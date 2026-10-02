@@ -1,0 +1,10 @@
+[package]
+name = "tarz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+description = "Tarz — an agent application built on Causa"
+publish = false
+
+[dependencies]
+causa = { version = "=0.0.2", default-features = false, features = ["runtime"] }
