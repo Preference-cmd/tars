@@ -18,6 +18,8 @@
 
 Causa 精确依赖 0.0.2，启用 runtime + providers；不使用源码 include、path 或 patch 替换。内部 lib 不构成第三方 SDK。
 
+完整创建、受理、装配、运行、保存路径见 [Session 运行机制](session-lifecycle.md)。包含可能 Store 的设计讨论见 [分析附件](../.agents/pipelines/assets/tarz-agent/session-assembly-and-store.md)。
+
 ## 共享核心与 CLI
 
 `ModelConfig::session` 使用 registry provider adapter 和空 ToolExecutor 装配空闲 Session，构造不发送请求。HTTP 连接可复用，模型选项在新工作装配时建立。配置不读取环境变量；环境变量和完整 endpoint 的解释归入口。当前不注册模型可调用工具。
