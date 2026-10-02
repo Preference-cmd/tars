@@ -1,6 +1,6 @@
 # 当前实现
 
-2026-10-02：单会话基础实现已接通，包括内部 Session 模块、材料文件和 `tarz demo` 离线消费者。真实 provider 配置、正式 CLI 工作操作、TUI 与 GUI、流式展示、父子 Agent、安装和发布仍在后续范围。
+2026-10-03：单会话基础、共享 application 模块与独立 `tarz run` 已接通。CLI 可选择三个真实 provider 协议，执行文本工作、取消/限时、导入/保存材料并输出文本或 JSON。TUI 与 GUI、流式展示、工具配置、父子 Agent、安装和发布仍在后续范围。
 
 ## 代码结构
 
@@ -8,6 +8,7 @@
 | --- | --- |
 | `crates/tarz/src/main.rs`、`cli/` | 参数、运行时入口与退出码 |
 | `crates/tarz/src/lib.rs` | 不可发布的内部模块入口，供 CLI 和集成测试共用 |
+| `crates/tarz/src/application/` | provider/模型装配、用户文本 block、单次执行及返回材料；无 stdio/信号/UI 依赖 |
 | `crates/tarz/src/session/` | owner/handle、受理与去重、工作监督、控制、结果保留 |
 | `crates/tarz/src/material/` | Context JSON 文件、原子替换及外部引用验证 |
 | `crates/tarz/src/demo/` | 脚本模型、本地工具、T1/T2/摘要/重放/保存重建 |
@@ -15,7 +16,15 @@
 | `Cargo.toml`、`Cargo.lock` | workspace 元数据和锁定的 registry 依赖 |
 | `.github/workflows/ci.yml` | 格式、静态检查、文档、测试与多平台构建/演示 |
 
-Causa 精确依赖 0.0.2，只启用 runtime；不使用源码 include、path 或 patch 替换。内部 lib 不构成第三方 SDK。
+Causa 精确依赖 0.0.2，启用 runtime + providers；不使用源码 include、path 或 patch 替换。内部 lib 不构成第三方 SDK。
+
+## 共享核心与 CLI
+
+`ModelConfig::session` 使用 registry provider adapter 和空 ToolExecutor 装配空闲 Session，构造不发送请求。HTTP 连接可复用，模型选项在新工作装配时建立。配置不读取环境变量；环境变量和完整 endpoint 的解释归入口。当前不注册模型可调用工具。
+
+`application::run_once` 消费一个独占使用的空闲 Session，追加输入、提交工作、响应外部 CancellationToken，并在监督完成后 shutdown。调用方在此期间不能通过其他 handle 提交工作；多工作界面直接驱动 Session。它返回原 Arc<WorkResult>、收尾后的 Context（异常丢失则为错误）及原未提交 ToolBatch；CLI 不会自动执行批次。丢弃该 future 只能请求 owner Drop 取消，调用方必须持续 await 才能保证等待收尾。
+
+CLI 使用 `run_once`，Ctrl-C 转为取消令牌后继续等待；不丢弃 runner future。显式保存使用现有 material 模块，在收尾后锁外执行；保存失败不改原工作终态。文本模式只输出完成文本；JSON 状态及退出码见 [使用说明](../README.md)。凭据不参与 Context 和结果序列化，provider 失败不 dump 原请求或响应。输入、模型 ID、凭据和 endpoint 由使用者显式配置，无默认模型选择。
 
 ## 单会话边界
 
@@ -48,7 +57,9 @@ cargo build --workspace --locked --release
 ./target/release/tarz demo
 ```
 
-测试使用脚本 gateway、本地工具、通知/屏障与临时文件，不需要在线模型。依赖已缓存时可追加 `--offline`。当前本机验证及 W01–W15 的逐项证据（历史记录使用 S1–S15，见 [编号映射](../.agents/pipelines/assets/tarz-agent/provenance.md)）见 [实施记录](../.agents/reviews/2026-10-02-single-session-foundation/README.md)。CI 配置涵盖 Linux、macOS、Windows，当前本地证据不代表远端各平台已运行。
+测试使用脚本 gateway、本地 HTTP fixture、本地工具、通知/屏障与临时文件，不需要在线模型。CLI 测试覆盖实际三个协议、stdin、保存/加载、失败与期限；Unix 另发 SIGINT 验证取消退出码和材料，Windows 控制台信号尚未在本机实测。依赖已缓存时可追加 `--offline`。当前本机验证及 W01–W15 的逐项证据（历史记录使用 S1–S15，见 [编号映射](../.agents/pipelines/assets/tarz-agent/provenance.md)）见 [实施记录](../.agents/reviews/2026-10-02-single-session-foundation/README.md)。CI 配置涵盖 Linux、macOS、Windows，当前本地证据不代表远端各平台已运行。
+
+新增 CLI 和共享核心的逐项证据见 [实施记录](../.agents/reviews/2026-10-03-cli-execution/README.md)。
 
 ## 开发流程入口
 

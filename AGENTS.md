@@ -14,7 +14,7 @@ Tarz 是可安装、可运行的 Agent 应用，目标目录为 `~/project/tarz/
 
 ## 工作约定
 
-- 根目录为 Cargo workspace，包统一放在 `crates/`；当前 `crates/tarz/` 提供 binary 和内部 lib target，供应用与集成测试共用，不承诺第三方 SDK。Session、装配与应用策略归 Tarz，Causa 提供材料和单次执行。
+- 根目录为 Cargo workspace，包统一放在 `crates/`；当前 `crates/tarz/` 提供 binary 和内部 lib target，供应用与集成测试共用，不承诺第三方 SDK。`application` 是 CLI/TUI/GUI 共用的配置与执行模块，当前 CLI 提供 `run` 和离线 `demo`；Causa 0.0.2 启用 runtime + providers。Session、装配与应用策略归 Tarz，Causa 提供材料和单次执行。
 - 通过 registry 的 Causa 公开 facade 接线，不以 path/patch 或复制源码替代。
 - 设计建议与已确认语义分开；实现前从 `.agents/README.md` 进入 Tarz 主提案与相关契约/验收，不把骨架检查视为行为验收。
 - 模块采用 `foo.rs` 与 `foo/`；索引文件只保留文档、声明和重导出。

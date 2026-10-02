@@ -10,7 +10,7 @@ rust-version = "1.96"
 publish = false
 
 [workspace.dependencies]
-causa = { version = "=0.0.2", default-features = false, features = ["runtime"] }
+causa = { version = "=0.0.2", default-features = false, features = ["runtime", "providers"] }
 
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }

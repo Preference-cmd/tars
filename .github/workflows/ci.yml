@@ -38,4 +38,5 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
           "$binary" --help
           "$binary" --version
+          "$binary" run --help
           "$binary" demo

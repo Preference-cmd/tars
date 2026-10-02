@@ -5,5 +5,6 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod application;
 pub mod material;
 pub mod session;
