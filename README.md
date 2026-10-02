@@ -4,6 +4,8 @@ Tarz 是基于 Causa 的 Agent 应用，以可安装、可运行程序交付，�
 
 当前为项目骨架：支持帮助与版本输出，已接入 registry Causa 0.0.2 的 runtime 依赖。交互会话、模型配置、工具执行与材料保存尚未实现。
 
+根目录为 Cargo workspace，包统一放在 `crates/`；当前应用包为 `crates/tarz/`。依赖锁文件与构建产物目录位于 workspace 根目录。
+
 ## 本地构建与运行
 
 使用 Rust 1.96.0（由 `rust-toolchain.toml` 固定）：
