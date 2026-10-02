@@ -28,3 +28,9 @@ cargo build --workspace --locked --release
 ## 下一实现边界
 
 Session 和逐工作装配将作为内部模块实现；内部是否拆为 lib target 按测试与调用需求决定，不承诺第三方 SDK。设计、待定项与进度统一在 [.agents](../.agents/README.md) 维护。
+
+## 开发流程入口
+
+当前使用 Causa 迁入的 Direct/Noted 本地提案流程；机器规则在 `AGENTS.local.md`，完整流程见 [.agents/pipelines/WORKFLOW.md](../.agents/pipelines/WORKFLOW.md)。本地设计资料与 scripts 被 Git 忽略，不包含在应用发布内容中；已有历史提交不重写。
+
+文档/提案变更运行 `node scripts/verify-proposals.mjs --links`；校验器变更另运行 `node scripts/test-verify-proposals.mjs`。这两项不替代 Rust 或 Agent 行为验收。

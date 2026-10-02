@@ -3,3 +3,9 @@
 .env
 .env.*
 !.env.example
+
+# Machine-local development workflow
+/.agents/
+/scripts/
+/AGENTS.local.md
+/CLAUDE.local.md
