@@ -29,8 +29,8 @@ Windows 使用 `target\release\tarz.exe`。不带参数显示帮助；参数错�
 
 - [当前结构、接口边界与检查](docs/README.md)
 - [本地设计与实施入口](.agents/README.md)
-- [首阶段单会话方案](.agents/pipelines/proposals/architecture/2026-10-02-single-session-work-loop.md)
-- [行为验收](.agents/pipelines/assets/single-session/acceptance.md)
+- [Tarz 应用设计](.agents/pipelines/proposals/architecture/2026-10-02-tarz-agent-application.md)
+- [行为验收](.agents/pipelines/assets/tarz-agent/acceptance.md)
 
 Causa 负责 Context 和单次执行；Tarz 负责会话、工作受理、依赖装配及应用交互。
 

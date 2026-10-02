@@ -48,7 +48,7 @@ cargo build --workspace --locked --release
 ./target/release/tarz demo
 ```
 
-测试使用脚本 gateway、本地工具、通知/屏障与临时文件，不需要在线模型。依赖已缓存时可追加 `--offline`。当前本机验证及 S1–S15 的逐项证据见 [实施记录](../.agents/reviews/2026-10-02-single-session-foundation/README.md)。CI 配置涵盖 Linux、macOS、Windows，当前本地证据不代表远端各平台已运行。
+测试使用脚本 gateway、本地工具、通知/屏障与临时文件，不需要在线模型。依赖已缓存时可追加 `--offline`。当前本机验证及 W01–W15 的逐项证据（历史记录使用 S1–S15，见 [编号映射](../.agents/pipelines/assets/tarz-agent/provenance.md)）见 [实施记录](../.agents/reviews/2026-10-02-single-session-foundation/README.md)。CI 配置涵盖 Linux、macOS、Windows，当前本地证据不代表远端各平台已运行。
 
 ## 开发流程入口
 
