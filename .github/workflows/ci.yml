@@ -16,6 +16,9 @@ jobs:
         run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --locked --all-targets -- -D warnings
+      - run: cargo doc --workspace --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   build:
     strategy:
@@ -35,3 +38,4 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
           "$binary" --help
           "$binary" --version
+          "$binary" demo
