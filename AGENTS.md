@@ -1,6 +1,6 @@
 # AGENTS.md — Tarz
 
-Tarz 是可安装、可运行的 Agent 应用，目标目录为 `~/projects/tarz/`。
+Tarz 是可安装、可运行的 Agent 应用，目标目录为 `~/project/tarz/`。
 不发布 crates.io；所有 Cargo packages 必须保留 `publish = false`。
 
 ## 阅读入口
