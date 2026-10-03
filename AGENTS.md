@@ -1,24 +1,63 @@
 # AGENTS.md — Tarz
 
-Tarz 是可安装、可运行的 Agent 应用，目标目录为 `~/project/tarz/`。
-不发布 crates.io；所有 Cargo packages 必须保留 `publish = false`。
+Tarz is an agent application built on Causa. It ships as an application, not a
+crates.io library or a public Rust SDK. All Cargo packages must remain
+`publish = false`.
 
-## 阅读入口
+`CLAUDE.md` is a symlink to this file; edit this file only. Read
+`AGENTS.local.md` when present for machine-local workflow rules.
 
-- [README.md](README.md)：构建、运行与当前可用能力。
-- [docs/README.md](docs/README.md)：当前代码结构与验证命令。
-- [.agents/README.md](.agents/README.md)：本地设计提案、来源与验收进度。
-- [.agents/pipelines/WORKFLOW.md](.agents/pipelines/WORKFLOW.md)：Direct/Noted、提案生命周期及本地跟踪规则。
+## Read by task
 
-`CLAUDE.md` 指向本文件；机器流程补充在 Git 忽略的 `AGENTS.local.md`。
+| Task | Start here |
+| --- | --- |
+| Build, run, or inspect available commands | [README.md](README.md) |
+| Change code or run checks | [Current implementation](docs/README.md) |
+| Trace session ownership, assembly, or execution | [Session lifecycle](docs/session-lifecycle.md) |
+| Plan a change or inspect acceptance status | [Local design index](.agents/README.md) |
+| Follow Direct/Noted or proposal lifecycle rules | [Workflow](.agents/pipelines/WORKFLOW.md) |
 
-## 工作约定
+Keep implementation facts in `docs/`; keep proposals, acceptance progress and
+historical evidence in the local `.agents/` tree. Read the relevant proposal
+before implementation. Proposed structures are not current capabilities.
 
-- 根目录为 Cargo workspace，包统一放在 `crates/`；当前 `crates/tarz/` 提供 binary 和内部 lib target，供应用与集成测试共用，不承诺第三方 SDK。`application` 是 CLI/TUI/GUI 共用的配置与执行模块，当前 CLI 提供 `run` 和离线 `demo`；Causa 0.0.2 启用 runtime + providers。Session、装配与应用策略归 Tarz，Causa 提供材料和单次执行。
-- 通过 registry 的 Causa 公开 facade 接线，不以 path/patch 或复制源码替代。
-- 设计建议与已确认语义分开；实现前从 `.agents/README.md` 进入 Tarz 主提案与相关契约/验收，不把骨架检查视为行为验收。
-- 模块采用 `foo.rs` 与 `foo/`；索引文件只保留文档、声明和重导出。
-- 禁止 unsafe；新增依赖必须说明用途。提交使用 Conventional Commits。
-- 当前事实放 `docs/`，提案与历史证据放本地 `.agents/`，避免两处维护同一进度。流程资料和辅助 `scripts/` 不进入应用发布。
-- 验证：`cargo fmt --all --check`、`cargo clippy --workspace --locked --all-targets -- -D warnings`、`cargo test --workspace --locked`、`cargo build --workspace --locked --release`。
-- 安装渠道、支持平台和发布自动化仍待确定；不将本地构建当作公开发布。
+## Verify facts at the source
+
+| Fact | Authority |
+| --- | --- |
+| Workspace members, dependencies, package metadata and features | Root and member `Cargo.toml`; resolved versions in `Cargo.lock` |
+| Toolchain and components | `rust-toolchain.toml` |
+| Current behavior and ownership | Relevant `crates/*/src/` code and its consumers; `docs/` is the reading guide |
+| CI requirements | [.github/workflows/ci.yml](.github/workflows/ci.yml) |
+
+Do not infer implemented behavior from a proposal or an old review. Keep the
+README, current docs and affected guidance aligned when layout, commands or
+features change; keep one authoritative acceptance list per proposal scope.
+
+## Architecture and conventions
+
+- Keep Cargo packages under `crates/`, inheriting workspace metadata. Follow
+  the current manifests; proposed crate splits are documented in the design index.
+- Use Causa's public registry facade. Do not replace Causa with path/patch
+  dependencies, source includes or copied implementations. Tarz owns sessions,
+  assembly, application policy and persistence; Causa supplies material contracts
+  and individual runs.
+- Keep shared application behavior independent of CLI/TUI/GUI presentation.
+  Entry points adapt input, output and UI events to shared operations.
+- Use `foo.rs` plus `foo/` for library modules, never `mod.rs`. Keep index files
+  limited to documentation, declarations and explicit re-exports.
+- Deny unsafe code and document public library APIs. Explain new dependencies
+  or an MSRV increase in the commit. Keep `Cargo.lock` committed.
+- Use Conventional Commits, one logical change per commit. Local tracking and
+  branch defaults belong in `AGENTS.local.md`, not in duplicated process rules.
+
+## Validation and delivery
+
+Use the relevant checks in [docs/README.md](docs/README.md), including formatting,
+warning-free lint/docs, tests and release builds when applicable. Test observable
+behavior and failure cases; build success alone does not satisfy behavior gates.
+Documentation-only changes need link/proposal checks, not unrelated Rust tests.
+
+Tests use local fixtures; do not require live model credentials. Installation,
+platform support and release delivery need their own evidence. Do not treat a
+local build as a published release or import Causa's library publishing workflow.
