@@ -20,6 +20,8 @@ Causa 精确依赖 0.0.2，启用 runtime + providers；不使用源码 include�
 
 完整创建、受理、装配、运行、保存路径见 [Session 运行机制](session-lifecycle.md)。后续统一 owner、托管保存与具体 Store 的设计和验收见 [Session 结构与存储提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)，其中的新增能力尚未实现。
 
+该提案的 2.1–2.3 节给出目标 crates/模块布局及迁移顺序：先提取 tarz-core 与 tarz-cli，TUI/GUI 在实际实现时再增加。当前仍是上表的单包结构，尚未拆分。
+
 ## 共享核心与 CLI
 
 `ModelConfig::session` 使用 registry provider adapter 和空 ToolExecutor 装配空闲 Session，构造不发送请求。HTTP 连接可复用，模型选项在新工作装配时建立。配置不读取环境变量；环境变量和完整 endpoint 的解释归入口。当前不注册模型可调用工具。
