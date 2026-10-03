@@ -1,8 +1,6 @@
 # Session 的组装与运行机制
 
-2026-10-03，依据 `9ab10e6` 的实际实现核对。本文说明现状；可能的 Store 和后续结构建议放在 [设计附件](../.agents/pipelines/assets/tarz-agent/session-assembly-and-store.md)，不视为当前保证。后续收敛方案见 [托管 Session 设计](../.agents/pipelines/assets/tarz-agent/managed-session-design.md)，其中的 owner 管理和自动保存均为候选，尚未实现。
-
-首个物理后端的建议与验证范围见 [JSON Store 方案](../.agents/pipelines/assets/tarz-agent/first-session-store.md)。该方案区分活动期独占、保存提交和崩溃保证；当前 CLI 仍只有下文所述的显式材料导入/导出。
+2026-10-03，依据 `9ab10e6` 的实际实现核对。本文只说明现状；后续模块结构、组装、owner 管理、自动保存和 JSON Store 的设计统一见 [Session 结构与存储提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)。专项新增能力尚未实现，当前 CLI 仍只有下文所述的显式材料导入/导出。
 
 ## 1. 当前调用路径
 
@@ -107,4 +105,4 @@ load 验证材料后，当前 ModelConfig::session 创建新的 ConversationId �
 | provider/model/endpoint/凭据 | CLI 输入、环境及装配闭包 | 需要重新提供 |
 | 外部媒体与 artifact | 由调用方验证和保留 | 默认文件接口拒绝；扩展接口重验可读性 |
 
-后续要增加的 Store、活动会话目录和保存时点应在这一归属基础上设计，具体选项见 [分析附件](../.agents/pipelines/assets/tarz-agent/session-assembly-and-store.md)。
+后续 Store、活动会话目录和保存时点在这一归属基础上设计，具体职责与新增验收见 [专项提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)。

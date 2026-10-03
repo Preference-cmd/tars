@@ -18,7 +18,7 @@
 
 Causa 精确依赖 0.0.2，启用 runtime + providers；不使用源码 include、path 或 patch 替换。内部 lib 不构成第三方 SDK。
 
-完整创建、受理、装配、运行、保存路径见 [Session 运行机制](session-lifecycle.md)。包含可能 Store 的设计讨论见 [分析附件](../.agents/pipelines/assets/tarz-agent/session-assembly-and-store.md)。
+完整创建、受理、装配、运行、保存路径见 [Session 运行机制](session-lifecycle.md)。后续统一 owner、托管保存与具体 Store 的设计和验收见 [Session 结构与存储提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)，其中的新增能力尚未实现。
 
 ## 共享核心与 CLI
 
