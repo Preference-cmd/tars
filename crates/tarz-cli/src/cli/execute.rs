@@ -6,7 +6,6 @@ use causa::runtime::{TurnInterruption, TurnResult};
 use std::io::{self, Write};
 use std::process::ExitCode;
 use tarz_core::application::{ClosePolicy, PreparedCreate, SessionHost};
-use tarz_core::definition::{CredentialRef, SessionDefinition};
 use tarz_core::session::WorkResult;
 
 pub(super) fn run(options: RunOptions) -> ExitCode {
@@ -34,19 +33,9 @@ async fn execute(options: RunOptions) -> ExitCode {
         Ok(input) => input,
         Err(error) => return early_failure(options.json, error),
     };
-    let definition = SessionDefinition {
-        provider: options.provider,
-        model: options.model,
-        endpoint: options.endpoint,
-        credential: CredentialRef::Environment(options.key_env),
-        work_timeout_secs: Some(options.timeout.as_secs()),
-        retained_work_capacity: 1,
-        max_model_rounds: 10,
-        max_tool_calls: 64,
-    };
     let host = SessionHost::new(None);
     let session = match host
-        .create(PreparedCreate::transient(definition, context))
+        .create(PreparedCreate::transient(options.definition, context))
         .await
     {
         Ok(session) => session,

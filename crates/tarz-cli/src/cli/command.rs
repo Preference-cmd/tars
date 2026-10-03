@@ -16,8 +16,8 @@ Commands:
   session        Save and reopen sessions; see tarz session --help
 
 Run options:
-  --provider     openai-chat | openai-responses | anthropic (required)
-  --model        Explicit model identifier (required)
+  --provider     openai-chat | openai-responses | anthropic (or configured profile)
+  --model        Model identifier (or configured profile)
   --input        User text; mutually exclusive with --stdin
   --stdin        Read UTF-8 user text until EOF
   --api-key-env  Credential variable (default OPENAI_API_KEY / ANTHROPIC_API_KEY)
@@ -26,12 +26,17 @@ Run options:
   --load         Import a Context material file into a new session
   --save         Replace a material file after completion or controlled interruption
   --json         Output a structured result instead of answer text
+  --config       Shared TOML configuration file
+  --profile      Named model preset (otherwise default_profile)
+  --no-config    Ignore global configuration; conflicts with --config
 
 Options:
   -h, --help     Show this help
   -V, --version  Show the version
 
 The demo uses a scripted model and a local tool; it makes no network calls.
+Run/session read --config, then TARZ_CONFIG, then the global config path.
+Explicit options override configured fields. Saved sessions keep their definition.
 Exit codes: 0 complete, 1 execution/configuration/file error, 2 arguments,
 124 deadline, 130 cancelled. Ctrl-C cancels work and waits for returned materials.
 ";

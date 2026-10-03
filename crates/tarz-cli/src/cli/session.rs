@@ -13,8 +13,9 @@ Usage: tarz session create --store <directory> --provider <protocol> --model <id
        tarz session list --store <directory> [--json]
 
 Create options:
-  --provider          openai-chat | openai-responses | anthropic (required)
-  --model             Explicit model identifier (required)
+  --provider          openai-chat | openai-responses | anthropic (or profile)
+  --model             Model identifier (or profile)
+  --profile           Named model preset (otherwise default_profile)
   --api-key-env       Credential variable, resolved when a session opens
   --endpoint          Full HTTP(S) URL without credentials, query or fragment
   --timeout-secs      Work deadline, 1–86400 seconds (default 120)
@@ -29,7 +30,9 @@ Run options:
   --recovery-dir      Material recovery directory on save failure (default current directory)
 
 Common options:
-  --store             Explicit local store directory (required)
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
   --json              Structured output
 
 Create saves the fixed definition and materials without calling a model.

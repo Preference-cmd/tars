@@ -1,7 +1,8 @@
+use crate::cli::configuration;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use tarz_core::definition::{CredentialRef, Provider, SessionDefinition};
+use tarz_core::definition::SessionDefinition;
 
 pub(crate) enum SessionCommand {
     Create {
@@ -24,7 +25,7 @@ pub(crate) enum SessionCommand {
 }
 
 impl SessionCommand {
-    pub(crate) fn parse(args: &[OsString]) -> Result<Self, &'static str> {
+    pub(crate) fn parse(args: &[OsString]) -> Result<Self, String> {
         let (command, mut args) = args.split_first().ok_or("session command is required")?;
         let command = command.to_str().ok_or("session command must be UTF-8")?;
         let id = if command == "run" {
@@ -39,22 +40,25 @@ impl SessionCommand {
             None
         };
         if !matches!(command, "create" | "run" | "list") {
-            return Err("unknown session command");
+            return Err("unknown session command".into());
         }
         let mut values = HashMap::new();
         let mut stdin = false;
         let mut json = false;
+        let mut no_config = false;
         let mut args = args.iter();
         while let Some(flag) = args.next() {
             let flag = flag.to_str().ok_or("option must be UTF-8")?;
             match flag {
                 "--json" if !json => json = true,
+                "--no-config" if !no_config => no_config = true,
                 "--stdin" if command == "run" && !stdin => stdin = true,
-                "--store" => {
+                "--store" | "--config" => {
                     insert(&mut values, flag, &mut args)?;
                 }
                 "--provider" | "--model" | "--api-key-env" | "--endpoint" | "--timeout-secs"
                 | "--capacity" | "--max-model-rounds" | "--max-tool-calls" | "--load"
+                | "--profile"
                     if command == "create" =>
                 {
                     insert(&mut values, flag, &mut args)?;
@@ -62,7 +66,7 @@ impl SessionCommand {
                 "--input" | "--recovery-dir" if command == "run" => {
                     insert(&mut values, flag, &mut args)?;
                 }
-                _ => return Err("unknown, duplicate, or inapplicable session option"),
+                _ => return Err("unknown, duplicate, or inapplicable session option".into()),
             }
         }
         let string = |key| -> Result<Option<String>, &'static str> {
@@ -76,52 +80,15 @@ impl SessionCommand {
                 })
                 .transpose()
         };
-        let store = PathBuf::from(*values.get("--store").ok_or("--store is required")?);
+        let config = configuration::load(&values, no_config)?;
+        let store = values
+            .get("--store")
+            .map(PathBuf::from)
+            .or_else(|| config.store_dir().map(PathBuf::from))
+            .ok_or("--store or a configured store directory is required")?;
         match command {
             "create" => {
-                let provider = match string("--provider")?.as_deref() {
-                    Some("openai-chat") => Provider::OpenAiChat,
-                    Some("openai-responses") => Provider::OpenAiResponses,
-                    Some("anthropic") => Provider::Anthropic,
-                    _ => {
-                        return Err(
-                            "--provider must be openai-chat, openai-responses or anthropic",
-                        );
-                    }
-                };
-                let model = string("--model")?.ok_or("--model is required")?;
-                let env = string("--api-key-env")?.unwrap_or_else(|| match provider {
-                    Provider::Anthropic => "ANTHROPIC_API_KEY".into(),
-                    _ => "OPENAI_API_KEY".into(),
-                });
-                let number = |key, default| -> Result<u64, &'static str> {
-                    string(key)?
-                        .map(|value| value.parse().map_err(|_| "invalid numeric session option"))
-                        .unwrap_or(Ok(default))
-                };
-                let timeout = number("--timeout-secs", 120)?;
-                if !(1..=86400).contains(&timeout) {
-                    return Err("timeout must be 1–86400 seconds");
-                }
-                let definition = SessionDefinition {
-                    provider,
-                    model,
-                    endpoint: string("--endpoint")?,
-                    credential: CredentialRef::Environment(env),
-                    work_timeout_secs: Some(timeout),
-                    retained_work_capacity: number("--capacity", 256)?
-                        .try_into()
-                        .map_err(|_| "capacity is too large")?,
-                    max_model_rounds: number("--max-model-rounds", 10)?
-                        .try_into()
-                        .map_err(|_| "model round limit is too large")?,
-                    max_tool_calls: number("--max-tool-calls", 64)?
-                        .try_into()
-                        .map_err(|_| "tool call limit is too large")?,
-                };
-                definition
-                    .validate()
-                    .map_err(|_| "invalid session definition")?;
+                let definition = configuration::definition(&config, &values)?;
                 Ok(Self::Create {
                     store,
                     definition,
@@ -132,10 +99,10 @@ impl SessionCommand {
             "run" => {
                 let input = string("--input")?;
                 if stdin == input.is_some() {
-                    return Err("choose exactly one of --input or --stdin");
+                    return Err("choose exactly one of --input or --stdin".into());
                 }
                 if input.as_ref().is_some_and(|value| value.trim().is_empty()) {
-                    return Err("input must not be blank");
+                    return Err("input must not be blank".into());
                 }
                 Ok(Self::Run {
                     store,
@@ -144,6 +111,7 @@ impl SessionCommand {
                     recovery_dir: values
                         .get("--recovery-dir")
                         .map(PathBuf::from)
+                        .or_else(|| config.recovery_dir().map(PathBuf::from))
                         .unwrap_or_else(|| PathBuf::from(".")),
                     json,
                 })

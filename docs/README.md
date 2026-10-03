@@ -1,6 +1,6 @@
 # 当前实现
 
-2026-10-03：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。TUI/GUI、流式展示、工具配置、父子 Agent、安装和发布仍在后续范围。
+2026-10-04：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tarz-tui` 已接通会话、输入、结果、取消及保存恢复；GUI、流式展示、工具配置、父子 Agent、安装和发布仍在后续范围。
 
 ## 代码结构
 
@@ -8,15 +8,17 @@
 | --- | --- |
 | `crates/tarz-core/src/application/` | 活动目录、opening/关闭监督、实例视图、保存门禁与版本编辑 |
 | `crates/tarz-core/src/definition/` | 可序列化的固定定义与纯校验 |
+| `crates/tarz-core/src/config/` | 共享 TOML 加载、路径、命名模型预设与新定义默认值 |
 | `crates/tarz-core/src/assembly/` | 打开时解析凭据、装配 gateway/runner 与固定执行选项 |
 | `crates/tarz-core/src/session/` | 单会话 owner/handle、原工作受理、监督、去重与结果 |
 | `crates/tarz-core/src/store/` | 私有 JSON 后端、活动期文件锁、提交与确认 |
 | `crates/tarz-core/src/material/` | 显式 Context 文件导入/导出、引用校验 |
 | `crates/tarz-cli/src/cli/` | 命令参数、信号、展示、恢复文件与退出码 |
 | `crates/tarz-cli/src/demo/` | 脚本模型和本地工具的底层 Session 演示 |
+| `crates/tarz-tui/src/` | Ratatui/Crossterm 终端原型、输入适配和后台工作结果呈现 |
 | `crates/tarz-core/tests/`、`crates/tarz-cli/tests/` | 核心契约消费者、真实 CLI 与本地 HTTP 测试 |
 
-workspace 只有 `tarz-core` 和 `tarz-cli`，均为 `publish=false`，binary 仍名 `tarz`。CLI 单向依赖核心，核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。Causa 精确消费 registry `=0.0.2`，不使用 path/patch 或源码复制。
+workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false`，binary 为 `tarz` 和 `tarz-tui`。CLI/TUI 各自单向依赖核心，核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。Causa 精确消费 registry `=0.0.2`，不使用 path/patch 或源码复制。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
 
 完整行为见 [Session 运行机制](session-lifecycle.md)，使用方法见 [README](../README.md)，逐项验收与本机证据见 [专项提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)和[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
 
@@ -40,7 +42,7 @@ CLI 持久运行在成功、失败和受控中断后等待保存。保存失败�
 
 ## 后端与资源边界
 
-`--store DIR` 是明确指定的本机目录，无隐式默认目录。记录位于 `DIR/sessions/<uuid>.json`，格式 `tarz-session-v1`。固定定义、Context、ConversationId、revision 和 last_commit_id 同次写入；初始 revision 为 1。凭据配置只保存环境变量名。用户材料本身按原样保存。
+本机存储目录由 `--store DIR` 或共享 TOML 的 `store` 明确指定，没有自动生成的存储默认路径。记录位于 `DIR/sessions/<uuid>.json`，格式 `tarz-session-v1`。固定定义、Context、ConversationId、revision 和 last_commit_id 同次写入；初始 revision 为 1。凭据配置只保存环境变量名。用户材料本身按原样保存。
 
 稳定的 `<uuid>.lock` 文件与可替换记录分离，OS 排他锁从读取前持有至本地 worker/I/O 停止。占用、不支持或 I/O 错误均拒绝，不降级为无锁。提交校验基线与完整内容，经同目录临时文件、内容刷新和原子替换；确认不明时保持原操作。list 忽略锁和临时文件，逐记录报告损坏与活动状态；列表不是全目录原子快照。
 
@@ -60,6 +62,7 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --locked --no-deps
 cargo build -p tarz-core --locked
 cargo build --workspace --locked --release
 ./target/release/tarz session --help
+./target/release/tarz-tui --help
 ./target/release/tarz demo
 node scripts/verify-proposals.mjs --links
 ```

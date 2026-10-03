@@ -14,6 +14,8 @@ crates.io library or a public Rust SDK. All Cargo packages must remain
 | Build, run, or inspect available commands | [README.md](README.md) |
 | Change code or run checks | [Current implementation](docs/README.md) |
 | Trace session ownership, assembly, or execution | [Session lifecycle](docs/session-lifecycle.md) |
+| Change shared TOML configuration | [Configuration](docs/configuration.md), `tarz-core::config` |
+| Run or change the terminal prototype | [TUI prototype](docs/tui.md), `crates/tarz-tui/` |
 | Plan a change or inspect acceptance status | [Local design index](.agents/README.md) |
 | Follow Direct/Noted or proposal lifecycle rules | [Workflow](.agents/pipelines/WORKFLOW.md) |
 
@@ -37,7 +39,8 @@ features change; keep one authoritative acceptance list per proposal scope.
 ## Architecture and conventions
 
 - Keep Cargo packages under `crates/`, inheriting workspace metadata.
-  `tarz-core` owns shared behavior; `tarz-cli` owns presentation and the `tarz` binary.
+  `tarz-core` owns shared behavior and configuration; `tarz-cli` owns the `tarz`
+  binary; `tarz-tui` owns the experimental terminal consumer and `tarz-tui` binary.
   Add other entry crates only with real consumers, never placeholder UI packages.
 - Use Causa's public registry facade. Do not replace Causa with path/patch
   dependencies, source includes or copied implementations. Tarz owns sessions,
@@ -45,6 +48,9 @@ features change; keep one authoritative acceptance list per proposal scope.
   and individual runs.
 - Keep shared application behavior independent of CLI/TUI/GUI presentation.
   Entry points adapt input, output and UI events to shared operations.
+- Shared TOML supplies new-session defaults. Explicit input overrides those
+  defaults; reopening always uses the saved SessionDefinition. Keep secrets as
+  environment references and do not automatically rewrite global configuration.
 - Use `foo.rs` plus `foo/` for library modules, never `mod.rs`. Keep index files
   limited to documentation, declarations and explicit re-exports.
 - Deny unsafe code and document public library APIs. Explain new dependencies

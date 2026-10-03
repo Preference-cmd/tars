@@ -12,6 +12,45 @@ use std::{
 
 const KEY: &str = "fixture-secret";
 
+#[test]
+fn global_profile_changes_do_not_replace_a_reopened_definition() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(1);
+    let config_path = dir.path().join("config.toml");
+    let config = format!(
+        "version = 1\ndefault_profile = 'local'\n[profiles.local]\nprovider = 'openai-chat'\nmodel = 'original-profile-model'\napi_key_env = 'TARZ_TEST_KEY'\nendpoint = '{}'\n",
+        fixture.endpoint
+    );
+    fs::write(&config_path, &config).unwrap();
+    let output = command(dir.path(), "create")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let id = report(&output)["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::write(
+        &config_path,
+        config.replace("original-profile-model", "changed-profile-model"),
+    )
+    .unwrap();
+    let child = spawn(
+        run(dir.path(), &id, "use saved definition")
+            .arg("--config")
+            .arg(&config_path),
+    );
+    let request = fixture.request();
+    assert!(request.contains("original-profile-model"));
+    assert!(!request.contains("changed-profile-model"));
+    fixture.answer("saved definition result");
+    let output = finished(child);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(report(&output)["text"], "saved definition result");
+}
+
 struct Fixture {
     endpoint: String,
     requests: mpsc::Receiver<String>,

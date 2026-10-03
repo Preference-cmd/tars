@@ -7,6 +7,7 @@
 
 pub mod application;
 pub(crate) mod assembly;
+pub mod config;
 pub mod definition;
 pub mod material;
 pub mod session;
