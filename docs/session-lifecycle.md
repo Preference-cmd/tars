@@ -1,6 +1,6 @@
 # Session 的组装与运行机制
 
-2026-10-03，依据 `9ab10e6` 的实际实现核对。本文说明现状；可能的 Store 和后续结构建议放在 [设计附件](../.agents/pipelines/assets/tarz-agent/session-assembly-and-store.md)，不视为当前保证。
+2026-10-03，依据 `9ab10e6` 的实际实现核对。本文说明现状；可能的 Store 和后续结构建议放在 [设计附件](../.agents/pipelines/assets/tarz-agent/session-assembly-and-store.md)，不视为当前保证。后续收敛方案见 [托管 Session 设计](../.agents/pipelines/assets/tarz-agent/managed-session-design.md)，其中的 owner 管理和自动保存均为候选，尚未实现。
 
 ## 1. 当前调用路径
 
