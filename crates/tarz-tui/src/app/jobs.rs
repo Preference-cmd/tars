@@ -126,6 +126,10 @@ impl App {
                         .into();
                     if let Err(error) = result {
                         entry.notice = error;
+                    } else if entry.notice.starts_with("Input accepted")
+                        || entry.notice.starts_with("Cancellation requested")
+                    {
+                        entry.notice.clear();
                     }
                 }
             }
@@ -190,6 +194,14 @@ impl App {
                 }
                 match result {
                     Ok(outcome) => {
+                        if self.notice.starts_with("Exit paused")
+                            && !self
+                                .entries
+                                .iter()
+                                .any(|entry| entry.notice.starts_with("Close failed"))
+                        {
+                            self.notice.clear();
+                        }
                         self.exit_reports
                             .push(format!("{}: {}", key.id, close_label(&outcome)))
                     }

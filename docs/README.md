@@ -15,7 +15,7 @@
 | `crates/tarz-core/src/material/` | 显式 Context 文件导入/导出、引用校验 |
 | `crates/tarz-cli/src/cli/` | 命令参数、信号、展示、恢复文件与退出码 |
 | `crates/tarz-cli/src/demo/` | 脚本模型和本地工具的底层 Session 演示 |
-| `crates/tarz-tui/src/` | Ratatui/Crossterm 终端原型、输入适配和后台工作结果呈现 |
+| `crates/tarz-tui/src/` | 单列对话界面、命令/会话选择、输入适配和后台结果呈现 |
 | `crates/tarz-core/tests/`、`crates/tarz-cli/tests/` | 核心契约消费者、真实 CLI 与本地 HTTP 测试 |
 
 workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false`，binary 为 `tarz` 和 `tarz-tui`。CLI/TUI 各自单向依赖核心，核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。Causa 精确消费 registry `=0.0.2`，不使用 path/patch 或源码复制。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。

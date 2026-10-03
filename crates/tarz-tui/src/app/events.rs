@@ -32,6 +32,7 @@ impl App {
                     if self.dirty {
                         let size = terminal.size()?;
                         self.view_width = render::transcript_width(size.width);
+                        self.viewport_height = render::conversation_height(size.height, size.width, self);
                         terminal.draw(|frame| render::draw(frame, self))?;
                         self.dirty = false;
                     }
@@ -46,6 +47,15 @@ impl App {
         }
         if let Event::Paste(text) = &event {
             if self.quitting || self.confirmation.is_some() {
+                return;
+            }
+            if let Some(panel) = &mut self.panel {
+                if let super::commands::Panel::Commands { query, selected }
+                | super::commands::Panel::Sessions { query, selected } = panel
+                {
+                    query.extend(text.chars().filter(|c| !c.is_control()));
+                    *selected = 0;
+                }
                 return;
             }
             if let Some(form) = &mut self.form {
@@ -81,11 +91,11 @@ impl App {
             return;
         }
         if input::control(key, 'q') {
-            if self.form.is_some() || self.entries.iter().any(|e| e.has_draft()) {
-                self.confirmation = Some(Confirmation::Quit);
-            } else {
-                self.quitting = true;
-            }
+            self.request_quit();
+            return;
+        }
+        if self.panel.is_some() {
+            self.panel_key(key);
             return;
         }
         if let Some(form) = &mut self.form {
@@ -95,6 +105,37 @@ impl App {
                 self.form = None;
             } else {
                 form.key(key);
+            }
+            return;
+        }
+        if key.kind == KeyEventKind::Press
+            && (key.code == KeyCode::F(1)
+                || (key.code == KeyCode::Char('/')
+                    && key.modifiers.is_empty()
+                    && self
+                        .entries
+                        .get(self.selected)
+                        .is_none_or(|e| !e.has_draft())))
+        {
+            self.show_commands();
+            return;
+        }
+        if key.code == KeyCode::Enter {
+            if key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+            {
+                if let Some(entry) = self.entries.get_mut(self.selected) {
+                    entry.editor.insert_newline();
+                }
+            } else if key.kind == KeyEventKind::Press {
+                self.submit();
+            }
+            return;
+        }
+        if input::control(key, 'j') {
+            if let Some(entry) = self.entries.get_mut(self.selected) {
+                entry.editor.insert_newline();
             }
             return;
         }
@@ -109,15 +150,7 @@ impl App {
         } else if input::control(key, 'd') {
             self.confirmation = Some(Confirmation::Discard);
         } else if input::control(key, 'w') {
-            if self
-                .entries
-                .get(self.selected)
-                .is_some_and(|e| e.has_draft())
-            {
-                self.confirmation = Some(Confirmation::Close);
-            } else {
-                self.close(self.selected, ClosePolicy::Save);
-            }
+            self.request_close();
         } else if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
                 key.code,
@@ -137,17 +170,20 @@ impl App {
                     }
                 }
                 KeyCode::F(5) if key.kind == KeyEventKind::Press => self.list(),
+                KeyCode::Esc if key.kind == KeyEventKind::Press => self.cancel(),
                 KeyCode::PageUp | KeyCode::PageDown => {
                     if let Some(entry) = self.entries.get_mut(self.selected) {
                         let end = entry
                             .rows
                             .as_ref()
-                            .map_or(0, |r| r.ranges.len().saturating_sub(12));
+                            .map_or(0, |r| r.ranges.len().saturating_sub(self.viewport_height));
                         let offset = entry.scroll.unwrap_or(end);
+                        let page = self.viewport_height.saturating_sub(1).max(1);
                         entry.scroll = if key.code == KeyCode::PageUp {
-                            Some(offset.saturating_sub(12))
+                            Some(offset.saturating_sub(page))
                         } else {
-                            Some((offset + 12).min(end))
+                            let next = (offset + page).min(end);
+                            (next < end).then_some(next)
                         };
                     }
                 }

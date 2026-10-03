@@ -8,6 +8,7 @@ pub(crate) use graphemes::edit;
 pub(crate) fn editor() -> TextArea<'static> {
     let mut editor = TextArea::default();
     editor.set_wrap_mode(WrapMode::Word);
+    editor.set_cursor_line_style(ratatui::style::Style::default());
     editor
 }
 

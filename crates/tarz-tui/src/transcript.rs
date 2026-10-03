@@ -13,8 +13,15 @@ impl Transcript {
     pub fn from_context(context: &Context) -> Self {
         let mut text = String::new();
         for block in context.blocks() {
-            text.push_str(block.meta().source.as_deref().unwrap_or("material"));
-            text.push_str(":\n");
+            match block.meta().source.as_deref() {
+                Some("user") => text.push_str("❯ You\n"),
+                Some(source) => {
+                    text.push_str("● ");
+                    text.push_str(source);
+                    text.push('\n');
+                }
+                None => text.push_str("●\n"),
+            }
             match block.content() {
                 BlockContent::Parts(parts) => {
                     for part in parts {

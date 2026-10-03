@@ -20,7 +20,7 @@ fn unicode_paste_newlines_editing_and_release_keys_do_not_submit() {
         text.replace("\r\n", "\n")
     );
     assert!(app.entries[0].work.is_none());
-    app.event(key(KeyCode::Enter));
+    app.event(ctrl('j'));
     app.event(key(KeyCode::Char('好')));
     app.event(Event::Key(KeyEvent::new_with_kind(
         KeyCode::Char('好'),
