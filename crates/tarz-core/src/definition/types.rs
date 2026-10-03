@@ -1,0 +1,125 @@
+use crate::session::SessionConfig;
+use causa::kernel::ModelRef;
+use causa::runtime::{TurnLimits, TurnRunOptions};
+use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
+
+/// Supported wire protocols; model identifiers are supplied explicitly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provider {
+    /// OpenAI Chat Completions wire format.
+    #[serde(rename = "openai-chat")]
+    OpenAiChat,
+    /// OpenAI Responses wire format.
+    #[serde(rename = "openai-responses")]
+    OpenAiResponses,
+    /// Anthropic Messages wire format.
+    Anthropic,
+}
+
+/// A resolvable credential reference, never a persisted plaintext credential.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CredentialRef {
+    /// Name of the environment variable resolved once when opening a session.
+    Environment(String),
+}
+
+/// Frozen execution choices saved with a persistent session's materials.
+/// Generation, cache and empty-tool-catalog choices are fixed by record format 1.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionDefinition {
+    /// Selected provider wire protocol.
+    pub provider: Provider,
+    /// Explicit provider model identifier.
+    pub model: String,
+    /// Full HTTP(S) endpoint, without credentials, query or fragment.
+    pub endpoint: Option<String>,
+    /// Credential reference; resolving it is assembly's responsibility.
+    pub credential: CredentialRef,
+    /// Admission-relative deadline in seconds, or no deadline; zero is valid.
+    pub work_timeout_secs: Option<u64>,
+    /// Maximum retained work records; zero rejects new work.
+    pub retained_work_capacity: usize,
+    /// Maximum logical model invocations, including the first; zero stops before invocation.
+    pub max_model_rounds: u32,
+    /// Maximum cumulative model tool declarations; zero permits none.
+    pub max_tool_calls: u32,
+}
+
+impl SessionDefinition {
+    /// Validate without resolving credentials, contacting providers or editing data.
+    /// Error messages omit endpoint and model contents to avoid accidental disclosure.
+    pub fn validate(&self) -> Result<(), DefinitionError> {
+        if self.model.trim().is_empty() {
+            return Err(DefinitionError::BlankModel);
+        }
+        let CredentialRef::Environment(name) = &self.credential;
+        let mut bytes = name.bytes();
+        if !bytes
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+            || !bytes.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        {
+            return Err(DefinitionError::InvalidCredentialReference);
+        }
+        if let Some(endpoint) = &self.endpoint {
+            let url = url::Url::parse(endpoint).map_err(|_| DefinitionError::InvalidEndpoint)?;
+            if !matches!(url.scheme(), "http" | "https")
+                || url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+                || endpoint.chars().any(char::is_whitespace)
+            {
+                return Err(DefinitionError::InvalidEndpoint);
+            }
+        }
+        if self.work_timeout_secs.is_some_and(|seconds| {
+            Instant::now()
+                .checked_add(Duration::from_secs(seconds))
+                .is_none()
+        }) {
+            return Err(DefinitionError::UnrepresentableTimeout);
+        }
+        Ok(())
+    }
+
+    /// Construct the low-level session's explicit record and lifetime bounds.
+    pub fn session_config(&self) -> SessionConfig {
+        SessionConfig {
+            retained_work_capacity: self.retained_work_capacity,
+            work_timeout: self.work_timeout_secs.map(Duration::from_secs),
+        }
+    }
+
+    /// Construct per-work options with the saved model and explicit execution limits.
+    pub fn run_options(&self) -> TurnRunOptions {
+        let mut options = TurnRunOptions::new(ModelRef::new(self.model.clone()));
+        options.limits = TurnLimits {
+            max_model_rounds: self.max_model_rounds,
+            max_tool_calls: self.max_tool_calls,
+        };
+        options
+    }
+}
+
+/// A definition rejected before credential resolution or provider execution.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DefinitionError {
+    /// No explicit nonblank model identifier was provided.
+    #[error("model identifier must not be blank")]
+    BlankModel,
+    /// The reference is not a portable environment variable name.
+    #[error("credential reference must name a valid environment variable")]
+    InvalidCredentialReference,
+    /// Endpoint syntax or embedded credential-bearing components are forbidden.
+    #[error("endpoint must be an absolute HTTP(S) URL without credentials, query or fragment")]
+    InvalidEndpoint,
+    /// The deadline cannot be represented on this platform.
+    #[error("work timeout cannot be represented")]
+    UnrepresentableTimeout,
+}

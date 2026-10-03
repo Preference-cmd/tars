@@ -1,54 +1,54 @@
 # 当前实现
 
-2026-10-03：单会话基础、共享 application 模块与独立 `tarz run` 已接通。CLI 可选择三个真实 provider 协议，执行文本工作、取消/限时、导入/保存材料并输出文本或 JSON。TUI 与 GUI、流式展示、工具配置、父子 Agent、安装和发布仍在后续范围。
+2026-10-03：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。TUI/GUI、流式展示、工具配置、父子 Agent、安装和发布仍在后续范围。
 
 ## 代码结构
 
 | 路径 | 当前职责 |
 | --- | --- |
-| `crates/tarz/src/main.rs`、`cli/` | 参数、运行时入口与退出码 |
-| `crates/tarz/src/lib.rs` | 不可发布的内部模块入口，供 CLI 和集成测试共用 |
-| `crates/tarz/src/application/` | provider/模型装配、用户文本 block、单次执行及返回材料；无 stdio/信号/UI 依赖 |
-| `crates/tarz/src/session/` | owner/handle、受理与去重、工作监督、控制、结果保留 |
-| `crates/tarz/src/material/` | Context JSON 文件、原子替换及外部引用验证 |
-| `crates/tarz/src/demo/` | 脚本模型、本地工具、T1/T2/摘要/重放/保存重建 |
-| `crates/tarz/tests/` | 通过内部模块公开接口的集成消费者和 CLI 测试 |
-| `Cargo.toml`、`Cargo.lock` | workspace 元数据和锁定的 registry 依赖 |
-| `.github/workflows/ci.yml` | 格式、静态检查、文档、测试与多平台构建/演示 |
+| `crates/tarz-core/src/application/` | 活动目录、opening/关闭监督、实例视图、保存门禁与版本编辑 |
+| `crates/tarz-core/src/definition/` | 可序列化的固定定义与纯校验 |
+| `crates/tarz-core/src/assembly/` | 打开时解析凭据、装配 gateway/runner 与固定执行选项 |
+| `crates/tarz-core/src/session/` | 单会话 owner/handle、原工作受理、监督、去重与结果 |
+| `crates/tarz-core/src/store/` | 私有 JSON 后端、活动期文件锁、提交与确认 |
+| `crates/tarz-core/src/material/` | 显式 Context 文件导入/导出、引用校验 |
+| `crates/tarz-cli/src/cli/` | 命令参数、信号、展示、恢复文件与退出码 |
+| `crates/tarz-cli/src/demo/` | 脚本模型和本地工具的底层 Session 演示 |
+| `crates/tarz-core/tests/`、`crates/tarz-cli/tests/` | 核心契约消费者、真实 CLI 与本地 HTTP 测试 |
 
-Causa 精确依赖 0.0.2，启用 runtime + providers；不使用源码 include、path 或 patch 替换。内部 lib 不构成第三方 SDK。
+workspace 只有 `tarz-core` 和 `tarz-cli`，均为 `publish=false`，binary 仍名 `tarz`。CLI 单向依赖核心，核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。Causa 精确消费 registry `=0.0.2`，不使用 path/patch 或源码复制。
 
-完整创建、受理、装配、运行、保存路径见 [Session 运行机制](session-lifecycle.md)。后续统一 owner、托管保存与具体 Store 的设计和验收见 [Session 结构与存储提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)，其中的新增能力尚未实现。
+完整行为见 [Session 运行机制](session-lifecycle.md)，使用方法见 [README](../README.md)，逐项验收与本机证据见 [专项提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)和[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
 
-该提案的 2.1–2.3 节给出目标 crates/模块布局及迁移顺序：先提取 tarz-core 与 tarz-cli，TUI/GUI 在实际实现时再增加。当前仍是上表的单包结构，尚未拆分。
+## 共享应用入口
 
-## 共享核心与 CLI
+`SessionHost` 独占活动目录与底层 Session owner。`PreparedCreate` 在异步前固定身份，`create/open` 登记后由独立任务监督；丢弃等待或 `ManagedSession` 视图不终止操作。`SessionTarget` 区分同一 ConversationId 的不同打开实例；旧 target 不会作用于重开的实例。
 
-`ModelConfig::session` 使用 registry provider adapter 和空 ToolExecutor 装配空闲 Session，构造不发送请求。HTTP 连接可复用，模型选项在新工作装配时建立。配置不读取环境变量；环境变量和完整 endpoint 的解释归入口。当前不注册模型可调用工具。
+`ManagedSession` 提供 submit/observe/wait/cancel、状态、版本材料、原子 edit、wait_saved/retry_save 和 forget。视图不暴露底层 owner/handle。host 提供明确的 Save/DiscardLocal 关闭和原未提交 ToolBatch 的一次领取。调用方自行决定谁可使用 host；它不是用户身份认证系统。
 
-`application::run_once` 消费一个独占使用的空闲 Session，追加输入、提交工作、响应外部 CancellationToken，并在监督完成后 shutdown。调用方在此期间不能通过其他 handle 提交工作；多工作界面直接驱动 Session。它返回原 Arc<WorkResult>、收尾后的 Context（异常丢失则为错误）及原未提交 ToolBatch；CLI 不会自动执行批次。丢弃该 future 只能请求 owner Drop 取消，调用方必须持续 await 才能保证等待收尾。
+固定定义包含 provider、model、endpoint、凭据环境变量引用、工作期限、保留容量和模型/工具次数限制。打开时校验、解析一次并固定资源，创建和重开不调用模型。重开保留定义与 BlockId，但工作表、请求键、WorkRef、终态和未提交批次不恢复，不自动重跑旧工作。当前实际产品工具目录为空。
 
-CLI 使用 `run_once`，Ctrl-C 转为取消令牌后继续等待；不丢弃 runner future。显式保存使用现有 material 模块，在收尾后锁外执行；保存失败不改原工作终态。文本模式只输出完成文本；JSON 状态及退出码见 [使用说明](../README.md)。凭据不参与 Context 和结果序列化，provider 失败不 dump 原请求或响应。输入、模型 ID、凭据和 endpoint 由使用者显式配置，无默认模型选择。
+低层 `session` 仍供核心与 fixture 消费者使用；产品 CLI 通过托管入口。其原去重、取消、typed 结果、批次和材料交还契约保留。
 
-## 单会话边界
+## 保存与关闭
 
-`Session::new` 接收调用方的 ConversationId、初始 Context、异步装配回调及显式 SessionConfig，不执行模型或工具。Session owner 不可 Clone，控制当前材料、批次领取、forget 和 shutdown；可 Clone 的 SessionHandle 提供 submit/observe/wait/cancel。
+执行终态和保存状态是独立事实。持久实例在 T1 受理后封锁新键和编辑，直到实际返回材料保存确认；同参保留键仍重放，异参仍 Conflict。Finished 可以早于 Saved。失败保留原结果与待提交快照，`retry_save` 确认/重试同一 commit，不调用模型。版本编辑先验证候选，拒绝时材料不变，成功后自动保存。
 
-每个新键的有序 blocks 原子追加一次；保留键先比较完整原参数，再检查 Busy、关闭、故障、容量和编辑条件。相同参数返回原 WorkReceipt，不同参数结构化拒绝并返还原请求。新工作分配 UUIDv7 TurnId；空 blocks 可以运行现有材料。每个 Session 最多一个活动工作，无后台提交队列。
+`close(Save)` 等待取消、材料交还和保存；保存失败保持 owner/锁，可重试。`DiscardLocal` 等待在途 worker/I/O 停止并确认原待提交操作后放弃本地内容，不撤销已落盘记录。CloseOutcome 返回已提交、未提交、未尝试或仍无法确认的事实，后者保留原错误。最后一个 host 被丢弃会请求受监督的 DiscardLocal 清理；正常等待收尾仍要求 Tokio runtime 存活，强退不保证未保存材料可恢复。
 
-装配回调接收本次 WorkRef 与 RunControl，返回实际使用的 runner/options。工作期限从受理开始，覆盖装配和执行。普通取消让 Causa 交回实际 Context、typed TurnResult 和未提交 ToolBatch；发布 Finished 前先归还材料。终态以 Arc 共享，后续编辑和新工作不改旧结果；owner 可以独占领取未提交批次一次。
+CLI 持久运行在成功、失败和受控中断后等待保存。保存失败按已选择的行为：导出实际 Context 到随机且不覆盖现有文件的 `tarz-recovery-<uuid>.json`，然后错误退出；导出失败独立报告。临时运行只在显式 `--save` 时导出。
 
-`with_context` 只允许空闲时短暂同步访问，与受理共用锁，闭包不能重入 Session 或执行阻塞 I/O。同步闭包成功编辑不会因随后返回 Err 回滚；panic 使会话故障。worker panic/异常终止由仍存活的 supervisor 发布 Faulted，丢失材料明确返回 ContextUnavailable。监督和正常收尾要求 Tokio runtime 持续存活；提交要求启用时间驱动。无时间驱动的配置错误会被捕获并拒绝，但进程 panic hook 仍可能输出诊断。
+## 后端与资源边界
 
-`wait` 超时只返回当前状态，不取消工作。`shutdown` 关闭新键、请求取消并等待正常收尾；Drop 请求取消但不等待。没有自动恢复或跨进程工作去重。
+`--store DIR` 是明确指定的本机目录，无隐式默认目录。记录位于 `DIR/sessions/<uuid>.json`，格式 `tarz-session-v1`。固定定义、Context、ConversationId、revision 和 last_commit_id 同次写入；初始 revision 为 1。凭据配置只保存环境变量名。用户材料本身按原样保存。
 
-## 保存与资源
+稳定的 `<uuid>.lock` 文件与可替换记录分离，OS 排他锁从读取前持有至本地 worker/I/O 停止。占用、不支持或 I/O 错误均拒绝，不降级为无锁。提交校验基线与完整内容，经同目录临时文件、内容刷新和原子替换；确认不明时保持原操作。list 忽略锁和临时文件，逐记录报告损坏与活动状态；列表不是全目录原子快照。
 
-`material::save/load` 保存和读回原 Context，检查 JSON 与 BlockId 唯一性。写入使用同目录临时文件、同步内容后原子替换；父目录必须存在。它不提供跨文件资产事务或掉电后目录项持久性保证。
+单份记录读取/序列化上限为 64 MiB；这是文件限制，不是内存预算。默认 host 最多 32 个 opening/活动/受阻/closing 槽、最多 4 个并发存储操作；每会话最多一个待确认提交。CLI 持久定义默认保留 256 项工作，临时定义为 1 项。容量用尽明确拒绝；无自动淘汰、卸载或工作历史归档。
 
-默认拒绝媒体和 artifact 引用。`save_with_references/load_with_references` 要求应用回调实际确认每个引用可读，覆盖 Parts、ToolResult.media 和 ToolOutput.artifact；导入时重新验证。保存层不猜测 opaque ID 是文件路径或 URL，也不自动复制资产。长期资产保留由应用负责。
+保留成本包括当前 Context、创建时的原始材料、请求原输入、Arc 终态/未领取批次、待保存与基线副本、序列化缓冲，以及调用方持有的副本。关闭后仍持有的视图/观察也可能保留底层工作表和材料；活动槽上限不限制这些外部持有对象。list 需要完整校验每份记录；大量记录的扫描和内存仍随规模增长。观测样本中 4.2 KiB/1.13 MiB/9.06 MiB 材料场景峰值 RSS 约为 6.9/24.9/158.7 MiB；8 个同时活动的中型会话为 93.8 MiB。这是本机单次实验，不能外推吞吐保证，也未采集可靠 CPU cache 指标。原始规模、延迟、复制/序列化和字节计数见实施记录。
 
-保留成本包括当前 Context、每项工作的原提交 blocks 副本、Arc 终态中的输出/失败输入、未领取 ToolBatch，以及调用方持有的 Arc 或显式材料副本。容量只限制工作记录数量，不限制总字节数；没有自动淘汰。owner `forget` 释放终态记录、键和未领取批次，不改当前材料，已有观察/已登记等待继续持有原结果。原键可再次受理为新工作。
+默认拒绝外部媒体/artifact 引用。显式 material 扩展接口可交给调用方验证引用，但 Store 不自动复制资产。当前验证范围是本机进程中断后的完整旧/新记录；不承诺掉电后的目录项持久性、网络文件系统/同步盘跨主机执行或远程副作用 exactly-once。
 
 ## 本地检查
 
@@ -57,16 +57,13 @@ cargo fmt --all --check
 cargo clippy --workspace --locked --all-targets -- -D warnings
 cargo test --workspace --locked
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --locked --no-deps
+cargo build -p tarz-core --locked
 cargo build --workspace --locked --release
+./target/release/tarz session --help
 ./target/release/tarz demo
+node scripts/verify-proposals.mjs --links
 ```
 
-测试使用脚本 gateway、本地 HTTP fixture、本地工具、通知/屏障与临时文件，不需要在线模型。CLI 测试覆盖实际三个协议、stdin、保存/加载、失败与期限；Unix 另发 SIGINT 验证取消退出码和材料，Windows 控制台信号尚未在本机实测。依赖已缓存时可追加 `--offline`。当前本机验证及 W01–W15 的逐项证据（历史记录使用 S1–S15，见 [编号映射](../.agents/pipelines/assets/tarz-agent/provenance.md)）见 [实施记录](../.agents/reviews/2026-10-02-single-session-foundation/README.md)。CI 配置涵盖 Linux、macOS、Windows，当前本地证据不代表远端各平台已运行。
+测试使用本地 HTTP、脚本模型/工具、真实文件、进程和确定性屏障，无线上模型凭据。Unix 测试发 SIGINT 与 kill；Windows 控制台信号和远端各平台尚无本轮本机证据。CI 配置包含 Linux/macOS/Windows，不代表已在每个平台执行。
 
-新增 CLI 和共享核心的逐项证据见 [实施记录](../.agents/reviews/2026-10-03-cli-execution/README.md)。
-
-## 开发流程入口
-
-当前使用 Direct/Noted 本地提案流程；机器规则在 `AGENTS.local.md`，完整流程见 [.agents/pipelines/WORKFLOW.md](../.agents/pipelines/WORKFLOW.md)。设计与进度统一在 [.agents](../.agents/README.md) 维护。该目录和 scripts 被 Git 忽略，不包含在应用发布内容中。
-
-文档/提案变更运行 `node scripts/verify-proposals.mjs --links`；校验器变更另运行 `node scripts/test-verify-proposals.mjs`。这两项不替代 Rust 或应用安装验收。
+开发流程在 [.agents/pipelines/WORKFLOW.md](../.agents/pipelines/WORKFLOW.md)；`.agents/`、`scripts/` 和 `AGENTS.local.md` 留在本机，不强行加入版本库或应用分发。

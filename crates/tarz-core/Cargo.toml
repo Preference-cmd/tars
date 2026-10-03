@@ -1,0 +1,23 @@
+[package]
+name = "tarz-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Shared internal application core for Tarz"
+
+[dependencies]
+causa.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+url.workspace = true
+tempfile.workspace = true
+futures-util.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["test-util"] }

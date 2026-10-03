@@ -4,7 +4,7 @@ Tarz 是基于 Causa 的 Agent 应用，以可安装、可运行程序交付，�
 
 当前已实现单会话工作闭环，并提供离线 CLI 演示：原子提交、同键重放、逐工作装配、取消与结果观察、材料编辑及保存/导入。演示使用脚本模型和真实本地工具，经过 Session 与 Causa runner 执行，不需要凭据或网络。
 
-独立 `tarz run` 已支持真实 provider 的单次文本执行、JSON 输出、取消/期限和材料保存。TUI/GUI、流式展示、工具配置、父子 Agent 和安装渠道尚未实现。当前开发版本为 `0.0.0`，尚无公开发布。
+`tarz run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tarz session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。TUI/GUI、流式展示、工具配置、父子 Agent 和安装渠道尚未实现。当前开发版本为 `0.0.0`，尚无公开发布。
 
 ## 本地构建与运行
 
@@ -42,9 +42,28 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 这些路径已由本地 HTTP fixture 和实际进程测试验证，不需要线上凭据；尚未做真实付费模型调用或公开安装验收。
 
+## 保存并重开会话
+
+```sh
+# 首次创建，输出 ConversationId；创建本身不请求模型
+./target/release/tarz session create --store ./tarz-data \
+  --provider openai-chat --model "$MODEL_ID" --json
+
+# 使用输出的 ID；provider/model/期限沿用保存定义
+./target/release/tarz session run "$SESSION_ID" --store ./tarz-data \
+  --input '继续这个会话' --json
+./target/release/tarz session list --store ./tarz-data --json
+```
+
+`--store` 必须显式指定。记录保存固定定义和最新 Context；重开保持 ConversationId 与 BlockId，但不恢复旧工作、请求键或未提交输出。环境变量凭据在每次打开时重新解析，记录只保存变量引用。定义默认 120 秒期限、256 项保留工作、10 次模型调用和 64 个工具声明；详见 `tarz session --help`。
+
+`session run` 在执行成功、失败或取消后等待自动保存。JSON 分开返回执行 `status/text/execution_error` 与 `saved/revision/save_error`，并包含 `recovery_file/recovery_error/close_error/close_outcome`。保存失败时导出当前材料到 `tarz-recovery-<uuid>.json` 后以 1 退出；默认导出至当前目录，可用 `--recovery-dir` 指定已存在的目录。导出失败单独报告，不能宣称材料已恢复。恢复文件可通过创建命令的 `--load` 导入为新会话。关闭会确认原待保存操作；`close_outcome` 明确区分已提交、未提交与仍无法确认。若关闭时确认先前结果不明的提交，`saved/revision` 更新为已确认事实，原 `save_error` 和错误退出仍保留。
+
+存储采用本机稳定文件锁：另一进程占用同一会话时明确拒绝。坏记录在列表中单列并使命令失败，不自动覆盖。单条记录最多 64 MiB；该大小不是进程内存预算。当前范围不包含掉电持久性、网络共享盘或跨主机写入，详情见[当前边界](docs/README.md)。
+
 ## 项目入口
 
-根目录是 Cargo workspace；`crates/tarz/` 包含可执行程序及内部 lib target，供应用与集成测试共用。所有包 `publish = false`，不承诺第三方 SDK。Causa 0.0.2 从 registry 消费，启用 runtime 与 providers。
+根目录是 Cargo workspace；`crates/tarz-core/` 提供共享应用核心，`crates/tarz-cli/` 提供仍名为 `tarz` 的可执行程序。CLI 单向依赖核心，不预建空 TUI/GUI 包。所有包 `publish = false`，不承诺第三方 SDK。Causa 0.0.2 从 registry 消费，启用 runtime 与 providers。
 
 - [当前结构、接口边界与检查](docs/README.md)
 - [本地设计与实施入口](.agents/README.md)

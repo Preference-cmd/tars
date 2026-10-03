@@ -1,108 +1,68 @@
 # Session 的组装与运行机制
 
-2026-10-03，依据 `9ab10e6` 的实际实现核对。本文只说明现状；后续模块结构、组装、owner 管理、自动保存和 JSON Store 的设计统一见 [Session 结构与存储提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)。专项新增能力尚未实现，当前 CLI 仍只有下文所述的显式材料导入/导出。
+本文说明 2026-10-03 的当前实现。设计与验收集中在 [Session 结构与存储提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)，本机测试和资源原始数据见[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
 
-## 1. 当前调用路径
-
-```text
-CLI 参数 / 环境变量 / 输入 / 可选材料文件
-  → ModelConfig::session(initial_context, session_config)
-  → Session::new(conversation_id, context, assemble, config)
-  → run_once → handle.submit(request_key, blocks)
-  → worker → assemble(work_ref, run_control)
-  → TurnRunner::run(turn_id, context, options, control)
-  → supervisor 归还材料、未提交批次并发布终态
-  → run_once shutdown → RunReport
-  → CLI 可选保存 Context，输出文本 / JSON
-```
-
-这条路径有会话级资源组装和逐工作装配两个时点。当前没有统一 Session 目录、持久化 SessionStore 或可跨进程恢复的工作记录。
-
-## 2. 创建 Session：资源与活动容器
-
-[CLI prepare](../crates/tarz/src/cli/execute.rs)读取参数指定的凭据环境变量、可选材料文件及文本输入，构造 ModelConfig。材料导入校验 BlockId 唯一性和外部引用；它不启动执行。
-
-[ModelConfig::session](../crates/tarz/src/application/model.rs)现在同时承担：
-
-1. 根据 provider 创建实际 HTTP gateway，可覆盖完整 endpoint。
-2. 创建空工具目录的 ToolExecutor，并与 gateway 组装可共享的 Arc<TurnRunner>。
-3. 新分配 ConversationId，把初始 Context、工作配置及装配闭包交给 Session::new。
-
-当前模型和 provider 配置被闭包固定；正式 `run` 没有工具选择、preparer 或 observer 配置。装配闭包每次返回同一个 runner 的 Arc 和新构造的 TurnRunOptions。由于没有捕获工作身份的工具包装，这种复用适用于现有消费者。
-
-[Session::new](../crates/tarz/src/session/owner.rs)只创建活动容器：Context、空工作表、空请求键索引、活动槽、关闭/故障标志、装配回调和配置。它不调用 assemble、不创建 worker、不发送网络请求，不根据材料猜测工作历史。
-
-Session owner 不可 Clone；handle 可以 Clone。这个约束只在该实例内成立，不会阻止另一进程或另一个 Session::new 使用相同 ConversationId。
-
-## 3. 受理：先去重，再新建工作
-
-[SessionHandle::submit](../crates/tarz/src/session/handle.rs)在同一同步协调锁内按顺序完成：
-
-1. 先查保留的请求键：完整 blocks（ID、内容、metadata、顺序）相同则返回旧回执；不同则 Conflict。重放不重新装配或执行。
-2. 对新键检查 Faulted、Closed、Busy、容量、Context、运行时和期限是否有效。
-3. 分配 TurnId 并检查保留表内碰撞，建立 WorkRef 与该工作的取消 token、绝对期限。
-4. 原子追加输入；失败返还原输入，不登记部分工作。
-5. 保留原请求副本，登记 key → TurnId、Accepted 记录与活动槽，移交 Context。
-6. 释放锁，在锁外启动 worker 和 supervisor，返回 WorkReceipt。
-
-回执只表示进程内受理，当前没有落盘保证。worker 可以先于调用方实际收到回执被调度。一个实例最多一个活动工作，没有后台提交队列；每项期限从受理起算，覆盖装配和运行。
-
-## 4. 逐工作装配：把当前工作接到真实依赖
-
-[worker](../crates/tarz/src/session/worker.rs)持有 Context，先检查控制，再调用 `assemble(WorkRef, RunControl)`，至多一次。装配过程中取消或到期可以结束装配，Context 仍由 worker 保管。
-
-装配返回 `(Arc<TurnRunner>, TurnRunOptions)`；返回后再次检查控制，再决定是否进入 runner。普通连接与无工作状态的实现可共享；捕获当前 WorkRef 的工具、处理器、preparer、observer 应在这个时点绑定。闭包中的配置必须成为实际执行值。
-
-WorkRef 和控制属于单次工作，不应固化到跨工作复用的连接中。当前模型配置固定在会话构造时，尚无运行期间切换配置的契约。
-
-## 5. Causa：一次工作中的多次模型/工具循环
-
-Tarz 调用 registry Causa 0.0.2 的 TurnRunner::run。按实际 runner 顺序概括：
+## 1. 创建和重开
 
 ```text
-检查控制与模型轮次上限
-  → 为本次 Invocation 绑定工具目录与控制
-  → preparer 编辑 / 选择材料，生成请求 Frame
-  → gateway 模型调用
-  → 检查停止原因并提交可接受的模型材料
-  → EndTurn：返回 Completed
-  → 新工具声明：处理批次、校验与提交工具结果
-  → 下一次 Invocation，或返回中断
+CLI 参数 → SessionDefinition + 初始 Context → PreparedCreate
+  → SessionHost 登记 opening + 启动独立监督
+  → 持久实例取得稳定文件锁 → 读取并校验最新完整记录
+  → assembly 解析一次凭据并冻结 gateway / runner / 执行选项
+  → 创建：确认初始 revision 1；重开：采用已有 revision
+  → 发布绑定本次 SessionTarget 的 ManagedSession
 ```
 
-当前 CLI 的工具目录为空，preparer 未设置，使用默认材料 frame。旧材料中的 ToolCall 不会被当作本次新声明自动重跑。拒答、长度限制和各阶段错误可在结果里保留尚未提交的原输出。
+[Host](../crates/tarz-core/src/application/host.rs)在持有目录锁时登记并启动监督任务，同 ID 并发调用连接同一实例。create 的 ConversationId 和初始 commit_id 由同步 PreparedCreate 固定；等待者离开不改变它们。读取/装配失败且任务停止后移除 opening；初始提交失败则保留可 lookup 的 InitializationBlocked 与原操作，不发布可提交视图。
 
-Causa 只持有一次运行的 Context 与当前工具批次；不负责 Tarz 的会话目录、请求键、文件保存或工作历史。
+[Definition](../crates/tarz-core/src/definition/types.rs)是可保存的数据；[assembly](../crates/tarz-core/src/assembly/provider.rs)才解析环境引用。定义在活动实例中固定，重开重新解析同一引用，连接不捕获某次 WorkRef。每工作仍获得对应身份、控制和固定策略的选项。构造和重开不发模型请求。
 
-## 6. 收尾、观察与取消
+## 2. 受理与执行
 
-正常或受控中断返回 `TurnOutcome { context, result, uncommitted_tool_batch }`。supervisor 通过 [Shared::finish](../crates/tarz/src/session/state.rs)把实际材料及批次放回 Session，在同一协调范围发布不可变终态并清空活动槽。
+[ManagedSession::submit](../crates/tarz-core/src/application/managed.rs)先借用底层唯一请求键表比较完整参数，再检查生命周期和保存门禁。保留键同参返回原回执，异参 Conflict；新键拒绝返还原请求。新工作受理与 host active 槽登记在同一应用门禁内，worker 即使先完成也不能让 T2 越过保存。
 
-观察者得到 Arc<WorkResult>，其中保留原 typed TurnResult 或错误。材料继续属于 Session；终态不等于自动保留该工作对应的 Context 快照。若 T1 后 T2 已受理，T1 的 wait 完成也不会为 owner 预约空闲材料访问。
+底层 [SessionHandle](../crates/tarz-core/src/session/handle.rs)分配 TurnId，原子追加输入，保存原请求副本，并移交 Context 给 worker。每实例最多一个活动工作，无后台提交队列。工作期限从受理起覆盖逐工作装配和执行；不覆盖 opening、stdin 和磁盘 I/O。
 
-取消只请求停止：进入 runner 后仍要等待其正常交回 Context 和批次。wait 的超时不取消工作。worker 异常终止由 supervisor 发布 Faulted，丢失 Context 则明确不可用，不从旧文件伪造当前材料。
+[Worker](../crates/tarz-core/src/session/worker.rs)检查控制，调用逐工作装配，再交给 registry Causa 的 TurnRunner。Causa 处理一次工作中的模型/工具循环，返回真实 Context、typed TurnResult 和未提交 ToolBatch；它不拥有 Tarz 目录、文件或工作历史。当前产品为空工具目录，旧 Context 中的工具材料不会触发旧工具重跑。
 
-shutdown 关闭新键受理、请求取消并等待收尾，不自动删除记录或保存文件。Drop 只请求取消，不等待；进程或运行时退出不保证收尾。
+## 3. Finished 与 Saved
 
-## 7. 当前保存与重建
+底层 supervisor 先归还材料及批次，再发布原 `Arc<WorkResult>`。host 的[独立监督路径](../crates/tarz-core/src/application/supervisor.rs)等到真实材料可用，推进 MaterialVersion，并固定本次不可变保存操作。
 
-[run_once](../crates/tarz/src/application/execution.rs)消费一个独占使用的 Session，等待终态后 shutdown，复制收尾材料，领取原未提交批次，并返回 RunReport。它是单次执行便利入口，不是长期多工作会话目录。调用期间不能通过其他 handle 并发提交。
+```text
+submit → Dirty → 原 WorkResult::Finished → 固定返回材料 → Saving
+                                                       ├─ 确认 → Saved → 可受理 T2
+                                                       └─ 错误 → SaveBlocked
+                                                                    ↓ retry_save
+                                                               原提交确认/重试
+```
 
-[CLI](../crates/tarz/src/cli/execute.rs)在收到报告后，按显式 --save 调用 [material::save](../crates/tarz/src/material/file.rs)。这意味着工作完成与文件保存是独立事实：保存失败不改 Completed，但命令返回失败。当前保存位置与选择由 CLI 管理，完整的多入口会话管理尚未实现。
+保存 I/O 在有并发上限的 blocking 任务执行，不占同步协调锁。等待者、取消、重放和观察仍响应。Saved 是持久事实；Finished 只描述执行。保存失败不会把 Completed 改成执行失败；重试不重跑模型。临时实例保持 NotTracked，仍等材料交还后才解除活动门禁。
 
-材料文件仅包含 Context.blocks；没有 ConversationId、工作表、原请求键、配置、取消 token、未提交批次或完整 WorkResult。文件采用同目录临时写入、内容 sync 和原子替换；没有跨文件事务、写入版本冲突检测或资产保留协议。Causa 当前 Context 本身也不携带持久化修订号。
+`read_materials` 返回带版本的实际空闲材料副本。`edit` 以该 MaterialVersion 为基线验证并一次替换全部 blocks，拒绝旧版本、旧实例、Busy 或未处理保存；合法持久编辑固定新快照并保存，不接受可重入的任意编辑回调。
 
-load 验证材料后，当前 ModelConfig::session 创建新的 ConversationId 和空工作表。通用 Session::new 允许调用方传入旧 ConversationId，但同样不会恢复旧记录。导入材料继续执行，与恢复旧工作是不同操作。
+## 4. JSON 提交与确认
 
-## 8. 当前数据归属
+[Store](../crates/tarz-core/src/store/json.rs)是 core 内部具体后端。记录格式 `tarz-session-v1` 保存 ConversationId、revision、last_commit_id、definition、context；只接受规范 UUID 文件名，不把任意输入拼为路径。工作表、请求键、执行结果、未提交批次、任务与连接不序列化。
 
-| 数据 | 当前 owner / 保存位置 | 当前重启后可获得什么 |
-| --- | --- | --- |
-| Context | 空闲 Session 或活动 worker；可显式保存为文件 | 仅最后一次显式成功保存的 blocks |
-| 请求键、原输入、WorkRef、终态、未领取批次 | Session 工作表 / 外部 Arc | 不恢复 |
-| gateway、executor、runner、装配闭包 | 应用构造的进程内对象 | 需要重新构造 |
-| token、deadline、通知、task、锁 | 当前运行时 | 不恢复 |
-| provider/model/endpoint/凭据 | CLI 输入、环境及装配闭包 | 需要重新提供 |
-| 外部媒体与 artifact | 由调用方验证和保留 | 默认文件接口拒绝；扩展接口重验可读性 |
+writer 持有稳定锁文件；每个在途 blocking 操作也持有它。提交先读最新版本：同 commit_id 必须完整内容相同；否则要求基线一致。写临时文件、同步后替换最终 JSON。回应丢失后读取确认原 commit；完整旧基线和持续同一写访问才可证明尚未提交。记录已推进或不可读时保留冲突/无法确认，不生成新身份或强行覆盖。
 
-后续 Store、活动会话目录和保存时点在这一归属基础上设计，具体职责与新增验收见 [专项提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)。
+list 校验最终记录，独立报告坏 JSON、格式、身份、重复 BlockId、引用和锁错误，不回退默认定义或空会话。临时文件不出现在列表，清理要求对应写访问。锁文件不在关闭时删除；外部删除/替换锁文件不属于受支持的协调方式。
+
+## 5. 关闭、故障和批次
+
+host 的 close 检查完整 SessionTarget，标记 Closing，关闭新受理并请求取消，等待真实 worker 和 I/O。Save 确认最新材料后释放；保存失败保留 owner/写访问，重试可继续关闭。DiscardLocal 也等在途写入停止，只确认原 pending commit 而不再写入。返回的 CloseOutcome 区分 Applied、NotApplied、NotSubmitted 和 Unresolved；无法确认会保留原结构化错误，不能把关闭当成记录不存在。它不回滚已提交记录。opening 也可用 lookup 的 target 关闭，原等待者不会获得可提交句柄；进行中不同策略请求拒绝，受阻且无在途操作时可明确改选 DiscardLocal。
+
+旧 ManagedSession 只能观察其保留事实，不会跟随 ConversationId 重定向。视图 Drop 不关闭 owner；最后一个外部 host Drop 请求监督清理，不能代替明确 await。运行时或进程退出不保证正常收尾。
+
+owner/worker 异常会隔离新工作，等待可确认的任务停止，保留故障和锁直到明确处理。ContextUnavailable 如实报告，不把旧磁盘版本伪装成本次返回材料。操作系统句柄存活期间的本机文件锁没有租约到期；不支持外部撤销锁或跨主机共享执行。
+
+`SessionHost::take_uncommitted_tool_batch(target, work)` 在同一协调边界从原 owner 一次取走原 U，无 await、复制或工具执行。观察结果的 Arc 不变。关联保存未处理时 forget 拒绝；forget 后释放请求键、终态和未领取批次，已有 Arc 仍有效。入口若需要 U 必须在最终关闭前领取；Store 不补存 U。
+
+## 6. CLI 消费者
+
+`session create` 只创建并确认初始记录。`session run ID` 重开保存定义，提交新工作，等待独立保存结果后关闭；不能临时覆盖 provider/model。`session list` 无需解析凭据。它们均要求显式 `--store`。
+
+CLI 在保存失败时保留原执行 status/text，另输出 save_error；按用户选择导出随机不覆盖的恢复 Context，再以 1 退出。recovery_error、close_error 和 close_outcome 单列；恢复文件包含实际返回材料，不包含原工作表或未提交内容。Ctrl-C 取消工作后仍等待交还和保存。
+
+`tarz run` 创建 transient host，仍支持原 `--load/--save`：导入获得新 ConversationId，只有显式 `--save` 导出 Context，报告与退出码保持。低层 offline demo 是独立 fixture，用来观察单会话契约。

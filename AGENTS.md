@@ -36,8 +36,9 @@ features change; keep one authoritative acceptance list per proposal scope.
 
 ## Architecture and conventions
 
-- Keep Cargo packages under `crates/`, inheriting workspace metadata. Follow
-  the current manifests; proposed crate splits are documented in the design index.
+- Keep Cargo packages under `crates/`, inheriting workspace metadata.
+  `tarz-core` owns shared behavior; `tarz-cli` owns presentation and the `tarz` binary.
+  Add other entry crates only with real consumers, never placeholder UI packages.
 - Use Causa's public registry facade. Do not replace Causa with path/patch
   dependencies, source includes or copied implementations. Tarz owns sessions,
   assembly, application policy and persistence; Causa supplies material contracts
