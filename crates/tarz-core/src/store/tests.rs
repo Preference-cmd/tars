@@ -114,6 +114,31 @@ fn lost_reply_confirms_same_record_and_same_revision() {
     assert_eq!(store.metrics().writes, 1);
 }
 #[test]
+fn prewrite_read_failure_retains_the_exact_operation_for_confirmation() {
+    let (folder, store, id, writer) = setup();
+    let initial = op(&id, None, "old");
+    writer.commit(&initial).unwrap();
+    let update = op(&id, Some(1), "new");
+    let path = folder.path().join("sessions").join(format!("{id}.json"));
+    let held = folder.path().join("held.json");
+    fs::rename(&path, &held).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert!(writer.commit(&update).is_err());
+    fs::remove_dir(&path).unwrap();
+    fs::rename(&held, &path).unwrap();
+    assert_eq!(
+        writer.resolve_commit(&update).unwrap(),
+        CommitResolution::NotApplied
+    );
+    let different = op(&id, Some(1), "different");
+    assert!(matches!(
+        writer.commit(&different),
+        Err(StoreError::PendingCommit)
+    ));
+    assert_eq!(writer.commit(&update).unwrap().revision, 2);
+    assert_eq!(store.metrics().writes, 2);
+}
+#[test]
 fn failures_before_replace_leave_full_old_baseline_and_retry_original() {
     for stage in [
         CommitStage::Serialize,

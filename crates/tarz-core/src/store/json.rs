@@ -204,7 +204,27 @@ impl Writer {
     ) -> Result<SavedSessionRecord, StoreError> {
         operation.validate(&self.id)?;
         let mut state = self.state.lock().map_err(|_| StoreError::Poisoned)?;
-        let latest = read_record(&self.path(), &self.id)?;
+        let latest = match read_record(&self.path(), &self.id) {
+            Ok(latest) => latest,
+            Err(error) => {
+                // Keep the exact attempted operation even when the pre-write
+                // read fails. A later confirmation can compare its known
+                // baseline; a newly opened writer cannot infer this history.
+                if state.pending.is_none()
+                    && let Some(baseline) = &state.baseline
+                    && revision(baseline) == operation.expected_revision
+                {
+                    state.pending = Some((
+                        PreparedCommit {
+                            expected_revision: operation.expected_revision,
+                            record: self.clone_record(&operation.record),
+                        },
+                        self.clone_snapshot(baseline),
+                    ));
+                }
+                return Err(error);
+            }
+        };
         if let Some(current) = &latest
             && current.last_commit_id == operation.record.last_commit_id
         {
