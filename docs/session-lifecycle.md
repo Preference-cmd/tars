@@ -2,6 +2,8 @@
 
 2026-10-03，依据 `9ab10e6` 的实际实现核对。本文说明现状；可能的 Store 和后续结构建议放在 [设计附件](../.agents/pipelines/assets/tarz-agent/session-assembly-and-store.md)，不视为当前保证。后续收敛方案见 [托管 Session 设计](../.agents/pipelines/assets/tarz-agent/managed-session-design.md)，其中的 owner 管理和自动保存均为候选，尚未实现。
 
+首个物理后端的建议与验证范围见 [JSON Store 方案](../.agents/pipelines/assets/tarz-agent/first-session-store.md)。该方案区分活动期独占、保存提交和崩溃保证；当前 CLI 仍只有下文所述的显式材料导入/导出。
+
 ## 1. 当前调用路径
 
 ```text
