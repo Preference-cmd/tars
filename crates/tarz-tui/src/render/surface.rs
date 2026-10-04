@@ -299,6 +299,8 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         }
     } else if app.quitting {
         "Saving and closing sessions; waiting for actual completion..."
+    } else if matches!(app.panel, Some(crate::app::Panel::Repair(_))) {
+        "↑↓ / PageUp/PageDown scroll · Esc back to draft"
     } else if matches!(app.panel, Some(crate::app::Panel::Info { .. })) {
         "↑↓ / PageUp PageDown scroll · Esc back"
     } else if app.panel.is_some() {

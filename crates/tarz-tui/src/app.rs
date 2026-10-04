@@ -4,6 +4,7 @@ mod commands;
 mod events;
 mod jobs;
 mod progress;
+mod repair;
 mod state;
 
 pub(crate) use commands::{COMMANDS, Panel, matching_commands};

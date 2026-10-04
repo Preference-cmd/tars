@@ -26,6 +26,14 @@ pub(crate) enum SessionCommand {
         store: PathBuf,
         json: bool,
     },
+    Repair {
+        store: PathBuf,
+        id: String,
+        apply: bool,
+        expected_revision: Option<u64>,
+        recovery_dir: PathBuf,
+        json: bool,
+    },
 }
 
 impl SessionCommand {
@@ -53,7 +61,7 @@ impl SessionCommand {
                     .ok_or("--output is required")?,
             });
         }
-        let id = if command == "run" {
+        let id = if matches!(command, "run" | "repair") {
             let (id, rest) = args.split_first().ok_or("conversation ID is required")?;
             args = rest;
             Some(
@@ -64,13 +72,15 @@ impl SessionCommand {
         } else {
             None
         };
-        if !matches!(command, "create" | "run" | "list") {
+        if !matches!(command, "create" | "run" | "list" | "repair") {
             return Err("unknown session command".into());
         }
         let mut values = HashMap::new();
         let mut stdin = false;
         let mut json = false;
         let mut no_config = false;
+        let mut apply = false;
+        let mut dry_run = false;
         let mut args = args.iter();
         while let Some(flag) = args.next() {
             let flag = flag.to_str().ok_or("option must be UTF-8")?;
@@ -78,6 +88,8 @@ impl SessionCommand {
                 "--json" if !json => json = true,
                 "--no-config" if !no_config => no_config = true,
                 "--stdin" if command == "run" && !stdin => stdin = true,
+                "--apply" if command == "repair" && !apply => apply = true,
+                "--dry-run" if command == "repair" && !dry_run => dry_run = true,
                 "--store" | "--config" => {
                     insert(&mut values, flag, &mut args)?;
                 }
@@ -88,7 +100,13 @@ impl SessionCommand {
                 {
                     insert(&mut values, flag, &mut args)?;
                 }
-                "--input" | "--recovery-dir" if command == "run" => {
+                "--input" if command == "run" => {
+                    insert(&mut values, flag, &mut args)?;
+                }
+                "--expected-revision" if command == "repair" => {
+                    insert(&mut values, flag, &mut args)?;
+                }
+                "--recovery-dir" if matches!(command, "run" | "repair") => {
                     insert(&mut values, flag, &mut args)?;
                 }
                 _ => return Err("unknown, duplicate, or inapplicable session option".into()),
@@ -112,6 +130,38 @@ impl SessionCommand {
             .or_else(|| config.store_dir().map(PathBuf::from))
             .ok_or("--store or a configured store directory is required")?;
         match command {
+            "repair" => {
+                if apply && dry_run {
+                    return Err("--apply conflicts with --dry-run".into());
+                }
+                let expected_revision = string("--expected-revision")?
+                    .map(|value| {
+                        value
+                            .parse::<u64>()
+                            .ok()
+                            .filter(|revision| *revision > 0)
+                            .ok_or("--expected-revision must be a positive integer")
+                    })
+                    .transpose()?;
+                if apply != expected_revision.is_some() {
+                    return Err(
+                        "--apply requires --expected-revision; preview does not accept a revision"
+                            .into(),
+                    );
+                }
+                Ok(Self::Repair {
+                    store,
+                    id: id.expect("repair ID parsed"),
+                    apply,
+                    expected_revision,
+                    recovery_dir: values
+                        .get("--recovery-dir")
+                        .map(PathBuf::from)
+                        .or_else(|| config.recovery_dir().map(PathBuf::from))
+                        .unwrap_or_else(|| PathBuf::from(".")),
+                    json,
+                })
+            }
             "create" => {
                 let definition = configuration::definition(&config, &values)?;
                 Ok(Self::Create {

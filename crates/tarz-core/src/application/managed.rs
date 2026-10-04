@@ -5,7 +5,7 @@ use crate::session::{
     SessionError, SubmitRequest, WorkObservation, WorkProgress, WorkReceipt, WorkRef,
 };
 use crate::store::{PreparedCommit, SavedSessionRecord};
-use causa::kernel::ContextBlock;
+use causa::kernel::{Context, ContextBlock};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -55,6 +55,17 @@ impl ManagedSession {
             });
         }
         if let Err(reason) = self.entry.new_mutation(&state) {
+            return Err(ManagedSubmitRejection { reason, request });
+        }
+        let readiness = state
+            .owner
+            .as_mut()
+            .expect("published owner")
+            .with_context(|context| super::repair::admission_check(context));
+        let readiness = readiness
+            .map_err(ApplicationError::from)
+            .and_then(|result| result.map_err(Into::into));
+        if let Err(reason) = readiness {
             return Err(ManagedSubmitRejection { reason, request });
         }
         let receipt = handle
@@ -146,10 +157,6 @@ impl ManagedSession {
             return Err(ApplicationError::StaleMaterial);
         }
         self.entry.new_mutation(&state)?;
-        let next = state
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| ApplicationError::Faulted("material generation exhausted".into()))?;
         // Validate the complete replacement and persistent snapshot before
         // mutating the owner. Every ordinary rejection leaves materials intact.
         let mut candidate = state
@@ -166,6 +173,20 @@ impl ManagedSession {
             .replace(0..len, blocks)
             .commit()
             .map_err(|failure| SessionError::ContextEdit(failure.reason))?;
+        self.commit_materials(&mut state, candidate)
+    }
+
+    // Called only with the application gate held, after the caller validates
+    // its baseline and the complete immutable candidate.
+    pub(super) fn commit_materials(
+        &self,
+        state: &mut super::entry::State,
+        candidate: Context,
+    ) -> Result<MaterialVersion, ApplicationError> {
+        let next = state
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| ApplicationError::Faulted("material generation exhausted".into()))?;
         let pending = if state.persistent {
             self.entry.cloned_snapshot();
             let record = SavedSessionRecord::new(
@@ -191,11 +212,11 @@ impl ManagedSession {
             state.save_requested = true;
             state.save = SaveStatus::Dirty {
                 base_revision: state.revision,
-                material_version: self.entry.version(&state),
+                material_version: self.entry.version(state),
             };
         }
         self.entry.notify();
-        Ok(self.entry.version(&state))
+        Ok(self.entry.version(state))
     }
     /// Wait for this instance's current execution/save barrier to settle.
     pub async fn wait_saved(&self) -> Result<SaveStatus, ApplicationError> {

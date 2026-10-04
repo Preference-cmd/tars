@@ -39,6 +39,10 @@ pub struct ToolMetrics {
 
 #[derive(Default)]
 pub(crate) struct Counters {
+    // Deterministic integration-test boundary: the real wrapper was entered,
+    // unlike a declaration-stage Waiting observation. Never shipped as API.
+    #[cfg(test)]
+    pub test_wrappers_entered: AtomicUsize,
     pub started: AtomicUsize,
     pub completed: AtomicUsize,
     pub active: AtomicUsize,

@@ -17,6 +17,7 @@ pub(crate) enum Panel {
         lines: Vec<String>,
         scroll: usize,
     },
+    Repair(Box<super::repair::RepairPanel>),
 }
 
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
@@ -24,6 +25,10 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("sessions", "Find and open a saved or active session"),
     ("help", "Keyboard shortcuts and session behavior"),
     ("tools", "Expand recorded tool calls and complete results"),
+    (
+        "repair",
+        "Inspect incomplete tool exchanges before continuing",
+    ),
     ("status", "Full session status, settings and error details"),
     ("open", "Open the current stored session"),
     ("cancel", "Interrupt the current work"),
@@ -94,13 +99,14 @@ impl App {
                 title: "Keyboard shortcuts".into(), scroll: 0,
                 lines: ["Enter / Ctrl-S   Send input", "Ctrl-J / Alt-Enter   New line",
                     "Esc / Ctrl-C   Interrupt work", "/ or F1   Commands; Esc returns",
-                    "F2 new · F3 open · F4 next · F5 refresh", "F6 / /tools   Expand complete recorded tool results", "PageUp / PageDown   Read conversation",
+                    "F2 new · F3 open · F4 next · F5 refresh", "F6 / /tools   Expand complete recorded tool results", "F7 / /repair   Preview and apply material repair", "PageUp / PageDown   Read conversation",
                     "Ctrl-Z undo · Ctrl-Y redo", "Ctrl-W close · Ctrl-Q save and quit",
                     "Ctrl-R retry save · Ctrl-E export", "Ctrl-D discard with confirmation", "",
                     "Switching views keeps work and drafts. Saved sessions restore materials, not old work records.",
                     "Use /status for full configuration, save state and error details."].into_iter().map(str::to_owned).collect(),
             }),
             "tools" => self.show_tools(),
+            "repair" => self.show_repair(),
             "status" => {
                 let mut lines = vec![format!("Config: {}", self.options.config_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "none".into())),
                     format!("Store: {}", self.options.store.display()),
@@ -139,6 +145,10 @@ impl App {
         });
     }
     pub(super) fn panel_key(&mut self, key: KeyEvent) {
+        if matches!(self.panel, Some(Panel::Repair(_))) {
+            self.repair_key(key);
+            return;
+        }
         let Some(mut panel) = self.panel.take() else {
             return;
         };
@@ -146,6 +156,7 @@ impl App {
             return;
         }
         let (query, selected, commands) = match &mut panel {
+            Panel::Repair(_) => unreachable!("repair keys handled separately"),
             Panel::Commands { query, selected } => (query, selected, true),
             Panel::Sessions { query, selected } => (query, selected, false),
             Panel::Info { scroll, lines, .. } => {

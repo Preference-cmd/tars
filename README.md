@@ -40,7 +40,7 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 退出码：0 完成；1 配置、执行或文件失败；2 参数错误；124 工作期限；130 取消。Ctrl-C 在执行期间请求取消并等待真实材料交还；`--save` 在成功、执行失败或受控中断后保存当前材料，没有该选项则不自动保存。它不保存未提交输出或未提交工具批次，也不恢复旧工作或请求键。默认材料接口拒绝外部媒体/资产引用。
 
-这些路径已由本地 HTTP fixture 和实际进程测试验证，不需要线上凭据；尚未做真实付费模型调用或公开安装验收。
+这些路径由本地 HTTP fixture 和实际进程测试验证，不需要线上凭据；另已完成用户配置服务的最小请求与三工具往返实测。线上样本不代替中断/竞态验证，公开安装尚未验收。
 
 ## 保存并重开会话
 
@@ -61,6 +61,8 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 存储采用本机稳定文件锁：另一进程占用同一会话时明确拒绝。坏记录在列表中单列并使命令失败，不自动覆盖。单条记录最多 64 MiB；该大小不是进程内存预算。当前范围不包含掉电持久性、网络共享盘或跨主机写入，详情见[当前边界](docs/README.md)。
 
+取消后有未配对工具声明时，新输入会原样保留并提示处理材料。TUI 用 F7 或 `/repair` 预览采纳原结果或移除未配对声明，再 Enter 应用并保存。CLI 用 `session repair ID --store DIR --json` 查看，显式 `--apply --expected-revision N` 应用移除模式。处理不重跑旧工具，原工作状态保持；保存后另行发送新输入。条件、重开与原批次保留范围见[中断后继续](docs/session-continuation.md)。
+
 ## 项目入口
 
 根目录是 Cargo workspace；`crates/tarz-core/` 提供共享应用核心与配置，`crates/tarz-cli/` 提供 `tarz`，`crates/tarz-tui/` 提供 `tarz-tui` 原型。默认 `cargo run/build` 仍选择 CLI；TUI 使用 `cargo run -p tarz-tui -- --config /path/to/config.toml`，全部构建用 `cargo build --workspace --locked`。入口各自单向依赖核心，所有包 `publish = false`。本轮按用户授权通过 `../agent-stack-oss/crates/causa` 接入 Causa 最新开发实现，启用 runtime 与 providers；构建要求同级目录存在 Causa checkout，当前验证基线为 `9f955b4`。Cargo.lock 不固定本地路径中的源码提交。恢复 registry 依赖和独立分发另行处理。
@@ -70,6 +72,7 @@ CLI/TUI 共用 [TOML 配置](docs/configuration.md)，支持全局默认路径�
 - [当前结构、接口边界与检查](docs/README.md)
 - [共享配置说明](docs/configuration.md)
 - [工作区只读工具与记录迁移](docs/workspace-tools.md)
+- [中断后的材料处理与继续](docs/session-continuation.md)
 - [TUI 运行、按键与验证边界](docs/tui.md)
 - [本地设计与实施入口](.agents/README.md)
 - [Tarz 应用设计](.agents/pipelines/proposals/architecture/2026-10-02-tarz-agent-application.md)

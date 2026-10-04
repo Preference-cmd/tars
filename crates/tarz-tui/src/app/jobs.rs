@@ -7,6 +7,22 @@ use tarz_core::application::{
 use tarz_core::session::{WorkRef, WorkResult};
 
 pub(super) enum Message {
+    RepairInspected(
+        Key,
+        causa::kernel::BlockId,
+        Result<(tarz_core::application::RepairInspection, Option<String>), String>,
+    ),
+    RepairPlanned(
+        Key,
+        causa::kernel::BlockId,
+        Result<tarz_core::application::RepairPlan, String>,
+    ),
+    RepairApplied(
+        Key,
+        causa::kernel::BlockId,
+        bool,
+        Result<SaveStatus, String>,
+    ),
     Listed(Result<Vec<SessionListing>, ApplicationError>),
     Opened(Key, Result<ManagedSession, ApplicationError>),
     Finished(
@@ -79,6 +95,15 @@ impl App {
     pub(super) fn complete(&mut self, message: Message) {
         self.dirty = true;
         match message {
+            Message::RepairInspected(key, request, result) => {
+                self.repair_inspected(key, request, result)
+            }
+            Message::RepairPlanned(key, request, result) => {
+                self.repair_planned(key, request, result)
+            }
+            Message::RepairApplied(key, request, applied, result) => {
+                self.repair_applied(key, request, applied, result)
+            }
             Message::Listed(result) => {
                 self.listing = false;
                 match result {

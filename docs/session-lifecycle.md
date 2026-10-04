@@ -41,6 +41,8 @@ submit → Dirty → 原 WorkResult::Finished → 固定返回材料 → Saving
 
 `read_materials` 返回带版本的实际空闲材料副本。`edit` 以该 MaterialVersion 为基线验证并一次替换全部 blocks，拒绝旧版本、旧实例、Busy 或未处理保存；合法持久编辑固定新快照并保存，不接受可重入的任意编辑回调。
 
+中断后材料处理复用同一编辑/保存门禁：`inspect_repair` 只读检查，`plan_repair` 构建经过协议校验的不可改写候选，`apply_repair` 核对材料版本、打开实例及原批次可用性再一次提交。take/forget 会使既有计划失效。新键配对准入失败返还原输入且不登记工作，保留键回放仍优先。CLI/TUI 操作与原结果保留范围见[中断后继续](session-continuation.md)。
+
 ## 4. JSON 提交与确认
 
 [Store](../crates/tarz-core/src/store/json.rs)是 core 内部具体后端。记录格式 `tarz-session-v2` 保存 ConversationId、revision、last_commit_id、definition、context；只接受规范 UUID 文件名，不把任意输入拼为路径。定义中的 workspace_root、tools、tool_limits 必须完整存在；旧 v1 明确拒绝，离线材料导出见[工作区工具](workspace-tools.md)。工作表、请求键、执行结果、未提交批次、任务与连接不序列化。

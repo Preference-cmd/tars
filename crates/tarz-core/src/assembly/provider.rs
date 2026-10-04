@@ -77,7 +77,8 @@ pub(crate) fn assemble(
             }
         },
         definition.session_config(),
-    ))
+    )
+    .allow_readonly_repair())
 }
 
 #[cfg(test)]

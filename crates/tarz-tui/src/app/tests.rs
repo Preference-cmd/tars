@@ -6,6 +6,7 @@ mod support;
 
 mod navigation;
 
+mod repair;
 mod streaming;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

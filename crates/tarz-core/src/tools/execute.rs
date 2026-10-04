@@ -163,6 +163,12 @@ impl Tool for WorkspaceToolImpl {
         let control =
             control.with_timeout(Duration::from_secs(self.shared.limits.call_timeout_secs));
         self.reporter.waiting(call);
+        #[cfg(test)]
+        self.shared
+            .host
+            .counters
+            .test_wrappers_entered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let acquire = async {
             let local = self.shared.local.clone().acquire_owned().await.ok()?;
             let host = self.shared.host.slots.clone().acquire_owned().await.ok()?;

@@ -37,6 +37,7 @@ pub(crate) struct Entry {
     pub scroll: Option<usize>,
     pub(super) material_version: Option<MaterialVersion>,
     pub(super) requested_material_version: Option<MaterialVersion>,
+    pub(super) repair_job: Option<causa::kernel::BlockId>,
     #[cfg(test)]
     pub(super) material_reads: usize,
     pub(super) refreshing: bool,
@@ -63,6 +64,7 @@ impl Entry {
             scroll: None,
             material_version: None,
             requested_material_version: None,
+            repair_job: None,
             #[cfg(test)]
             material_reads: 0,
             refreshing: false,

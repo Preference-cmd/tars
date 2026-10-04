@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 /// Exclusive lifecycle owner for one conversation's current materials.
 pub struct Session {
     pub(super) shared: Arc<Shared>,
+    standard_readonly_repair: bool,
 }
 
 impl Session {
@@ -50,6 +51,7 @@ impl Session {
             + 'static,
     {
         Self {
+            standard_readonly_repair: false,
             shared: Arc::new(Shared {
                 conversation_id,
                 state: Mutex::new(State {
@@ -59,6 +61,7 @@ impl Session {
                     faulted: false,
                     records: HashMap::new(),
                     keys: HashMap::new(),
+                    claims_revision: 0,
                 }),
                 assemble: Arc::new(move |work, control, reporter| {
                     Box::pin(assemble(work, control, reporter))
@@ -75,6 +78,39 @@ impl Session {
         SessionHandle {
             shared: self.shared.clone(),
         }
+    }
+
+    // Only the reviewed application assembly grants this provenance. Public
+    // arbitrary runner/processor constructors must leave it disabled.
+    pub(crate) fn allow_readonly_repair(mut self) -> Self {
+        self.standard_readonly_repair = true;
+        self
+    }
+
+    pub(crate) fn claims_revision(&self) -> u64 {
+        self.shared.lock().claims_revision
+    }
+
+    pub(crate) fn inspect_uncommitted<R>(
+        &self,
+        work: &WorkRef,
+        inspect: impl FnOnce(bool, &WorkResult, Option<&ToolBatch>) -> R,
+    ) -> Result<R, SessionError> {
+        let state = self.shared.lock();
+        let record = self.shared.record(&state, work)?;
+        let WorkState::Finished(result) = record.snapshot().state else {
+            return Err(SessionError::NotFinished { work: work.clone() });
+        };
+        Ok(inspect(
+            self.standard_readonly_repair,
+            &result,
+            state
+                .records
+                .get(&work.turn_id)
+                .expect("retained record")
+                .uncommitted
+                .as_ref(),
+        ))
     }
 
     /// Access idle materials under the admission lock.
@@ -112,6 +148,18 @@ impl Session {
         if !matches!(record.snapshot().state, WorkState::Finished(_)) {
             return Err(SessionError::NotFinished { work: work.clone() });
         }
+        if state
+            .records
+            .get(&work.turn_id)
+            .expect("record located")
+            .uncommitted
+            .is_some()
+        {
+            state.claims_revision = state
+                .claims_revision
+                .checked_add(1)
+                .ok_or(SessionError::Faulted)?;
+        }
         Ok(state
             .records
             .get_mut(&work.turn_id)
@@ -130,6 +178,10 @@ impl Session {
         if !matches!(record.snapshot().state, WorkState::Finished(_)) {
             return Err(SessionError::NotFinished { work: work.clone() });
         }
+        state.claims_revision = state
+            .claims_revision
+            .checked_add(1)
+            .ok_or(SessionError::Faulted)?;
         let entry = state.records.remove(&work.turn_id).expect("record located");
         state.keys.remove(&entry.request_key);
         drop(state);

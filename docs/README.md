@@ -29,6 +29,8 @@ workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false
 
 `ManagedSession` 提供 submit/observe/wait/cancel、subscribe_progress、状态、版本材料、原子 edit、wait_saved/retry_save 和 forget。视图不暴露底层 owner/handle。host 提供明确的 Save/DiscardLocal 关闭和原未提交 ToolBatch 的一次领取。调用方自行决定谁可使用 host；它不是用户身份认证系统。
 
+中断后继续通过 `inspect_repair/plan_repair/apply_repair` 显式处理材料。正式只读装配可采纳受控中断的原结果，重开无原批次时可移除未配对声明；新输入先经过配对准入，保存确认后才开始新工作。CLI `session repair` 与 TUI F7 共用此行为，完整条件、版本与保留边界见[中断后继续](session-continuation.md)。
+
 固定定义包含 provider、model、endpoint、凭据环境变量引用、工作期限、保留容量、模型/工具次数限制，以及工作区、工具选择和完整工具限额。打开时校验、解析一次并固定资源，创建和重开不调用模型。重开保留定义与 BlockId，但工作表、请求键、WorkRef、终态和未提交批次不恢复，不自动重跑旧工作。默认工具目录为空，可显式启用 list_directory/read_file/search_text。边界及记录迁移见[工作区工具](workspace-tools.md)，本轮证据见[实施记录](../.agents/reviews/2026-10-04-workspace-tools/README.md)。
 
 低层 `session` 仍供核心与 fixture 消费者使用；产品 CLI 通过托管入口。其原去重、取消、typed 结果、批次和材料交还契约保留。

@@ -33,6 +33,7 @@ pub(super) struct State {
     pub faulted: bool,
     pub records: HashMap<TurnId, Entry>,
     pub keys: HashMap<String, TurnId>,
+    pub claims_revision: u64,
 }
 pub(super) struct Entry {
     pub request_key: String,

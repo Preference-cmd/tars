@@ -169,6 +169,9 @@ pub enum ClosePolicy {
 /// Structured managed admission, opening, editing and lifecycle failures.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ApplicationError {
+    /// Current materials, repair provenance or a prepared plan need attention.
+    #[error(transparent)]
+    Repair(#[from] super::repair::RepairError),
     /// Original low-level contract failure.
     #[error(transparent)]
     Session(#[from] SessionError),

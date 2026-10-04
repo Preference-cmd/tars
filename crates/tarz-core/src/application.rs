@@ -9,6 +9,7 @@ mod entry;
 mod host;
 mod managed;
 mod opening;
+mod repair;
 mod saving;
 mod supervisor;
 mod types;
@@ -16,6 +17,10 @@ mod types;
 pub use crate::store::{CommitStage, StoreError};
 pub use host::SessionHost;
 pub use managed::ManagedSession;
+pub use repair::{
+    OriginalBatchPreview, OriginalResultPreview, RepairDiagnosis, RepairError, RepairInspection,
+    RepairIssue, RepairIssueKind, RepairMode, RepairPlan, RepairSummary,
+};
 pub use types::{
     ApplicationError, CloseOutcome, ClosePolicy, CommitDisposition, HostOptions, Lifecycle,
     ManagedSubmitRejection, MaterialSnapshot, MaterialVersion, PreparedCreate, SaveStatus,

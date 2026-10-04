@@ -14,6 +14,39 @@ use ratatui::{
 pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) {
     frame.render_widget(Clear, area);
     let (query, selected, commands) = match panel {
+        Panel::Repair(panel) => {
+            let regions = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Min(1),
+                Constraint::Length(3),
+            ])
+            .split(area);
+            frame.render_widget(
+                Paragraph::new("Continue after interruption · material repair")
+                    .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                regions[0],
+            );
+            let lines: Vec<_> = crate::transcript::detail_rows(&panel.lines, regions[1].width)
+                .skip(panel.scroll)
+                .take(usize::from(regions[1].height))
+                .map(Line::from)
+                .collect();
+            frame.render_widget(Paragraph::new(lines), regions[1]);
+            let hint = if panel.busy {
+                "Waiting for local work / saving…\nEsc closes this view; no work is resumed."
+            } else if panel.plan.is_some() {
+                "Enter apply this preview · r remove preview · a original-results preview\nF7 refresh · Ctrl-R retry save · Esc keep materials · F4 next session"
+            } else {
+                "r preview removal · a preview original results · F7 refresh\nCtrl-R retry save · Esc keep materials · F4 next session"
+            };
+            frame.render_widget(
+                Paragraph::new(hint)
+                    .wrap(Wrap { trim: false })
+                    .style(Style::default().fg(MUTED)),
+                regions[2],
+            );
+            return;
+        }
         Panel::Commands { query, selected } => (query, *selected, true),
         Panel::Sessions { query, selected } => (query, *selected, false),
         Panel::Info {

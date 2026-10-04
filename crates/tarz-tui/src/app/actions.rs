@@ -71,6 +71,7 @@ impl App {
         entry.key.generation += 1;
         entry.material_version = None;
         entry.requested_material_version = None;
+        entry.repair_job = None;
         entry.refreshing = false;
         entry.wrapping = false;
         entry.execution = "No work in this instance".into();
@@ -96,6 +97,10 @@ impl App {
         let Some(session) = entry.session.clone() else {
             return;
         };
+        if entry.busy.is_some() {
+            entry.notice = "Input retained; wait for the current session operation".into();
+            return;
+        }
         let text = entry.editor.lines().join("\n");
         if text.trim().is_empty() {
             return;
@@ -106,7 +111,17 @@ impl App {
         };
         let progress = session.subscribe_progress();
         match session.submit(request) {
-            Err(rejected) => entry.notice = format!("Input retained: {}", rejected.reason),
+            Err(rejected) => {
+                let hint = if matches!(
+                    rejected.reason,
+                    tarz_core::application::ApplicationError::Repair(_)
+                ) {
+                    " · F7 / /repair"
+                } else {
+                    ""
+                };
+                entry.notice = format!("Input retained: {}{hint}", rejected.reason);
+            }
             Ok(receipt) => {
                 entry.editor = input::editor();
                 entry.work = Some(receipt.work.clone());

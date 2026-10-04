@@ -52,6 +52,14 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 json,
             } => run_saved(store, id, input, recovery_dir, json).await,
             SessionCommand::List { store, json } => list(store, json).await,
+            SessionCommand::Repair {
+                store,
+                id,
+                apply,
+                expected_revision,
+                recovery_dir,
+                json,
+            } => super::repair::run(store, id, apply, expected_revision, recovery_dir, json).await,
             SessionCommand::ExportMaterials { .. } => {
                 unreachable!("offline export handled before runtime")
             }
@@ -290,14 +298,14 @@ async fn list(store: PathBuf, json_output: bool) -> ExitCode {
     }
 }
 
-fn revision(save: &SaveStatus) -> Option<u64> {
+pub(super) fn revision(save: &SaveStatus) -> Option<u64> {
     match save {
         SaveStatus::Saved { revision, .. } => Some(*revision),
         _ => None,
     }
 }
 
-fn close_value(outcome: &CloseOutcome) -> serde_json::Value {
+pub(super) fn close_value(outcome: &CloseOutcome) -> serde_json::Value {
     let (pending, pending_revision, confirmation_error) = match &outcome.pending_commit {
         None => (None, None, None),
         Some(CommitDisposition::Applied { revision }) => (Some("applied"), Some(*revision), None),
@@ -315,7 +323,7 @@ fn close_value(outcome: &CloseOutcome) -> serde_json::Value {
     })
 }
 
-fn report_confirmation(outcome: &CloseOutcome) {
+pub(super) fn report_confirmation(outcome: &CloseOutcome) {
     if let Some(pending) = &outcome.pending_commit {
         let message = match pending {
             CommitDisposition::Applied { .. } => {
