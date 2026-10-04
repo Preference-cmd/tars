@@ -45,7 +45,13 @@ fn unicode_paste_newlines_editing_and_release_keys_do_not_submit() {
 #[test]
 fn grapheme_wrapping_never_splits_combining_marks_or_zwj_sequences() {
     let text = "中e\u{301}👩‍💻文\nabc";
-    let rows = Rows::wrap(Arc::new(Transcript { text: text.into() }), 3);
+    let rows = Rows::wrap(
+        Arc::new(Transcript {
+            text: text.into(),
+            ..Transcript::default()
+        }),
+        3,
+    );
     let values: Vec<_> = rows
         .ranges
         .iter()
@@ -122,4 +128,29 @@ fn shared_toml_populates_tui_form_and_explicit_store_wins() {
     .unwrap()
     .unwrap();
     assert_eq!(options.store, explicit);
+}
+
+#[test]
+fn workspace_form_uses_shared_resolver_and_preserves_profile_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("workspace")).unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path,"version = 1\nstore = 'data'\ndefault_profile = 'local'\n[profiles.local]\nprovider = 'openai-chat'\nmodel = 'workspace-model'\nworkspace_root = 'workspace'\ntools = ['read_file','search_text']\n[profiles.local.tool_limits]\nmax_search_matches = 7\n").unwrap();
+    let options =
+        crate::options::parse(["--config".into(), path.to_string_lossy().into_owned()].into_iter())
+            .unwrap()
+            .unwrap();
+    let mut form = input::Form::new(options.preset.as_ref());
+    assert_eq!(form.fields.len(), 7);
+    let frozen = form.definition().unwrap();
+    assert_eq!(
+        frozen.workspace_root,
+        Some(dir.path().join("workspace").canonicalize().unwrap())
+    );
+    assert_eq!(frozen.tools.len(), 2);
+    assert_eq!(frozen.tool_limits.max_search_matches, 7);
+    form.fields[6] = ratatui_textarea::TextArea::from([""]);
+    assert!(form.definition().unwrap().tools.is_empty());
+    form.fields[6] = ratatui_textarea::TextArea::from(["shell"]);
+    assert!(form.definition().is_err());
 }

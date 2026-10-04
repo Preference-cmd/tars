@@ -83,3 +83,104 @@ fn unknown_plaintext_key_invalid_values_and_missing_files_are_rejected_without_s
             .is_none()
     );
 }
+
+#[test]
+fn workspace_profile_freezes_physical_root_and_explicit_empty_tools_disable_it() {
+    use crate::definition::WorkspaceTool;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let file = directory.path().join("config.toml");
+    let text = format!(
+        "{CONFIG}\nworkspace_root = \"workspace\"\ntools = [\"read_file\", \"search_text\"]\n"
+    );
+    std::fs::write(&file, text).unwrap();
+    let config = Config::load(ConfigSource::File(file)).unwrap();
+    let frozen = config.definition(None, Default::default()).unwrap();
+    assert_eq!(frozen.workspace_root, Some(root.canonicalize().unwrap()));
+    assert_eq!(
+        frozen.tools,
+        vec![WorkspaceTool::ReadFile, WorkspaceTool::SearchText]
+    );
+    let disabled = config
+        .definition(
+            None,
+            DefinitionOverrides {
+                tools: Some(vec![]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(disabled.tools.is_empty());
+    assert_eq!(disabled.workspace_root, frozen.workspace_root);
+    assert_eq!(disabled.tool_limits, frozen.tool_limits);
+}
+
+#[test]
+fn workspace_selection_never_implicitly_enables_tools_and_rejects_missing_roots() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = Config::load(ConfigSource::Disabled).unwrap();
+    let overrides = || DefinitionOverrides {
+        provider: Some(Provider::OpenAiChat),
+        model: Some("fixture".into()),
+        ..Default::default()
+    };
+    let mut chosen = overrides();
+    chosen.workspace_root = Some(directory.path().to_owned());
+    let definition = config.definition(None, chosen).unwrap();
+    assert!(definition.tools.is_empty());
+    let mut missing = overrides();
+    missing.workspace_root = Some(directory.path().join("absent"));
+    assert!(matches!(
+        config.definition(None, missing),
+        Err(super::ConfigError::Workspace { .. })
+    ));
+    let mut forbidden = overrides();
+    forbidden.tools = Some(vec![crate::definition::WorkspaceTool::ReadFile]);
+    assert!(matches!(
+        config.definition(None, forbidden),
+        Err(super::ConfigError::Definition(
+            crate::definition::DefinitionError::WorkspaceRequired
+        ))
+    ));
+    assert!(super::parse_tools("read_file,read_file").is_err());
+    assert!(super::parse_tools("execute_command").is_err());
+    assert!(super::parse_tools("").unwrap().is_empty());
+}
+
+#[test]
+fn explicit_workspace_resolution_freezes_current_directory() {
+    const MARKER: &str = "TARZ_CONFIG_CWD_TEST_DESTINATION";
+    if let Some(destination) = std::env::var_os(MARKER) {
+        let initial = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let config = Config::load(ConfigSource::Disabled).unwrap();
+        let definition = config
+            .definition(
+                None,
+                DefinitionOverrides {
+                    provider: Some(Provider::OpenAiChat),
+                    model: Some("fixture".into()),
+                    workspace_root: Some(".".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        std::env::set_current_dir(destination).unwrap();
+        assert_eq!(definition.workspace_root, Some(initial));
+        return;
+    }
+    let initial = tempfile::tempdir().unwrap();
+    let later = tempfile::tempdir().unwrap();
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("config::tests::explicit_workspace_resolution_freezes_current_directory")
+        .current_dir(initial.path())
+        .env(MARKER, later.path())
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

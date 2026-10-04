@@ -72,6 +72,9 @@ async fn managed_reopen_preserves_definition_material_identity_and_restores_no_w
         retained_work_capacity: 3,
         max_model_rounds: 1,
         max_tool_calls: 0,
+        workspace_root: None,
+        tools: Vec::new(),
+        tool_limits: Default::default(),
     };
     let requests = Arc::new(Mutex::new(vec![]));
     let tool_calls = Arc::new(AtomicUsize::new(0));

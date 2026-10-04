@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ffi::OsString};
 use tarz_core::{
-    config::{Config, ConfigSource, DefinitionOverrides},
+    config::{Config, ConfigSource, DefinitionOverrides, parse_tools},
     definition::{Provider, SessionDefinition},
 };
 
@@ -50,6 +50,11 @@ pub(super) fn definition(
     };
     let overrides = DefinitionOverrides {
         provider,
+        workspace_root: values.get("--workspace").map(|path| (*path).into()),
+        tools: string(values, "--tools")?
+            .map(|value| parse_tools(&value).map_err(|e| e.to_string()))
+            .transpose()?,
+        tool_limits: None,
         model: string(values, "--model")?,
         endpoint: string(values, "--endpoint")?,
         api_key_env: string(values, "--api-key-env")?,

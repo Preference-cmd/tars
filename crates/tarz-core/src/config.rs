@@ -9,7 +9,7 @@ mod file;
 mod model;
 
 pub use file::{Config, ConfigError, ConfigSource};
-pub use model::DefinitionOverrides;
+pub use model::{DefinitionOverrides, parse_tools};
 
 #[cfg(test)]
 mod tests;

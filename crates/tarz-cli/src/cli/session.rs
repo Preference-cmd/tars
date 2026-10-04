@@ -11,6 +11,7 @@ pub(super) const HELP: &str = "Persistent Tarz sessions
 Usage: tarz session create --store <directory> --provider <protocol> --model <id> [options]
        tarz session run <conversation-id> --store <directory> (--input <text> | --stdin) [options]
        tarz session list --store <directory> [--json]
+       tarz session export-materials --record <file> --output <new-file>
 
 Create options:
   --provider          openai-chat | openai-responses | anthropic (or profile)
@@ -22,6 +23,8 @@ Create options:
   --capacity          Retained work record count (default 256; not a byte limit)
   --max-model-rounds  Per-work model call limit (default 10)
   --max-tool-calls    Per-work tool call limit (default 64)
+  --workspace         Root directory for selected read-only tools
+  --tools             Comma-separated list_directory,read_file,search_text (default empty)
   --load              Initial Context material file; creates a new conversation
 
 Run options:
@@ -35,6 +38,8 @@ Common options:
   --no-config         Ignore global configuration; conflicts with --config
   --json              Structured output
 
+export-materials extracts validated Context from a v1/v2 session record offline.
+It neither loads configuration nor opens a session; an existing output is refused.
 Create saves the fixed definition and materials without calling a model.
 Run reopens that definition, executes, saves, and closes the local instance.
 Model and execution options cannot be overridden during run.

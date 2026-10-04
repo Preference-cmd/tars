@@ -67,6 +67,7 @@ impl App {
         }
         // Reopen changes the UI instance key. Old completions can never update it.
         entry.clear_progress();
+        entry.tools = super::tool_progress::ToolView::default();
         entry.key.generation += 1;
         entry.material_version = None;
         entry.requested_material_version = None;
@@ -119,7 +120,7 @@ impl App {
                         match session.wait(&receipt.work, Duration::from_secs(30)).await {
                             Ok(observation) => {
                                 if let WorkState::Finished(result) = observation.state {
-                                    break Ok(result);
+                                    break Ok((result, observation.tools));
                                 }
                             }
                             Err(error) => break Err(error.to_string()),

@@ -73,6 +73,8 @@ pub enum ProgressUpdate {
     /// Complete output accepted by Causa, before material conversion/commit.
     /// This is not a successful work result or a save confirmation.
     ModelOutputReady,
+    /// A bounded tool-stage observation; reliable snapshots remain on work observation.
+    Tool(super::ToolProgress),
 }
 
 /// Stable admission receipt, independent of later execution state.
@@ -109,6 +111,9 @@ pub struct WorkObservation {
     pub work: WorkRef,
     /// Current state or immutable terminal result.
     pub state: WorkState,
+    /// Bounded actual tool facts, including returned but uncommitted results.
+    /// Terminal snapshots are stable and do not consume the original batch.
+    pub tools: Arc<super::ToolProgressSnapshot>,
 }
 
 /// Observable progress; scheduling may skip intermediate observations.

@@ -167,6 +167,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                 lines.push(Line::styled(warning, Style::default().fg(Color::Yellow)));
             }
         }
+        let tool_lines = entry.tools.lines();
         for index in start..entry.conversation_len() {
             if lines.len() >= height {
                 break;
@@ -180,6 +181,10 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                     Style::default()
                 };
                 lines.push(Line::styled(text, style));
+            } else if index >= history + entry.preview.line_count() {
+                if let Some(text) = tool_lines.get(index - history - entry.preview.line_count()) {
+                    lines.push(Line::styled(text.clone(), Style::default().fg(MUTED)));
+                }
             } else {
                 let offset = index - history;
                 let text = entry.preview.line(offset);
@@ -194,7 +199,10 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             }
         }
         frame.render_widget(Paragraph::new(lines), regions[1]);
-        if entry.transcript.text.is_empty() && !entry.preview.is_active() {
+        if entry.transcript.text.is_empty()
+            && !entry.preview.is_active()
+            && entry.tools.calls.is_empty()
+        {
             welcome(frame, regions[1], entry.session.is_some());
         }
     } else {

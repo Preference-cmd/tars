@@ -46,13 +46,14 @@ pub(super) async fn create_provider(app: &mut App, provider: &str, endpoint: &st
     // PATH supplies a nonsecret fixture token without mutating process-global
     // environment (unsafe in edition 2024). The endpoint is local only.
     app.form = Some(Form {
-        fields: [provider, "fixture-model", endpoint, "PATH", "120"]
+        fields: [provider, "fixture-model", endpoint, "PATH", "120", "", ""]
             .into_iter()
             .map(|v| TextArea::from([v]))
             .collect(),
         selected: 1,
         error: String::new(),
         limits: (256, 10, 64),
+        ..Form::default()
     });
     app.event(ctrl('s'));
     until(app, |a| a.entries[a.selected].session.is_some()).await;

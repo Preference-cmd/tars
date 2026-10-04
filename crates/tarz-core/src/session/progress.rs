@@ -11,11 +11,13 @@ pub(super) fn observer(
     sender: broadcast::Sender<Arc<WorkProgress>>,
     work: WorkRef,
     previous: Option<Arc<RunObserver>>,
+    tools: super::ToolReporter,
 ) -> Arc<RunObserver> {
     Arc::new(move |event| {
         if let Some(previous) = &previous {
             previous(event);
         }
+        tools.observe(event);
         // Broadcast is advisory. Without a subscriber, do not allocate or copy
         // an owned preview from the runner's borrowed observation.
         if sender.receiver_count() == 0 {

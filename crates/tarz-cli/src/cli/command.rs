@@ -12,7 +12,7 @@ Usage: tarz [--help | --version]
 
 Commands:
   demo           Run the offline single-session demonstration
-  run            Execute one work with a real model (no tools)
+  run            Execute one work with a real model and explicitly selected workspace tools
   session        Save and reopen sessions; see tarz session --help
 
 Run options:
@@ -23,6 +23,8 @@ Run options:
   --api-key-env  Credential variable (default OPENAI_API_KEY / ANTHROPIC_API_KEY)
   --endpoint     Full HTTP endpoint override, including the path
   --timeout-secs Work deadline, 1–86400 seconds (default 120)
+  --workspace    Root directory for read-only tools; relative to current directory
+  --tools        Comma-separated list_directory,read_file,search_text (default empty)
   --load         Import a Context material file into a new session
   --save         Replace a material file after completion or controlled interruption
   --json         Output a structured result instead of answer text
@@ -56,7 +58,10 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
         }
         [one, command, help]
             if one == "session"
-                && matches!(command.to_str(), Some("create" | "run" | "list"))
+                && matches!(
+                    command.to_str(),
+                    Some("create" | "run" | "list" | "export-materials")
+                )
                 && (help == "--help" || help == "-h") =>
         {
             output(super::session::HELP)

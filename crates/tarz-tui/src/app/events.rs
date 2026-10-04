@@ -45,6 +45,13 @@ impl App {
         if let Event::Resize(width, height) = event {
             self.view_width = render::transcript_width(width);
             self.viewport_height = render::conversation_height(height, width, self);
+            if let Some(super::Panel::Info { lines, scroll, .. }) = &mut self.panel {
+                *scroll = (*scroll).min(
+                    crate::transcript::detail_rows(lines, self.view_width)
+                        .count()
+                        .saturating_sub(1),
+                );
+            }
             return;
         }
         if let Event::Paste(text) = &event {
@@ -172,6 +179,7 @@ impl App {
                     }
                 }
                 KeyCode::F(5) if key.kind == KeyEventKind::Press => self.list(),
+                KeyCode::F(6) if key.kind == KeyEventKind::Press => self.show_tools(),
                 KeyCode::Esc if key.kind == KeyEventKind::Press => self.cancel(),
                 KeyCode::PageUp | KeyCode::PageDown => {
                     if let Some(entry) = self.entries.get_mut(self.selected) {

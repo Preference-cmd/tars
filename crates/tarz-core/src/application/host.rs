@@ -20,6 +20,7 @@ pub(super) struct HostInner {
     pub store: Option<SessionStore>,
     pub options: HostOptions,
     pub io: Arc<Semaphore>,
+    pub tool_resources: Arc<crate::tools::ToolResources>,
     pub snapshot_clones: Arc<std::sync::atomic::AtomicU64>,
     pub external_hosts: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -56,6 +57,7 @@ impl SessionHost {
                 entries: Mutex::new(HashMap::new()),
                 store: store_root.map(SessionStore::new),
                 io: Arc::new(Semaphore::new(options.max_storage_operations)),
+                tool_resources: crate::tools::ToolResources::new(16),
                 options,
                 external_hosts: std::sync::atomic::AtomicUsize::new(1),
                 snapshot_clones: Arc::new(std::sync::atomic::AtomicU64::new(0)),

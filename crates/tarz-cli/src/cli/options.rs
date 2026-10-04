@@ -26,9 +26,12 @@ impl RunOptions {
                 "--json" if !json => json = true,
                 "--no-config" if !no_config => no_config = true,
                 "--provider" | "--model" | "--api-key-env" | "--endpoint" | "--input"
-                | "--load" | "--save" | "--timeout-secs" | "--config" | "--profile" => {
+                | "--workspace" | "--tools" | "--load" | "--save" | "--timeout-secs"
+                | "--config" | "--profile" => {
                     let value = args.next().ok_or("option needs a value")?;
-                    if value.is_empty() || values.insert(flag, value).is_some() {
+                    if (value.is_empty() && flag != "--tools")
+                        || values.insert(flag, value).is_some()
+                    {
                         return Err("empty or duplicate option".into());
                     }
                 }

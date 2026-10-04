@@ -9,7 +9,17 @@ use tarz_core::session::{WorkRef, WorkResult};
 pub(super) enum Message {
     Listed(Result<Vec<SessionListing>, ApplicationError>),
     Opened(Key, Result<ManagedSession, ApplicationError>),
-    Finished(Key, WorkRef, Result<Arc<WorkResult>, String>),
+    Finished(
+        Key,
+        WorkRef,
+        Result<
+            (
+                Arc<WorkResult>,
+                Arc<tarz_core::session::ToolProgressSnapshot>,
+            ),
+            String,
+        >,
+    ),
     Materials(Key, Result<(MaterialVersion, Arc<Transcript>), String>),
     Wrapped(Key, Rows),
     Retried(Key, Result<SaveStatus, ApplicationError>),
@@ -119,11 +129,14 @@ impl App {
                 if let Some(entry) = self.entry_mut(&key)
                     && entry.work.as_ref() == Some(&work)
                 {
+                    if let Ok((_, tools)) = &result {
+                        entry.tools.reconcile(tools);
+                    }
                     entry.clear_progress();
                     entry.scroll = None;
                     entry.execution = result
-                        .as_deref()
-                        .map(result_label)
+                        .as_ref()
+                        .map(|(result, _)| result_label(result))
                         .unwrap_or("Observation failed")
                         .into();
                     if let Err(error) = result {
@@ -184,6 +197,7 @@ impl App {
                             entry.prepared = None;
                             entry.work = None;
                             entry.clear_progress();
+                            entry.tools = super::tool_progress::ToolView::default();
                             entry.editor = crate::input::editor();
                             entry.status = "Closed; F3 to reopen".into();
                             entry.notice = close_label(outcome);

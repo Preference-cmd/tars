@@ -27,6 +27,28 @@ impl Session {
             + Send
             + 'static,
     {
+        Self::new_with_tools(
+            conversation_id,
+            context,
+            move |work, control, _| assemble(work, control),
+            config,
+        )
+    }
+
+    /// Construct an owner whose per-work assembly receives tool observation and
+    /// resource supervision tied to that accepted work.
+    pub fn new_with_tools<F, Fut>(
+        conversation_id: ConversationId,
+        context: Context,
+        assemble: F,
+        config: SessionConfig,
+    ) -> Self
+    where
+        F: Fn(WorkRef, RunControl, super::ToolReporter) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(Arc<TurnRunner>, TurnRunOptions), Box<dyn Error + Send + Sync>>>
+            + Send
+            + 'static,
+    {
         Self {
             shared: Arc::new(Shared {
                 conversation_id,
@@ -38,7 +60,9 @@ impl Session {
                     records: HashMap::new(),
                     keys: HashMap::new(),
                 }),
-                assemble: Arc::new(move |work, control| Box::pin(assemble(work, control))),
+                assemble: Arc::new(move |work, control, reporter| {
+                    Box::pin(assemble(work, control, reporter))
+                }),
                 config,
                 candidate: Arc::new(|| TurnId::new(uuid::Uuid::now_v7().to_string())),
                 progress: tokio::sync::broadcast::channel(super::progress::PROGRESS_CAPACITY).0,

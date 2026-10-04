@@ -14,6 +14,7 @@ crates.io library or a public Rust SDK. All Cargo packages must remain
 | Build, run, or inspect available commands | [README.md](README.md) |
 | Change code or run checks | [Current implementation](docs/README.md) |
 | Trace session ownership, assembly, or execution | [Session lifecycle](docs/session-lifecycle.md) |
+| Change workspace tool access, limits or status | [Workspace tools](docs/workspace-tools.md), `tarz-core::workspace`, `tarz-core::tools`, `session::ToolReporter` |
 | Change shared TOML configuration | [Configuration](docs/configuration.md), `tarz-core::config` |
 | Run or change the terminal prototype | [TUI prototype](docs/tui.md), `crates/tarz-tui/` |
 | Plan a change or inspect acceptance status | [Local design index](.agents/README.md) |

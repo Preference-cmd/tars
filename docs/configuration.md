@@ -45,3 +45,9 @@ tarz-tui --config ./config.toml --profile work
 选择 `--profile NAME` 优先于 default_profile。参数按字段覆盖所选预设；没有覆盖的 endpoint、凭据引用、期限和限制仍沿用预设。CLI 模型参数用于 `run` 与 `session create`；`session run` 不接受 `--profile` 或模型覆盖。`--store`、`--recovery-dir` 覆盖配置中的相应路径。
 
 TUI 新建表单从所选预设填充，修改只影响本次新会话，预设中未显示的容量/调用限制原样保留。首版配置由用户编辑文件，TUI 不自动保存或覆盖全局配置。后续 GUI 应复用相同加载与解析模块。
+
+## 工作区与只读工具
+
+预设可增加 `workspace_root = "../project"` 和 `tools = ["list_directory", "read_file", "search_text"]`。默认 tools 为空；工具启用时必须有根目录。CLI `run`、`session create` 和 TUI 启动选项接受 `--workspace DIR --tools NAME,NAME`；显式 `--tools ''` 清空预设。TUI 新建表单可修改 Workspace、Tools。重开仍采用原定义，不接受工具覆盖。
+
+相对工作区同样使用配置目录/CLI cwd 基准，但在首次解析时 canonicalize 为物理绝对目录并验证存在；保存后重开不再解析别名。未知/重复工具、缺根或超限拒绝。`[profiles.NAME.tool_limits]` 可以逐项降低 `max_concurrent_operations`、`call_timeout_secs`、`max_output_bytes`、`max_directory_entries`、`max_file_scan_bytes`、`max_search_files`、`max_search_depth`、`max_search_scan_bytes` 和 `max_search_matches`；未写字段采用默认，持久定义保存完整有效值。数值和访问/取消边界见[工作区工具](workspace-tools.md)。

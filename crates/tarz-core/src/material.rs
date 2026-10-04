@@ -9,7 +9,10 @@
 mod file;
 mod references;
 
-pub use file::{MaterialError, load, load_with_references, save, save_new, save_with_references};
+pub use file::{
+    MaterialError, load, load_session_materials, load_with_references, save, save_new,
+    save_with_references,
+};
 pub use references::MaterialReference;
 pub(crate) use references::validate as validate_references;
 

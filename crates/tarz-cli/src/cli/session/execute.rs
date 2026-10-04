@@ -15,6 +15,20 @@ use tarz_core::application::{
 use tarz_core::definition::SessionDefinition;
 
 pub(crate) fn run(command: SessionCommand) -> ExitCode {
+    if let SessionCommand::ExportMaterials {
+        record,
+        output: path,
+    } = command
+    {
+        let context = match tarz_core::material::load_session_materials(&record) {
+            Ok(context) => context,
+            Err(error) => return failure(error),
+        };
+        return match tarz_core::material::save_new(&path, &context) {
+            Ok(()) => output(&format!("{}\n", path.display())),
+            Err(error) => failure(error),
+        };
+    }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -38,6 +52,9 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 json,
             } => run_saved(store, id, input, recovery_dir, json).await,
             SessionCommand::List { store, json } => list(store, json).await,
+            SessionCommand::ExportMaterials { .. } => {
+                unreachable!("offline export handled before runtime")
+            }
         }
     })
 }

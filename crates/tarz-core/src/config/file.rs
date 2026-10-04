@@ -114,12 +114,20 @@ impl Config {
             })
             .transpose()
         };
+        let mut profiles = raw.profiles;
+        for profile in profiles.values_mut() {
+            profile.workspace_root = profile
+                .workspace_root
+                .take()
+                .map(|path| model::absolute_root(path, Some(base)))
+                .transpose()?;
+        }
         let config = Self {
             source: Some(source.to_owned()),
             store: resolve(raw.store)?,
             recovery_dir: resolve(raw.recovery_dir)?,
             default_profile: raw.default_profile,
-            profiles: raw.profiles,
+            profiles,
         };
         for (name, profile) in &config.profiles {
             if name.trim().is_empty() {
@@ -223,6 +231,17 @@ pub enum ConfigError {
     /// Configured deadlines use the same range as entry-point arguments.
     #[error("timeout must be 1..86400 seconds")]
     InvalidTimeout,
+    /// A selected workspace cannot be fixed to a usable directory.
+    #[error("workspace root is unavailable or is not a directory: {kind:?}")]
+    Workspace {
+        /// Original filesystem failure category.
+        kind: io::ErrorKind,
+    },
+    /// Tool names must be known, unique capabilities.
+    #[error(
+        "tools must be a comma-separated selection of list_directory, read_file, search_text without duplicates"
+    )]
+    InvalidTools,
     /// A fixed-definition value is invalid.
     #[error(transparent)]
     Definition(DefinitionError),

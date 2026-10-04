@@ -12,3 +12,5 @@ pub(crate) use state::Confirmation;
 
 #[cfg(test)]
 mod tests;
+
+mod tool_progress;

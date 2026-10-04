@@ -8,11 +8,13 @@ mod handle;
 mod owner;
 mod progress;
 mod state;
+mod tool_progress;
 mod types;
 mod worker;
 
 pub use handle::SessionHandle;
 pub use owner::Session;
+pub use tool_progress::{ToolPhase, ToolProgress, ToolProgressSnapshot, ToolReporter};
 pub use types::{
     ConversationId, ProgressUpdate, SessionConfig, SessionError, SubmitRejection, SubmitRequest,
     WorkObservation, WorkProgress, WorkReceipt, WorkRef, WorkResult, WorkState, WorkerFault,

@@ -14,6 +14,15 @@ timeout_secs = 120
 capacity = 256
 max_model_rounds = 10
 max_tool_calls = 64
+# Explicit opt-in: root alone does not enable tools.
+# workspace_root = "../my-project"
+# tools = ["list_directory", "read_file", "search_text"]
+
+# Optional lower limits (never raises the supported ceilings).
+# [profiles.default.tool_limits]
+# max_concurrent_operations = 2
+# call_timeout_secs = 5
+# max_output_bytes = 32768
 
 # Add more [profiles.NAME] sections, selected by --profile NAME.
 # Existing saved sessions keep their original definition when reopened.

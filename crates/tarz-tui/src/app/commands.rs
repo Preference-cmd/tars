@@ -15,7 +15,7 @@ pub(crate) enum Panel {
     Info {
         title: String,
         lines: Vec<String>,
-        scroll: u16,
+        scroll: usize,
     },
 }
 
@@ -23,6 +23,7 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("new", "Create a session with model settings"),
     ("sessions", "Find and open a saved or active session"),
     ("help", "Keyboard shortcuts and session behavior"),
+    ("tools", "Expand recorded tool calls and complete results"),
     ("status", "Full session status, settings and error details"),
     ("open", "Open the current stored session"),
     ("cancel", "Interrupt the current work"),
@@ -93,12 +94,13 @@ impl App {
                 title: "Keyboard shortcuts".into(), scroll: 0,
                 lines: ["Enter / Ctrl-S   Send input", "Ctrl-J / Alt-Enter   New line",
                     "Esc / Ctrl-C   Interrupt work", "/ or F1   Commands; Esc returns",
-                    "F2 new · F3 open · F4 next · F5 refresh", "PageUp / PageDown   Read conversation",
+                    "F2 new · F3 open · F4 next · F5 refresh", "F6 / /tools   Expand complete recorded tool results", "PageUp / PageDown   Read conversation",
                     "Ctrl-Z undo · Ctrl-Y redo", "Ctrl-W close · Ctrl-Q save and quit",
                     "Ctrl-R retry save · Ctrl-E export", "Ctrl-D discard with confirmation", "",
                     "Switching views keeps work and drafts. Saved sessions restore materials, not old work records.",
                     "Use /status for full configuration, save state and error details."].into_iter().map(str::to_owned).collect(),
             }),
+            "tools" => self.show_tools(),
             "status" => {
                 let mut lines = vec![format!("Config: {}", self.options.config_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "none".into())),
                     format!("Store: {}", self.options.store.display()),
@@ -119,6 +121,23 @@ impl App {
             _ => unreachable!("commands are a closed local set"),
         }
     }
+    pub(super) fn show_tools(&mut self) {
+        let mut lines = Vec::new();
+        if let Some(entry) = self.entries.get(self.selected) {
+            lines.extend(entry.transcript.tool_details.iter().cloned());
+        }
+        if lines.is_empty() {
+            lines.push(
+                "No committed tool materials. Returned pending results may not be committed."
+                    .into(),
+            );
+        }
+        self.panel = Some(Panel::Info {
+            title: "Recorded tool materials · viewing never executes".into(),
+            lines,
+            scroll: 0,
+        });
+    }
     pub(super) fn panel_key(&mut self, key: KeyEvent) {
         let Some(mut panel) = self.panel.take() else {
             return;
@@ -130,17 +149,9 @@ impl App {
             Panel::Commands { query, selected } => (query, selected, true),
             Panel::Sessions { query, selected } => (query, selected, false),
             Panel::Info { scroll, lines, .. } => {
-                let max = lines
-                    .iter()
-                    .map(|l| {
-                        l.chars()
-                            .count()
-                            .div_ceil(self.view_width.max(1).into())
-                            .max(1)
-                    })
-                    .sum::<usize>()
-                    .saturating_sub(1)
-                    .min(u16::MAX as usize) as u16;
+                let max = crate::transcript::detail_rows(lines, self.view_width)
+                    .count()
+                    .saturating_sub(1);
                 match key.code {
                     KeyCode::Down => *scroll = scroll.saturating_add(1).min(max),
                     KeyCode::PageDown => *scroll = scroll.saturating_add(5).min(max),

@@ -1,7 +1,9 @@
+use super::workspace::{WorkspaceTool, WorkspaceToolLimits};
 use crate::session::SessionConfig;
 use causa::kernel::ModelRef;
 use causa::runtime::{TurnLimits, TurnRunOptions};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// Supported wire protocols; model identifiers are supplied explicitly.
@@ -27,7 +29,7 @@ pub enum CredentialRef {
 }
 
 /// Frozen execution choices saved with a persistent session's materials.
-/// Generation, cache and empty-tool-catalog choices are fixed by record format 1.
+/// Workspace permissions and bounds are fixed by record format 2.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionDefinition {
@@ -47,6 +49,22 @@ pub struct SessionDefinition {
     pub max_model_rounds: u32,
     /// Maximum cumulative model tool declarations; zero permits none.
     pub max_tool_calls: u32,
+    /// Absolute workspace root frozen at creation; never resolved against reopen cwd.
+    #[serde(deserialize_with = "required_workspace_root")]
+    pub workspace_root: Option<PathBuf>,
+    /// Explicit read-only capabilities; an empty selection performs no workspace access.
+    pub tools: Vec<WorkspaceTool>,
+    /// Fixed effective bounds for selected workspace tools.
+    pub tool_limits: WorkspaceToolLimits,
+}
+
+// Unlike sparse startup configuration, a record must explicitly retain no-root
+// as null rather than gaining that choice when a field is missing.
+fn required_workspace_root<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<PathBuf>::deserialize(deserializer)
 }
 
 impl SessionDefinition {
@@ -85,6 +103,22 @@ impl SessionDefinition {
         }) {
             return Err(DefinitionError::UnrepresentableTimeout);
         }
+        if self
+            .workspace_root
+            .as_ref()
+            .is_some_and(|root| !root.is_absolute())
+        {
+            return Err(DefinitionError::InvalidWorkspaceRoot);
+        }
+        if !self.tools.is_empty() && self.workspace_root.is_none() {
+            return Err(DefinitionError::WorkspaceRequired);
+        }
+        for (index, tool) in self.tools.iter().enumerate() {
+            if self.tools[..index].contains(tool) {
+                return Err(DefinitionError::DuplicateTool);
+            }
+        }
+        self.tool_limits.validate()?;
         Ok(())
     }
 
@@ -110,6 +144,18 @@ impl SessionDefinition {
 /// A definition rejected before credential resolution or provider execution.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DefinitionError {
+    /// A saved workspace path cannot depend on the process working directory.
+    #[error("workspace root must be an absolute nonempty path")]
+    InvalidWorkspaceRoot,
+    /// Enabled tools require one explicit workspace resource.
+    #[error("workspace root is required when tools are enabled")]
+    WorkspaceRequired,
+    /// A capability may appear only once in the fixed catalog.
+    #[error("workspace tool selection contains a duplicate")]
+    DuplicateTool,
+    /// Effective bounds cannot exceed the supported hard limits or be zero.
+    #[error("workspace tool limits must be positive and no greater than the supported bounds")]
+    InvalidToolLimits,
     /// No explicit nonblank model identifier was provided.
     #[error("model identifier must not be blank")]
     BlankModel,

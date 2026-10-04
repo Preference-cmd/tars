@@ -1,6 +1,6 @@
 # TUI 原型
 
-`tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；没有 GUI、工具配置或安装分发。本轮使用用户授权的同级 Causa 本地依赖，源码基线与构建要求见[当前实现](README.md)。
+`tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；已接通工作区只读工具配置与状态；没有 GUI、写入/命令/MCP 配置或安装分发。本轮使用用户授权的同级 Causa 本地依赖，源码基线与构建要求见[当前实现](README.md)。
 
 ```sh
 cargo build -p tarz-tui --locked
@@ -17,6 +17,7 @@ stdin 和 stdout 都必须是交互终端。至少 30×12；矮窗口表单一�
 | 新建/填写模型配置 | `/new` 或 F2；Tab/Shift-Tab 换字段，Ctrl-S 创建，Esc 返回 |
 | 会话选择 | `/sessions`，按模型名或 ID 筛选，Enter 切换并打开 |
 | 帮助 / 完整状态与错误详情 | `/help` / `/status`；↑↓ 或 PageUp/PageDown 滚动 |
+| 完整工具调用/结果 | `/tools` 或 F6；↑↓ / PageUp/PageDown 滚动 |
 | 打开选中记录 | F3 |
 | 切换会话 / 刷新记录列表 | F4 / F5 |
 | 提交输入 | Enter 或 Ctrl-S |
@@ -30,7 +31,7 @@ stdin 和 stdout 都必须是交互终端。至少 30×12；矮窗口表单一�
 
 界面采用单列对话布局：顶部是 Tarz、模型和会话信息，正文以 `❯ You` 和 `●` 区分输入与其他材料，输入区只有上下分隔线，随内容增高至最多 6 行，并受终端高度限制。背景和主文字沿用终端配色，暖橙色突出选择，灰色用于辅助信息，黄色用于错误和确认。没有常驻侧栏，宽窄终端采用相同结构；退出/放弃使用独立确认视图。
 
-命令菜单包含 `/new`、`/sessions`、`/help`、`/status`、`/open`、`/cancel`、`/retry`、`/export`、`/close`、`/discard` 和 `/quit`。菜单出现期间输入只用于筛选；需要在正文输入以 `/` 开头的文本时可以粘贴。`/status` 显示打开时的详情快照，再次打开可刷新。F2–F5 和保存恢复快捷键在主视图可用；菜单内按键用于菜单操作，Ctrl-Q 仍可发起退出。
+命令菜单包含 `/new`、`/sessions`、`/help`、`/status`、`/tools`、`/open`、`/cancel`、`/retry`、`/export`、`/close`、`/discard` 和 `/quit`。菜单出现期间输入只用于筛选；需要在正文输入以 `/` 开头的文本时可以粘贴。`/status` 显示打开时的详情快照，再次打开可刷新。F2–F6 和保存恢复快捷键在主视图可用；菜单内按键用于菜单操作，Ctrl-Q 仍可发起退出。
 
 会话各自保留未提交草稿。切换视图和重绘不取消工作、不重复提交；粘贴只插入文本，控制字符会被过滤，粘贴 `/quit` 等字符串也不会执行命令。Enter 在本轮改为发送；换行请使用 Ctrl-J。Ctrl-Q/关闭遇到草稿先确认；未提交草稿不属于自动保存的 Context。执行和保存状态分别显示，Completed 不等于 Saved。历史材料按内容显示，不恢复旧工作表或执行旧工具。
 
@@ -60,3 +61,11 @@ UI 最多每 50 ms 更新一次，所有实例合计每 tick 最多取 128 条�
 工作完成、失败、取消或关闭会移除临时预览，正式正文从最终返回材料更新，可能与预览不同。保存受阻时仍显示真实返回材料并沿用重试/导出/放弃流程。恢复文件、导出及 Store 均不包含预览；未发送草稿也不自动保存。
 
 本轮真实分段 HTTP、TestBackend、PTY 和资源证据见[流式接线记录](../.agents/reviews/2026-10-04-tui-streaming/README.md)。本地路径及本机验证不代表 registry 已发布或各平台 CI 已通过。
+
+## 工具执行
+
+新建表单的 Workspace 与 Tools 使用 core 的统一解析。正文展示有界参数摘要及 Waiting / Running / Returned / Committed；Returned 仍待材料提交，Committed 不等于工作完成或 Saved。调用以当前实例、WorkRef、InvocationId 和声明 BlockId 归属，相同参数仍是两次独立调用。
+
+工具事件走同一有界观察通道，落后会提示 `Tool observations incomplete`，结束时用可靠摘要校正。取消后显示实际 UnknownOutcome 或未执行事实，不能把整个批次都标为已运行。完整结果从已有实际材料缓存展开：F6 或 `/tools`；这不会领取原未提交批次、读取文件或重跑工具。摘要与完整结果中的控制字符仅在展示层处理，Store 中材料保持原样。
+
+工具事件更新小状态集合，不逐事件复制或重排整个 Context。材料版本变化才刷新缓存；展开、滚动、resize 和切换不增加模型/工具调用。详细限额和平台边界见[工作区工具](workspace-tools.md)。

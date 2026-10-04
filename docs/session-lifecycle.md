@@ -1,6 +1,6 @@
 # Session 的组装与运行机制
 
-本文说明 2026-10-03 的当前实现。设计与验收集中在 [Session 结构与存储提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)，本机测试和资源原始数据见[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
+本文说明 2026-10-05 的当前实现。设计与验收集中在 [Session 结构与存储提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)，本机测试和资源原始数据见[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
 
 ## 1. 创建和重开
 
@@ -23,11 +23,11 @@ CLI 参数 → SessionDefinition + 初始 Context → PreparedCreate
 
 底层 [SessionHandle](../crates/tarz-core/src/session/handle.rs)分配 TurnId，原子追加输入，保存原请求副本，并移交 Context 给 worker。每实例最多一个活动工作，无后台提交队列。工作期限从受理起覆盖逐工作装配和执行；不覆盖 opening、stdin 和磁盘 I/O。
 
-[Worker](../crates/tarz-core/src/session/worker.rs)检查控制，调用逐工作装配，再交给 Causa 公开 facade 的 `TurnRunner::run_streaming`。Causa 处理一次工作中的模型/工具循环，返回真实 Context、typed TurnResult 和未提交 ToolBatch；它不拥有 Tarz 目录、文件或工作历史。当前产品为空工具目录，旧 Context 中的工具材料不会触发旧工具重跑。
+[Worker](../crates/tarz-core/src/session/worker.rs)检查控制，调用逐工作装配，再交给 Causa 公开 facade 的 `TurnRunner::run_streaming`。Causa 处理一次工作中的模型/工具循环，返回真实 Context、typed TurnResult 和未提交 ToolBatch；它不拥有 Tarz 目录、文件或工作历史。产品装配默认空工具目录，可按固定定义绑定三种只读工作区工具。根资源在实例内共享，工具包装和 ToolReporter 按 WorkRef 新建。旧 Context 中的工具材料不会触发旧工具重跑。
 
 ## 3. Finished 与 Saved
 
-底层 supervisor 先归还材料及批次，再发布原 `Arc<WorkResult>`。host 的[独立监督路径](../crates/tarz-core/src/application/supervisor.rs)等到真实材料可用，推进 MaterialVersion，并固定本次不可变保存操作。
+底层 supervisor 在正常和异常路径均等待该工作的受监督文件闭包实际退出，冻结可靠工具状态，然后归还材料及批次并发布原 `Arc<WorkResult>`。工具 future 的丢弃会请求停止操作，不能代替真实任务回收。host 的[独立监督路径](../crates/tarz-core/src/application/supervisor.rs)等到真实材料可用，推进 MaterialVersion，并固定本次不可变保存操作。
 
 ```text
 submit → Dirty → 原 WorkResult::Finished → 固定返回材料 → Saving
@@ -43,7 +43,7 @@ submit → Dirty → 原 WorkResult::Finished → 固定返回材料 → Saving
 
 ## 4. JSON 提交与确认
 
-[Store](../crates/tarz-core/src/store/json.rs)是 core 内部具体后端。记录格式 `tarz-session-v1` 保存 ConversationId、revision、last_commit_id、definition、context；只接受规范 UUID 文件名，不把任意输入拼为路径。工作表、请求键、执行结果、未提交批次、任务与连接不序列化。
+[Store](../crates/tarz-core/src/store/json.rs)是 core 内部具体后端。记录格式 `tarz-session-v2` 保存 ConversationId、revision、last_commit_id、definition、context；只接受规范 UUID 文件名，不把任意输入拼为路径。定义中的 workspace_root、tools、tool_limits 必须完整存在；旧 v1 明确拒绝，离线材料导出见[工作区工具](workspace-tools.md)。工作表、请求键、执行结果、未提交批次、任务与连接不序列化。
 
 writer 持有稳定锁文件；每个在途 blocking 操作也持有它。提交先读最新版本：同 commit_id 必须完整内容相同；否则要求基线一致。写临时文件、同步后替换最终 JSON。回应丢失后读取确认原 commit；完整旧基线和持续同一写访问才可证明尚未提交。记录已推进或不可读时保留冲突/无法确认，不生成新身份或强行覆盖。
 

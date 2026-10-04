@@ -63,13 +63,22 @@ pub(super) async fn initialize(
     let owner = if let Some(assemble) = fixture {
         assemble(&definition, entry.target.conversation_id.clone(), context)?
     } else {
-        crate::assembly::assemble(&definition, entry.target.conversation_id.clone(), context)
-            .map_err(|error| ApplicationError::Assembly(error.to_string()))?
+        crate::assembly::assemble(
+            &definition,
+            entry.target.conversation_id.clone(),
+            context,
+            host.tool_resources.clone(),
+        )
+        .map_err(|error| ApplicationError::Assembly(error.to_string()))?
     };
     #[cfg(not(test))]
-    let owner =
-        crate::assembly::assemble(&definition, entry.target.conversation_id.clone(), context)
-            .map_err(|error| ApplicationError::Assembly(error.to_string()))?;
+    let owner = crate::assembly::assemble(
+        &definition,
+        entry.target.conversation_id.clone(),
+        context,
+        host.tool_resources.clone(),
+    )
+    .map_err(|error| ApplicationError::Assembly(error.to_string()))?;
     let mut state = entry.lock();
     state.handle = Some(owner.handle());
     state.owner = Some(owner);

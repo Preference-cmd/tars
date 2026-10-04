@@ -22,6 +22,9 @@ fn definition() -> SessionDefinition {
         retained_work_capacity: 1,
         max_model_rounds: 0,
         max_tool_calls: 0,
+        workspace_root: None,
+        tools: vec![],
+        tool_limits: Default::default(),
     }
 }
 
@@ -30,7 +33,12 @@ fn invalid_definition_is_rejected_before_credential_resolution() {
     let mut definition = definition();
     definition.model.clear();
     assert!(matches!(
-        assemble(&definition, "id".into(), Context::default()),
+        assemble(
+            &definition,
+            "id".into(),
+            Context::default(),
+            crate::tools::ToolResources::new(16)
+        ),
         Err(AssemblyError::Definition(DefinitionError::BlankModel))
     ));
 }
@@ -38,7 +46,12 @@ fn invalid_definition_is_rejected_before_credential_resolution() {
 #[test]
 fn missing_credentials_report_only_a_sanitized_resolution_error() {
     let definition = definition();
-    let error = match assemble(&definition, "id".into(), Context::default()) {
+    let error = match assemble(
+        &definition,
+        "id".into(),
+        Context::default(),
+        crate::tools::ToolResources::new(16),
+    ) {
         Ok(_) => panic!("missing credential accepted"),
         Err(error) => error,
     };
@@ -95,4 +108,82 @@ async fn assembled_work_uses_frozen_limits_and_supplied_conversation_identity() 
         })
     ));
     session.shutdown().await;
+}
+
+#[test]
+fn unavailable_workspace_is_rejected_before_credentials_or_model_access() {
+    let mut definition = definition();
+    definition.workspace_root = Some(
+        std::env::current_dir()
+            .unwrap()
+            .join(uuid::Uuid::now_v7().to_string()),
+    );
+    definition.tools = vec![crate::definition::WorkspaceTool::ReadFile];
+    assert!(matches!(
+        assemble(
+            &definition,
+            "id".into(),
+            Context::default(),
+            crate::tools::ToolResources::new(16)
+        ),
+        Err(AssemblyError::Workspace(_))
+    ));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn host_reopens_only_saved_workspace_definition_and_rejects_missing_root() {
+    use crate::application::{ClosePolicy, PreparedCreate, SessionHost};
+    let workspace = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let root = workspace.path().join("selected");
+    std::fs::create_dir(&root).unwrap();
+    let mut chosen = definition();
+    chosen.credential = CredentialRef::Environment("PATH".into());
+    chosen.workspace_root = Some(root.canonicalize().unwrap());
+    chosen.tools = vec![crate::definition::WorkspaceTool::ReadFile];
+    chosen.tool_limits.max_concurrent_operations = 2;
+    let saved_definition = chosen.clone();
+    let host = SessionHost::new(Some(storage.path().to_owned()));
+    let prepared = PreparedCreate::persistent(chosen, Context::default());
+    let id = prepared.conversation_id().clone();
+    let session = host.create(prepared).await.unwrap();
+    assert_eq!(session.definition(), saved_definition);
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+    let reopened = host.open(id.clone()).await.unwrap();
+    assert_eq!(reopened.definition(), saved_definition);
+    host.close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+    std::fs::remove_dir(&root).unwrap();
+    let error = match host.open(id).await {
+        Ok(_) => panic!("missing saved workspace accepted"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("workspace resource unavailable"));
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn unsupported_platform_rejects_enabled_workspace_but_still_assembles_empty_catalog() {
+    let mut chosen = definition();
+    chosen.credential = CredentialRef::Environment("PATH".into());
+    chosen.workspace_root = Some(std::env::current_dir().unwrap());
+    chosen.tools = vec![crate::definition::WorkspaceTool::ReadFile];
+    assert!(matches!(
+        assemble(&chosen, "id".into(), Context::default(), crate::tools::ToolResources::new(16)),
+        Err(AssemblyError::Workspace(error)) if matches!(&*error, crate::workspace::WorkspaceError::UnsupportedPlatform)
+    ));
+    chosen.tools.clear();
+    assert!(
+        assemble(
+            &chosen,
+            "id".into(),
+            Context::default(),
+            crate::tools::ToolResources::new(16)
+        )
+        .is_ok()
+    );
 }

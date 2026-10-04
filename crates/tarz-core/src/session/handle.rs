@@ -150,6 +150,7 @@ impl SessionHandle {
             control,
             state: Mutex::new(WorkState::Accepted),
             changed: Notify::new(),
+            tools: super::ToolReporter::new(work.clone(), self.shared.progress.clone()),
             #[cfg(test)]
             abort: Mutex::new(None),
             #[cfg(test)]

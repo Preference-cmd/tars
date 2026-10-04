@@ -12,3 +12,5 @@ pub mod definition;
 pub mod material;
 pub mod session;
 mod store;
+pub(crate) mod tools;
+pub(crate) mod workspace;

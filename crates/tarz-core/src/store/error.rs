@@ -36,7 +36,9 @@ pub enum StoreError {
     #[error("invalid session JSON: {0}")]
     Json(#[source] Arc<serde_json::Error>),
     /// The record names a format this implementation cannot read.
-    #[error("unsupported session format: {0}")]
+    #[error(
+        "unsupported session format: {0}; expected tarz-session-v2. Export the old record with tarz session export-materials --record RECORD --output NEW_CONTEXT, then import that Context into a new session; old tool permissions are never upgraded"
+    )]
     UnsupportedFormat(String),
     /// The record belongs to a different conversation.
     #[error("record identity {actual} does not match {expected}")]

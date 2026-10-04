@@ -5,6 +5,10 @@ use std::path::PathBuf;
 use tarz_core::definition::SessionDefinition;
 
 pub(crate) enum SessionCommand {
+    ExportMaterials {
+        record: PathBuf,
+        output: PathBuf,
+    },
     Create {
         store: PathBuf,
         definition: SessionDefinition,
@@ -28,6 +32,27 @@ impl SessionCommand {
     pub(crate) fn parse(args: &[OsString]) -> Result<Self, String> {
         let (command, mut args) = args.split_first().ok_or("session command is required")?;
         let command = command.to_str().ok_or("session command must be UTF-8")?;
+        if command == "export-materials" {
+            let mut values = HashMap::new();
+            let mut options = args.iter();
+            while let Some(flag) = options.next() {
+                let flag = flag.to_str().ok_or("option must be UTF-8")?;
+                if !matches!(flag, "--record" | "--output") {
+                    return Err("export-materials accepts only --record and --output".into());
+                }
+                insert(&mut values, flag, &mut options)?;
+            }
+            return Ok(Self::ExportMaterials {
+                record: values
+                    .get("--record")
+                    .map(PathBuf::from)
+                    .ok_or("--record is required")?,
+                output: values
+                    .get("--output")
+                    .map(PathBuf::from)
+                    .ok_or("--output is required")?,
+            });
+        }
         let id = if command == "run" {
             let (id, rest) = args.split_first().ok_or("conversation ID is required")?;
             args = rest;
@@ -58,7 +83,7 @@ impl SessionCommand {
                 }
                 "--provider" | "--model" | "--api-key-env" | "--endpoint" | "--timeout-secs"
                 | "--capacity" | "--max-model-rounds" | "--max-tool-calls" | "--load"
-                | "--profile"
+                | "--profile" | "--workspace" | "--tools"
                     if command == "create" =>
                 {
                     insert(&mut values, flag, &mut args)?;
@@ -127,7 +152,7 @@ fn insert<'a>(
     args: &mut std::slice::Iter<'a, OsString>,
 ) -> Result<(), &'static str> {
     let value = args.next().ok_or("option needs a value")?;
-    if value.is_empty() || values.insert(flag, value).is_some() {
+    if (value.is_empty() && flag != "--tools") || values.insert(flag, value).is_some() {
         return Err("empty or duplicate option");
     }
     Ok(())

@@ -27,13 +27,12 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
                     .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
                 regions[0],
             );
-            let lines: Vec<_> = lines.iter().map(|line| Line::from(line.as_str())).collect();
-            frame.render_widget(
-                Paragraph::new(lines)
-                    .wrap(Wrap { trim: false })
-                    .scroll((*scroll, 0)),
-                regions[1],
-            );
+            let lines: Vec<_> = crate::transcript::detail_rows(lines, regions[1].width)
+                .skip(*scroll)
+                .take(usize::from(regions[1].height))
+                .map(Line::from)
+                .collect();
+            frame.render_widget(Paragraph::new(lines), regions[1]);
             return;
         }
     };
@@ -107,7 +106,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
 
 pub(super) fn form(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let form = app.form.as_ref().unwrap();
-    let compact = area.height < 22;
+    let compact = area.height < 2 + 3 * form.fields.len() as u16 + 4;
     let shown: Vec<_> = if compact {
         vec![form.selected]
     } else {

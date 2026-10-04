@@ -42,6 +42,7 @@ fn entry(turn: &str, width: u16, capacity: usize) -> (Entry, Sender) {
     entry.execution = "Running".into();
     entry.transcript = Arc::new(Transcript {
         text: "❯ You\ncommitted history\n\n".into(),
+        ..Transcript::default()
     });
     entry.rows = Some(Rows::wrap(entry.transcript.clone(), width));
     let (sender, receiver) = broadcast::channel(capacity);
@@ -264,6 +265,7 @@ fn finished_or_closed_observation_clears_temporary_content_and_receiver() {
     // Final materials are independent of the provisional event text.
     app.entries[0].transcript = Arc::new(Transcript {
         text: "●\nactual final response\n".into(),
+        ..Transcript::default()
     });
     app.entries[0].rows = Some(Rows::wrap(
         app.entries[0].transcript.clone(),
@@ -339,6 +341,7 @@ fn incremental_wrap_matches_full_grapheme_layout_across_split_unicode() {
         let full = Rows::wrap(
             Arc::new(Transcript {
                 text: preview.text.clone(),
+                ..Transcript::default()
             }),
             6,
         );
@@ -428,6 +431,7 @@ async fn streaming_resource_probe() {
     // any preview token. Its initial layout is outside the streaming sample.
     entry.transcript = Arc::new(Transcript {
         text: "recorded history\n".repeat(1_048_576 / 17),
+        ..Transcript::default()
     });
     entry.rows = Some(Rows::wrap(entry.transcript.clone(), app.view_width));
     let history = entry.transcript.clone();

@@ -15,7 +15,8 @@ type AssemblyFuture = Pin<
             + Send,
     >,
 >;
-pub(super) type Assemble = dyn Fn(WorkRef, RunControl) -> AssemblyFuture + Send + Sync;
+pub(super) type Assemble =
+    dyn Fn(WorkRef, RunControl, super::ToolReporter) -> AssemblyFuture + Send + Sync;
 
 pub(super) struct Shared {
     pub conversation_id: ConversationId,
@@ -44,6 +45,7 @@ pub(super) struct Record {
     pub control: RunControl,
     pub state: Mutex<WorkState>,
     pub changed: Notify,
+    pub tools: super::ToolReporter,
     #[cfg(test)]
     pub abort: Mutex<Option<tokio::task::AbortHandle>>,
     #[cfg(test)]
@@ -100,6 +102,7 @@ impl Record {
                 .lock()
                 .expect("record state has no user callbacks")
                 .clone(),
+            tools: self.tools.snapshot(),
         }
     }
     pub fn publish(&self, state: WorkState) {

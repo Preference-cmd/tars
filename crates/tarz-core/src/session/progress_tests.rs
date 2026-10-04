@@ -470,6 +470,7 @@ async fn model_progress_tracks_each_invocation_in_a_multi_round_work() {
             ProgressUpdate::ModelStarted => started.push(item.invocation_id.round_id.0),
             ProgressUpdate::ModelOutputReady => output_rounds.push(item.invocation_id.round_id.0),
             ProgressUpdate::Text { .. } => text_rounds.push(item.invocation_id.round_id.0),
+            ProgressUpdate::Tool(_) => {}
         }
     }
     assert_eq!(started, [0, 1]);

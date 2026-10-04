@@ -23,6 +23,8 @@ pub(super) fn start(runtime: Handle, shared: Arc<Shared>, record: Arc<Record>, c
     runtime.spawn(async move {
         match task.await {
             Ok(returned) => {
+                record.tools.drain().await;
+                record.tools.freeze();
                 #[cfg(test)]
                 {
                     let gate = record
@@ -43,6 +45,11 @@ pub(super) fn start(runtime: Handle, shared: Arc<Shared>, record: Arc<Record>, c
                 );
             }
             Err(error) => {
+                // Fault selection is preserved while tracked filesystem jobs
+                // observe cancellation and actually release their resources.
+                record.control.cancellation_token().cancel();
+                record.tools.drain().await;
+                record.tools.freeze();
                 let fault = if error.is_panic() {
                     WorkerFault::Panicked {
                         message: panic_message(error.into_panic()),
@@ -65,7 +72,7 @@ async fn run(shared: Arc<Shared>, record: Arc<Record>, context: Context) -> Retu
     let assembled = tokio::select! {
         biased;
         error = wait_for_stop(control) => return stopped(context, error),
-        result = (shared.assemble)(record.work.clone(), control.clone()) => result,
+        result = (shared.assemble)(record.work.clone(), control.clone(), record.tools.clone()) => result,
     };
     // Control wins when the assembly result and cancellation are selected in the
     // same progression. Once a terminal result is selected, it stays frozen.
@@ -86,6 +93,7 @@ async fn run(shared: Arc<Shared>, record: Arc<Record>, context: Context) -> Retu
         shared.progress.clone(),
         record.work.clone(),
         options.observer.take(),
+        record.tools.clone(),
     ));
     // Ordinary cancellation must let Causa return owned context and the full U.
     // Do not race and drop this future against cancellation or a deadline here.

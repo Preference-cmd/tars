@@ -22,6 +22,7 @@ pub(super) struct ProgressFeed {
 impl Entry {
     pub(super) fn bind_progress(&mut self, receiver: broadcast::Receiver<Arc<WorkProgress>>) {
         self.preview = Preview::default();
+        self.tools = super::tool_progress::ToolView::default();
         self.progress = Some(ProgressFeed {
             key: self.key.clone(),
             receiver,
@@ -37,6 +38,12 @@ impl Entry {
         {
             return;
         }
+        if let ProgressUpdate::Tool(call) = &event.update {
+            if call.invocation_id == event.invocation_id {
+                self.tools.apply(call);
+            }
+            return;
+        }
         if let Some(current) = &self.preview.invocation
             && current.turn_id == event.invocation_id.turn_id
             && current.round_id.0 > event.invocation_id.round_id.0
@@ -50,6 +57,7 @@ impl Entry {
             ProgressUpdate::ModelStarted => self.preview.start(event.invocation_id.clone()),
             ProgressUpdate::Text { delta, truncated } => self.preview.append(delta, *truncated),
             ProgressUpdate::ModelOutputReady => self.preview.ready = true,
+            ProgressUpdate::Tool(_) => unreachable!("handled independently of model preview"),
         }
     }
     pub fn viewport(&self, height: usize) -> ConversationViewport {
@@ -79,7 +87,9 @@ impl Entry {
         }
     }
     pub fn conversation_len(&self) -> usize {
-        self.rows.as_ref().map_or(0, |rows| rows.ranges.len()) + self.preview.line_count()
+        self.rows.as_ref().map_or(0, |rows| rows.ranges.len())
+            + self.preview.line_count()
+            + self.tools.lines().len()
     }
 }
 impl App {
@@ -110,6 +120,7 @@ impl App {
                     Err(TryRecvError::Lagged(lost)) => {
                         remaining -= 1;
                         entry.preview.lost = entry.preview.lost.saturating_add(lost);
+                        entry.tools.lost = entry.tools.lost.saturating_add(lost);
                         self.dirty = true;
                     }
                     Err(TryRecvError::Closed) => {

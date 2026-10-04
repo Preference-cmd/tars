@@ -6,7 +6,22 @@ use uuid::Uuid;
 use super::StoreError;
 use crate::definition::SessionDefinition;
 
-pub(crate) const RECORD_FORMAT: &str = "tarz-session-v1";
+pub(crate) const RECORD_FORMAT: &str = "tarz-session-v2";
+/// Check the format before decoding the fixed permission-bearing definition.
+pub(super) fn decode(bytes: &[u8], identity: &str) -> Result<SavedSessionRecord, StoreError> {
+    #[derive(Deserialize)]
+    struct Format {
+        format: String,
+    }
+    let format: Format = serde_json::from_slice(bytes)?;
+    if format.format != RECORD_FORMAT {
+        return Err(StoreError::UnsupportedFormat(format.format));
+    }
+    let record: SavedSessionRecord = serde_json::from_slice(bytes)?;
+    record.validate(identity)?;
+    Ok(record)
+}
+
 /// Full wire record; Context's deserializer rejects duplicate block IDs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -109,4 +124,15 @@ fn successor(revision: Option<u64>) -> Result<u64, StoreError> {
         .checked_add(1)
         .filter(|_| revision != Some(0))
         .ok_or(StoreError::InvalidRevision)
+}
+
+#[cfg(test)]
+mod format_tests {
+    #[test]
+    fn legacy_format_is_rejected_before_decoding_permission_fields() {
+        let bytes = br#"{"format":"tarz-session-v1","definition":{"tools":["execute_command"]}}"#;
+        assert!(
+            matches!(super::decode(bytes, "unused"), Err(super::StoreError::UnsupportedFormat(format)) if format == "tarz-session-v1")
+        );
+    }
 }

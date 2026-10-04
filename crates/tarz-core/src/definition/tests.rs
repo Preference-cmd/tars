@@ -10,6 +10,9 @@ fn definition() -> SessionDefinition {
         retained_work_capacity: 0,
         max_model_rounds: 0,
         max_tool_calls: 0,
+        workspace_root: None,
+        tools: vec![],
+        tool_limits: Default::default(),
     }
 }
 
@@ -78,4 +81,47 @@ fn invalid_model_reference_and_unrepresentable_deadline_are_rejected() {
         candidate.validate(),
         Err(DefinitionError::UnrepresentableTimeout)
     );
+}
+
+#[test]
+fn workspace_permissions_require_explicit_root_and_bounded_limits() {
+    use super::{WorkspaceTool, WorkspaceToolLimits};
+    let mut candidate = definition();
+    candidate.tools = vec![WorkspaceTool::ReadFile];
+    assert_eq!(
+        candidate.validate(),
+        Err(DefinitionError::WorkspaceRequired)
+    );
+    candidate.workspace_root = Some("relative".into());
+    assert_eq!(
+        candidate.validate(),
+        Err(DefinitionError::InvalidWorkspaceRoot)
+    );
+    candidate.workspace_root = Some(std::env::current_dir().unwrap());
+    assert!(candidate.validate().is_ok());
+    candidate.tools.push(WorkspaceTool::ReadFile);
+    assert_eq!(candidate.validate(), Err(DefinitionError::DuplicateTool));
+    candidate.tools.pop();
+    candidate.tool_limits.max_concurrent_operations = 5;
+    assert_eq!(
+        candidate.validate(),
+        Err(DefinitionError::InvalidToolLimits)
+    );
+    candidate.tool_limits = WorkspaceToolLimits::default();
+    candidate.tool_limits.call_timeout_secs = 0;
+    assert_eq!(
+        candidate.validate(),
+        Err(DefinitionError::InvalidToolLimits)
+    );
+    let mut encoded = serde_json::to_value(definition()).unwrap();
+    encoded.as_object_mut().unwrap().remove("tool_limits");
+    assert!(serde_json::from_value::<SessionDefinition>(encoded).is_err());
+}
+
+#[test]
+fn persisted_no_workspace_must_be_explicit_null() {
+    let mut encoded = serde_json::to_value(definition()).unwrap();
+    assert!(encoded["workspace_root"].is_null());
+    encoded.as_object_mut().unwrap().remove("workspace_root");
+    assert!(serde_json::from_value::<SessionDefinition>(encoded).is_err());
 }

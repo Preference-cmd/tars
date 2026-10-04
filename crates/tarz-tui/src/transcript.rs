@@ -7,11 +7,13 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Default)]
 pub(crate) struct Transcript {
     pub text: String,
+    pub tool_details: Vec<String>,
 }
 
 impl Transcript {
     pub fn from_context(context: &Context) -> Self {
         let mut text = String::new();
+        let mut tool_details = Vec::new();
         for block in context.blocks() {
             match block.meta().source.as_deref() {
                 Some("user") => text.push_str("❯ You\n"),
@@ -31,10 +33,35 @@ impl Transcript {
                         }
                     }
                 }
-                BlockContent::ToolCall(_) => {
-                    text.push_str("[recorded tool call; not executed by viewing]")
+                BlockContent::ToolCall(call) => {
+                    text.push_str(&format!(
+                        "Tool {} · recorded declaration · {}\n/tools expands actual material",
+                        display(&call.tool_name),
+                        block.id().0
+                    ));
+                    tool_details.push(format!(
+                        "Declaration {} · {}\n{}",
+                        block.id().0,
+                        display(&call.tool_name),
+                        display(&serde_json::to_string_pretty(&call.arguments).unwrap_or_default())
+                    ));
                 }
-                BlockContent::ToolResult(_) => text.push_str("[recorded tool result]"),
+                BlockContent::ToolResult(result) => {
+                    let body =
+                        serde_json::to_string_pretty(&result.output.content).unwrap_or_default();
+                    text.push_str(&format!(
+                        "Tool result · {:?} · {}\n{}\n/tools expands actual material",
+                        result.status,
+                        result.call_block_id.0,
+                        summary(&body)
+                    ));
+                    tool_details.push(format!(
+                        "Result for {} · {:?}\n{}",
+                        result.call_block_id.0,
+                        result.status,
+                        display(&serde_json::to_string_pretty(result).unwrap_or_default())
+                    ));
+                }
             }
             text.push_str("\n\n");
         }
@@ -42,8 +69,53 @@ impl Transcript {
         text.retain(|c| !c.is_control() || matches!(c, '\n' | '\t'));
         Self {
             text: text.replace('\t', "    "),
+            tool_details,
         }
     }
+}
+
+pub(crate) fn display(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect::<String>()
+        .replace('\t', "    ")
+}
+fn summary(value: &str) -> String {
+    let clean = display(value).replace('\n', " ");
+    let mut end = clean.len().min(160);
+    while !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}{}",
+        &clean[..end],
+        if end < clean.len() { "…" } else { "" }
+    )
+}
+
+// Detail panels use the same grapheme/cell wrapping for drawing and scrolling.
+// Yield borrowed visible rows; don't join or duplicate full result history on draw.
+pub(crate) fn detail_rows(lines: &[String], width: u16) -> impl Iterator<Item = &str> {
+    lines
+        .iter()
+        .flat_map(|text| text.split('\n'))
+        .flat_map(move |line| {
+            let mut remaining = Some(line);
+            std::iter::from_fn(move || {
+                let line = remaining.take()?;
+                let mut columns = 0;
+                for (offset, grapheme) in line.grapheme_indices(true) {
+                    let cells = grapheme.width();
+                    if columns > 0 && columns + cells > usize::from(width.max(1)) {
+                        remaining = Some(&line[offset..]);
+                        return Some(&line[..offset]);
+                    }
+                    columns += cells;
+                }
+                Some(line)
+            })
+        })
 }
 
 pub(crate) struct Rows {

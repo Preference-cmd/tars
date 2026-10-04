@@ -447,8 +447,7 @@ fn read_record(path: &Path, id: &str) -> Result<Option<SavedSessionRecord>, Stor
             limit: MAX_RECORD_BYTES,
         });
     }
-    let record: SavedSessionRecord = serde_json::from_slice(&bytes)?;
-    record.validate(id)?;
+    let record = super::record::decode(&bytes, id)?;
     Ok(Some(record))
 }
 fn serialize_record(record: &SavedSessionRecord) -> Result<Vec<u8>, StoreError> {

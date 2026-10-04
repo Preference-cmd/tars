@@ -1,6 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui_textarea::{TextArea, WrapMode};
-use tarz_core::definition::{CredentialRef, Provider, SessionDefinition};
+use tarz_core::{
+    config::{Config, ConfigSource, DefinitionOverrides, parse_tools},
+    definition::{CredentialRef, Provider, SessionDefinition, WorkspaceToolLimits},
+};
 
 mod graphemes;
 pub(crate) use graphemes::edit;
@@ -34,25 +37,29 @@ pub(crate) struct Form {
     pub selected: usize,
     pub error: String,
     pub limits: (usize, u32, u32),
+    pub tool_limits: WorkspaceToolLimits,
 }
-pub(crate) const FIELD_NAMES: [&str; 5] = [
+pub(crate) const FIELD_NAMES: [&str; 7] = [
     "Provider",
     "Model",
     "Endpoint (optional, full URL)",
     "Credential environment variable",
     "Timeout seconds (1..86400)",
+    "Workspace root (optional; does not enable tools)",
+    "Tools (comma-separated list_directory,read_file,search_text)",
 ];
 
 impl Default for Form {
     fn default() -> Self {
         Self {
-            fields: ["openai-chat", "", "", "OPENAI_API_KEY", "120"]
+            fields: ["openai-chat", "", "", "OPENAI_API_KEY", "120", "", ""]
                 .into_iter()
                 .map(|s| TextArea::from([s]))
                 .collect(),
             selected: 1,
             error: String::new(),
             limits: (256, 10, 64),
+            tool_limits: WorkspaceToolLimits::default(),
         }
     }
 }
@@ -73,6 +80,17 @@ impl Form {
             preset.endpoint.clone().unwrap_or_default(),
             name.clone(),
             preset.work_timeout_secs.unwrap_or(120).to_string(),
+            preset
+                .workspace_root
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            preset
+                .tools
+                .iter()
+                .map(|tool| tool.name())
+                .collect::<Vec<_>>()
+                .join(","),
         ];
         Self {
             fields: values
@@ -81,6 +99,7 @@ impl Form {
                 .collect(),
             selected: 1,
             error: String::new(),
+            tool_limits: preset.tool_limits.clone(),
             limits: (
                 preset.retained_work_capacity,
                 preset.max_model_rounds,
@@ -101,18 +120,27 @@ impl Form {
             .ok()
             .filter(|n| (1..=86400).contains(n))
             .ok_or("Timeout must be 1..86400 seconds")?;
-        let definition = SessionDefinition {
-            provider,
-            model: values[1].clone(),
-            endpoint: (!values[2].is_empty()).then(|| values[2].clone()),
-            credential: CredentialRef::Environment(values[3].clone()),
-            work_timeout_secs: Some(timeout),
-            retained_work_capacity: self.limits.0,
-            max_model_rounds: self.limits.1,
-            max_tool_calls: self.limits.2,
-        };
-        definition.validate().map_err(|e| e.to_string())?;
-        Ok(definition)
+        // Resolve explicit form values through the same core path as CLI input.
+        // Profile limits were frozen when the selected startup preset was loaded.
+        Config::load(ConfigSource::Disabled)
+            .map_err(|e| e.to_string())?
+            .definition(
+                None,
+                DefinitionOverrides {
+                    provider: Some(provider),
+                    model: Some(values[1].clone()),
+                    endpoint: (!values[2].is_empty()).then(|| values[2].clone()),
+                    api_key_env: Some(values[3].clone()),
+                    timeout_secs: Some(timeout),
+                    capacity: Some(self.limits.0),
+                    max_model_rounds: Some(self.limits.1),
+                    max_tool_calls: Some(self.limits.2),
+                    workspace_root: (!values[5].is_empty()).then(|| values[5].clone().into()),
+                    tools: Some(parse_tools(&values[6]).map_err(|e| e.to_string())?),
+                    tool_limits: Some(self.tool_limits.clone()),
+                },
+            )
+            .map_err(|e| e.to_string())
     }
     pub fn key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
