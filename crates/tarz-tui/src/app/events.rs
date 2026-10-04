@@ -27,12 +27,12 @@ impl App {
                     }
                 },
                 _ = tick.tick() => {
+                    let size = terminal.size()?;
+                    self.view_width = render::transcript_width(size.width);
+                    self.viewport_height = render::conversation_height(size.height, size.width, self);
                     self.poll();
                     if self.done { return Ok(()); }
                     if self.dirty {
-                        let size = terminal.size()?;
-                        self.view_width = render::transcript_width(size.width);
-                        self.viewport_height = render::conversation_height(size.height, size.width, self);
                         terminal.draw(|frame| render::draw(frame, self))?;
                         self.dirty = false;
                     }
@@ -42,7 +42,9 @@ impl App {
     }
     pub(super) fn event(&mut self, event: Event) {
         self.dirty = true;
-        if matches!(event, Event::Resize(_, _)) {
+        if let Event::Resize(width, height) = event {
+            self.view_width = render::transcript_width(width);
+            self.viewport_height = render::conversation_height(height, width, self);
             return;
         }
         if let Event::Paste(text) = &event {
@@ -173,12 +175,10 @@ impl App {
                 KeyCode::Esc if key.kind == KeyEventKind::Press => self.cancel(),
                 KeyCode::PageUp | KeyCode::PageDown => {
                     if let Some(entry) = self.entries.get_mut(self.selected) {
-                        let end = entry
-                            .rows
-                            .as_ref()
-                            .map_or(0, |r| r.ranges.len().saturating_sub(self.viewport_height));
-                        let offset = entry.scroll.unwrap_or(end);
-                        let page = self.viewport_height.saturating_sub(1).max(1);
+                        let viewport = entry.viewport(self.viewport_height);
+                        let end = viewport.end;
+                        let offset = viewport.start;
+                        let page = viewport.page;
                         entry.scroll = if key.code == KeyCode::PageUp {
                             Some(offset.saturating_sub(page))
                         } else {

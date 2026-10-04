@@ -1,6 +1,6 @@
 # 当前实现
 
-2026-10-04：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tarz-tui` 已接通会话、输入、结果、取消及保存恢复；GUI、流式展示、工具配置、父子 Agent、安装和发布仍在后续范围。
+2026-10-04：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tarz-tui` 已接通会话、输入、临时流式正文预览、结果、取消及保存恢复；GUI、工具配置、父子 Agent、安装和发布仍在后续范围。
 
 ## 代码结构
 
@@ -10,15 +10,15 @@
 | `crates/tarz-core/src/definition/` | 可序列化的固定定义与纯校验 |
 | `crates/tarz-core/src/config/` | 共享 TOML 加载、路径、命名模型预设与新定义默认值 |
 | `crates/tarz-core/src/assembly/` | 打开时解析凭据、装配 gateway/runner 与固定执行选项 |
-| `crates/tarz-core/src/session/` | 单会话 owner/handle、原工作受理、监督、去重与结果 |
+| `crates/tarz-core/src/session/` | 单会话 owner/handle、原工作受理、监督、去重、可靠结果与有界临时观察 |
 | `crates/tarz-core/src/store/` | 私有 JSON 后端、活动期文件锁、提交与确认 |
 | `crates/tarz-core/src/material/` | 显式 Context 文件导入/导出、引用校验 |
 | `crates/tarz-cli/src/cli/` | 命令参数、信号、展示、恢复文件与退出码 |
 | `crates/tarz-cli/src/demo/` | 脚本模型和本地工具的底层 Session 演示 |
-| `crates/tarz-tui/src/` | 单列对话界面、命令/会话选择、输入适配和后台结果呈现 |
+| `crates/tarz-tui/src/` | 单列对话、命令/会话选择、输入适配、流式预览与实际材料呈现 |
 | `crates/tarz-core/tests/`、`crates/tarz-cli/tests/` | 核心契约消费者、真实 CLI 与本地 HTTP 测试 |
 
-workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false`，binary 为 `tarz` 和 `tarz-tui`。CLI/TUI 各自单向依赖核心，核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。Causa 精确消费 registry `=0.0.2`，不使用 path/patch 或源码复制。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
+workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false`，binary 为 `tarz` 和 `tarz-tui`。CLI/TUI 各自单向依赖核心，核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。本轮按用户明确授权，以公开 facade 通过本地路径 `../agent-stack-oss/crates/causa` 消费 Causa 开发实现（验证基线 `9f955b4`，package version 仍是 `0.0.2`）。构建需要同级 Causa checkout；Cargo.lock 不锁定其源码提交。没有源码 include 或复制。恢复 registry 依赖与独立 CI/分发是后续交付步骤。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
 
 完整行为见 [Session 运行机制](session-lifecycle.md)，使用方法见 [README](../README.md)，逐项验收与本机证据见 [专项提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)和[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
 
@@ -26,11 +26,19 @@ workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false
 
 `SessionHost` 独占活动目录与底层 Session owner。`PreparedCreate` 在异步前固定身份，`create/open` 登记后由独立任务监督；丢弃等待或 `ManagedSession` 视图不终止操作。`SessionTarget` 区分同一 ConversationId 的不同打开实例；旧 target 不会作用于重开的实例。
 
-`ManagedSession` 提供 submit/observe/wait/cancel、状态、版本材料、原子 edit、wait_saved/retry_save 和 forget。视图不暴露底层 owner/handle。host 提供明确的 Save/DiscardLocal 关闭和原未提交 ToolBatch 的一次领取。调用方自行决定谁可使用 host；它不是用户身份认证系统。
+`ManagedSession` 提供 submit/observe/wait/cancel、subscribe_progress、状态、版本材料、原子 edit、wait_saved/retry_save 和 forget。视图不暴露底层 owner/handle。host 提供明确的 Save/DiscardLocal 关闭和原未提交 ToolBatch 的一次领取。调用方自行决定谁可使用 host；它不是用户身份认证系统。
 
 固定定义包含 provider、model、endpoint、凭据环境变量引用、工作期限、保留容量和模型/工具次数限制。打开时校验、解析一次并固定资源，创建和重开不调用模型。重开保留定义与 BlockId，但工作表、请求键、WorkRef、终态和未提交批次不恢复，不自动重跑旧工作。当前实际产品工具目录为空。
 
 低层 `session` 仍供核心与 fixture 消费者使用；产品 CLI 通过托管入口。其原去重、取消、typed 结果、批次和材料交还契约保留。
+
+## 流式观察
+
+Session worker 使用 `TurnRunner::run_streaming`，原装配 observer 仍按同步借用契约执行。CLI 继续等待并呈现最终结果；TUI 在 submit 前订阅 `ManagedSession::subscribe_progress`。事件按 WorkRef 和 InvocationId 归属，只携带 ModelStarted、正文 Text、ModelOutputReady；本轮不展示 reasoning 或未完成工具参数。
+
+通道属于一个打开实例，容量 128 项，每项正文最多 16 KiB，UTF-8 边界截断带 `truncated` 标记；无订阅者不复制正文。慢消费者收到 Tokio broadcast 的 Lagged，迟到订阅不回放历史；订阅/丢弃观察器不会取消工作或改变最终结果。调用方保留的事件 Arc 不计入通道容量。可靠终态仍走 observe/wait，与可丢失的临时预览分开。
+
+TUI 每 50 ms 最多处理 128 项，多个视图轮转；只保留当前工作、当前模型轮的最多 256 KiB 正文，落后/超限明确提示。结束、失败、取消和关闭清除预览，正式对话从实际返回的 Context 更新。ModelOutputReady 仅表示模型交付完整输出，不表示已提交材料或保存成功。预览不进入 Store、材料导出或恢复文件。
 
 ## 保存与关闭
 

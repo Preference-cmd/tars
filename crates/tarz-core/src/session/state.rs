@@ -7,7 +7,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, broadcast};
 
 type AssemblyFuture = Pin<
     Box<
@@ -23,6 +23,7 @@ pub(super) struct Shared {
     pub assemble: Arc<Assemble>,
     pub config: SessionConfig,
     pub candidate: Arc<dyn Fn() -> TurnId + Send + Sync>,
+    pub progress: broadcast::Sender<Arc<WorkProgress>>,
 }
 pub(super) struct State {
     pub context: Option<Context>,

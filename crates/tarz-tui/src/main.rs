@@ -4,6 +4,7 @@
 mod app;
 mod input;
 mod options;
+mod preview;
 mod render;
 mod terminal;
 mod transcript;

@@ -15,6 +15,14 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    /// Subscribe to temporary model observations from this exact session instance.
+    /// Subscribe before submit; there is no replay. Capacity is 128 observations,
+    /// with at most 16 KiB per text fragment. A slow receiver reports `Lagged`;
+    /// work results and cancellation remain available through their reliable APIs.
+    pub fn subscribe_progress(&self) -> tokio::sync::broadcast::Receiver<Arc<WorkProgress>> {
+        self.shared.progress.subscribe()
+    }
+
     #[cfg(test)]
     pub(crate) fn hold_terminal(&self, work: &WorkRef, entered: Arc<Notify>, release: Arc<Notify>) {
         let state = self.shared.lock();

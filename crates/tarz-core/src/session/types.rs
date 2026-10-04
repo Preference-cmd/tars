@@ -1,4 +1,4 @@
-use causa::kernel::{ContextBlock, ControlError, EditError, TurnId};
+use causa::kernel::{ContextBlock, ControlError, EditError, InvocationId, TurnId};
 use causa::runtime::TurnResult;
 use std::error::Error;
 use std::sync::Arc;
@@ -42,6 +42,37 @@ pub struct WorkRef {
     pub conversation_id: ConversationId,
     /// Independently allocated UUIDv7 execution identity.
     pub turn_id: TurnId,
+}
+
+/// Advisory model progress scoped to an owning session instance and work.
+/// Subscribe before submission to observe from the start; delivery remains
+/// bounded and may lag or truncate. Late receivers have no history. This value
+/// is never committed or persisted as material.
+#[derive(Clone, Debug)]
+pub struct WorkProgress {
+    /// Work whose current model invocation produced this observation.
+    pub work: WorkRef,
+    /// Logical invocation within that work, including its model round.
+    pub invocation_id: InvocationId,
+    /// Bounded preview or model lifecycle notification.
+    pub update: ProgressUpdate,
+}
+
+/// Nonterminal observations for a model preview, independent of work/save state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProgressUpdate {
+    /// A model request is ready; reset any previous round's preview.
+    ModelStarted,
+    /// Borrowed model text copied into a bounded, temporary preview.
+    Text {
+        /// At most 16 KiB of the incoming fragment, cut at a UTF-8 boundary.
+        delta: String,
+        /// The original fragment exceeded this observation's text bound.
+        truncated: bool,
+    },
+    /// Complete output accepted by Causa, before material conversion/commit.
+    /// This is not a successful work result or a save confirmation.
+    ModelOutputReady,
 }
 
 /// Stable admission receipt, independent of later execution state.

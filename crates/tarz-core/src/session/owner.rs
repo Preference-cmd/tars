@@ -41,6 +41,7 @@ impl Session {
                 assemble: Arc::new(move |work, control| Box::pin(assemble(work, control))),
                 config,
                 candidate: Arc::new(|| TurnId::new(uuid::Uuid::now_v7().to_string())),
+                progress: tokio::sync::broadcast::channel(super::progress::PROGRESS_CAPACITY).0,
             }),
         }
     }

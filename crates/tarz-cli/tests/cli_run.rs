@@ -5,6 +5,9 @@ use std::process::{Command, Output, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+#[path = "common/sse.rs"]
+mod sse;
+
 fn server(status: u16, body: Value, delay: Duration) -> (String, mpsc::Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/fixture", listener.local_addr().unwrap());
@@ -43,10 +46,10 @@ fn server(status: u16, body: Value, delay: Duration) -> (String, mpsc::Receiver<
         }
         tx.send(String::from_utf8(bytes).unwrap()).unwrap();
         std::thread::sleep(delay);
-        let body = body.to_string();
+        let (content_type, body) = sse::reply(status, body);
         let _ = write!(
             socket,
-            "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
     });
@@ -112,6 +115,7 @@ fn actual_provider_protocols_receive_selected_model_input_and_credentials() {
         assert!(request.contains(header), "{request}");
         let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(body["model"], "fixture-model");
+        assert_eq!(body["stream"], true);
         assert!(body.to_string().contains("user question"));
         assert!(
             body.get("tools")

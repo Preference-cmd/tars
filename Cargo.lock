@@ -88,8 +88,6 @@ dependencies = [
 [[package]]
 name = "causa"
 version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc136749e249cdf1ca9b45cf0c794dc7c326aee56f4e29516a404fcb3183201c"
 dependencies = [
  "causa-kernel",
  "causa-protocol",
@@ -100,8 +98,6 @@ dependencies = [
 [[package]]
 name = "causa-kernel"
 version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23a1d6c7fa903eb1bdf8b011f67a0910d4a5e3a0b4aef418b246f22d2eab0c67"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -116,8 +112,6 @@ dependencies = [
 [[package]]
 name = "causa-protocol"
 version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86469b65a0de7744ac91b136a14d2dc5caf726d57d3deb29e22c6a29ec016e36"
 dependencies = [
  "async-trait",
  "causa-kernel",
@@ -129,12 +123,11 @@ dependencies = [
 [[package]]
 name = "causa-provider"
 version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee55143bdf0d640b2095fbe77ba6708a7d9e3a59f7ea74e99e440fe143d5f87a"
 dependencies = [
  "async-trait",
  "causa-kernel",
  "causa-protocol",
+ "futures-util",
  "reqwest",
  "serde_json",
  "tokio",
@@ -144,8 +137,6 @@ dependencies = [
 [[package]]
 name = "causa-runtime"
 version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f6f41d0e68141c2202eead6898883871ed8c9206562c815b1a94d75c1e790db"
 dependencies = [
  "async-trait",
  "causa-kernel",

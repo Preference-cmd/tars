@@ -119,6 +119,8 @@ impl App {
                 if let Some(entry) = self.entry_mut(&key)
                     && entry.work.as_ref() == Some(&work)
                 {
+                    entry.clear_progress();
+                    entry.scroll = None;
                     entry.execution = result
                         .as_deref()
                         .map(result_label)
@@ -181,6 +183,7 @@ impl App {
                             entry.session = None;
                             entry.prepared = None;
                             entry.work = None;
+                            entry.clear_progress();
                             entry.editor = crate::input::editor();
                             entry.status = "Closed; F3 to reopen".into();
                             entry.notice = close_label(outcome);

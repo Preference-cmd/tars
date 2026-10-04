@@ -1,6 +1,6 @@
 # TUI 原型
 
-`tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、最终结果、多行输入、取消、保存及恢复操作已接通；没有逐 token 展示、GUI、工具配置或安装分发。
+`tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；没有 GUI、工具配置或安装分发。本轮使用用户授权的同级 Causa 本地依赖，源码基线与构建要求见[当前实现](README.md)。
 
 ```sh
 cargo build -p tarz-tui --locked
@@ -44,4 +44,19 @@ stdin 和 stdout 都必须是交互终端。至少 30×12；矮窗口表单一�
 
 此前双栏原型的本机 debug 测量中 100 KiB/1 MiB/8 MiB 和 8×1 MiB 会话的缓存绘制 p95 约 1–3 ms，30 次绘制没有额外读取完整 Context。8 MiB 重新换行约 1.2 秒，属于后续优化点；数据只代表该次本机实验，详见[原型验证记录](../.agents/reviews/2026-10-04-tui-prototype/README.md)。
 
-本轮对话布局的终端捕获、宽窄窗口与菜单行为证据见[界面改造记录](../.agents/reviews/2026-10-04-conversation-ui/README.md)。界面参考 Claude Code 的对话/输入/命令交互，仍使用 Ratatui 全屏备用屏幕；尚无原生终端 scrollback、流式输出、Markdown 渲染或 Claude Code 的其他命令能力。
+本轮对话布局的终端捕获、宽窄窗口与菜单行为证据见[界面改造记录](../.agents/reviews/2026-10-04-conversation-ui/README.md)。界面参考 Claude Code 的对话/输入/命令交互，仍使用 Ratatui 全屏备用屏幕；尚无原生终端 scrollback、Markdown 渲染或 Claude Code 的其他命令能力。该记录为流式接线之前的界面证据。
+
+
+## 流式正文
+
+OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 的正文增量显示在对话尾部，标记 `Generating · temporary`。完整模型输出到达后可显示 `Temporary output · awaiting result`；这个状态不表示保存成功。当前只预览正文，不展示 reasoning、工具参数草稿或增量用量。
+
+预览独立于正式材料缓存，每个会话只保留当前工作的当前模型轮。可以继续编辑下一条草稿、滚动、resize 或切换会话；取消仍作用于明确的 WorkRef。切换不会重新提交；已关闭或重开实例的迟到事件被忽略。已发送输入仍以实际材料刷新为准，预览不会伪造 Context。
+
+UI 最多每 50 ms 更新一次，所有实例合计每 tick 最多取 128 条观察，超出时轮转到下一个实例。core 通道容量 128，每条正文最多 16 KiB；TUI 正文预览最多 256 KiB。拥塞或截断会显示 `Preview incomplete`，最终结果仍从可靠工作终态和实际 Context 获取。消费者落后不能阻塞模型/取消，也不会丢失原来的结果或保存错误。
+
+增量只重新排布末尾两行；对异常长组合字符序列，最多回看 4 KiB UTF-8 边界，因而这种病理性 cluster 的临时换行可能分行。变宽/变窄时重新排布这份有界预览；正式历史保持原缓存，不按每个增量复制或重排。
+
+工作完成、失败、取消或关闭会移除临时预览，正式正文从最终返回材料更新，可能与预览不同。保存受阻时仍显示真实返回材料并沿用重试/导出/放弃流程。恢复文件、导出及 Store 均不包含预览；未发送草稿也不自动保存。
+
+本轮真实分段 HTTP、TestBackend、PTY 和资源证据见[流式接线记录](../.agents/reviews/2026-10-04-tui-streaming/README.md)。本地路径及本机验证不代表 registry 已发布或各平台 CI 已通过。

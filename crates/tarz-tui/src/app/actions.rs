@@ -66,6 +66,7 @@ impl App {
             return;
         }
         // Reopen changes the UI instance key. Old completions can never update it.
+        entry.clear_progress();
         entry.key.generation += 1;
         entry.material_version = None;
         entry.requested_material_version = None;
@@ -102,11 +103,13 @@ impl App {
             request_key: new_block_id().0.to_string(),
             blocks: vec![tarz_core::application::text_input(text)],
         };
+        let progress = session.subscribe_progress();
         match session.submit(request) {
             Err(rejected) => entry.notice = format!("Input retained: {}", rejected.reason),
             Ok(receipt) => {
                 entry.editor = input::editor();
                 entry.work = Some(receipt.work.clone());
+                entry.bind_progress(progress);
                 entry.execution = "Running".into();
                 entry.notice = "Input accepted; Ctrl-C cancels this work".into();
                 entry.scroll = None;
@@ -209,6 +212,7 @@ impl App {
         });
     }
     pub(super) fn poll(&mut self) {
+        self.poll_progress();
         for entry in &mut self.entries {
             if let Some(status) = self.host.lookup(&entry.id().into()) {
                 let label = format!("{:?} | {}", status.lifecycle, save_label(&status.save));

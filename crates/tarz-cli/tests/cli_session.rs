@@ -12,6 +12,9 @@ use std::{
 
 const KEY: &str = "fixture-secret";
 
+#[path = "common/sse.rs"]
+mod sse;
+
 #[test]
 fn global_profile_changes_do_not_replace_a_reopened_definition() {
     let dir = tempfile::tempdir().unwrap();
@@ -72,10 +75,10 @@ impl Fixture {
                 let Ok((status, body)) = response_rx.recv_timeout(Duration::from_secs(10)) else {
                     return;
                 };
-                let body = body.to_string();
+                let (content_type, body) = sse::reply(status, body);
                 let _ = write!(
                     socket,
-                    "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
             }

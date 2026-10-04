@@ -30,6 +30,8 @@ pub(crate) struct Entry {
     pub notice: String,
     pub editor: TextArea<'static>,
     pub transcript: Arc<Transcript>,
+    pub preview: crate::preview::Preview,
+    pub(super) progress: Option<super::progress::ProgressFeed>,
     pub rows: Option<Rows>,
     pub scroll: Option<usize>,
     pub(super) material_version: Option<MaterialVersion>,
@@ -53,6 +55,8 @@ impl Entry {
             notice: String::new(),
             editor: input::editor(),
             transcript: Arc::new(Transcript::default()),
+            preview: crate::preview::Preview::default(),
+            progress: None,
             rows: None,
             scroll: None,
             material_version: None,
@@ -92,6 +96,7 @@ pub(crate) struct App {
     pub(super) view_width: u16,
     pub(super) dirty: bool,
     pub(super) done: bool,
+    pub(super) progress_cursor: usize,
 }
 impl App {
     pub fn new(options: Options) -> Self {
@@ -118,6 +123,7 @@ impl App {
             view_width: 80,
             dirty: true,
             done: false,
+            progress_cursor: 0,
         }
     }
     pub(super) fn entry_mut(&mut self, key: &Key) -> Option<&mut Entry> {

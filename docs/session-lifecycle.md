@@ -23,7 +23,7 @@ CLI 参数 → SessionDefinition + 初始 Context → PreparedCreate
 
 底层 [SessionHandle](../crates/tarz-core/src/session/handle.rs)分配 TurnId，原子追加输入，保存原请求副本，并移交 Context 给 worker。每实例最多一个活动工作，无后台提交队列。工作期限从受理起覆盖逐工作装配和执行；不覆盖 opening、stdin 和磁盘 I/O。
 
-[Worker](../crates/tarz-core/src/session/worker.rs)检查控制，调用逐工作装配，再交给 registry Causa 的 TurnRunner。Causa 处理一次工作中的模型/工具循环，返回真实 Context、typed TurnResult 和未提交 ToolBatch；它不拥有 Tarz 目录、文件或工作历史。当前产品为空工具目录，旧 Context 中的工具材料不会触发旧工具重跑。
+[Worker](../crates/tarz-core/src/session/worker.rs)检查控制，调用逐工作装配，再交给 Causa 公开 facade 的 `TurnRunner::run_streaming`。Causa 处理一次工作中的模型/工具循环，返回真实 Context、typed TurnResult 和未提交 ToolBatch；它不拥有 Tarz 目录、文件或工作历史。当前产品为空工具目录，旧 Context 中的工具材料不会触发旧工具重跑。
 
 ## 3. Finished 与 Saved
 
@@ -66,3 +66,10 @@ owner/worker 异常会隔离新工作，等待可确认的任务停止，保留�
 CLI 在保存失败时保留原执行 status/text，另输出 save_error；按用户选择导出随机不覆盖的恢复 Context，再以 1 退出。recovery_error、close_error 和 close_outcome 单列；恢复文件包含实际返回材料，不包含原工作表或未提交内容。Ctrl-C 取消工作后仍等待交还和保存。
 
 `tarz run` 创建 transient host，仍支持原 `--load/--save`：导入获得新 ConversationId，只有显式 `--save` 导出 Context，报告与退出码保持。低层 offline demo 是独立 fixture，用来观察单会话契约。
+
+
+## 临时流式观察
+
+`SessionHandle::subscribe_progress` 与 `ManagedSession::subscribe_progress` 返回本实例的 broadcast receiver。需要观察新工作的调用方先订阅再 submit；每项 WorkProgress 携带 WorkRef、InvocationId，以及 ModelStarted、正文 Text 或 ModelOutputReady。当前限额、Lagged 和截断语义见[当前实现](README.md#流式观察)。原 `TurnRunOptions::observer` 被组合调用，不被静默替换。
+
+这些事件是可丢失的临时观察，无工作历史或重开恢复含义，也不是材料编辑指令。可靠 WorkResult 仍由原工作表保留；同步 observer 不等待 UI 消费。仅 Causa 返回的 Context 进入原保存流程，取消/EOF/error 前的文字碎片不被补成完整模型输出。模型输出已齐、工作已终结、材料已保存继续是不同事实。

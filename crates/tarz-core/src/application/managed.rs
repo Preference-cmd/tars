@@ -1,7 +1,9 @@
 use super::entry::Entry;
 use super::types::*;
 use crate::definition::SessionDefinition;
-use crate::session::{SessionError, SubmitRequest, WorkObservation, WorkReceipt, WorkRef};
+use crate::session::{
+    SessionError, SubmitRequest, WorkObservation, WorkProgress, WorkReceipt, WorkRef,
+};
 use crate::store::{PreparedCommit, SavedSessionRecord};
 use causa::kernel::ContextBlock;
 use std::sync::Arc;
@@ -13,6 +15,19 @@ pub struct ManagedSession {
     pub(super) entry: Arc<Entry>,
 }
 impl ManagedSession {
+    /// Subscribe to this instance's bounded, temporary model observations.
+    /// Subscribe before submit; late subscriptions have no history. Capacity is
+    /// 128 observations, each text fragment at most 16 KiB. `Lagged` does not
+    /// affect reliable work results, cancellation, material return or saving.
+    pub fn subscribe_progress(&self) -> tokio::sync::broadcast::Receiver<Arc<WorkProgress>> {
+        self.entry
+            .lock()
+            .handle
+            .as_ref()
+            .expect("published handle")
+            .subscribe_progress()
+    }
+
     /// Exact instance target for privileged host operations.
     pub fn target(&self) -> SessionTarget {
         self.entry.target.clone()

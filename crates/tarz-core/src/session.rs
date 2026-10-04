@@ -6,6 +6,7 @@
 
 mod handle;
 mod owner;
+mod progress;
 mod state;
 mod types;
 mod worker;
@@ -13,9 +14,12 @@ mod worker;
 pub use handle::SessionHandle;
 pub use owner::Session;
 pub use types::{
-    ConversationId, SessionConfig, SessionError, SubmitRejection, SubmitRequest, WorkObservation,
-    WorkReceipt, WorkRef, WorkResult, WorkState, WorkerFault,
+    ConversationId, ProgressUpdate, SessionConfig, SessionError, SubmitRejection, SubmitRequest,
+    WorkObservation, WorkProgress, WorkReceipt, WorkRef, WorkResult, WorkState, WorkerFault,
 };
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod progress_tests;

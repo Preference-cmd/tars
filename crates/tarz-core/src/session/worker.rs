@@ -72,7 +72,7 @@ async fn run(shared: Arc<Shared>, record: Arc<Record>, context: Context) -> Retu
     if let Err(error) = control.call_control().check() {
         return stopped(context, error);
     }
-    let (runner, options) = match assembled {
+    let (runner, mut options) = match assembled {
         Ok(assembled) => assembled,
         Err(error) => {
             return Returned {
@@ -82,10 +82,15 @@ async fn run(shared: Arc<Shared>, record: Arc<Record>, context: Context) -> Retu
             };
         }
     };
+    options.observer = Some(super::progress::observer(
+        shared.progress.clone(),
+        record.work.clone(),
+        options.observer.take(),
+    ));
     // Ordinary cancellation must let Causa return owned context and the full U.
     // Do not race and drop this future against cancellation or a deadline here.
     let outcome = runner
-        .run(
+        .run_streaming(
             record.work.turn_id.clone(),
             context,
             options,

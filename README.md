@@ -4,7 +4,7 @@ Tarz 是基于 Causa 的 Agent 应用，以可安装、可运行程序交付，�
 
 当前已实现单会话工作闭环，并提供离线 CLI 演示：原子提交、同键重放、逐工作装配、取消与结果观察、材料编辑及保存/导入。演示使用脚本模型和真实本地工具，经过 Session 与 Causa runner 执行，不需要凭据或网络。
 
-`tarz run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tarz session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。`tarz-tui` 提供原生终端原型，两端共用 TOML 配置。GUI、流式展示、工具配置、父子 Agent 和安装渠道尚未实现。当前开发版本为 `0.0.0`，尚无公开发布。
+`tarz run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tarz session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。`tarz-tui` 提供原生终端原型与临时流式正文预览，两端共用 TOML 配置。GUI、工具配置、父子 Agent 和安装渠道尚未实现。当前开发版本为 `0.0.0`，尚无公开发布。
 
 ## 本地构建与运行
 
@@ -63,7 +63,7 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 ## 项目入口
 
-根目录是 Cargo workspace；`crates/tarz-core/` 提供共享应用核心与配置，`crates/tarz-cli/` 提供 `tarz`，`crates/tarz-tui/` 提供 `tarz-tui` 原型。默认 `cargo run/build` 仍选择 CLI；TUI 使用 `cargo run -p tarz-tui -- --config /path/to/config.toml`，全部构建用 `cargo build --workspace --locked`。入口各自单向依赖核心，所有包 `publish = false`。Causa 0.0.2 从 registry 消费，启用 runtime 与 providers。
+根目录是 Cargo workspace；`crates/tarz-core/` 提供共享应用核心与配置，`crates/tarz-cli/` 提供 `tarz`，`crates/tarz-tui/` 提供 `tarz-tui` 原型。默认 `cargo run/build` 仍选择 CLI；TUI 使用 `cargo run -p tarz-tui -- --config /path/to/config.toml`，全部构建用 `cargo build --workspace --locked`。入口各自单向依赖核心，所有包 `publish = false`。本轮按用户授权通过 `../agent-stack-oss/crates/causa` 接入 Causa 最新开发实现，启用 runtime 与 providers；构建要求同级目录存在 Causa checkout，当前验证基线为 `9f955b4`。Cargo.lock 不固定本地路径中的源码提交。恢复 registry 依赖和独立分发另行处理。
 
 CLI/TUI 共用 [TOML 配置](docs/configuration.md)，支持全局默认路径、`TARZ_CONFIG`、`--config` 和命名模型预设；显式参数优先。可从 [config.example.toml](config.example.toml) 开始填写。已有会话重开不受全局模型预设变更影响。
 

@@ -6,6 +6,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 pub(super) const ACCENT: Color = Color::Rgb(215, 147, 114);
@@ -113,30 +114,87 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         return;
     }
     if let Some(entry) = entry {
-        if let Some(rows) = &entry.rows {
-            let end = rows
-                .ranges
-                .len()
-                .saturating_sub(usize::from(regions[1].height));
-            let start = entry.scroll.unwrap_or(end).min(end);
-            let lines: Vec<_> = rows
-                .ranges
-                .iter()
-                .skip(start)
-                .take(usize::from(regions[1].height))
-                .map(|range| {
-                    let text = &rows.transcript.text[range.clone()];
-                    let style = if text.starts_with("❯ ") {
-                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        let history = entry.rows.as_ref().map_or(0, |rows| rows.ranges.len());
+        let height = usize::from(regions[1].height);
+        let viewport = entry.viewport(height);
+        let start = viewport.start;
+        let sticky = viewport.sticky;
+        let mut lines = Vec::with_capacity(height);
+        if sticky && height == 1 {
+            // At minimum terminal height, retain both the temporary label and
+            // the latest text instead of spending the sole row on a heading.
+            let label = entry.preview.compact_label();
+            let text = entry.preview.line(start.saturating_sub(history));
+            let space = usize::from(regions[1].width).saturating_sub(label.width());
+            let mut tail = text.len();
+            let mut cells = 0;
+            for (offset, grapheme) in text.grapheme_indices(true).rev() {
+                cells += grapheme.width();
+                if cells > space {
+                    break;
+                }
+                tail = offset;
+            }
+            lines.push(Line::from(vec![
+                Span::styled(
+                    label,
+                    Style::default().fg(if entry.preview.warning().is_some() {
+                        Color::Yellow
                     } else {
-                        Style::default()
-                    };
-                    Line::styled(text, style)
-                })
-                .collect();
-            frame.render_widget(Paragraph::new(lines), regions[1]);
+                        MUTED
+                    }),
+                ),
+                Span::raw(&text[tail..]),
+            ]));
+        } else if sticky {
+            lines.push(Line::styled(
+                if viewport.reserved == 1 && entry.preview.warning().is_some() {
+                    entry.preview.compact_label()
+                } else {
+                    entry.preview.label()
+                },
+                Style::default().fg(
+                    if entry.preview.warning().is_some() && viewport.reserved == 1 {
+                        Color::Yellow
+                    } else {
+                        MUTED
+                    },
+                ),
+            ));
+            if let Some(warning) = entry.preview.warning()
+                && lines.len() < viewport.reserved
+            {
+                lines.push(Line::styled(warning, Style::default().fg(Color::Yellow)));
+            }
         }
-        if entry.transcript.text.is_empty() {
+        for index in start..entry.conversation_len() {
+            if lines.len() >= height {
+                break;
+            }
+            if index < history {
+                let rows = entry.rows.as_ref().unwrap();
+                let text = &rows.transcript.text[rows.ranges[index].clone()];
+                let style = if text.starts_with("❯ ") {
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::styled(text, style));
+            } else {
+                let offset = index - history;
+                let text = entry.preview.line(offset);
+                let style = if offset == 0 {
+                    Style::default().fg(MUTED)
+                } else if offset == 1 && entry.preview.warning().is_some() {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::styled(text, style));
+            }
+        }
+        frame.render_widget(Paragraph::new(lines), regions[1]);
+        if entry.transcript.text.is_empty() && !entry.preview.is_active() {
             welcome(frame, regions[1], entry.session.is_some());
         }
     } else {

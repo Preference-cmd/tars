@@ -40,10 +40,13 @@ pub(super) async fn until(app: &mut App, predicate: impl Fn(&App) -> bool) {
     }).await.expect("TUI predicate must settle");
 }
 pub(super) async fn create(app: &mut App, endpoint: &str) {
+    create_provider(app, "openai-chat", endpoint).await;
+}
+pub(super) async fn create_provider(app: &mut App, provider: &str, endpoint: &str) {
     // PATH supplies a nonsecret fixture token without mutating process-global
     // environment (unsafe in edition 2024). The endpoint is local only.
     app.form = Some(Form {
-        fields: ["openai-chat", "fixture-model", endpoint, "PATH", "120"]
+        fields: [provider, "fixture-model", endpoint, "PATH", "120"]
             .into_iter()
             .map(|v| TextArea::from([v]))
             .collect(),
@@ -69,11 +72,19 @@ impl Server {
         let release = Arc::new(Semaphore::new(0));
         let barrier = release.clone();
         let task = tokio::spawn(async move {
+            // Owned children are aborted when the listener task is aborted.
+            let mut children = tokio::task::JoinSet::new();
             loop {
-                let (mut socket, _) = listener.accept().await.unwrap();
+                let (mut socket, _) = tokio::select! {
+                    socket = listener.accept() => socket.unwrap(),
+                    completed = children.join_next(), if !children.is_empty() => {
+                        completed.unwrap().unwrap();
+                        continue;
+                    },
+                };
                 let captured = captured.clone();
                 let barrier = barrier.clone();
-                tokio::spawn(async move {
+                children.spawn(async move {
                     let mut data = Vec::new();
                     let (header_end, content_len) = loop {
                         let mut chunk = [0; 4096];
@@ -108,13 +119,12 @@ impl Server {
                         serde_json::from_slice(&data[header_end..header_end + content_len])
                             .unwrap(),
                     );
+                    let prefix = r#"data: {"id":"fixture","choices":[{"index":0,"delta":{"content":"你好，terminal 👩‍💻"},"finish_reason":null}]}"#.to_owned() + "\n\n";
+                    let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await;
+                    let _ = socket.write_all(format!("{:x}\r\n{prefix}\r\n", prefix.len()).as_bytes()).await;
                     barrier.acquire().await.unwrap().forget();
-                    let body = r#"{"id":"fixture","object":"chat.completion","created":0,"model":"fixture-model","choices":[{"index":0,"message":{"role":"assistant","content":"你好，terminal 👩‍💻"},"finish_reason":"stop"}]}"#;
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    let _ = socket.write_all(response.as_bytes()).await;
+                    let suffix = "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+                    let _ = socket.write_all(format!("{:x}\r\n{suffix}\r\n0\r\n\r\n", suffix.len()).as_bytes()).await;
                 });
             }
         });
