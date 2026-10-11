@@ -11,6 +11,7 @@ fn call(wire: &str) -> ContextBlock {
         BlockMeta {
             provider_call_id: Some(wire.into()),
             source: Some("assistant".into()),
+            wire: None,
         },
     )
 }

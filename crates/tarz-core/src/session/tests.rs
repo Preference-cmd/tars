@@ -27,6 +27,7 @@ fn request(key: &str) -> SubmitRequest {
             BlockMeta {
                 source: Some("test".to_owned()),
                 provider_call_id: None,
+                wire: None,
             },
         )],
     }
@@ -325,14 +326,14 @@ impl causa::kernel::ModelGateway for FinalGateway {
         _: &causa::kernel::ModelRequest,
         _: &causa::kernel::CallControl,
     ) -> Result<causa::kernel::ModelOutput, causa::kernel::ModelInvokeError> {
-        use causa::kernel::{ModelOutput, ModelResponse, ModelStopReason, TextPayload};
+        use causa::kernel::{ModelItem, ModelOutput, ModelResponse, ModelStopReason};
         Ok(ModelOutput {
             response: ModelResponse {
-                text: TextPayload::new("finished"),
-                tool_calls: Vec::new(),
+                items: vec![ModelItem::text("finished")],
             },
             usage: None,
             stop_reason: ModelStopReason::EndTurn,
+            raw_stop_reason: None,
             reasoning: None,
         })
     }
@@ -378,7 +379,7 @@ async fn cancellation_between_runner_return_and_publication_cannot_reclassify_re
         .await
         .unwrap();
     assert!(
-        matches!(observed.state, WorkState::Finished(result) if matches!(&*result, WorkResult::Run(TurnResult::Completed { final_output }) if final_output.response.text.0 == "finished"))
+        matches!(observed.state, WorkState::Finished(result) if matches!(&*result, WorkResult::Run(TurnResult::Completed { final_output }) if final_output.response.text() == "finished"))
     );
     assert_eq!(
         session

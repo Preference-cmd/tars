@@ -7,8 +7,11 @@ use causa::kernel::{
     ToolSurface,
 };
 use causa::protocol::translation::{
-    anthropic::render_anthropic_messages, media::MediaSet,
-    openai_chat::render_openai_chat_messages, openai_responses::render_openai_responses_input,
+    anthropic::render_anthropic_messages,
+    media::MediaSet,
+    openai_chat::render_openai_chat_messages,
+    openai_responses::render_openai_responses_input,
+    render_options::{AnthropicRenderOptions, ChatRenderOptions, ResponsesRenderOptions},
 };
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
@@ -114,23 +117,44 @@ pub(super) fn render(context: &Context, definition: &SessionDefinition) -> Resul
     let frame = context.frame();
     let media = MediaSet::new();
     let tools = ToolSurface::default();
-    let generation = GenerationOptions::default();
-    let model = ModelRef::new(&definition.model);
-    let render = match definition.provider {
-        Provider::OpenAiChat => render_openai_chat_messages,
-        Provider::OpenAiResponses => render_openai_responses_input,
-        Provider::Anthropic => render_anthropic_messages,
+    // Rendering is checked only; no request is sent. The limit is present
+    // because the Anthropic renderer rejects a request without one.
+    let generation = GenerationOptions {
+        max_tokens: Some(4096),
+        ..Default::default()
     };
-    render(
-        &frame,
-        &media,
-        &tools,
-        &generation,
-        &model,
-        CacheDirective::None,
-    )
-    .map(|_| ())
-    .map_err(|error| bounded(&error.to_string(), 512))
+    let model = ModelRef::new(&definition.model);
+    let res = match definition.provider {
+        Provider::OpenAiChat => render_openai_chat_messages(
+            &frame,
+            &media,
+            &tools,
+            &generation,
+            &model,
+            CacheDirective::None,
+            &ChatRenderOptions::default(),
+        ),
+        Provider::OpenAiResponses => render_openai_responses_input(
+            &frame,
+            &media,
+            &tools,
+            &generation,
+            &model,
+            CacheDirective::None,
+            &ResponsesRenderOptions::default(),
+        ),
+        Provider::Anthropic => render_anthropic_messages(
+            &frame,
+            &media,
+            &tools,
+            &generation,
+            &model,
+            CacheDirective::None,
+            &AnthropicRenderOptions::default(),
+        ),
+    };
+    res.map(|_| ())
+        .map_err(|error| bounded(&error.to_string(), 512))
 }
 
 pub(super) fn diagnose(context: &Context, definition: &SessionDefinition) -> RepairDiagnosis {

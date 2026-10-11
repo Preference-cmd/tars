@@ -1,7 +1,7 @@
 use super::*;
 use causa::kernel::{
-    CallControl, Context, ModelGateway, ModelInvokeError, ModelInvokeErrorKind, ModelOutput,
-    ModelRef, ModelRequest, ModelResponse, ModelStopReason, ModelStream, StreamDelta, TextPayload,
+    CallControl, Context, ModelGateway, ModelInvokeError, ModelInvokeErrorKind, ModelItem,
+    ModelOutput, ModelRef, ModelRequest, ModelResponse, ModelStopReason, ModelStream, StreamDelta,
 };
 use causa::runtime::{
     RunEvent, RunObserver, ToolExecutor, ToolExecutorOptions, TurnResult, TurnRunOptions,
@@ -54,12 +54,13 @@ impl ModelGateway for ScriptGateway {
                     }
                     match ending {
                         Ending::Complete => Some(StreamDelta::Done {
-                            stop_reason: ModelStopReason::EndTurn,
                             final_output: final_output(),
                         }),
                         Ending::Error => Some(StreamDelta::Error {
-                            kind: ModelInvokeErrorKind::Permanent,
-                            message: "script stream failure".into(),
+                            error: ModelInvokeError::new(
+                                ModelInvokeErrorKind::Permanent,
+                                "script stream failure",
+                            ),
                         }),
                         Ending::Eof => None,
                     }
@@ -73,11 +74,11 @@ impl ModelGateway for ScriptGateway {
 pub(crate) fn final_output() -> ModelOutput {
     ModelOutput {
         response: ModelResponse {
-            text: TextPayload::new("authoritative saved output"),
-            tool_calls: vec![],
+            items: vec![ModelItem::text("authoritative saved output")],
         },
         usage: None,
         stop_reason: ModelStopReason::EndTurn,
+        raw_stop_reason: None,
         reasoning: None,
     }
 }
@@ -186,7 +187,7 @@ async fn session_progress_precedes_terminal_and_preserves_original_observer() {
         .await
         .unwrap();
     assert!(
-        matches!(result.state,WorkState::Finished(result) if matches!(&*result,WorkResult::Run(TurnResult::Completed{final_output}) if final_output.response.text.0=="authoritative saved output"))
+        matches!(result.state,WorkState::Finished(result) if matches!(&*result,WorkResult::Run(TurnResult::Completed{final_output}) if final_output.response.text()=="authoritative saved output"))
     );
     assert_eq!(
         recv(&mut progress).await.update,
@@ -379,12 +380,14 @@ impl ModelGateway for RoundGateway {
         if request.invocation_id.round_id.0 == 0 {
             output
                 .response
-                .tool_calls
-                .push(causa::kernel::ToolCallDraft {
-                    tool_name: "round_tool".into(),
-                    arguments: serde_json::json!({}),
-                    provider_call_id: Some("round-call".into()),
-                });
+                .items
+                .push(causa::kernel::ModelItem::tool_call(
+                    causa::kernel::ToolCallDraft {
+                        tool_name: "round_tool".into(),
+                        arguments: serde_json::json!({}),
+                        provider_call_id: Some("round-call".into()),
+                    },
+                ));
             output.stop_reason = ModelStopReason::ToolUse;
         }
         Ok(Box::pin(futures_util::stream::iter(vec![
@@ -392,7 +395,6 @@ impl ModelGateway for RoundGateway {
                 delta: format!("round {} preview", request.invocation_id.round_id.0),
             },
             StreamDelta::Done {
-                stop_reason: output.stop_reason,
                 final_output: output,
             },
         ])))

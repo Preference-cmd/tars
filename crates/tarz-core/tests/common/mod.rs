@@ -23,6 +23,7 @@ pub fn block(text: &str) -> ContextBlock {
         BlockMeta {
             source: Some("user".into()),
             provider_call_id: Some(format!("provenance:{text}")),
+            wire: None,
         },
     )
 }
@@ -35,29 +36,31 @@ pub fn request(key: &str, blocks: Vec<ContextBlock>) -> SubmitRequest {
 pub fn final_output(text: &str) -> ModelOutput {
     ModelOutput {
         response: ModelResponse {
-            text: TextPayload::new(text),
-            tool_calls: vec![],
+            items: vec![ModelItem::text(text)],
         },
         usage: None,
         stop_reason: ModelStopReason::EndTurn,
+        raw_stop_reason: None,
         reasoning: None,
     }
 }
 pub fn tool_output(names: &[&str]) -> ModelOutput {
     ModelOutput {
         response: ModelResponse {
-            text: TextPayload::new(""),
-            tool_calls: names
+            items: names
                 .iter()
-                .map(|name| ToolCallDraft {
-                    tool_name: (*name).into(),
-                    arguments: serde_json::json!({"original":name}),
-                    provider_call_id: Some(format!("provider:{name}")),
+                .map(|name| {
+                    ModelItem::tool_call(ToolCallDraft {
+                        tool_name: (*name).into(),
+                        arguments: serde_json::json!({"original":name}),
+                        provider_call_id: Some(format!("provider:{name}")),
+                    })
                 })
                 .collect(),
         },
         usage: None,
         stop_reason: ModelStopReason::ToolUse,
+        raw_stop_reason: None,
         reasoning: None,
     }
 }
@@ -124,7 +127,7 @@ pub fn completed(result: &WorkResult, text: &str) {
     let WorkResult::Run(TurnResult::Completed { final_output }) = result else {
         panic!("unexpected result: {result:?}")
     };
-    assert_eq!(final_output.response.text.0, text);
+    assert_eq!(final_output.response.text(), text);
 }
 pub fn context(session: &mut Session) -> Vec<ContextBlock> {
     session

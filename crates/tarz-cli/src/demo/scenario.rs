@@ -135,7 +135,7 @@ async fn completed(handle: &SessionHandle, work: &WorkRef) -> Result<String, Fai
     match observation.state {
         WorkState::Finished(result) => match result.as_ref() {
             WorkResult::Run(TurnResult::Completed { final_output }) => {
-                Ok(final_output.response.text.0.clone())
+                Ok(final_output.response.text())
             }
             other => Err(std::io::Error::other(format!("demo work stopped: {other:?}")).into()),
         },

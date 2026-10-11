@@ -1,6 +1,6 @@
 use super::types::*;
-use causa::kernel::{Context, ContextBlock, ToolBatch, TurnId};
-use causa::runtime::{RunControl, TurnRunOptions, TurnRunner};
+use causa::kernel::{CallControl, Context, ContextBlock, ToolBatch, TurnId};
+use causa::runtime::{TurnRunOptions, TurnRunner};
 use std::collections::HashMap;
 use std::error::Error;
 use std::future::Future;
@@ -16,7 +16,7 @@ type AssemblyFuture = Pin<
     >,
 >;
 pub(super) type Assemble =
-    dyn Fn(WorkRef, RunControl, super::ToolReporter) -> AssemblyFuture + Send + Sync;
+    dyn Fn(WorkRef, CallControl, super::ToolReporter) -> AssemblyFuture + Send + Sync;
 
 pub(super) struct Shared {
     pub conversation_id: ConversationId,
@@ -43,7 +43,7 @@ pub(super) struct Entry {
 }
 pub(super) struct Record {
     pub work: WorkRef,
-    pub control: RunControl,
+    pub control: CallControl,
     pub state: Mutex<WorkState>,
     pub changed: Notify,
     pub tools: super::ToolReporter,

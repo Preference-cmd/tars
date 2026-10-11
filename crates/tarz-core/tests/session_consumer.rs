@@ -92,7 +92,7 @@ async fn public_consumer_runs_tools_summarizes_replays_and_rebuilds_only_materia
         let prepared = prepared.clone();
         let processors = processors.clone();
         let observed = observed.clone();
-        move |work: WorkRef, _: RunControl| {
+        move |work: WorkRef, _: CallControl| {
             assemblies.lock().unwrap().push(work.clone());
             let gateway = gateway.clone();
             let tools = tools.clone();

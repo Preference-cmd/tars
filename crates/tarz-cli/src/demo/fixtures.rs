@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use causa::kernel::{
     BlockContent, BlockMeta, CallControl, ContentPart, Context, ContextBlock, ModelGateway,
-    ModelInvokeError, ModelOutput, ModelRef, ModelRequest, ModelResponse, ModelStopReason,
-    TextPayload, Tool, ToolCallContext, ToolCallDraft, ToolDefinition, ToolOutput,
+    ModelInvokeError, ModelItem, ModelOutput, ModelRef, ModelRequest, ModelResponse,
+    ModelStopReason, TextPayload, Tool, ToolCallContext, ToolCallDraft, ToolDefinition, ToolOutput,
     ToolResultPayload, ToolResultStatus,
 };
 use causa::runtime::{ToolExecutor, TurnRunOptions, TurnRunner, new_block_id};
@@ -71,22 +71,17 @@ impl ModelGateway for ScriptedGateway {
             .any(|block| matches!(block.content(), BlockContent::ToolResult(_)));
         Ok(ModelOutput {
             response: ModelResponse {
-                text: TextPayload::new(if has_result {
-                    format!(
+                items: if has_result {
+                    vec![ModelItem::text(format!(
                         "Offline result: {} material blocks.",
                         request.frame.blocks.len()
-                    )
+                    ))]
                 } else {
-                    String::new()
-                }),
-                tool_calls: if has_result {
-                    vec![]
-                } else {
-                    vec![ToolCallDraft {
+                    vec![ModelItem::tool_call(ToolCallDraft {
                         tool_name: "demo_status".into(),
                         arguments: serde_json::json!({"work": request.invocation_id.turn_id.0}),
                         provider_call_id: None,
-                    }]
+                    })]
                 },
             },
             usage: None,
@@ -95,6 +90,7 @@ impl ModelGateway for ScriptedGateway {
             } else {
                 ModelStopReason::ToolUse
             },
+            raw_stop_reason: None,
             reasoning: None,
         })
     }

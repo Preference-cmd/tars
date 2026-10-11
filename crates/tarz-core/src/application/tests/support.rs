@@ -59,11 +59,11 @@ impl causa::kernel::ModelGateway for Gateway {
         }
         Ok(causa::kernel::ModelOutput {
             response: causa::kernel::ModelResponse {
-                text: causa::kernel::TextPayload::new("completed original"),
-                tool_calls: vec![],
+                items: vec![causa::kernel::ModelItem::text("completed original")],
             },
             usage: None,
             stop_reason: causa::kernel::ModelStopReason::EndTurn,
+            raw_stop_reason: None,
             reasoning: None,
         })
     }
@@ -172,15 +172,17 @@ impl causa::kernel::ModelGateway for ToolGateway {
     ) -> Result<causa::kernel::ModelOutput, causa::kernel::ModelInvokeError> {
         Ok(causa::kernel::ModelOutput {
             response: causa::kernel::ModelResponse {
-                text: causa::kernel::TextPayload::new(""),
-                tool_calls: vec![causa::kernel::ToolCallDraft {
-                    tool_name: "fixture".into(),
-                    arguments: serde_json::json!({}),
-                    provider_call_id: None,
-                }],
+                items: vec![causa::kernel::ModelItem::tool_call(
+                    causa::kernel::ToolCallDraft {
+                        tool_name: "fixture".into(),
+                        arguments: serde_json::json!({}),
+                        provider_call_id: None,
+                    },
+                )],
             },
             usage: None,
             stop_reason: causa::kernel::ModelStopReason::ToolUse,
+            raw_stop_reason: None,
             reasoning: None,
         })
     }

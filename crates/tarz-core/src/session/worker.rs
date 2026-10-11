@@ -1,7 +1,6 @@
 use super::state::{Record, Shared};
 use super::types::{WorkResult, WorkState, WorkerFault};
-use causa::kernel::{Context, ControlError, ToolBatch};
-use causa::runtime::RunControl;
+use causa::kernel::{CallControl, Context, ControlError, ToolBatch};
 use std::any::Any;
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -65,7 +64,7 @@ pub(super) fn start(runtime: Handle, shared: Arc<Shared>, record: Arc<Record>, c
 
 async fn run(shared: Arc<Shared>, record: Arc<Record>, context: Context) -> Returned {
     let control = &record.control;
-    if let Err(error) = control.call_control().check() {
+    if let Err(error) = control.check() {
         return stopped(context, error);
     }
     record.publish(WorkState::Running);
@@ -76,7 +75,7 @@ async fn run(shared: Arc<Shared>, record: Arc<Record>, context: Context) -> Retu
     };
     // Control wins when the assembly result and cancellation are selected in the
     // same progression. Once a terminal result is selected, it stays frozen.
-    if let Err(error) = control.call_control().check() {
+    if let Err(error) = control.check() {
         return stopped(context, error);
     }
     let (runner, mut options) = match assembled {
@@ -120,7 +119,7 @@ fn stopped(context: Context, error: ControlError) -> Returned {
     }
 }
 
-async fn wait_for_stop(control: &RunControl) -> ControlError {
+async fn wait_for_stop(control: &CallControl) -> ControlError {
     match control.deadline() {
         Some(deadline) => tokio::select! {
             biased;

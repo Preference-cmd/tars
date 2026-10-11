@@ -4,7 +4,7 @@ use crate::session::{Session, SessionError, SubmitRequest, WorkResult, WorkState
 use async_trait::async_trait;
 use causa::kernel::{
     BlockContent, BlockMeta, CallControl, Context, ContextBlock, ModelGateway, ModelInvokeError,
-    ModelOutput, ModelRequest, ModelResponse, ModelStopReason, TextPayload, Tool, ToolCallContext,
+    ModelItem, ModelOutput, ModelRequest, ModelResponse, ModelStopReason, Tool, ToolCallContext,
     ToolCallPayload, ToolDefinition, ToolOutput, ToolResultPayload, ToolResultStatus,
 };
 use causa::runtime::{ToolExecutor, TurnResult, TurnRunner, new_block_id};
@@ -27,11 +27,11 @@ impl ModelGateway for Gateway {
         self.requests.lock().unwrap().push(request.clone());
         Ok(ModelOutput {
             response: ModelResponse {
-                text: TextPayload::new("fixed definition completion"),
-                tool_calls: vec![],
+                items: vec![ModelItem::text("fixed definition completion")],
             },
             usage: None,
             stop_reason: ModelStopReason::EndTurn,
+            raw_stop_reason: None,
             reasoning: None,
         })
     }
@@ -116,6 +116,7 @@ async fn managed_reopen_preserves_definition_material_identity_and_restores_no_w
         BlockMeta {
             source: Some("preserved-source".into()),
             provider_call_id: Some("old-provider-call".into()),
+            wire: None,
         },
     );
     let old_result = ContextBlock::new(

@@ -1,8 +1,8 @@
 use super::handle::SessionHandle;
 use super::state::{Shared, State};
 use super::types::*;
-use causa::kernel::{Context, ToolBatch, TurnId};
-use causa::runtime::{RunControl, TurnRunOptions, TurnRunner};
+use causa::kernel::{CallControl, Context, ToolBatch, TurnId};
+use causa::runtime::{TurnRunOptions, TurnRunner};
 use std::collections::HashMap;
 use std::error::Error;
 use std::future::Future;
@@ -23,7 +23,7 @@ impl Session {
         config: SessionConfig,
     ) -> Self
     where
-        F: Fn(WorkRef, RunControl) -> Fut + Send + Sync + 'static,
+        F: Fn(WorkRef, CallControl) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(Arc<TurnRunner>, TurnRunOptions), Box<dyn Error + Send + Sync>>>
             + Send
             + 'static,
@@ -45,7 +45,7 @@ impl Session {
         config: SessionConfig,
     ) -> Self
     where
-        F: Fn(WorkRef, RunControl, super::ToolReporter) -> Fut + Send + Sync + 'static,
+        F: Fn(WorkRef, CallControl, super::ToolReporter) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(Arc<TurnRunner>, TurnRunOptions), Box<dyn Error + Send + Sync>>>
             + Send
             + 'static,

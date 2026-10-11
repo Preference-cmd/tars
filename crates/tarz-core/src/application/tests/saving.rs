@@ -40,7 +40,7 @@ async fn finished_work_keeps_exact_replay_but_blocks_t2_until_save_and_preserves
     session.wait_saved().await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(
-        matches!(session.observe(&receipt.work).unwrap().state,WorkState::Finished(result) if matches!(&*result,WorkResult::Run(causa::runtime::TurnResult::Completed{final_output}) if final_output.response.text.0=="completed original"))
+        matches!(session.observe(&receipt.work).unwrap().state,WorkState::Finished(result) if matches!(&*result,WorkResult::Run(causa::runtime::TurnResult::Completed{final_output}) if final_output.response.text()=="completed original"))
     );
     let next = session.submit(t2).unwrap();
     finished(&session, &next.work).await;

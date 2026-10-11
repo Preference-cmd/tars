@@ -5,8 +5,8 @@ use crate::definition::{CredentialRef, Provider, SessionDefinition};
 use crate::session::{Session, SubmitRequest, WorkResult, WorkState};
 use async_trait::async_trait;
 use causa::kernel::{
-    CallControl, Context, ModelGateway, ModelInvokeError, ModelOutput, ModelRequest, ModelResponse,
-    ModelStopReason, TextPayload,
+    CallControl, Context, ModelGateway, ModelInvokeError, ModelItem, ModelOutput, ModelRequest,
+    ModelResponse, ModelStopReason,
 };
 use causa::runtime::{ToolExecutor, TurnResult, TurnRunner};
 use std::sync::{
@@ -26,11 +26,11 @@ impl ModelGateway for ProbeGateway {
         self.0.fetch_add(1, Ordering::Relaxed);
         Ok(ModelOutput {
             response: ModelResponse {
-                text: TextPayload::new("measured completion"),
-                tool_calls: vec![],
+                items: vec![ModelItem::text("measured completion")],
             },
             usage: None,
             stop_reason: ModelStopReason::EndTurn,
+            raw_stop_reason: None,
             reasoning: None,
         })
     }

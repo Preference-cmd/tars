@@ -101,28 +101,33 @@ async fn execute(options: RunOptions) -> ExitCode {
     ExitCode::from(code)
 }
 
-pub(super) fn classify(result: &WorkResult) -> (&'static str, &str, Option<&'static str>, u8) {
+pub(super) fn classify(result: &WorkResult) -> (&'static str, String, Option<&'static str>, u8) {
     match result {
         WorkResult::Run(TurnResult::Completed { final_output }) => {
-            ("completed", &final_output.response.text.0, None, 0)
+            ("completed", final_output.response.text(), None, 0)
         }
         WorkResult::StoppedBeforeRun(ControlError::Cancelled)
         | WorkResult::Run(TurnResult::Interrupted {
             cause: TurnInterruption::Cancelled { .. },
-        }) => ("cancelled", "", Some("work cancelled"), 130),
+        }) => ("cancelled", String::new(), Some("work cancelled"), 130),
         WorkResult::StoppedBeforeRun(ControlError::TimedOut)
         | WorkResult::Run(TurnResult::Interrupted {
             cause: TurnInterruption::DeadlineExceeded { .. },
-        }) => ("timed_out", "", Some("work deadline exceeded"), 124),
+        }) => (
+            "timed_out",
+            String::new(),
+            Some("work deadline exceeded"),
+            124,
+        ),
         WorkResult::Run(TurnResult::Interrupted {
             cause: TurnInterruption::ModelCallFailed { .. },
         }) => (
             "failed",
-            "",
+            String::new(),
             Some("model request failed; check provider, endpoint, model and credential"),
             1,
         ),
-        _ => ("failed", "", Some("work failed"), 1),
+        _ => ("failed", String::new(), Some("work failed"), 1),
     }
 }
 

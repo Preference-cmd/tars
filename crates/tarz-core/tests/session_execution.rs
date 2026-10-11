@@ -353,7 +353,10 @@ async fn runner_failures_retain_typed_values_and_successful_prepare_edits() {
 #[tokio::test]
 async fn malformed_output_is_returned_as_raw_typed_failure_without_material_commit() {
     let mut malformed = tool_output(&[" "]);
-    malformed.response.text = TextPayload::new("original body");
+    malformed
+        .response
+        .items
+        .insert(0, ModelItem::text("original body"));
     let gateway = Gateway::new(vec![malformed.clone()]);
     let mut session = simple_session(Context::new(), 1, gateway);
     let handle = session.handle();
@@ -376,11 +379,13 @@ async fn malformed_output_is_returned_as_raw_typed_failure_without_material_comm
         error,
         ModelBlockError::EmptyToolName { tool_index: 0 }
     ));
-    assert_eq!(output.response.text.0, "original body");
-    assert_eq!(output.response.tool_calls[0].tool_name, " ");
+    assert_eq!(output.response.text(), "original body");
+    let calls: Vec<_> = output.response.tool_calls().collect();
+    let malformed_calls: Vec<_> = malformed.response.tool_calls().collect();
+    assert_eq!(calls[0].tool_name, " ");
     assert_eq!(
-        output.response.tool_calls[0].provider_call_id,
-        malformed.response.tool_calls[0].provider_call_id
+        calls[0].provider_call_id,
+        malformed_calls[0].provider_call_id
     );
     assert_eq!(block_ids.len(), 2);
     assert_eq!(context(&mut session), input);

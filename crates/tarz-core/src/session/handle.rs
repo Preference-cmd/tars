@@ -1,7 +1,7 @@
 use super::state::{Entry, Record, Shared};
 use super::types::*;
 use super::worker;
-use causa::runtime::RunControl;
+use causa::kernel::CallControl;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
@@ -138,7 +138,7 @@ impl SessionHandle {
             conversation_id: self.shared.conversation_id.clone(),
             turn_id,
         };
-        let control = RunControl::new(CancellationToken::new(), deadline);
+        let control = CallControl::new(CancellationToken::new(), deadline);
         let original_blocks = request.blocks.clone();
         let context = state.context.as_mut().expect("idle context checked");
         if let Err(failure) = context.edit().append(request.blocks).commit() {

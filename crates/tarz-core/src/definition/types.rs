@@ -137,6 +137,12 @@ impl SessionDefinition {
             max_model_rounds: self.max_model_rounds,
             max_tool_calls: self.max_tool_calls,
         };
+        // Placeholder: the Anthropic renderer rejects a request without an
+        // output limit. The value belongs in the session definition; a long
+        // answer stops at this limit until it is configurable.
+        if self.provider == super::Provider::Anthropic {
+            options.generation.max_tokens = Some(4096);
+        }
         options
     }
 }

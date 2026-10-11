@@ -1,8 +1,8 @@
 use super::support::*;
 use causa::kernel::{
-    CallControl, ModelGateway, ModelInvokeError, ModelOutput, ModelRequest, ModelResponse,
-    ModelStopReason, TextPayload, Tool, ToolCallContext, ToolCallDraft, ToolDefinition, ToolOutput,
-    ToolResultPayload, ToolResultStatus,
+    CallControl, ModelGateway, ModelInvokeError, ModelItem, ModelOutput, ModelRequest,
+    ModelResponse, ModelStopReason, TextPayload, Tool, ToolCallContext, ToolCallDraft,
+    ToolDefinition, ToolOutput, ToolResultPayload, ToolResultStatus,
 };
 use causa::runtime::RunEvent;
 
@@ -29,31 +29,29 @@ impl ModelGateway for Model {
         _: &CallControl,
     ) -> Result<ModelOutput, ModelInvokeError> {
         let first = self.0.fetch_add(1, Ordering::SeqCst) == 0;
+        let mut items = vec![ModelItem::text(if first {
+            "original tool request"
+        } else {
+            "new work done"
+        })];
+        if first {
+            items.extend((0..2).map(|index| {
+                ModelItem::tool_call(ToolCallDraft {
+                    tool_name: "read_file".into(),
+                    arguments: serde_json::json!({"index":index}),
+                    provider_call_id: Some(format!("original-{index}")),
+                })
+            }));
+        }
         Ok(ModelOutput {
-            response: ModelResponse {
-                text: TextPayload::new(if first {
-                    "original tool request"
-                } else {
-                    "new work done"
-                }),
-                tool_calls: if first {
-                    (0..2)
-                        .map(|index| ToolCallDraft {
-                            tool_name: "read_file".into(),
-                            arguments: serde_json::json!({"index":index}),
-                            provider_call_id: Some(format!("original-{index}")),
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                },
-            },
+            response: ModelResponse { items },
             usage: None,
             stop_reason: if first {
                 ModelStopReason::ToolUse
             } else {
                 ModelStopReason::EndTurn
             },
+            raw_stop_reason: None,
             reasoning: None,
         })
     }

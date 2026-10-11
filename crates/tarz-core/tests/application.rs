@@ -68,6 +68,6 @@ async fn application_preserves_uncommitted_model_output_and_materials() {
     else {
         panic!("{:?}", report.result)
     };
-    assert_eq!(output.response.text.0, "uncommitted answer");
+    assert_eq!(output.response.text(), "uncommitted answer");
     assert_eq!(report.materials.unwrap().blocks(), &[input]);
 }

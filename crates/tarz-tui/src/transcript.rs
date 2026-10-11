@@ -30,6 +30,7 @@ impl Transcript {
                         match part {
                             ContentPart::Text(value) => text.push_str(&value.0),
                             ContentPart::Media(_) => text.push_str("[media reference]"),
+                            ContentPart::Sealed(_) => {}
                         }
                     }
                 }
