@@ -3,8 +3,7 @@ use crate::application::{ApplicationError, ManagedSession};
 use crate::definition::{Provider, SessionDefinition};
 use crate::session::WorkRef;
 use causa::kernel::{
-    BlockContent, BlockId, CacheDirective, ContentPart, Context, GenerationOptions, ModelRef,
-    ToolSurface,
+    BlockContent, BlockId, CacheDirective, ContentPart, Context, ModelRef, ToolSurface,
 };
 use causa::protocol::translation::{
     anthropic::render_anthropic_messages,
@@ -117,12 +116,11 @@ pub(super) fn render(context: &Context, definition: &SessionDefinition) -> Resul
     let frame = context.frame();
     let media = MediaSet::new();
     let tools = ToolSurface::default();
-    // Rendering is checked only; no request is sent. The limit is present
-    // because the Anthropic renderer rejects a request without one.
-    let generation = GenerationOptions {
-        max_tokens: Some(4096),
-        ..Default::default()
-    };
+    // Only the materials are checked and no request is sent, so a session
+    // without an output limit gets a stand-in: the Anthropic renderer rejects
+    // a missing limit, which says nothing about the materials.
+    let mut generation = definition.run_options().generation;
+    generation.max_tokens = generation.max_tokens.or(Some(1));
     let model = ModelRef::new(&definition.model);
     let res = match definition.provider {
         Provider::OpenAiChat => render_openai_chat_messages(

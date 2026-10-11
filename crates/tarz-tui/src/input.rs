@@ -37,6 +37,8 @@ pub(crate) struct Form {
     pub selected: usize,
     pub error: String,
     pub limits: (usize, u32, u32),
+    /// Output token limit and reasoning effort carried over from the preset.
+    pub generation: (Option<u32>, Option<causa::kernel::ReasoningEffort>),
     pub tool_limits: WorkspaceToolLimits,
 }
 pub(crate) const FIELD_NAMES: [&str; 7] = [
@@ -59,6 +61,7 @@ impl Default for Form {
             selected: 1,
             error: String::new(),
             limits: (256, 10, 64),
+            generation: (None, None),
             tool_limits: WorkspaceToolLimits::default(),
         }
     }
@@ -100,6 +103,7 @@ impl Form {
             selected: 1,
             error: String::new(),
             tool_limits: preset.tool_limits.clone(),
+            generation: (preset.max_tokens, preset.reasoning_effort),
             limits: (
                 preset.retained_work_capacity,
                 preset.max_model_rounds,
@@ -135,6 +139,8 @@ impl Form {
                     capacity: Some(self.limits.0),
                     max_model_rounds: Some(self.limits.1),
                     max_tool_calls: Some(self.limits.2),
+                    max_tokens: self.generation.0,
+                    reasoning_effort: self.generation.1,
                     workspace_root: (!values[5].is_empty()).then(|| values[5].clone().into()),
                     tools: Some(parse_tools(&values[6]).map_err(|e| e.to_string())?),
                     tool_limits: Some(self.tool_limits.clone()),

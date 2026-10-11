@@ -25,6 +25,8 @@ Create options:
   --capacity          Retained work record count (default 256; not a byte limit)
   --max-model-rounds  Per-work model call limit (default 10)
   --max-tool-calls    Per-work tool call limit (default 64)
+  --max-tokens        Output token limit per model call (no default; required by anthropic)
+  --reasoning-effort  none | minimal | low | medium | high | xhigh (default: provider's)
   --workspace         Root directory for selected read-only tools
   --tools             Comma-separated list_directory,read_file,search_text (default empty)
   --load              Initial Context material file; creates a new conversation

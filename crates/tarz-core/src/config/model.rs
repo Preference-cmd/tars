@@ -2,6 +2,7 @@ use super::file::ConfigError;
 use crate::definition::{
     CredentialRef, Provider, SessionDefinition, WorkspaceTool, WorkspaceToolLimits,
 };
+use causa::kernel::ReasoningEffort;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +25,10 @@ pub struct DefinitionOverrides {
     pub max_model_rounds: Option<u32>,
     /// Explicit tool declaration limit.
     pub max_tool_calls: Option<u32>,
+    /// Explicit output token limit per model call.
+    pub max_tokens: Option<u32>,
+    /// Explicit reasoning effort.
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Explicit root resolved relative to the current directory at resolution time.
     pub workspace_root: Option<PathBuf>,
     /// Explicit selected tools; Some(empty) disables preset tools.
@@ -43,6 +48,8 @@ pub(super) struct Profile {
     capacity: Option<usize>,
     max_model_rounds: Option<u32>,
     max_tool_calls: Option<u32>,
+    max_tokens: Option<u32>,
+    reasoning_effort: Option<ReasoningEffort>,
     pub(super) workspace_root: Option<PathBuf>,
     tools: Option<Vec<WorkspaceTool>>,
     tool_limits: Option<ProfileToolLimits>,
@@ -140,6 +147,12 @@ pub(super) fn resolve(
             .max_tool_calls
             .or(profile.and_then(|p| p.max_tool_calls))
             .unwrap_or(64),
+        // No default: an unset limit stays unset, and the Anthropic protocol
+        // then rejects the request before it is sent.
+        max_tokens: options.max_tokens.or(profile.and_then(|p| p.max_tokens)),
+        reasoning_effort: options
+            .reasoning_effort
+            .or(profile.and_then(|p| p.reasoning_effort)),
         workspace_root,
         tools: options
             .tools

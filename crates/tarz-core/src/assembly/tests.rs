@@ -22,6 +22,8 @@ fn definition() -> SessionDefinition {
         retained_work_capacity: 1,
         max_model_rounds: 0,
         max_tool_calls: 0,
+        max_tokens: None,
+        reasoning_effort: None,
         workspace_root: None,
         tools: vec![],
         tool_limits: Default::default(),

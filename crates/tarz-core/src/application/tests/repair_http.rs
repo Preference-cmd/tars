@@ -48,6 +48,7 @@ async fn repair_real_three_protocols_cancel_adopt_or_reopen_remove_save_and_cont
             def.tools = vec![WorkspaceTool::ReadFile];
             def.max_model_rounds = 4;
             def.max_tool_calls = 4;
+            def.max_tokens = (provider == Provider::Anthropic).then_some(1024);
             let mut session = host
                 .create(PreparedCreate::persistent(def, Context::new()))
                 .await

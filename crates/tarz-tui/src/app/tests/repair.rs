@@ -35,6 +35,8 @@ async fn incomplete(app: &mut crate::app::App, provider: Provider, endpoint: &st
         retained_work_capacity: 16,
         max_model_rounds: 4,
         max_tool_calls: 4,
+        max_tokens: (provider == Provider::Anthropic).then_some(1024),
+        reasoning_effort: None,
         workspace_root: None,
         tools: vec![],
         tool_limits: Default::default(),

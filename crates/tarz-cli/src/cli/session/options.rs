@@ -95,7 +95,8 @@ impl SessionCommand {
                 }
                 "--provider" | "--model" | "--api-key-env" | "--endpoint" | "--timeout-secs"
                 | "--capacity" | "--max-model-rounds" | "--max-tool-calls" | "--load"
-                | "--profile" | "--workspace" | "--tools"
+                | "--max-tokens" | "--reasoning-effort" | "--profile" | "--workspace"
+                | "--tools"
                     if command == "create" =>
                 {
                     insert(&mut values, flag, &mut args)?;

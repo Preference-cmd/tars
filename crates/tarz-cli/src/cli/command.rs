@@ -23,6 +23,8 @@ Run options:
   --api-key-env  Credential variable (default OPENAI_API_KEY / ANTHROPIC_API_KEY)
   --endpoint     Full HTTP endpoint override, including the path
   --timeout-secs Work deadline, 1–86400 seconds (default 120)
+  --max-tokens   Output token limit per model call (no default; required by anthropic)
+  --reasoning-effort  none | minimal | low | medium | high | xhigh (default: provider's)
   --workspace    Root directory for read-only tools; relative to current directory
   --tools        Comma-separated list_directory,read_file,search_text (default empty)
   --load         Import a Context material file into a new session

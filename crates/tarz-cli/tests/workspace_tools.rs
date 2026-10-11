@@ -46,6 +46,11 @@ fn actual_cli_process_runs_search_read_and_model_continuation_for_three_protocol
                 "--save",
             ])
             .arg(&material)
+            .args(if provider == "anthropic" {
+                vec!["--max-tokens", "1024"]
+            } else {
+                vec![]
+            })
             .output()
             .unwrap();
         assert!(

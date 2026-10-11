@@ -14,6 +14,9 @@ timeout_secs = 120
 capacity = 256
 max_model_rounds = 10
 max_tool_calls = 64
+# Output token limit per model call. No default; the anthropic protocol requires it.
+# max_tokens = 8192
+# reasoning_effort = "medium"  # none | minimal | low | medium | high | xhigh
 # Explicit opt-in: root alone does not enable tools.
 # workspace_root = "../my-project"
 # tools = ["list_directory", "read_file", "search_text"]

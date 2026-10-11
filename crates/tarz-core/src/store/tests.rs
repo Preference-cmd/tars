@@ -23,6 +23,8 @@ fn definition() -> SessionDefinition {
         retained_work_capacity: 16,
         max_model_rounds: 8,
         max_tool_calls: 0,
+        max_tokens: None,
+        reasoning_effort: None,
         workspace_root: None,
         tools: Vec::new(),
         tool_limits: Default::default(),

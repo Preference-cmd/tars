@@ -28,6 +28,8 @@ fn definition(provider: Provider, endpoint: &str, root: &Path) -> SessionDefinit
         retained_work_capacity: 8,
         max_model_rounds: 4,
         max_tool_calls: 3,
+        max_tokens: (provider == Provider::Anthropic).then_some(1024),
+        reasoning_effort: None,
         workspace_root: Some(root.canonicalize().unwrap()),
         tools: vec![WorkspaceTool::ReadFile],
         tool_limits: Default::default(),

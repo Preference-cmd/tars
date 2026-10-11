@@ -71,6 +71,18 @@ pub(super) fn definition(
             .map(u32::try_from)
             .transpose()
             .map_err(|_| "tool call limit too large")?,
+        max_tokens: number("--max-tokens")?
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| "output token limit too large")?,
+        reasoning_effort: string(values, "--reasoning-effort")?
+            .map(|value| {
+                serde_json::from_value(serde_json::Value::String(value)).map_err(|_| {
+                    "--reasoning-effort must be none, minimal, low, medium, high or xhigh"
+                        .to_owned()
+                })
+            })
+            .transpose()?,
     };
     config
         .definition(string(values, "--profile")?.as_deref(), overrides)

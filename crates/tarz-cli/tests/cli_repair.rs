@@ -67,6 +67,11 @@ fn create(dir: &Path, provider: &str, endpoint: &str) -> (String, std::path::Pat
         .arg(&store)
         .arg("--load")
         .arg(input)
+        .args(if provider == "anthropic" {
+            vec!["--max-tokens", "1024"]
+        } else {
+            vec![]
+        })
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");

@@ -182,6 +182,7 @@ async fn three_real_protocols_read_actual_workspace_and_tool_details_are_on_dema
             .into_iter()
             .map(|value| TextArea::from([value]))
             .collect(),
+            generation: ((provider == "anthropic").then_some(1024), None),
             ..Form::default()
         });
         app.event(ctrl('s'));

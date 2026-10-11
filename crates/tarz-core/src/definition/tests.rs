@@ -10,6 +10,8 @@ fn definition() -> SessionDefinition {
         retained_work_capacity: 0,
         max_model_rounds: 0,
         max_tool_calls: 0,
+        max_tokens: None,
+        reasoning_effort: None,
         workspace_root: None,
         tools: vec![],
         tool_limits: Default::default(),
@@ -124,4 +126,46 @@ fn persisted_no_workspace_must_be_explicit_null() {
     assert!(encoded["workspace_root"].is_null());
     encoded.as_object_mut().unwrap().remove("workspace_root");
     assert!(serde_json::from_value::<SessionDefinition>(encoded).is_err());
+}
+
+#[test]
+fn generation_choices_reach_run_options_and_have_no_default() {
+    let mut candidate = definition();
+    candidate.provider = Provider::Anthropic;
+    // No limit is invented, so the Anthropic renderer rejects the request.
+    assert_eq!(candidate.run_options().generation.max_tokens, None);
+    assert_eq!(candidate.run_options().generation.reasoning_effort, None);
+
+    candidate.max_tokens = Some(2048);
+    candidate.reasoning_effort = Some(causa::kernel::ReasoningEffort::High);
+    candidate.validate().unwrap();
+    let generation = candidate.run_options().generation;
+    assert_eq!(generation.max_tokens, Some(2048));
+    assert_eq!(
+        generation.reasoning_effort,
+        Some(causa::kernel::ReasoningEffort::High)
+    );
+    let encoded = serde_json::to_value(&candidate).unwrap();
+    assert_eq!(encoded["max_tokens"], 2048);
+    assert_eq!(encoded["reasoning_effort"], "high");
+    assert_eq!(
+        serde_json::from_value::<SessionDefinition>(encoded).unwrap(),
+        candidate
+    );
+
+    candidate.max_tokens = Some(0);
+    assert_eq!(
+        candidate.validate().unwrap_err(),
+        DefinitionError::InvalidMaxTokens
+    );
+}
+
+#[test]
+fn a_record_saved_before_the_generation_fields_reads_them_as_unset() {
+    let mut encoded = serde_json::to_value(definition()).unwrap();
+    let object = encoded.as_object_mut().unwrap();
+    object.remove("max_tokens").unwrap();
+    object.remove("reasoning_effort").unwrap();
+    let read = serde_json::from_value::<SessionDefinition>(encoded).unwrap();
+    assert_eq!(read, definition());
 }

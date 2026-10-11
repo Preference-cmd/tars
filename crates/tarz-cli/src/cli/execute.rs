@@ -119,6 +119,9 @@ pub(super) fn classify(result: &WorkResult) -> (&'static str, String, Option<&'s
             Some("work deadline exceeded"),
             124,
         ),
+        WorkResult::Run(TurnResult::Interrupted { cause }) if stop_reason(cause).is_some() => {
+            ("failed", String::new(), stop_reason(cause), 1)
+        }
         WorkResult::Run(TurnResult::Interrupted {
             cause: TurnInterruption::ModelCallFailed { .. },
         }) => (
@@ -140,4 +143,34 @@ pub(super) fn early_failure(json: bool, error: &str) -> ExitCode {
         ));
     }
     failure(error)
+}
+
+/// A failure the user can act on by changing a limit or the request, as
+/// opposed to a provider, endpoint or credential problem.
+fn stop_reason(cause: &TurnInterruption) -> Option<&'static str> {
+    use causa::kernel::ModelInvokeErrorKind;
+    Some(match cause {
+        TurnInterruption::ModelMaxTokens { .. } => {
+            "model output reached max_tokens; raise the limit and submit new work"
+        }
+        TurnInterruption::ModelContextWindowExceeded { .. } => {
+            "the conversation no longer fits the model's context window"
+        }
+        TurnInterruption::ModelRefusal { .. } => "the model refused the request",
+        TurnInterruption::ModelStopUnrecognized { .. } => {
+            "the provider stopped for a reason this version does not recognize"
+        }
+        TurnInterruption::MaxModelRounds { .. } => {
+            "model round limit reached; submit new work to continue"
+        }
+        TurnInterruption::MaxToolCalls { .. } => {
+            "tool call limit reached; submit new work to continue"
+        }
+        TurnInterruption::ModelCallFailed { error, .. }
+            if error.kind == ModelInvokeErrorKind::InvalidRequest =>
+        {
+            "model request was rejected as invalid; check max_tokens (required by anthropic) and reasoning effort"
+        }
+        _ => return None,
+    })
 }

@@ -184,3 +184,43 @@ fn explicit_workspace_resolution_freezes_current_directory() {
         String::from_utf8_lossy(&result.stderr)
     );
 }
+
+#[test]
+fn generation_settings_come_from_the_preset_unless_overridden() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let text = format!("{CONFIG}max_tokens = 4000\nreasoning_effort = \"low\"\n");
+    std::fs::write(&path, text).unwrap();
+    let config = Config::load(ConfigSource::File(path)).unwrap();
+    let preset = config
+        .definition(None, DefinitionOverrides::default())
+        .unwrap();
+    assert_eq!(preset.max_tokens, Some(4000));
+    assert_eq!(
+        preset.reasoning_effort,
+        Some(causa::kernel::ReasoningEffort::Low)
+    );
+    let overridden = config
+        .definition(
+            None,
+            DefinitionOverrides {
+                max_tokens: Some(9000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(overridden.max_tokens, Some(9000));
+
+    let unset = Config::load(ConfigSource::Disabled)
+        .unwrap()
+        .definition(
+            None,
+            DefinitionOverrides {
+                provider: Some(Provider::Anthropic),
+                model: Some("m".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(unset.max_tokens, None);
+}

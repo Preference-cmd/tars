@@ -69,6 +69,29 @@ fn result_label(result: &WorkResult) -> &'static str {
         | WorkResult::Run(TurnResult::Interrupted {
             cause: TurnInterruption::DeadlineExceeded { .. },
         }) => "Timed out",
+        WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::ModelMaxTokens { .. },
+        }) => "Output reached max_tokens; raise the limit and submit new work",
+        WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::ModelContextWindowExceeded { .. },
+        }) => "Conversation no longer fits the model's context window",
+        WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::ModelRefusal { .. },
+        }) => "The model refused the request",
+        WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::ModelStopUnrecognized { .. },
+        }) => "Provider stopped for an unrecognized reason",
+        WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::MaxModelRounds { .. },
+        }) => "Model round limit reached; submit new work to continue",
+        WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::MaxToolCalls { .. },
+        }) => "Tool call limit reached; submit new work to continue",
+        WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::ModelCallFailed { error, .. },
+        }) if error.kind == causa::kernel::ModelInvokeErrorKind::InvalidRequest => {
+            "Request rejected as invalid; check max_tokens (required by anthropic)"
+        }
         WorkResult::Faulted(_) => "Worker fault; materials may be unavailable",
         _ => "Failed; check model, endpoint and credential configuration",
     }

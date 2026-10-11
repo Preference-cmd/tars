@@ -1,6 +1,6 @@
 use super::workspace::{WorkspaceTool, WorkspaceToolLimits};
 use crate::session::SessionConfig;
-use causa::kernel::ModelRef;
+use causa::kernel::{ModelRef, ReasoningEffort};
 use causa::runtime::{TurnLimits, TurnRunOptions};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -49,6 +49,16 @@ pub struct SessionDefinition {
     pub max_model_rounds: u32,
     /// Maximum cumulative model tool declarations; zero permits none.
     pub max_tool_calls: u32,
+    /// Upper bound on generated tokens per model call, or none to leave it to
+    /// the provider. A record saved before this field existed reads as none.
+    /// The Anthropic protocol requires a value; without one the request is
+    /// rejected before it is sent.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// Requested reasoning effort, or none for the provider default. A record
+    /// saved before this field existed reads as none.
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
     /// Absolute workspace root frozen at creation; never resolved against reopen cwd.
     #[serde(deserialize_with = "required_workspace_root")]
     pub workspace_root: Option<PathBuf>,
@@ -110,6 +120,9 @@ impl SessionDefinition {
         {
             return Err(DefinitionError::InvalidWorkspaceRoot);
         }
+        if self.max_tokens == Some(0) {
+            return Err(DefinitionError::InvalidMaxTokens);
+        }
         if !self.tools.is_empty() && self.workspace_root.is_none() {
             return Err(DefinitionError::WorkspaceRequired);
         }
@@ -137,12 +150,8 @@ impl SessionDefinition {
             max_model_rounds: self.max_model_rounds,
             max_tool_calls: self.max_tool_calls,
         };
-        // Placeholder: the Anthropic renderer rejects a request without an
-        // output limit. The value belongs in the session definition; a long
-        // answer stops at this limit until it is configurable.
-        if self.provider == super::Provider::Anthropic {
-            options.generation.max_tokens = Some(4096);
-        }
+        options.generation.max_tokens = self.max_tokens;
+        options.generation.reasoning_effort = self.reasoning_effort;
         options
     }
 }
@@ -171,6 +180,9 @@ pub enum DefinitionError {
     /// Endpoint syntax or embedded credential-bearing components are forbidden.
     #[error("endpoint must be an absolute HTTP(S) URL without credentials, query or fragment")]
     InvalidEndpoint,
+    /// A zero output limit can never produce a response.
+    #[error("max_tokens must be positive when set")]
+    InvalidMaxTokens,
     /// The deadline cannot be represented on this platform.
     #[error("work timeout cannot be represented")]
     UnrepresentableTimeout,

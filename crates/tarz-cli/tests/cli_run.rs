@@ -71,6 +71,9 @@ fn command(provider: &str, endpoint: &str) -> Command {
             endpoint,
         ])
         .env("TARZ_TEST_KEY", "fixture-secret");
+    if provider == "anthropic" {
+        command.args(["--max-tokens", "1024"]);
+    }
     command
 }
 fn report(output: &Output) -> Value {
@@ -302,4 +305,74 @@ fn text_mode_prints_only_answer_and_invalid_material_never_starts_work() {
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(report(&output)["status"], "not_started");
     assert!(report(&output)["work_id"].is_null());
+}
+
+#[test]
+fn anthropic_without_an_output_limit_is_rejected_before_any_request() {
+    let (endpoint, requests) = server(200, json!({}), Duration::ZERO);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tarz"));
+    let output = command
+        .args([
+            "run",
+            "--no-config",
+            "--provider",
+            "anthropic",
+            "--model",
+            "fixture-model",
+            "--api-key-env",
+            "TARZ_TEST_KEY",
+            "--endpoint",
+            &endpoint,
+            "--input",
+            "user question",
+            "--json",
+        ])
+        .env("TARZ_TEST_KEY", "fixture-secret")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let report = report(&output);
+    assert_eq!(report["status"], "failed");
+    assert!(
+        report["error"].as_str().unwrap().contains("max_tokens"),
+        "{report}"
+    );
+    assert!(requests.recv_timeout(Duration::from_millis(300)).is_err());
+}
+
+#[test]
+fn the_configured_output_limit_and_effort_reach_the_request() {
+    let (endpoint, requests) = server(
+        200,
+        json!({"content":[{"type":"text","text":"fixture answer"}],"stop_reason":"end_turn"}),
+        Duration::ZERO,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_tarz"))
+        .args([
+            "run",
+            "--no-config",
+            "--provider",
+            "anthropic",
+            "--model",
+            "fixture-model",
+            "--api-key-env",
+            "TARZ_TEST_KEY",
+            "--endpoint",
+            &endpoint,
+            "--max-tokens",
+            "2048",
+            "--reasoning-effort",
+            "low",
+            "--input",
+            "user question",
+            "--json",
+        ])
+        .env("TARZ_TEST_KEY", "fixture-secret")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["max_tokens"], 2048);
+    assert_eq!(body["output_config"]["effort"], "low");
 }
