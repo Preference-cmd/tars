@@ -27,6 +27,7 @@ Create options:
   --max-tool-calls    Per-work tool call limit (default 64)
   --max-tokens        Output token limit per model call (no default; required by anthropic)
   --reasoning-effort  none | minimal | low | medium | high | xhigh (default: provider's)
+  --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
   --workspace         Root directory for selected read-only tools
   --tools             Comma-separated list_directory,read_file,search_text (default empty)
   --load              Initial Context material file; creates a new conversation

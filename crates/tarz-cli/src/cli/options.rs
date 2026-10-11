@@ -25,9 +25,21 @@ impl RunOptions {
                 "--stdin" if !stdin => stdin = true,
                 "--json" if !json => json = true,
                 "--no-config" if !no_config => no_config = true,
-                "--provider" | "--model" | "--api-key-env" | "--endpoint" | "--input"
-                | "--workspace" | "--tools" | "--load" | "--save" | "--timeout-secs"
-                | "--config" | "--profile" | "--max-tokens" | "--reasoning-effort" => {
+                "--provider"
+                | "--model"
+                | "--api-key-env"
+                | "--endpoint"
+                | "--input"
+                | "--workspace"
+                | "--tools"
+                | "--load"
+                | "--save"
+                | "--timeout-secs"
+                | "--config"
+                | "--profile"
+                | "--max-tokens"
+                | "--reasoning-effort"
+                | "--max-model-attempts" => {
                     let value = args.next().ok_or("option needs a value")?;
                     if (value.is_empty() && flag != "--tools")
                         || values.insert(flag, value).is_some()

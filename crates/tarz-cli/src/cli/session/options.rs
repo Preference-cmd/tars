@@ -93,9 +93,20 @@ impl SessionCommand {
                 "--store" | "--config" => {
                     insert(&mut values, flag, &mut args)?;
                 }
-                "--provider" | "--model" | "--api-key-env" | "--endpoint" | "--timeout-secs"
-                | "--capacity" | "--max-model-rounds" | "--max-tool-calls" | "--load"
-                | "--max-tokens" | "--reasoning-effort" | "--profile" | "--workspace"
+                "--provider"
+                | "--model"
+                | "--api-key-env"
+                | "--endpoint"
+                | "--timeout-secs"
+                | "--capacity"
+                | "--max-model-rounds"
+                | "--max-tool-calls"
+                | "--load"
+                | "--max-tokens"
+                | "--reasoning-effort"
+                | "--max-model-attempts"
+                | "--profile"
+                | "--workspace"
                 | "--tools"
                     if command == "create" =>
                 {

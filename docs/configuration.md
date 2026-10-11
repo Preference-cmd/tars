@@ -29,9 +29,10 @@ max_model_rounds = 10
 max_tool_calls = 64
 # max_tokens = 8192
 # reasoning_effort = "medium"
+# max_model_attempts = 3
 ```
 
-`version` 必须为 1；`store`、`recovery_dir`、`default_profile` 和 `profiles` 可省略。每个模型预设必须包含 provider 与非空 model。provider 为 `openai-chat`、`openai-responses` 或 `anthropic`。其余字段省略时采用表中默认：期限 120 秒、保留工作 256 项、每次工作最多 10 次模型调用和 64 个工具声明；`api_key_env` 随协议默认为 OPENAI_API_KEY 或 ANTHROPIC_API_KEY。`max_tokens`（每次模型调用的输出 token 上限）和 `reasoning_effort`（`none`、`minimal`、`low`、`medium`、`high`、`xhigh`）没有默认值，省略即不发送；`anthropic` 协议要求 `max_tokens`，未配置时请求在发出前被拒绝。对应的命令行参数是 `--max-tokens` 与 `--reasoning-effort`。已保存会话的记录里没有这两项时按未配置读取。临时 `tarz run` 只保留其单次工作，容量固定为 1。
+`version` 必须为 1；`store`、`recovery_dir`、`default_profile` 和 `profiles` 可省略。每个模型预设必须包含 provider 与非空 model。provider 为 `openai-chat`、`openai-responses` 或 `anthropic`。其余字段省略时采用表中默认：期限 120 秒、保留工作 256 项、每次工作最多 10 次模型调用和 64 个工具声明；`api_key_env` 随协议默认为 OPENAI_API_KEY 或 ANTHROPIC_API_KEY。`max_tokens`（每次模型调用的输出 token 上限）和 `reasoning_effort`（`none`、`minimal`、`low`、`medium`、`high`、`xhigh`）没有默认值，省略即不发送；`anthropic` 协议要求 `max_tokens`，未配置时请求在发出前被拒绝。对应的命令行参数是 `--max-tokens` 与 `--reasoning-effort`。`max_model_attempts` 是每轮模型调用在瞬时故障或限流时允许的总次数（含第一次），省略或为 1 时不重试，命令行参数是 `--max-model-attempts`；重试只发生在任何输出可见之前，等待时间不超过工作期限。已保存会话的记录里没有这三项时按未配置读取。临时 `tarz run` 只保留其单次工作，容量固定为 1。
 
 所有预设在加载时校验，未知字段、重复键、无效类型、无效预设、空路径和不支持的版本都报错。文件最多 1 MiB。解析诊断只显示行列，不回显 TOML 值；`api_key` 明文字段不被接受。真正凭据在打开会话时从指定环境变量读取。
 

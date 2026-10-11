@@ -59,6 +59,11 @@ pub struct SessionDefinition {
     /// saved before this field existed reads as none.
     #[serde(default)]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Total model calls allowed per logical invocation, the first included,
+    /// when the provider fails transiently or rate-limits. None or one makes
+    /// a single call. A record saved before this field existed reads as none.
+    #[serde(default)]
+    pub max_model_attempts: Option<u32>,
     /// Absolute workspace root frozen at creation; never resolved against reopen cwd.
     #[serde(deserialize_with = "required_workspace_root")]
     pub workspace_root: Option<PathBuf>,
@@ -123,6 +128,9 @@ impl SessionDefinition {
         if self.max_tokens == Some(0) {
             return Err(DefinitionError::InvalidMaxTokens);
         }
+        if self.max_model_attempts == Some(0) {
+            return Err(DefinitionError::InvalidModelAttempts);
+        }
         if !self.tools.is_empty() && self.workspace_root.is_none() {
             return Err(DefinitionError::WorkspaceRequired);
         }
@@ -183,6 +191,9 @@ pub enum DefinitionError {
     /// A zero output limit can never produce a response.
     #[error("max_tokens must be positive when set")]
     InvalidMaxTokens,
+    /// At least the first model call must be allowed.
+    #[error("max_model_attempts must be positive when set")]
+    InvalidModelAttempts,
     /// The deadline cannot be represented on this platform.
     #[error("work timeout cannot be represented")]
     UnrepresentableTimeout,

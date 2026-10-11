@@ -12,6 +12,7 @@ fn definition() -> SessionDefinition {
         max_tool_calls: 0,
         max_tokens: None,
         reasoning_effort: None,
+        max_model_attempts: None,
         workspace_root: None,
         tools: vec![],
         tool_limits: Default::default(),
@@ -168,4 +169,25 @@ fn a_record_saved_before_the_generation_fields_reads_them_as_unset() {
     object.remove("reasoning_effort").unwrap();
     let read = serde_json::from_value::<SessionDefinition>(encoded).unwrap();
     assert_eq!(read, definition());
+}
+
+#[test]
+fn the_attempt_limit_is_optional_positive_and_absent_from_older_records() {
+    let mut candidate = definition();
+    candidate.max_model_attempts = Some(0);
+    assert_eq!(
+        candidate.validate().unwrap_err(),
+        DefinitionError::InvalidModelAttempts
+    );
+    candidate.max_model_attempts = Some(3);
+    candidate.validate().unwrap();
+    let mut encoded = serde_json::to_value(&candidate).unwrap();
+    assert_eq!(encoded["max_model_attempts"], 3);
+    encoded
+        .as_object_mut()
+        .unwrap()
+        .remove("max_model_attempts")
+        .unwrap();
+    let read = serde_json::from_value::<SessionDefinition>(encoded).unwrap();
+    assert_eq!(read.max_model_attempts, None);
 }

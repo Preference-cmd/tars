@@ -74,6 +74,7 @@ async fn managed_reopen_preserves_definition_material_identity_and_restores_no_w
         max_tool_calls: 0,
         max_tokens: None,
         reasoning_effort: None,
+        max_model_attempts: None,
         workspace_root: None,
         tools: Vec::new(),
         tool_limits: Default::default(),

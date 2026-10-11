@@ -90,7 +90,7 @@ fn result_label(result: &WorkResult) -> &'static str {
         WorkResult::Run(TurnResult::Interrupted {
             cause: TurnInterruption::ModelCallFailed { error, .. },
         }) if error.kind == causa::kernel::ModelInvokeErrorKind::InvalidRequest => {
-            "Request rejected as invalid; check max_tokens (required by anthropic)"
+            "Request rejected as invalid; check model and max_tokens (required by anthropic)"
         }
         WorkResult::Faulted(_) => "Worker fault; materials may be unavailable",
         _ => "Failed; check model, endpoint and credential configuration",

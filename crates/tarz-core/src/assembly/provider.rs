@@ -6,7 +6,7 @@ use causa::kernel::{Context, ModelGateway};
 use causa::providers::{
     AnthropicMessagesGateway, OpenAiChatCompletionsGateway, OpenAiResponsesGateway,
 };
-use causa::runtime::{ToolExecutor, ToolExecutorOptions, TurnRunner};
+use causa::runtime::{RetryPolicy, RetryingGateway, ToolExecutor, ToolExecutorOptions, TurnRunner};
 use std::sync::Arc;
 
 #[derive(Clone, Debug, thiserror::Error)]
@@ -47,7 +47,12 @@ pub(crate) fn assemble(
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or(AssemblyError::CredentialUnavailable)?;
-    let gateway = gateway(definition.provider, api_key, definition.endpoint.clone());
+    let gateway = gateway(
+        definition.provider,
+        api_key,
+        definition.endpoint.clone(),
+        definition.max_model_attempts,
+    );
     let options = definition.run_options();
     let selected = definition.tools.clone();
     let call_timeout = (!selected.is_empty())
@@ -105,14 +110,24 @@ pub(crate) fn gateway(
     provider: Provider,
     api_key: String,
     endpoint: Option<String>,
+    max_attempts: Option<u32>,
 ) -> Arc<dyn ModelGateway> {
     macro_rules! gateway {
         ($kind:ty) => {{
             let gateway = <$kind>::new(api_key);
-            Arc::new(match endpoint {
+            let gateway = match endpoint {
                 Some(endpoint) => gateway.with_endpoint(endpoint),
                 None => gateway,
-            }) as Arc<dyn ModelGateway>
+            };
+            // The wrapper repeats the same request for transient and
+            // rate-limit failures, and never after output became visible.
+            match max_attempts.filter(|attempts| *attempts > 1) {
+                Some(attempts) => {
+                    Arc::new(RetryingGateway::new(gateway, RetryPolicy::new(attempts)))
+                        as Arc<dyn ModelGateway>
+                }
+                None => Arc::new(gateway) as Arc<dyn ModelGateway>,
+            }
         }};
     }
     match provider {

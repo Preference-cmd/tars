@@ -75,6 +75,10 @@ pub(super) fn definition(
             .map(u32::try_from)
             .transpose()
             .map_err(|_| "output token limit too large")?,
+        max_model_attempts: number("--max-model-attempts")?
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| "model attempt limit too large")?,
         reasoning_effort: string(values, "--reasoning-effort")?
             .map(|value| {
                 serde_json::from_value(serde_json::Value::String(value)).map_err(|_| {

@@ -169,7 +169,7 @@ fn stop_reason(cause: &TurnInterruption) -> Option<&'static str> {
         TurnInterruption::ModelCallFailed { error, .. }
             if error.kind == ModelInvokeErrorKind::InvalidRequest =>
         {
-            "model request was rejected as invalid; check max_tokens (required by anthropic) and reasoning effort"
+            "model request was rejected as invalid; check the model, max_tokens (required by anthropic) and reasoning effort"
         }
         _ => return None,
     })

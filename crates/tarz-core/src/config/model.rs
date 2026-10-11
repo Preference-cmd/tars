@@ -29,6 +29,8 @@ pub struct DefinitionOverrides {
     pub max_tokens: Option<u32>,
     /// Explicit reasoning effort.
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Explicit total model calls per invocation on transient failure.
+    pub max_model_attempts: Option<u32>,
     /// Explicit root resolved relative to the current directory at resolution time.
     pub workspace_root: Option<PathBuf>,
     /// Explicit selected tools; Some(empty) disables preset tools.
@@ -50,6 +52,7 @@ pub(super) struct Profile {
     max_tool_calls: Option<u32>,
     max_tokens: Option<u32>,
     reasoning_effort: Option<ReasoningEffort>,
+    max_model_attempts: Option<u32>,
     pub(super) workspace_root: Option<PathBuf>,
     tools: Option<Vec<WorkspaceTool>>,
     tool_limits: Option<ProfileToolLimits>,
@@ -153,6 +156,10 @@ pub(super) fn resolve(
         reasoning_effort: options
             .reasoning_effort
             .or(profile.and_then(|p| p.reasoning_effort)),
+        // No default: retry cost is the user's choice, so unset means one call.
+        max_model_attempts: options
+            .max_model_attempts
+            .or(profile.and_then(|p| p.max_model_attempts)),
         workspace_root,
         tools: options
             .tools

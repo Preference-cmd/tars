@@ -17,6 +17,8 @@ max_tool_calls = 64
 # Output token limit per model call. No default; the anthropic protocol requires it.
 # max_tokens = 8192
 # reasoning_effort = "medium"  # none | minimal | low | medium | high | xhigh
+# Model calls per round when the provider fails transiently or rate-limits. Default 1 (no retry).
+# max_model_attempts = 3
 # Explicit opt-in: root alone does not enable tools.
 # workspace_root = "../my-project"
 # tools = ["list_directory", "read_file", "search_text"]

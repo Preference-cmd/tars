@@ -25,6 +25,7 @@ Run options:
   --timeout-secs Work deadline, 1–86400 seconds (default 120)
   --max-tokens   Output token limit per model call (no default; required by anthropic)
   --reasoning-effort  none | minimal | low | medium | high | xhigh (default: provider's)
+  --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
   --workspace    Root directory for read-only tools; relative to current directory
   --tools        Comma-separated list_directory,read_file,search_text (default empty)
   --load         Import a Context material file into a new session
