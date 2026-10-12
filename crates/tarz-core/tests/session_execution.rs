@@ -305,9 +305,7 @@ impl ContextPreparer for EditingFailure {
             .append([block("prepare edit")])
             .commit()
             .unwrap();
-        Err(PrepareError {
-            message: "original preparation error".into(),
-        })
+        Err(PrepareError::new("original preparation error"))
     }
 }
 #[tokio::test]
@@ -441,17 +439,16 @@ impl ToolBatchProcessor for CollisionResult {
     ) -> Result<(), ProcessorError> {
         let call = batch.calls()[0].call().clone();
         batch
-            .resolve_at(
-                0,
-                self.0,
-                ToolResultPayload {
-                    call_block_id: call.call_block_id,
-                    status: ToolResultStatus::Rejected,
-                    output: ToolOutput::new(serde_json::json!({"raw":true})),
-                    media: vec![MediaRef::new("image/png", "opaque asset")],
-                    notes: vec![TextPayload::new("original note")],
-                },
-            )
+            .resolve_at(0, self.0, {
+                let mut result = ToolResultPayload::new(
+                    call.call_block_id,
+                    ToolResultStatus::Rejected,
+                    ToolOutput::new(serde_json::json!({"raw":true})),
+                );
+                result.media = vec![MediaRef::new("image/png", "opaque asset")];
+                result.notes = vec![TextPayload::new("original note")];
+                result
+            })
             .unwrap();
         Ok(())
     }
@@ -466,13 +463,11 @@ async fn tool_commit_failure_keeps_raw_edit_input_and_owned_batch() {
     let model = Arc::new(TurnRunner::new(
         Gateway::new(vec![tool_output(&["unknown"])]),
         Arc::new(
-            ToolExecutor::new(
-                vec![target],
-                ToolExecutorOptions {
-                    before: vec![Arc::new(CollisionResult(id))],
-                    ..Default::default()
-                },
-            )
+            ToolExecutor::new(vec![target], {
+                let mut options = ToolExecutorOptions::default();
+                options.before = vec![Arc::new(CollisionResult(id))];
+                options
+            })
             .unwrap(),
         ),
     ));
@@ -526,20 +521,14 @@ struct UnknownResultTool;
 #[async_trait]
 impl Tool for UnknownResultTool {
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "unknown".into(),
-            description: "fixture".into(),
-            parameters: serde_json::json!({"type":"object"}),
-        }
+        ToolDefinition::new("unknown", "fixture", serde_json::json!({"type":"object"}))
     }
     async fn execute(&self, call: &ToolCallContext, _: &CallControl) -> ToolResultPayload {
-        ToolResultPayload {
-            call_block_id: call.call_block_id,
-            status: ToolResultStatus::UnknownOutcome,
-            output: ToolOutput::new(serde_json::json!({"raw":true})),
-            media: vec![],
-            notes: vec![],
-        }
+        ToolResultPayload::new(
+            call.call_block_id,
+            ToolResultStatus::UnknownOutcome,
+            ToolOutput::new(serde_json::json!({"raw":true})),
+        )
     }
 }
 #[tokio::test]

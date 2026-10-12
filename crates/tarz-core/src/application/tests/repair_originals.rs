@@ -36,24 +36,22 @@ impl ModelGateway for Model {
         })];
         if first {
             items.extend((0..2).map(|index| {
-                ModelItem::tool_call(ToolCallDraft {
-                    tool_name: "read_file".into(),
-                    arguments: serde_json::json!({"index":index}),
-                    provider_call_id: Some(format!("original-{index}")),
+                ModelItem::tool_call({
+                    let mut call =
+                        ToolCallDraft::new("read_file", serde_json::json!({"index":index}));
+                    call.provider_call_id = Some(format!("original-{index}"));
+                    call
                 })
             }));
         }
-        Ok(ModelOutput {
-            response: ModelResponse { items },
-            usage: None,
-            stop_reason: if first {
+        Ok(ModelOutput::new(
+            ModelResponse { items },
+            if first {
                 ModelStopReason::ToolUse
             } else {
                 ModelStopReason::EndTurn
             },
-            raw_stop_reason: None,
-            reasoning: None,
-        })
+        ))
     }
 }
 struct FixtureTool {
@@ -63,11 +61,11 @@ struct FixtureTool {
 #[async_trait::async_trait]
 impl Tool for FixtureTool {
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "read_file".into(),
-            description: "deterministic contract fixture".into(),
-            parameters: serde_json::json!({"type":"object"}),
-        }
+        ToolDefinition::new(
+            "read_file",
+            "deterministic contract fixture",
+            serde_json::json!({"type":"object"}),
+        )
     }
     async fn execute(&self, call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -79,29 +77,32 @@ impl Tool for FixtureTool {
             }
             std::future::pending::<()>().await;
         }
-        ToolResultPayload {
-            call_block_id: if matches!(self.shape, Shape::InvalidPayload) {
-                BlockId::new(uuid::Uuid::now_v7())
-            } else {
-                call.call_block_id
-            },
-            status: if matches!(self.shape, Shape::Unknown) {
-                ToolResultStatus::UnknownOutcome
-            } else {
-                ToolResultStatus::Succeeded
-            },
-            output: ToolOutput::new(
-                serde_json::json!({"original":[1,2,3],"index":call.input.arguments["index"]}),
-            ),
-            notes: vec![TextPayload::new("unchanged original note")],
-            media: if matches!(self.shape, Shape::Media) {
+        {
+            let mut result = ToolResultPayload::new(
+                if matches!(self.shape, Shape::InvalidPayload) {
+                    BlockId::new(uuid::Uuid::now_v7())
+                } else {
+                    call.call_block_id
+                },
+                if matches!(self.shape, Shape::Unknown) {
+                    ToolResultStatus::UnknownOutcome
+                } else {
+                    ToolResultStatus::Succeeded
+                },
+                ToolOutput::new(
+                    serde_json::json!({"original":[1,2,3],"index":call.input.arguments["index"]}),
+                ),
+            );
+            result.notes = vec![TextPayload::new("unchanged original note")];
+            result.media = if matches!(self.shape, Shape::Media) {
                 vec![causa::kernel::MediaRef::new(
                     "image/png",
                     "unsupported-original",
                 )]
             } else {
                 vec![]
-            },
+            };
+            result
         }
     }
 }

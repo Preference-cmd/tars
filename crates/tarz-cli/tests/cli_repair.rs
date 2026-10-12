@@ -31,13 +31,14 @@ fn create(dir: &Path, provider: &str, endpoint: &str) -> (String, std::path::Pat
         tarz_core::application::text_input("old input"),
         ContextBlock::new(
             causa::runtime::new_block_id(),
-            BlockContent::ToolCall(ToolCallPayload {
-                tool_name: "read_file".into(),
-                arguments: serde_json::json!({"path":"evidence.txt"}),
-            }),
-            BlockMeta {
-                provider_call_id: Some("old-unpaired-wire-id".into()),
-                ..Default::default()
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "read_file",
+                serde_json::json!({"path":"evidence.txt"}),
+            )),
+            {
+                let mut meta = BlockMeta::default();
+                meta.provider_call_id = Some("old-unpaired-wire-id".into());
+                meta
             },
         ),
     ])

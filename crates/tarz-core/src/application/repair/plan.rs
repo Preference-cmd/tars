@@ -174,10 +174,7 @@ impl ManagedSession {
             BlockContent::Parts(vec![ContentPart::Text(TextPayload::new(
                 explanation.to_string(),
             ))]),
-            BlockMeta {
-                source: Some("application:tarz:material-repair".into()),
-                ..Default::default()
-            },
+            BlockMeta::from_source("application:tarz:material-repair"),
         ));
         let candidate = Context::from_blocks(blocks)
             .map_err(|failure| SessionError::ContextEdit(failure.reason))?;

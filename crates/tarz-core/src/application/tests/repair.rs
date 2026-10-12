@@ -4,26 +4,29 @@ use causa::kernel::{ToolCallPayload, ToolOutput, ToolResultPayload, ToolResultSt
 fn call(wire: &str) -> ContextBlock {
     ContextBlock::new(
         BlockId::new(uuid::Uuid::now_v7()),
-        BlockContent::ToolCall(ToolCallPayload {
-            tool_name: "read_file".into(),
-            arguments: serde_json::json!({"path":"example.txt"}),
-        }),
-        BlockMeta {
-            provider_call_id: Some(wire.into()),
-            source: Some("assistant".into()),
-            wire: None,
+        BlockContent::ToolCall(ToolCallPayload::new(
+            "read_file",
+            serde_json::json!({"path":"example.txt"}),
+        )),
+        {
+            let mut meta = BlockMeta::default();
+            meta.provider_call_id = Some(wire.into());
+            meta.source = Some("assistant".into());
+            meta
         },
     )
 }
 fn result(call: &ContextBlock, status: ToolResultStatus) -> ContextBlock {
     ContextBlock::new(
         BlockId::new(uuid::Uuid::now_v7()),
-        BlockContent::ToolResult(ToolResultPayload {
-            call_block_id: call.id(),
-            status,
-            output: ToolOutput::new(serde_json::json!({"actual":"kept"})),
-            notes: vec![causa::kernel::TextPayload::new("original note")],
-            media: vec![],
+        BlockContent::ToolResult({
+            let mut result = ToolResultPayload::new(
+                call.id(),
+                status,
+                ToolOutput::new(serde_json::json!({"actual":"kept"})),
+            );
+            result.notes = vec![causa::kernel::TextPayload::new("original note")];
+            result
         }),
         BlockMeta::default(),
     )

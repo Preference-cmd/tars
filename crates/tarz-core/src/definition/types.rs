@@ -154,10 +154,7 @@ impl SessionDefinition {
     /// Construct per-work options with the saved model and explicit execution limits.
     pub fn run_options(&self) -> TurnRunOptions {
         let mut options = TurnRunOptions::new(ModelRef::new(self.model.clone()));
-        options.limits = TurnLimits {
-            max_model_rounds: self.max_model_rounds,
-            max_tool_calls: self.max_tool_calls,
-        };
+        options.limits = TurnLimits::new(self.max_model_rounds, self.max_tool_calls);
         options.generation.max_tokens = self.max_tokens;
         options.generation.reasoning_effort = self.reasoning_effort;
         options

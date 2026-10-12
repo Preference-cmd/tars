@@ -46,13 +46,14 @@ async fn incomplete(app: &mut crate::app::App, provider: Provider, endpoint: &st
         tarz_core::application::text_input("old input"),
         ContextBlock::new(
             causa::runtime::new_block_id(),
-            BlockContent::ToolCall(ToolCallPayload {
-                tool_name: "read_file".into(),
-                arguments: serde_json::json!({"path":"old"}),
-            }),
-            BlockMeta {
-                provider_call_id: Some("old-unanswered".into()),
-                ..Default::default()
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "read_file",
+                serde_json::json!({"path":"old"}),
+            )),
+            {
+                let mut meta = BlockMeta::default();
+                meta.provider_call_id = Some("old-unanswered".into());
+                meta
             },
         ),
     ])

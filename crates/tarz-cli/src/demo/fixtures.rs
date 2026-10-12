@@ -21,10 +21,7 @@ pub(super) fn input(text: &str) -> ContextBlock {
     ContextBlock::new(
         new_block_id(),
         BlockContent::Parts(vec![ContentPart::Text(TextPayload::new(text))]),
-        BlockMeta {
-            source: Some("user".into()),
-            ..Default::default()
-        },
+        BlockMeta::from_source("user"),
     )
 }
 
@@ -69,30 +66,26 @@ impl ModelGateway for ScriptedGateway {
             .blocks
             .iter()
             .any(|block| matches!(block.content(), BlockContent::ToolResult(_)));
-        Ok(ModelOutput {
-            response: ModelResponse {
+        Ok(ModelOutput::new(
+            ModelResponse {
                 items: if has_result {
                     vec![ModelItem::text(format!(
                         "Offline result: {} material blocks.",
                         request.frame.blocks.len()
                     ))]
                 } else {
-                    vec![ModelItem::tool_call(ToolCallDraft {
-                        tool_name: "demo_status".into(),
-                        arguments: serde_json::json!({"work": request.invocation_id.turn_id.0}),
-                        provider_call_id: None,
-                    })]
+                    vec![ModelItem::tool_call(ToolCallDraft::new(
+                        "demo_status",
+                        serde_json::json!({"work": request.invocation_id.turn_id.0}),
+                    ))]
                 },
             },
-            usage: None,
-            stop_reason: if has_result {
+            if has_result {
                 ModelStopReason::EndTurn
             } else {
                 ModelStopReason::ToolUse
             },
-            raw_stop_reason: None,
-            reasoning: None,
-        })
+        ))
     }
 }
 struct LocalTool {
@@ -102,11 +95,11 @@ struct LocalTool {
 #[async_trait]
 impl Tool for LocalTool {
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "demo_status".into(),
-            description: "Return a local, deterministic demonstration result".into(),
-            parameters: serde_json::json!({"type":"object","properties":{"work":{"type":"string"}},"required":["work"]}),
-        }
+        ToolDefinition::new(
+            "demo_status",
+            "Return a local, deterministic demonstration result",
+            serde_json::json!({"type":"object","properties":{"work":{"type":"string"}},"required":["work"]}),
+        )
     }
     async fn execute(
         &self,
@@ -116,18 +109,16 @@ impl Tool for LocalTool {
         self.counters.tools.fetch_add(1, Ordering::SeqCst);
         let matches_work =
             context.input.arguments["work"].as_str() == Some(self.work.turn_id.0.as_str());
-        ToolResultPayload {
-            call_block_id: context.call_block_id,
-            status: if matches_work {
+        ToolResultPayload::new(
+            context.call_block_id,
+            if matches_work {
                 ToolResultStatus::Succeeded
             } else {
                 ToolResultStatus::Failed
             },
-            output: ToolOutput::new(
+            ToolOutput::new(
                 serde_json::json!({"offline":true,"work":self.work.turn_id.0,"scope_matches":matches_work}),
             ),
-            media: vec![],
-            notes: vec![],
-        }
+        )
     }
 }

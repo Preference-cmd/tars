@@ -103,18 +103,16 @@ fn tool_result_media_and_artifacts_are_both_verified() {
     let folder = tempfile::tempdir().unwrap();
     let path = folder.path().join("material.json");
     let mut output = ToolOutput::new(serde_json::json!("shortened"));
-    output.artifact = Some(ArtifactRef {
-        id: "full-output".into(),
-        size_bytes: 10,
-        kind: ArtifactKind::FullOutput,
-        persisted: true,
-    });
-    let context = Context::from_blocks(vec![block(BlockContent::ToolResult(ToolResultPayload {
-        call_block_id: new_block_id(),
-        status: ToolResultStatus::Succeeded,
-        output,
-        media: vec![MediaRef::new("image/png", "result-image")],
-        notes: vec![],
+    output.artifact = Some(ArtifactRef::new(
+        "full-output",
+        10,
+        ArtifactKind::FullOutput,
+        true,
+    ));
+    let context = Context::from_blocks(vec![block(BlockContent::ToolResult({
+        let mut built = ToolResultPayload::new(new_block_id(), ToolResultStatus::Succeeded, output);
+        built.media = vec![MediaRef::new("image/png", "result-image")];
+        built
     }))])
     .unwrap();
     assert!(matches!(

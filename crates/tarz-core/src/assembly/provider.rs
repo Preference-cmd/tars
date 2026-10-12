@@ -67,13 +67,11 @@ pub(crate) fn assemble(
                 .as_ref()
                 .map_or_else(Vec::new, |tools| tools.bind(&selected, reporter));
             async move {
-                let executor = ToolExecutor::new(
-                    tools,
-                    ToolExecutorOptions {
-                        call_timeout,
-                        ..Default::default()
-                    },
-                )
+                let executor = ToolExecutor::new(tools, {
+                    let mut options = ToolExecutorOptions::default();
+                    options.call_timeout = call_timeout;
+                    options
+                })
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
                 Ok((
                     Arc::new(TurnRunner::new(gateway, Arc::new(executor))),

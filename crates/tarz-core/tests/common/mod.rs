@@ -20,10 +20,11 @@ pub fn block(text: &str) -> ContextBlock {
     ContextBlock::new(
         new_block_id(),
         BlockContent::Parts(vec![ContentPart::Text(TextPayload::new(text))]),
-        BlockMeta {
-            source: Some("user".into()),
-            provider_call_id: Some(format!("provenance:{text}")),
-            wire: None,
+        {
+            let mut meta = BlockMeta::default();
+            meta.source = Some("user".into());
+            meta.provider_call_id = Some(format!("provenance:{text}"));
+            meta
         },
     )
 }
@@ -34,35 +35,30 @@ pub fn request(key: &str, blocks: Vec<ContextBlock>) -> SubmitRequest {
     }
 }
 pub fn final_output(text: &str) -> ModelOutput {
-    ModelOutput {
-        response: ModelResponse {
+    ModelOutput::new(
+        ModelResponse {
             items: vec![ModelItem::text(text)],
         },
-        usage: None,
-        stop_reason: ModelStopReason::EndTurn,
-        raw_stop_reason: None,
-        reasoning: None,
-    }
+        ModelStopReason::EndTurn,
+    )
 }
 pub fn tool_output(names: &[&str]) -> ModelOutput {
-    ModelOutput {
-        response: ModelResponse {
+    ModelOutput::new(
+        ModelResponse {
             items: names
                 .iter()
                 .map(|name| {
-                    ModelItem::tool_call(ToolCallDraft {
-                        tool_name: (*name).into(),
-                        arguments: serde_json::json!({"original":name}),
-                        provider_call_id: Some(format!("provider:{name}")),
+                    ModelItem::tool_call({
+                        let mut call =
+                            ToolCallDraft::new(*name, serde_json::json!({"original":name}));
+                        call.provider_call_id = Some(format!("provider:{name}"));
+                        call
                     })
                 })
                 .collect(),
         },
-        usage: None,
-        stop_reason: ModelStopReason::ToolUse,
-        raw_stop_reason: None,
-        reasoning: None,
-    }
+        ModelStopReason::ToolUse,
+    )
 }
 pub struct Gateway {
     outputs: Mutex<VecDeque<Result<ModelOutput, ModelInvokeError>>>,

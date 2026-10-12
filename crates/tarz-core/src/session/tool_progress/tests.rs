@@ -31,10 +31,7 @@ fn fixture() -> (
 fn call() -> ToolCallContext {
     ToolCallContext::from_declaration(
         new_block_id(),
-        &ToolCallPayload {
-            tool_name: "read_file".into(),
-            arguments: serde_json::json!({"path":"source.rs"}),
-        },
+        &ToolCallPayload::new("read_file", serde_json::json!({"path":"source.rs"})),
     )
 }
 
@@ -58,13 +55,11 @@ fn reliable_snapshot_survives_lost_events_and_tracks_actual_commit() {
     let mut batch = ready(&reporter, &invocation, vec![call.clone()]);
     reporter.running(&call);
     reporter.returned(&call, ToolResultStatus::Succeeded);
-    let payload = ToolResultPayload {
-        call_block_id: call.call_block_id,
-        status: ToolResultStatus::Succeeded,
-        output: ToolOutput::new(serde_json::json!({"text":"actual file bytes"})),
-        media: Vec::new(),
-        notes: Vec::new(),
-    };
+    let payload = ToolResultPayload::new(
+        call.call_block_id,
+        ToolResultStatus::Succeeded,
+        ToolOutput::new(serde_json::json!({"text":"actual file bytes"})),
+    );
     batch
         .resolve_at(0, new_block_id(), payload.clone())
         .unwrap();
@@ -113,13 +108,11 @@ fn controlled_unknown_and_pending_win_over_late_blocking_callbacks() {
         .resolve_at(
             0,
             new_block_id(),
-            ToolResultPayload {
-                call_block_id: started.call_block_id,
-                status: ToolResultStatus::UnknownOutcome,
-                output: ToolOutput::new(serde_json::json!({"error":"cancelled before acceptance"})),
-                media: Vec::new(),
-                notes: Vec::new(),
-            },
+            ToolResultPayload::new(
+                started.call_block_id,
+                ToolResultStatus::UnknownOutcome,
+                ToolOutput::new(serde_json::json!({"error":"cancelled before acceptance"})),
+            ),
         )
         .unwrap();
     reporter.observe(&RunEvent::ToolBatchReturned {
@@ -149,13 +142,11 @@ fn identical_wrapper_and_batch_result_still_seals_authoritative_facts() {
         .resolve_at(
             0,
             new_block_id(),
-            ToolResultPayload {
-                call_block_id: call.call_block_id,
-                status: ToolResultStatus::Failed,
-                output: ToolOutput::new(serde_json::json!({})),
-                media: vec![],
-                notes: vec![],
-            },
+            ToolResultPayload::new(
+                call.call_block_id,
+                ToolResultStatus::Failed,
+                ToolOutput::new(serde_json::json!({})),
+            ),
         )
         .unwrap();
     reporter.observe(&RunEvent::ToolBatchReturned {
@@ -189,13 +180,11 @@ fn drained_wrapper_start_facts_refine_unknown_without_changing_original_results(
             .into_iter()
             .enumerate()
         {
-            let payload = ToolResultPayload {
-                call_block_id: call.call_block_id,
-                status: ToolResultStatus::UnknownOutcome,
-                output: ToolOutput::new(serde_json::json!({"runtime":"conservative unknown"})),
-                media: Vec::new(),
-                notes: Vec::new(),
-            };
+            let payload = ToolResultPayload::new(
+                call.call_block_id,
+                ToolResultStatus::UnknownOutcome,
+                ToolOutput::new(serde_json::json!({"runtime":"conservative unknown"})),
+            );
             let id = new_block_id();
             blocks.push(ContextBlock::new(
                 id,

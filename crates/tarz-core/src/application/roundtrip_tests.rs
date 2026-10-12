@@ -25,36 +25,31 @@ impl ModelGateway for Gateway {
         _: &CallControl,
     ) -> Result<ModelOutput, ModelInvokeError> {
         self.requests.lock().unwrap().push(request.clone());
-        Ok(ModelOutput {
-            response: ModelResponse {
+        Ok(ModelOutput::new(
+            ModelResponse {
                 items: vec![ModelItem::text("fixed definition completion")],
             },
-            usage: None,
-            stop_reason: ModelStopReason::EndTurn,
-            raw_stop_reason: None,
-            reasoning: None,
-        })
+            ModelStopReason::EndTurn,
+        ))
     }
 }
 struct CountedOldTool(Arc<AtomicUsize>);
 #[async_trait]
 impl Tool for CountedOldTool {
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "old-tool".into(),
-            description: "Previously completed fixture tool".into(),
-            parameters: serde_json::json!({"type":"object"}),
-        }
+        ToolDefinition::new(
+            "old-tool",
+            "Previously completed fixture tool",
+            serde_json::json!({"type":"object"}),
+        )
     }
     async fn execute(&self, call: &ToolCallContext, _: &CallControl) -> ToolResultPayload {
         self.0.fetch_add(1, Ordering::SeqCst);
-        ToolResultPayload {
-            call_block_id: call.call_block_id,
-            status: ToolResultStatus::Succeeded,
-            output: ToolOutput::new(serde_json::json!({"unexpected_reexecution":true})),
-            media: vec![],
-            notes: vec![],
-        }
+        ToolResultPayload::new(
+            call.call_block_id,
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::json!({"unexpected_reexecution":true})),
+        )
     }
 }
 
@@ -112,25 +107,24 @@ async fn managed_reopen_preserves_definition_material_identity_and_restores_no_w
     }));
     let old_call = ContextBlock::new(
         new_block_id(),
-        BlockContent::ToolCall(ToolCallPayload {
-            tool_name: "old-tool".into(),
-            arguments: serde_json::json!({"already_completed":true}),
-        }),
-        BlockMeta {
-            source: Some("preserved-source".into()),
-            provider_call_id: Some("old-provider-call".into()),
-            wire: None,
+        BlockContent::ToolCall(ToolCallPayload::new(
+            "old-tool",
+            serde_json::json!({"already_completed":true}),
+        )),
+        {
+            let mut meta = BlockMeta::default();
+            meta.source = Some("preserved-source".into());
+            meta.provider_call_id = Some("old-provider-call".into());
+            meta
         },
     );
     let old_result = ContextBlock::new(
         new_block_id(),
-        BlockContent::ToolResult(ToolResultPayload {
-            call_block_id: old_call.id(),
-            status: ToolResultStatus::Succeeded,
-            output: ToolOutput::new(serde_json::json!({"saved_original":true})),
-            media: vec![],
-            notes: vec![],
-        }),
+        BlockContent::ToolResult(ToolResultPayload::new(
+            old_call.id(),
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::json!({"saved_original":true})),
+        )),
         BlockMeta::default(),
     );
     let original = vec![text_input("initial material"), old_call, old_result];

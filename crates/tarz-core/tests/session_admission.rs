@@ -12,10 +12,7 @@ use tokio::sync::{Notify, Semaphore};
 fn construction_preserves_partial_tool_material_and_has_no_execution() {
     let old_call = ContextBlock::new(
         new_block_id(),
-        BlockContent::ToolCall(ToolCallPayload {
-            tool_name: "old".into(),
-            arguments: serde_json::json!({"old":true}),
-        }),
+        BlockContent::ToolCall(ToolCallPayload::new("old", serde_json::json!({"old":true}))),
         BlockMeta::default(),
     );
     let blocks = vec![block("I"), old_call, block("B")];

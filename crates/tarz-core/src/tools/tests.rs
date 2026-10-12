@@ -14,14 +14,10 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 fn call(name: &str, arguments: Value) -> ToolCallContext {
-    ToolCallContext {
-        call_block_id: BlockId::new(uuid::Uuid::now_v7()),
-        input: ToolCallPayload {
-            tool_name: name.into(),
-            arguments,
-        },
-        result_notes: vec![],
-    }
+    ToolCallContext::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        ToolCallPayload::new(name, arguments),
+    )
 }
 fn reporter(calls: &[ToolCallContext]) -> ToolReporter {
     let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());

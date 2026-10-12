@@ -60,15 +60,12 @@ impl causa::kernel::ModelGateway for Gateway {
         if let Some(release) = &self.release {
             release.notified().await;
         }
-        Ok(causa::kernel::ModelOutput {
-            response: causa::kernel::ModelResponse {
+        Ok(causa::kernel::ModelOutput::new(
+            causa::kernel::ModelResponse {
                 items: vec![causa::kernel::ModelItem::text("completed original")],
             },
-            usage: None,
-            stop_reason: causa::kernel::ModelStopReason::EndTurn,
-            raw_stop_reason: None,
-            reasoning: None,
-        })
+            causa::kernel::ModelStopReason::EndTurn,
+        ))
     }
 }
 pub(super) fn fixture(host: &SessionHost, gateway: Gateway) -> Arc<AtomicUsize> {
@@ -173,21 +170,14 @@ impl causa::kernel::ModelGateway for ToolGateway {
         _: &causa::kernel::ModelRequest,
         _: &causa::kernel::CallControl,
     ) -> Result<causa::kernel::ModelOutput, causa::kernel::ModelInvokeError> {
-        Ok(causa::kernel::ModelOutput {
-            response: causa::kernel::ModelResponse {
+        Ok(causa::kernel::ModelOutput::new(
+            causa::kernel::ModelResponse {
                 items: vec![causa::kernel::ModelItem::tool_call(
-                    causa::kernel::ToolCallDraft {
-                        tool_name: "fixture".into(),
-                        arguments: serde_json::json!({}),
-                        provider_call_id: None,
-                    },
+                    causa::kernel::ToolCallDraft::new("fixture", serde_json::json!({})),
                 )],
             },
-            usage: None,
-            stop_reason: causa::kernel::ModelStopReason::ToolUse,
-            raw_stop_reason: None,
-            reasoning: None,
-        })
+            causa::kernel::ModelStopReason::ToolUse,
+        ))
     }
 }
 pub(super) struct HeldTool {
@@ -198,11 +188,11 @@ pub(super) struct HeldTool {
 #[async_trait::async_trait]
 impl causa::kernel::Tool for HeldTool {
     fn definition(&self) -> causa::kernel::ToolDefinition {
-        causa::kernel::ToolDefinition {
-            name: "fixture".into(),
-            description: "fixture".into(),
-            parameters: serde_json::json!({"type":"object"}),
-        }
+        causa::kernel::ToolDefinition::new(
+            "fixture",
+            "fixture",
+            serde_json::json!({"type":"object"}),
+        )
     }
     async fn execute(
         &self,
@@ -218,13 +208,11 @@ impl causa::kernel::Tool for HeldTool {
         let _stopped = Stopped(self.stopped.clone());
         self.entered.notify_one();
         self.release.notified().await;
-        causa::kernel::ToolResultPayload {
-            call_block_id: call.call_block_id,
-            status: causa::kernel::ToolResultStatus::Succeeded,
-            output: causa::kernel::ToolOutput::new(serde_json::json!({"actual":true})),
-            media: vec![],
-            notes: vec![],
-        }
+        causa::kernel::ToolResultPayload::new(
+            call.call_block_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            causa::kernel::ToolOutput::new(serde_json::json!({"actual":true})),
+        )
     }
 }
 pub(super) fn custom_runner(host: &SessionHost, runner: Arc<TurnRunner>) {
@@ -254,20 +242,18 @@ impl causa::kernel::ToolBatchProcessor for CollisionBatch {
     ) -> Result<(), causa::kernel::ProcessorError> {
         let call = batch.calls()[0].call().clone();
         batch
-            .resolve_at(
-                0,
-                self.0,
-                causa::kernel::ToolResultPayload {
-                    call_block_id: call.call_block_id,
-                    status: causa::kernel::ToolResultStatus::Rejected,
-                    output: causa::kernel::ToolOutput::new(serde_json::json!({"original":true})),
-                    media: vec![causa::kernel::MediaRef::new(
-                        "image/png",
-                        "uncommitted original asset",
-                    )],
-                    notes: vec![],
-                },
-            )
+            .resolve_at(0, self.0, {
+                let mut result = causa::kernel::ToolResultPayload::new(
+                    call.call_block_id,
+                    causa::kernel::ToolResultStatus::Rejected,
+                    causa::kernel::ToolOutput::new(serde_json::json!({"original":true})),
+                );
+                result.media = vec![causa::kernel::MediaRef::new(
+                    "image/png",
+                    "uncommitted original asset",
+                )];
+                result
+            })
             .unwrap();
         Ok(())
     }

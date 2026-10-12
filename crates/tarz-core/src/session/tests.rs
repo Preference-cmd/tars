@@ -24,11 +24,7 @@ fn request(key: &str) -> SubmitRequest {
         blocks: vec![ContextBlock::new(
             BlockId::new(uuid::Uuid::from_u128(17)),
             BlockContent::Parts(Vec::new()),
-            BlockMeta {
-                source: Some("test".to_owned()),
-                provider_call_id: None,
-                wire: None,
-            },
+            BlockMeta::from_source("test"),
         )],
     }
 }
@@ -327,15 +323,12 @@ impl causa::kernel::ModelGateway for FinalGateway {
         _: &causa::kernel::CallControl,
     ) -> Result<causa::kernel::ModelOutput, causa::kernel::ModelInvokeError> {
         use causa::kernel::{ModelItem, ModelOutput, ModelResponse, ModelStopReason};
-        Ok(ModelOutput {
-            response: ModelResponse {
+        Ok(ModelOutput::new(
+            ModelResponse {
                 items: vec![ModelItem::text("finished")],
             },
-            usage: None,
-            stop_reason: ModelStopReason::EndTurn,
-            raw_stop_reason: None,
-            reasoning: None,
-        })
+            ModelStopReason::EndTurn,
+        ))
     }
 }
 

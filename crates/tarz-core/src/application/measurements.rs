@@ -24,15 +24,12 @@ impl ModelGateway for ProbeGateway {
         _: &CallControl,
     ) -> Result<ModelOutput, ModelInvokeError> {
         self.0.fetch_add(1, Ordering::Relaxed);
-        Ok(ModelOutput {
-            response: ModelResponse {
+        Ok(ModelOutput::new(
+            ModelResponse {
                 items: vec![ModelItem::text("measured completion")],
             },
-            usage: None,
-            stop_reason: ModelStopReason::EndTurn,
-            raw_stop_reason: None,
-            reasoning: None,
-        })
+            ModelStopReason::EndTurn,
+        ))
     }
 }
 fn definition() -> SessionDefinition {

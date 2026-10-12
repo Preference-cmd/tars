@@ -72,15 +72,12 @@ impl ModelGateway for ScriptGateway {
 }
 
 pub(crate) fn final_output() -> ModelOutput {
-    ModelOutput {
-        response: ModelResponse {
+    ModelOutput::new(
+        ModelResponse {
             items: vec![ModelItem::text("authoritative saved output")],
         },
-        usage: None,
-        stop_reason: ModelStopReason::EndTurn,
-        raw_stop_reason: None,
-        reasoning: None,
-    }
+        ModelStopReason::EndTurn,
+    )
 }
 pub(crate) fn runner(gateway: ScriptGateway) -> Arc<TurnRunner> {
     Arc::new(TurnRunner::new(
@@ -381,13 +378,12 @@ impl ModelGateway for RoundGateway {
             output
                 .response
                 .items
-                .push(causa::kernel::ModelItem::tool_call(
-                    causa::kernel::ToolCallDraft {
-                        tool_name: "round_tool".into(),
-                        arguments: serde_json::json!({}),
-                        provider_call_id: Some("round-call".into()),
-                    },
-                ));
+                .push(causa::kernel::ModelItem::tool_call({
+                    let mut built =
+                        causa::kernel::ToolCallDraft::new("round_tool", serde_json::json!({}));
+                    built.provider_call_id = Some("round-call".into());
+                    built
+                }));
             output.stop_reason = ModelStopReason::ToolUse;
         }
         Ok(Box::pin(futures_util::stream::iter(vec![
@@ -404,11 +400,11 @@ struct RoundTool(Arc<AtomicUsize>);
 #[async_trait::async_trait]
 impl causa::kernel::Tool for RoundTool {
     fn definition(&self) -> causa::kernel::ToolDefinition {
-        causa::kernel::ToolDefinition {
-            name: "round_tool".into(),
-            description: "round fixture".into(),
-            parameters: serde_json::json!({"type":"object"}),
-        }
+        causa::kernel::ToolDefinition::new(
+            "round_tool",
+            "round fixture",
+            serde_json::json!({"type":"object"}),
+        )
     }
     async fn execute(
         &self,
@@ -416,13 +412,11 @@ impl causa::kernel::Tool for RoundTool {
         _: &CallControl,
     ) -> causa::kernel::ToolResultPayload {
         self.0.fetch_add(1, Ordering::SeqCst);
-        causa::kernel::ToolResultPayload {
-            call_block_id: call.call_block_id,
-            status: causa::kernel::ToolResultStatus::Succeeded,
-            output: causa::kernel::ToolOutput::new(serde_json::json!({})),
-            media: vec![],
-            notes: vec![],
-        }
+        causa::kernel::ToolResultPayload::new(
+            call.call_block_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            causa::kernel::ToolOutput::new(serde_json::json!({})),
+        )
     }
 }
 

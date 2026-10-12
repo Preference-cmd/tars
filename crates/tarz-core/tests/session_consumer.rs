@@ -15,20 +15,18 @@ struct BoundTool {
 #[async_trait]
 impl Tool for BoundTool {
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: "echo".into(),
-            description: "fixture".into(),
-            parameters: serde_json::json!({"type":"object"}),
-        }
+        ToolDefinition::new("echo", "fixture", serde_json::json!({"type":"object"}))
     }
     async fn execute(&self, call: &ToolCallContext, _: &CallControl) -> ToolResultPayload {
         self.calls.lock().unwrap().push(self.work.clone());
-        ToolResultPayload {
-            call_block_id: call.call_block_id,
-            status: ToolResultStatus::Succeeded,
-            output: ToolOutput::new(call.input.arguments.clone()),
-            media: vec![],
-            notes: vec![TextPayload::new(self.work.turn_id.0.as_str())],
+        {
+            let mut result = ToolResultPayload::new(
+                call.call_block_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(call.input.arguments.clone()),
+            );
+            result.notes = vec![TextPayload::new(self.work.turn_id.0.as_str())];
+            result
         }
     }
 }
@@ -105,12 +103,13 @@ async fn public_consumer_runs_tools_summarizes_replays_and_rebuilds_only_materia
                         work: work.clone(),
                         calls: tools,
                     })],
-                    ToolExecutorOptions {
-                        before: vec![Arc::new(BoundProcessor {
+                    {
+                        let mut options = ToolExecutorOptions::default();
+                        options.before = vec![Arc::new(BoundProcessor {
                             work: work.clone(),
                             seen: processors,
-                        })],
-                        ..Default::default()
+                        })];
+                        options
                     },
                 )
                 .unwrap();
@@ -253,17 +252,15 @@ impl ToolBatchProcessor for PrefixResult {
     ) -> Result<(), ProcessorError> {
         let call = batch.calls()[0].call().clone();
         batch
-            .resolve_at(
-                0,
-                new_block_id(),
-                ToolResultPayload {
-                    call_block_id: call.call_block_id,
-                    status: ToolResultStatus::Succeeded,
-                    output: ToolOutput::new(serde_json::json!({"preserved":true})),
-                    media: vec![],
-                    notes: vec![TextPayload::new("completed before dispatch")],
-                },
-            )
+            .resolve_at(0, new_block_id(), {
+                let mut result = ToolResultPayload::new(
+                    call.call_block_id,
+                    ToolResultStatus::Succeeded,
+                    ToolOutput::new(serde_json::json!({"preserved":true})),
+                );
+                result.notes = vec![TextPayload::new("completed before dispatch")];
+                result
+            })
             .unwrap();
         Ok(())
     }
@@ -275,11 +272,7 @@ struct StopTool {
 #[async_trait]
 impl Tool for StopTool {
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: self.name.into(),
-            description: "fixture".into(),
-            parameters: serde_json::json!({"type":"object"}),
-        }
+        ToolDefinition::new(self.name, "fixture", serde_json::json!({"type":"object"}))
     }
     async fn execute(&self, _: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
         self.started.fetch_add(1, Ordering::SeqCst);
@@ -310,9 +303,10 @@ async fn cancelled_batch_preserves_completed_unknown_pending_and_owner_takes_it_
                 started: unstarted.clone(),
             }),
         ],
-        ToolExecutorOptions {
-            before: vec![Arc::new(PrefixResult)],
-            ..Default::default()
+        {
+            let mut options = ToolExecutorOptions::default();
+            options.before = vec![Arc::new(PrefixResult)];
+            options
         },
     )
     .unwrap();

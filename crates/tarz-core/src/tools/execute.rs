@@ -87,13 +87,7 @@ pub(crate) fn result(
     status: ToolResultStatus,
     content: serde_json::Value,
 ) -> ToolResultPayload {
-    ToolResultPayload {
-        call_block_id: call.call_block_id,
-        status,
-        output: ToolOutput::new(content),
-        media: vec![],
-        notes: vec![],
-    }
+    ToolResultPayload::new(call.call_block_id, status, ToolOutput::new(content))
 }
 
 fn stopped(call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
@@ -135,11 +129,11 @@ impl Tool for WorkspaceToolImpl {
         } else {
             json!(["path"])
         };
-        ToolDefinition {
-            name: name.into(),
-            description: description.into(),
-            parameters: json!({"type":"object","properties":fields,"required":required,"additionalProperties":false}),
-        }
+        ToolDefinition::new(
+            name,
+            description,
+            json!({"type":"object","properties":fields,"required":required,"additionalProperties":false}),
+        )
     }
 
     async fn execute(&self, call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {

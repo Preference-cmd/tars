@@ -23,13 +23,14 @@ async fn repair_resource_probe() {
     blocks.extend((0..8).map(|index| {
         ContextBlock::new(
             causa::runtime::new_block_id(),
-            BlockContent::ToolCall(ToolCallPayload {
-                tool_name: "read_file".into(),
-                arguments: serde_json::json!({"path":format!("file-{index}")}),
-            }),
-            BlockMeta {
-                provider_call_id: Some(format!("probe-{index}")),
-                ..Default::default()
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "read_file",
+                serde_json::json!({"path":format!("file-{index}")}),
+            )),
+            {
+                let mut meta = BlockMeta::default();
+                meta.provider_call_id = Some(format!("probe-{index}"));
+                meta
             },
         )
     }));

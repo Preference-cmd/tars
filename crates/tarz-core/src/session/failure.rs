@@ -50,6 +50,11 @@ impl ModelFailure {
                     "model request was refused; check provider, endpoint, model and credential",
                 ),
             },
+            // The gateway may add kinds; an unknown one is not retried.
+            _ => (
+                "unclassified",
+                "model request failed for a reason this version does not classify",
+            ),
         };
         Self {
             kind,
@@ -156,12 +161,13 @@ mod tests {
     #[test]
     fn an_unrecognized_stop_reports_the_provider_value_or_its_absence() {
         use causa::kernel::{ModelResponse, ModelStopReason};
-        let mut output = ModelOutput {
-            response: ModelResponse { items: Vec::new() },
-            usage: None,
-            stop_reason: ModelStopReason::Unrecognized,
-            raw_stop_reason: Some("pause\nturn".into()),
-            reasoning: None,
+        let mut output = {
+            let mut output = ModelOutput::new(
+                ModelResponse { items: Vec::new() },
+                ModelStopReason::Unrecognized,
+            );
+            output.raw_stop_reason = Some("pause\nturn".into());
+            output
         };
         let failure = ModelFailure::unrecognized_stop(&output);
         assert_eq!(failure.kind, "unrecognized_stop");
