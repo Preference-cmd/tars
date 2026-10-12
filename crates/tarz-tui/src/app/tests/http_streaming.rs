@@ -295,7 +295,24 @@ async fn visible_partial_text_is_cleared_after_error_eof_or_cancellation_and_nev
         if mode == "cancel" {
             assert_eq!(app.entries[0].execution, "Cancelled");
         } else {
-            assert!(app.entries[0].execution.starts_with("Failed"));
+            let (label, notice) = if mode == "error" {
+                (
+                    "Temporary provider failure",
+                    "provider stream error (server_error)",
+                )
+            } else {
+                (
+                    "Response stream ended early",
+                    "stream ended without a provider terminal",
+                )
+            };
+            assert!(app.entries[0].execution.starts_with(label));
+            assert!(
+                app.entries[0].notice.starts_with("Model error: ")
+                    && app.entries[0].notice.contains(notice),
+                "{}",
+                app.entries[0].notice
+            );
         }
         assert!(app.entries[0].preview.text.is_empty());
         assert!(app.entries[0].progress.is_none());

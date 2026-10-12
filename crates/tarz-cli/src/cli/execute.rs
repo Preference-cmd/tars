@@ -6,7 +6,7 @@ use causa::runtime::{TurnInterruption, TurnResult};
 use std::io::{self, Write};
 use std::process::ExitCode;
 use tarz_core::application::{ClosePolicy, PreparedCreate, SessionHost};
-use tarz_core::session::WorkResult;
+use tarz_core::session::{ModelFailure, WorkResult};
 
 pub(super) fn run(options: RunOptions) -> ExitCode {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -51,6 +51,7 @@ async fn execute(options: RunOptions) -> ExitCode {
         }
     };
     let (status, text, mut error, mut code) = classify(&report.result);
+    let model_error = model_failure(&report.result);
     let mut saved = false;
     if let Some(path) = options.save {
         match session.read_materials() {
@@ -85,6 +86,8 @@ async fn execute(options: RunOptions) -> ExitCode {
             serde_json::json!({
                 "status": status, "text": text, "conversation_id": report.work.conversation_id.as_str(),
                 "work_id": report.work.turn_id.0, "saved": saved, "error": error,
+                "error_kind": model_error.as_ref().map(|failure| failure.kind),
+                "error_detail": model_error.as_ref().map(|failure| failure.detail.as_str()),
             })
         )
     } else if status == "completed" {
@@ -95,6 +98,7 @@ async fn execute(options: RunOptions) -> ExitCode {
     if let Some(error) = error {
         let _ = writeln!(io::stderr().lock(), "Tarz: {error}");
     }
+    report_detail(model_error.as_ref());
     if output(&rendered) != ExitCode::SUCCESS {
         return ExitCode::FAILURE;
     }
@@ -123,32 +127,36 @@ pub(super) fn classify(result: &WorkResult) -> (&'static str, String, Option<&'s
             ("failed", String::new(), stop_reason(cause), 1)
         }
         WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::ModelCallFailed { .. },
+            cause: TurnInterruption::ModelCallFailed { error, .. },
         }) => (
             "failed",
             String::new(),
-            Some("model request failed; check provider, endpoint, model and credential"),
+            Some(ModelFailure::of(error).hint),
             1,
         ),
         _ => ("failed", String::new(), Some("work failed"), 1),
     }
 }
 
-pub(super) fn early_failure(json: bool, error: &str) -> ExitCode {
-    if json {
-        let _ = output(&format!(
-            "{}\n",
-            serde_json::json!({ "status": "not_started",
-            "text": "", "conversation_id": null, "work_id": null, "saved": false, "error": error })
-        ));
+/// The failed model call behind a result, when that is why the work stopped.
+pub(super) fn model_failure(result: &WorkResult) -> Option<ModelFailure> {
+    match result {
+        WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::ModelCallFailed { error, .. },
+        }) => Some(ModelFailure::of(error)),
+        _ => None,
     }
-    failure(error)
 }
 
-/// A failure the user can act on by changing a limit or the request, as
-/// opposed to a provider, endpoint or credential problem.
+/// Prints the gateway's own description of a failed model call.
+pub(super) fn report_detail(failure: Option<&ModelFailure>) {
+    if let Some(failure) = failure {
+        let _ = writeln!(io::stderr().lock(), "Tarz: detail: {}", failure.detail);
+    }
+}
+
+/// A stop the user can act on by changing a limit or submitting new work.
 fn stop_reason(cause: &TurnInterruption) -> Option<&'static str> {
-    use causa::kernel::ModelInvokeErrorKind;
     Some(match cause {
         TurnInterruption::ModelMaxTokens { .. } => {
             "model output reached max_tokens; raise the limit and submit new work"
@@ -166,11 +174,17 @@ fn stop_reason(cause: &TurnInterruption) -> Option<&'static str> {
         TurnInterruption::MaxToolCalls { .. } => {
             "tool call limit reached; submit new work to continue"
         }
-        TurnInterruption::ModelCallFailed { error, .. }
-            if error.kind == ModelInvokeErrorKind::InvalidRequest =>
-        {
-            "model request was rejected as invalid; check the model, max_tokens (required by anthropic) and reasoning effort"
-        }
         _ => return None,
     })
+}
+
+pub(super) fn early_failure(json: bool, error: &str) -> ExitCode {
+    if json {
+        let _ = output(&format!(
+            "{}\n",
+            serde_json::json!({ "status": "not_started",
+            "text": "", "conversation_id": null, "work_id": null, "saved": false, "error": error })
+        ));
+    }
+    failure(error)
 }

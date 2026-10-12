@@ -211,6 +211,19 @@ fn an_exhausted_attempt_limit_fails_with_earlier_materials_kept_for_new_work() {
         assert!(!output.status.success(), "{provider}: {output:?}");
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(report["status"], "failed", "{provider}");
+        // The failure names its kind and carries the gateway's own message.
+        assert_eq!(report["error_kind"], "transient", "{provider}");
+        let detail = report["error_detail"].as_str().unwrap();
+        assert!(
+            detail.ends_with("error 429: slow down"),
+            "{provider}: {detail}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("temporary provider failure")
+                && stderr.contains(&format!("Tarz: detail: {detail}")),
+            "{provider}: {stderr}"
+        );
         assert_eq!(requests.lock().unwrap().len(), 4, "{provider}");
         assert_eq!(tool_results(&material), 2, "{provider}");
 

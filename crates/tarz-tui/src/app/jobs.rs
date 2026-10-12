@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tarz_core::application::{
     ApplicationError, CloseOutcome, ManagedSession, MaterialVersion, SaveStatus, SessionListing,
 };
-use tarz_core::session::{WorkRef, WorkResult};
+use tarz_core::session::{ModelFailure, WorkRef, WorkResult};
 
 pub(super) enum Message {
     RepairInspected(
@@ -56,7 +56,7 @@ pub(super) fn save_label(save: &SaveStatus) -> String {
 }
 fn result_label(result: &WorkResult) -> &'static str {
     use causa::{
-        kernel::ControlError,
+        kernel::{ControlError, ModelInvokeErrorKind},
         runtime::{TurnInterruption, TurnResult},
     };
     match result {
@@ -89,11 +89,28 @@ fn result_label(result: &WorkResult) -> &'static str {
         }) => "Tool call limit reached; submit new work to continue",
         WorkResult::Run(TurnResult::Interrupted {
             cause: TurnInterruption::ModelCallFailed { error, .. },
-        }) if error.kind == causa::kernel::ModelInvokeErrorKind::InvalidRequest => {
-            "Request rejected as invalid; check model and max_tokens (required by anthropic)"
-        }
+        }) => match error.kind {
+            ModelInvokeErrorKind::InvalidRequest => {
+                "Request rejected as invalid; check model and max_tokens (required by anthropic)"
+            }
+            ModelInvokeErrorKind::Transient => {
+                "Temporary provider failure; retry later or set max_model_attempts"
+            }
+            ModelInvokeErrorKind::UnknownOutcome => "Response stream ended early; outcome unknown",
+            _ => "Failed; check model, endpoint and credential configuration",
+        },
         WorkResult::Faulted(_) => "Worker fault; materials may be unavailable",
-        _ => "Failed; check model, endpoint and credential configuration",
+        _ => "Failed",
+    }
+}
+/// The gateway's description of a failed model call, for the session notice.
+fn failure_notice(result: &WorkResult) -> Option<String> {
+    use causa::runtime::{TurnInterruption, TurnResult};
+    match result {
+        WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::ModelCallFailed { error, .. },
+        }) => Some(format!("Model error: {}", ModelFailure::of(error).detail)),
+        _ => None,
     }
 }
 pub(super) fn close_label(outcome: &CloseOutcome) -> String {
@@ -189,6 +206,12 @@ impl App {
                         .into();
                     if let Err(error) = result {
                         entry.notice = error;
+                    } else if let Some(notice) = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|(result, _)| failure_notice(result))
+                    {
+                        entry.notice = notice;
                     } else if entry.notice.starts_with("Input accepted")
                         || entry.notice.starts_with("Cancellation requested")
                     {

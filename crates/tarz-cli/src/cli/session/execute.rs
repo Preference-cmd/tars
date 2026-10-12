@@ -1,6 +1,6 @@
 use super::options::SessionCommand;
 use crate::cli::command::{failure, output};
-use crate::cli::execute::{classify, early_failure};
+use crate::cli::execute::{classify, early_failure, model_failure, report_detail};
 use crate::cli::managed_execution;
 use causa::kernel::Context;
 use causa::runtime::new_block_id;
@@ -176,6 +176,7 @@ async fn run_saved(
         }
     };
     let (status, text, execution_error, mut code) = classify(&report.result);
+    let model_error = model_failure(&report.result);
     let mut saved_revision = report.save.as_ref().ok().and_then(revision);
     let save_error = report.save.as_ref().err().map(ToString::to_string);
     let mut recovery_file = None;
@@ -226,6 +227,7 @@ async fn run_saved(
     if let Some(error) = error {
         let _ = writeln!(io::stderr().lock(), "Tarz: {error}");
     }
+    report_detail(model_error.as_ref());
     let rendered = if json_output {
         format!(
             "{}\n",
@@ -233,6 +235,8 @@ async fn run_saved(
                 "status":status,"text":text,"conversation_id":report.work.conversation_id.as_str(),
                 "work_id":report.work.turn_id.0,"saved":saved_revision.is_some(),"revision":saved_revision,
                 "error":error,"execution_error":execution_error,"save_error":save_error,
+                "error_kind":model_error.as_ref().map(|failure| failure.kind),
+                "error_detail":model_error.as_ref().map(|failure| failure.detail.as_str()),
                 "recovery_file":recovery_file,"recovery_error":recovery_error,"close_error":close_error,
                 "close_outcome":close.as_ref().ok().map(close_value),
             })

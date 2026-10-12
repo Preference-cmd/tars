@@ -36,7 +36,7 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 输入必须二选一：`--input <text>` 或 `--stdin`（读到 EOF，UTF-8，不能全空白）。`--timeout-secs` 默认 120，范围 1–86400，从工作受理起覆盖装配和执行；不覆盖读取 stdin、加载或保存文件。
 
-普通模式 stdout 只有完成文本，诊断走 stderr。`--json` 输出 `status`、`text`、`conversation_id`、`work_id`、`saved` 和 `error`；status 为 `not_started`、`completed`、`failed`、`cancelled` 或 `timed_out`。参数错误只走 stderr。执行结果和文件结果分开：模型完成但保存失败时仍为 `completed`，同时 `saved=false`、`error` 非空且退出码为 1。判断命令整体成功应检查退出码。
+普通模式 stdout 只有完成文本，诊断走 stderr。`--json` 输出 `status`、`text`、`conversation_id`、`work_id`、`saved` 和 `error`；status 为 `not_started`、`completed`、`failed`、`cancelled` 或 `timed_out`。模型调用失败时另有 `error_kind`（`transient`、`timed_out`、`cancelled`、`invalid_request`、`unknown_outcome` 或 `permanent`）和 `error_detail`（网关给出的原始说明，可能含服务端返回的文本），其余情况两者为 null；普通模式下 `error_detail` 以 `Tarz: detail: …` 写入 stderr。参数错误只走 stderr。执行结果和文件结果分开：模型完成但保存失败时仍为 `completed`，同时 `saved=false`、`error` 非空且退出码为 1。判断命令整体成功应检查退出码。
 
 退出码：0 完成；1 配置、执行或文件失败；2 参数错误；124 工作期限；130 取消。Ctrl-C 在执行期间请求取消并等待真实材料交还；`--save` 在成功、执行失败或受控中断后保存当前材料，没有该选项则不自动保存。它不保存未提交输出或未提交工具批次，也不恢复旧工作或请求键。默认材料接口拒绝外部媒体/资产引用。
 
@@ -57,7 +57,7 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 `--store` 由参数或共享配置指定。记录保存固定定义和最新 Context；重开保持 ConversationId 与 BlockId，但不恢复旧工作、请求键或未提交输出。环境变量凭据在每次打开时重新解析，记录只保存变量引用。定义默认 120 秒期限、256 项保留工作、10 次模型调用和 64 个工具声明；详见 `tarz session --help`。
 
-`session run` 在执行成功、失败或取消后等待自动保存。JSON 分开返回执行 `status/text/execution_error` 与 `saved/revision/save_error`，并包含 `recovery_file/recovery_error/close_error/close_outcome`。保存失败时导出当前材料到 `tarz-recovery-<uuid>.json` 后以 1 退出；默认导出至当前目录，可用 `--recovery-dir` 指定已存在的目录。导出失败单独报告，不能宣称材料已恢复。恢复文件可通过创建命令的 `--load` 导入为新会话。关闭会确认原待保存操作；`close_outcome` 明确区分已提交、未提交与仍无法确认。若关闭时确认先前结果不明的提交，`saved/revision` 更新为已确认事实，原 `save_error` 和错误退出仍保留。
+`session run` 在执行成功、失败或取消后等待自动保存。JSON 分开返回执行 `status/text/execution_error/error_kind/error_detail` 与 `saved/revision/save_error`，并包含 `recovery_file/recovery_error/close_error/close_outcome`。保存失败时导出当前材料到 `tarz-recovery-<uuid>.json` 后以 1 退出；默认导出至当前目录，可用 `--recovery-dir` 指定已存在的目录。导出失败单独报告，不能宣称材料已恢复。恢复文件可通过创建命令的 `--load` 导入为新会话。关闭会确认原待保存操作；`close_outcome` 明确区分已提交、未提交与仍无法确认。若关闭时确认先前结果不明的提交，`saved/revision` 更新为已确认事实，原 `save_error` 和错误退出仍保留。
 
 存储采用本机稳定文件锁：另一进程占用同一会话时明确拒绝。坏记录在列表中单列并使命令失败，不自动覆盖。单条记录最多 64 MiB；该大小不是进程内存预算。当前范围不包含掉电持久性、网络共享盘或跨主机写入，详情见[当前边界](docs/README.md)。
 

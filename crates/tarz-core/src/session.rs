@@ -4,6 +4,7 @@
 //! copies, terminal failure payloads, unclaimed tool batches and external result
 //! `Arc`s all retain memory independently. No history or crash recovery is implied.
 
+mod failure;
 mod handle;
 mod owner;
 mod progress;
@@ -12,6 +13,7 @@ mod tool_progress;
 mod types;
 mod worker;
 
+pub use failure::ModelFailure;
 pub use handle::SessionHandle;
 pub use owner::Session;
 pub use tool_progress::{ToolPhase, ToolProgress, ToolProgressSnapshot, ToolReporter};
