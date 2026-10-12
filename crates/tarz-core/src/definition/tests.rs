@@ -12,6 +12,7 @@ fn definition() -> SessionDefinition {
         max_tool_calls: 0,
         max_tokens: None,
         reasoning_effort: None,
+        extra_body: Default::default(),
         max_model_attempts: None,
         workspace_root: None,
         tools: vec![],
@@ -138,14 +139,11 @@ fn generation_choices_reach_run_options_and_have_no_default() {
     assert_eq!(candidate.run_options().generation.reasoning_effort, None);
 
     candidate.max_tokens = Some(2048);
-    candidate.reasoning_effort = Some(causa::kernel::ReasoningEffort::High);
+    candidate.reasoning_effort = Some("high".into());
     candidate.validate().unwrap();
     let generation = candidate.run_options().generation;
     assert_eq!(generation.max_tokens, Some(2048));
-    assert_eq!(
-        generation.reasoning_effort,
-        Some(causa::kernel::ReasoningEffort::High)
-    );
+    assert_eq!(generation.reasoning_effort, Some("high".into()));
     let encoded = serde_json::to_value(&candidate).unwrap();
     assert_eq!(encoded["max_tokens"], 2048);
     assert_eq!(encoded["reasoning_effort"], "high");

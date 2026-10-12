@@ -30,6 +30,7 @@ fn definition(provider: Provider, endpoint: &str, root: &Path) -> SessionDefinit
         max_tool_calls: 3,
         max_tokens: (provider == Provider::Anthropic).then_some(1024),
         reasoning_effort: None,
+        extra_body: Default::default(),
         max_model_attempts: None,
         workspace_root: Some(root.canonicalize().unwrap()),
         tools: vec![WorkspaceTool::ReadFile],

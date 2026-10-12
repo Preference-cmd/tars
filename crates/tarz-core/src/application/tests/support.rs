@@ -23,6 +23,7 @@ pub(super) fn definition() -> SessionDefinition {
         max_tool_calls: 0,
         max_tokens: None,
         reasoning_effort: None,
+        extra_body: Default::default(),
         max_model_attempts: None,
         workspace_root: None,
         tools: Vec::new(),

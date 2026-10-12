@@ -56,6 +56,7 @@ async fn repair_resource_probe() {
         max_tool_calls: 0,
         max_tokens: None,
         reasoning_effort: None,
+        extra_body: Default::default(),
         max_model_attempts: None,
         workspace_root: None,
         tools: vec![],

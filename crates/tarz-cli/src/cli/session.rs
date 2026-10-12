@@ -26,7 +26,8 @@ Create options:
   --max-model-rounds  Per-work model call limit (default 10)
   --max-tool-calls    Per-work tool call limit (default 64)
   --max-tokens        Output token limit per model call (no default; required by anthropic)
-  --reasoning-effort  none | minimal | low | medium | high | xhigh (default: provider's)
+  --reasoning-effort  Effort text sent as written, e.g. low, high (default: provider's)
+  --extra-body   JSON object of further request fields, sent as written
   --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
   --workspace         Root directory for selected read-only tools
   --tools             Comma-separated list_directory,read_file,search_text (default empty)

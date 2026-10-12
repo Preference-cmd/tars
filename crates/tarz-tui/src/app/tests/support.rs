@@ -53,7 +53,11 @@ pub(super) async fn create_provider(app: &mut App, provider: &str, endpoint: &st
         selected: 1,
         error: String::new(),
         limits: (256, 10, 64),
-        generation: ((provider == "anthropic").then_some(1024), None),
+        generation: (
+            (provider == "anthropic").then_some(1024),
+            None,
+            Default::default(),
+        ),
         ..Form::default()
     });
     app.event(ctrl('s'));

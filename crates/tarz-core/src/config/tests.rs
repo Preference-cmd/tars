@@ -196,10 +196,8 @@ fn generation_settings_come_from_the_preset_unless_overridden() {
         .definition(None, DefinitionOverrides::default())
         .unwrap();
     assert_eq!(preset.max_tokens, Some(4000));
-    assert_eq!(
-        preset.reasoning_effort,
-        Some(causa::kernel::ReasoningEffort::Low)
-    );
+    assert_eq!(preset.reasoning_effort.as_deref(), Some("low"));
+    assert!(preset.extra_body.is_empty());
     let overridden = config
         .definition(
             None,
@@ -223,4 +221,47 @@ fn generation_settings_come_from_the_preset_unless_overridden() {
         )
         .unwrap();
     assert_eq!(unset.max_tokens, None);
+}
+
+#[test]
+fn effort_text_and_extra_request_fields_are_kept_as_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    // A value no fixed list would contain, and a nested table.
+    let text = format!(
+        "{CONFIG}reasoning_effort = \"off\"\n[profiles.local.extra_body]\ntop_k = 40\n[profiles.local.extra_body.thinking]\ntype = \"adaptive\"\ndisplay = \"summarized\"\n"
+    );
+    std::fs::write(&path, text).unwrap();
+    let config = Config::load(ConfigSource::File(path)).unwrap();
+    let preset = config
+        .definition(None, DefinitionOverrides::default())
+        .unwrap();
+    assert_eq!(preset.reasoning_effort.as_deref(), Some("off"));
+    assert_eq!(
+        serde_json::Value::Object(preset.extra_body.clone()),
+        serde_json::json!({"top_k": 40, "thinking": {"type": "adaptive", "display": "summarized"}})
+    );
+    let generation = preset.run_options().generation;
+    assert_eq!(generation.reasoning_effort.as_deref(), Some("off"));
+    assert_eq!(generation.extra_body, preset.extra_body);
+
+    // An explicit value replaces the preset's object as a whole.
+    let mut replacement = serde_json::Map::new();
+    replacement.insert("enable_thinking".into(), serde_json::json!(false));
+    let overridden = config
+        .definition(
+            None,
+            DefinitionOverrides {
+                extra_body: Some(replacement.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(overridden.extra_body, replacement);
+
+    // A definition saved before the field existed reads as empty.
+    let mut saved = serde_json::to_value(&preset).unwrap();
+    saved.as_object_mut().unwrap().remove("extra_body");
+    let reread: crate::definition::SessionDefinition = serde_json::from_value(saved).unwrap();
+    assert!(reread.extra_body.is_empty());
 }

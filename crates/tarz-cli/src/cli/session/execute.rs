@@ -43,7 +43,7 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 definition,
                 load,
                 json,
-            } => create(store, definition, load, json).await,
+            } => create(store, *definition, load, json).await,
             SessionCommand::Run {
                 store,
                 id,

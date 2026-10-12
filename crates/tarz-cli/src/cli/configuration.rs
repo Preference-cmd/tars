@@ -79,12 +79,12 @@ pub(super) fn definition(
             .map(u32::try_from)
             .transpose()
             .map_err(|_| "model attempt limit too large")?,
-        reasoning_effort: string(values, "--reasoning-effort")?
+        // Sent as written: accepted values differ by model and server.
+        reasoning_effort: string(values, "--reasoning-effort")?,
+        extra_body: string(values, "--extra-body")?
             .map(|value| {
-                serde_json::from_value(serde_json::Value::String(value)).map_err(|_| {
-                    "--reasoning-effort must be none, minimal, low, medium, high or xhigh"
-                        .to_owned()
-                })
+                serde_json::from_str(&value)
+                    .map_err(|_| "--extra-body must be a JSON object".to_owned())
             })
             .transpose()?,
     };

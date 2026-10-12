@@ -37,8 +37,13 @@ pub(crate) struct Form {
     pub selected: usize,
     pub error: String,
     pub limits: (usize, u32, u32),
-    /// Output token limit and reasoning effort carried over from the preset.
-    pub generation: (Option<u32>, Option<causa::kernel::ReasoningEffort>),
+    /// Output token limit, reasoning effort and extra request fields carried
+    /// over from the preset.
+    pub generation: (
+        Option<u32>,
+        Option<String>,
+        serde_json::Map<String, serde_json::Value>,
+    ),
     /// Model attempt limit carried over from the preset.
     pub max_model_attempts: Option<u32>,
     pub tool_limits: WorkspaceToolLimits,
@@ -63,7 +68,7 @@ impl Default for Form {
             selected: 1,
             error: String::new(),
             limits: (256, 10, 64),
-            generation: (None, None),
+            generation: (None, None, Default::default()),
             max_model_attempts: None,
             tool_limits: WorkspaceToolLimits::default(),
         }
@@ -106,7 +111,11 @@ impl Form {
             selected: 1,
             error: String::new(),
             tool_limits: preset.tool_limits.clone(),
-            generation: (preset.max_tokens, preset.reasoning_effort),
+            generation: (
+                preset.max_tokens,
+                preset.reasoning_effort.clone(),
+                preset.extra_body.clone(),
+            ),
             max_model_attempts: preset.max_model_attempts,
             limits: (
                 preset.retained_work_capacity,
@@ -144,7 +153,8 @@ impl Form {
                     max_model_rounds: Some(self.limits.1),
                     max_tool_calls: Some(self.limits.2),
                     max_tokens: self.generation.0,
-                    reasoning_effort: self.generation.1,
+                    reasoning_effort: self.generation.1.clone(),
+                    extra_body: Some(self.generation.2.clone()),
                     max_model_attempts: self.max_model_attempts,
                     workspace_root: (!values[5].is_empty()).then(|| values[5].clone().into()),
                     tools: Some(parse_tools(&values[6]).map_err(|e| e.to_string())?),

@@ -11,7 +11,8 @@ pub(crate) enum SessionCommand {
     },
     Create {
         store: PathBuf,
-        definition: SessionDefinition,
+        // Boxed: the definition is far larger than the other variants.
+        definition: Box<SessionDefinition>,
         load: Option<PathBuf>,
         json: bool,
     },
@@ -104,6 +105,7 @@ impl SessionCommand {
                 | "--load"
                 | "--max-tokens"
                 | "--reasoning-effort"
+                | "--extra-body"
                 | "--max-model-attempts"
                 | "--profile"
                 | "--workspace"
@@ -178,7 +180,7 @@ impl SessionCommand {
                 let definition = configuration::definition(&config, &values)?;
                 Ok(Self::Create {
                     store,
-                    definition,
+                    definition: Box::new(definition),
                     load: values.get("--load").map(PathBuf::from),
                     json,
                 })

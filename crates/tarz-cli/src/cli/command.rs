@@ -24,7 +24,8 @@ Run options:
   --endpoint     Full HTTP endpoint override, including the path
   --timeout-secs Work deadline, 1–86400 seconds (default 120)
   --max-tokens   Output token limit per model call (no default; required by anthropic)
-  --reasoning-effort  none | minimal | low | medium | high | xhigh (default: provider's)
+  --reasoning-effort  Effort text sent as written, e.g. low, high (default: provider's)
+  --extra-body   JSON object of further request fields, sent as written
   --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
   --workspace    Root directory for read-only tools; relative to current directory
   --tools        Comma-separated list_directory,read_file,search_text (default empty)

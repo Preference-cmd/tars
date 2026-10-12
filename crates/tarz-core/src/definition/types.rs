@@ -1,6 +1,6 @@
 use super::workspace::{WorkspaceTool, WorkspaceToolLimits};
 use crate::session::SessionConfig;
-use causa::kernel::{ModelRef, ReasoningEffort};
+use causa::kernel::ModelRef;
 use causa::runtime::{TurnLimits, TurnRunOptions};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -55,10 +55,17 @@ pub struct SessionDefinition {
     /// rejected before it is sent.
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    /// Requested reasoning effort, or none for the provider default. A record
-    /// saved before this field existed reads as none.
+    /// Requested reasoning effort, or none for the provider default. The
+    /// text is sent to the provider as written; Tarz keeps no list of accepted
+    /// values, since they differ by model and server. A record saved before
+    /// this field existed reads as none.
     #[serde(default)]
-    pub reasoning_effort: Option<ReasoningEffort>,
+    pub reasoning_effort: Option<String>,
+    /// Further request fields, sent at the top level of every model request
+    /// as written, such as an Anthropic `thinking` object. A record saved
+    /// before this field existed reads as empty.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra_body: serde_json::Map<String, serde_json::Value>,
     /// Total model calls allowed per logical invocation, the first included,
     /// when the provider fails transiently or rate-limits. None or one makes
     /// a single call. A record saved before this field existed reads as none.
@@ -156,7 +163,8 @@ impl SessionDefinition {
         let mut options = TurnRunOptions::new(ModelRef::new(self.model.clone()));
         options.limits = TurnLimits::new(self.max_model_rounds, self.max_tool_calls);
         options.generation.max_tokens = self.max_tokens;
-        options.generation.reasoning_effort = self.reasoning_effort;
+        options.generation.reasoning_effort = self.reasoning_effort.clone();
+        options.generation.extra_body = self.extra_body.clone();
         options
     }
 }

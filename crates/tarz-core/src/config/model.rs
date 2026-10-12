@@ -2,7 +2,6 @@ use super::file::ConfigError;
 use crate::definition::{
     CredentialRef, Provider, SessionDefinition, WorkspaceTool, WorkspaceToolLimits,
 };
-use causa::kernel::ReasoningEffort;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -27,8 +26,10 @@ pub struct DefinitionOverrides {
     pub max_tool_calls: Option<u32>,
     /// Explicit output token limit per model call.
     pub max_tokens: Option<u32>,
-    /// Explicit reasoning effort.
-    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Explicit reasoning effort, sent to the provider as written.
+    pub reasoning_effort: Option<String>,
+    /// Explicit extra request fields; replaces the preset's as a whole.
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
     /// Explicit total model calls per invocation on transient failure.
     pub max_model_attempts: Option<u32>,
     /// Explicit root resolved relative to the current directory at resolution time.
@@ -51,7 +52,8 @@ pub(super) struct Profile {
     max_model_rounds: Option<u32>,
     max_tool_calls: Option<u32>,
     max_tokens: Option<u32>,
-    reasoning_effort: Option<ReasoningEffort>,
+    reasoning_effort: Option<String>,
+    extra_body: Option<serde_json::Map<String, serde_json::Value>>,
     max_model_attempts: Option<u32>,
     pub(super) workspace_root: Option<PathBuf>,
     tools: Option<Vec<WorkspaceTool>>,
@@ -155,7 +157,11 @@ pub(super) fn resolve(
         max_tokens: options.max_tokens.or(profile.and_then(|p| p.max_tokens)),
         reasoning_effort: options
             .reasoning_effort
-            .or(profile.and_then(|p| p.reasoning_effort)),
+            .or_else(|| profile.and_then(|p| p.reasoning_effort.clone())),
+        extra_body: options
+            .extra_body
+            .or_else(|| profile.and_then(|p| p.extra_body.clone()))
+            .unwrap_or_default(),
         // No default: retry cost is the user's choice, so unset means one call.
         max_model_attempts: options
             .max_model_attempts

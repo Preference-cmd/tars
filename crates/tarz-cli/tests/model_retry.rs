@@ -305,3 +305,45 @@ fn a_refusal_and_an_unreadable_response_are_reported_as_different_causes() {
         );
     }
 }
+
+#[test]
+fn effort_text_and_extra_request_fields_reach_the_provider_as_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    let extra = r#"{"thinking":{"type":"adaptive","display":"summarized"},"top_k":40}"#;
+    for (provider, effort_at) in [
+        ("openai-chat", "/reasoning_effort"),
+        ("openai-responses", "/reasoning/effort"),
+        ("anthropic", "/output_config/effort"),
+    ] {
+        let (endpoint, requests) = serve(provider, vec![Reply::Stream(tools::answer(provider))]);
+        // `off` is on no fixed list of levels; it goes out unchanged.
+        let output = run(
+            provider,
+            &endpoint,
+            &workspace,
+            &["--reasoning-effort", "off", "--extra-body", extra],
+        );
+        assert!(output.status.success(), "{provider}: {output:?}");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "{provider}");
+        let body = &requests[0];
+        assert_eq!(body.pointer(effort_at), Some(&json!("off")), "{provider}");
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "adaptive", "display": "summarized"}),
+            "{provider}"
+        );
+        assert_eq!(body["top_k"], 40, "{provider}");
+    }
+    // Anything but a JSON object is refused before a request is made.
+    let (endpoint, requests) = serve("openai-chat", Vec::new());
+    let output = run(
+        "openai-chat",
+        &endpoint,
+        &workspace,
+        &["--extra-body", "[1]"],
+    );
+    assert!(!output.status.success());
+    assert!(requests.lock().unwrap().is_empty());
+}
