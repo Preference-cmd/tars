@@ -8,26 +8,22 @@ fn call(wire: &str) -> ContextBlock {
             "read_file",
             serde_json::json!({"path":"example.txt"}),
         )),
-        {
-            let mut meta = BlockMeta::default();
-            meta.provider_call_id = Some(wire.into());
-            meta.source = Some("assistant".into());
-            meta
-        },
+        BlockMeta::default()
+            .with_provider_call_id(wire)
+            .with_source("assistant"),
     )
 }
 fn result(call: &ContextBlock, status: ToolResultStatus) -> ContextBlock {
     ContextBlock::new(
         BlockId::new(uuid::Uuid::now_v7()),
-        BlockContent::ToolResult({
-            let mut result = ToolResultPayload::new(
+        BlockContent::ToolResult(
+            ToolResultPayload::new(
                 call.id(),
                 status,
                 ToolOutput::new(serde_json::json!({"actual":"kept"})),
-            );
-            result.notes = vec![causa::kernel::TextPayload::new("original note")];
-            result
-        }),
+            )
+            .with_notes(vec![causa::kernel::TextPayload::new("original note")]),
+        ),
         BlockMeta::default(),
     )
 }

@@ -36,12 +36,10 @@ impl ModelGateway for Model {
         })];
         if first {
             items.extend((0..2).map(|index| {
-                ModelItem::tool_call({
-                    let mut call =
-                        ToolCallDraft::new("read_file", serde_json::json!({"index":index}));
-                    call.provider_call_id = Some(format!("original-{index}"));
-                    call
-                })
+                ModelItem::tool_call(
+                    ToolCallDraft::new("read_file", serde_json::json!({"index":index}))
+                        .with_provider_call_id(format!("original-{index}")),
+                )
             }));
         }
         Ok(ModelOutput::new(
@@ -92,16 +90,14 @@ impl Tool for FixtureTool {
                 ToolOutput::new(
                     serde_json::json!({"original":[1,2,3],"index":call.input.arguments["index"]}),
                 ),
-            );
-            result.notes = vec![TextPayload::new("unchanged original note")];
-            result.media = if matches!(self.shape, Shape::Media) {
-                vec![causa::kernel::MediaRef::new(
+            )
+            .with_notes(vec![TextPayload::new("unchanged original note")]);
+            if matches!(self.shape, Shape::Media) {
+                result = result.with_media(vec![causa::kernel::MediaRef::new(
                     "image/png",
                     "unsupported-original",
-                )]
-            } else {
-                vec![]
-            };
+                )]);
+            }
             result
         }
     }
@@ -141,8 +137,7 @@ async fn interrupted(
             context,
             move |_, control| {
                 let runner = runner.clone();
-                let mut options = options.clone();
-                options.observer = Some(Arc::new(move |event| {
+                let options = options.clone().with_observer(Arc::new(move |event| {
                     if (matches!(shape, Shape::Pending)
                         && matches!(event, RunEvent::ToolBatchReady { .. }))
                         || (!matches!(shape, Shape::Pending | Shape::Mixed | Shape::Deadline)

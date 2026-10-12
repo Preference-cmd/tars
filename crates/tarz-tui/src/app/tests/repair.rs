@@ -51,11 +51,7 @@ async fn incomplete(app: &mut crate::app::App, provider: Provider, endpoint: &st
                 "read_file",
                 serde_json::json!({"path":"old"}),
             )),
-            {
-                let mut meta = BlockMeta::default();
-                meta.provider_call_id = Some("old-unanswered".into());
-                meta
-            },
+            BlockMeta::default().with_provider_call_id("old-unanswered"),
         ),
     ])
     .unwrap();

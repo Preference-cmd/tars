@@ -35,11 +35,7 @@ fn create(dir: &Path, provider: &str, endpoint: &str) -> (String, std::path::Pat
                 "read_file",
                 serde_json::json!({"path":"evidence.txt"}),
             )),
-            {
-                let mut meta = BlockMeta::default();
-                meta.provider_call_id = Some("old-unpaired-wire-id".into());
-                meta
-            },
+            BlockMeta::default().with_provider_call_id("old-unpaired-wire-id"),
         ),
     ])
     .unwrap();

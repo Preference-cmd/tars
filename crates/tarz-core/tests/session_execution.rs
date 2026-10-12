@@ -318,8 +318,8 @@ async fn runner_failures_retain_typed_values_and_successful_prepare_edits() {
         move |_, _| {
             let model = model.clone();
             async move {
-                let mut options = TurnRunOptions::new(ModelRef::new("fixture"));
-                options.preparer = Some(Arc::new(EditingFailure));
+                let options = TurnRunOptions::new(ModelRef::new("fixture"))
+                    .with_preparer(Arc::new(EditingFailure));
                 Ok((model, options))
             }
         },
@@ -439,16 +439,17 @@ impl ToolBatchProcessor for CollisionResult {
     ) -> Result<(), ProcessorError> {
         let call = batch.calls()[0].call().clone();
         batch
-            .resolve_at(0, self.0, {
-                let mut result = ToolResultPayload::new(
+            .resolve_at(
+                0,
+                self.0,
+                ToolResultPayload::new(
                     call.call_block_id,
                     ToolResultStatus::Rejected,
                     ToolOutput::new(serde_json::json!({"raw":true})),
-                );
-                result.media = vec![MediaRef::new("image/png", "opaque asset")];
-                result.notes = vec![TextPayload::new("original note")];
-                result
-            })
+                )
+                .with_media(vec![MediaRef::new("image/png", "opaque asset")])
+                .with_notes(vec![TextPayload::new("original note")]),
+            )
             .unwrap();
         Ok(())
     }
@@ -463,11 +464,10 @@ async fn tool_commit_failure_keeps_raw_edit_input_and_owned_batch() {
     let model = Arc::new(TurnRunner::new(
         Gateway::new(vec![tool_output(&["unknown"])]),
         Arc::new(
-            ToolExecutor::new(vec![target], {
-                let mut options = ToolExecutorOptions::default();
-                options.before = vec![Arc::new(CollisionResult(id))];
-                options
-            })
+            ToolExecutor::new(
+                vec![target],
+                ToolExecutorOptions::default().with_before(vec![Arc::new(CollisionResult(id))]),
+            )
             .unwrap(),
         ),
     ));

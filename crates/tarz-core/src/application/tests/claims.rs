@@ -16,11 +16,8 @@ async fn original_batch_claim_is_once_in_saving_blocked_and_closing_without_touc
                         release: Arc::new(Notify::new()),
                         stopped: executed.clone(),
                     })],
-                    {
-                        let mut options = ToolExecutorOptions::default();
-                        options.before = vec![Arc::new(CollisionBatch(existing.id()))];
-                        options
-                    },
+                    ToolExecutorOptions::default()
+                        .with_before(vec![Arc::new(CollisionBatch(existing.id()))]),
                 )
                 .unwrap(),
             ),
@@ -159,11 +156,8 @@ async fn batch_claim_rejects_unfinished_and_linearizes_against_forget() {
                     release: Arc::new(Notify::new()),
                     stopped: Arc::new(AtomicUsize::new(0)),
                 })],
-                {
-                    let mut options = ToolExecutorOptions::default();
-                    options.before = vec![Arc::new(CollisionBatch(existing.id()))];
-                    options
-                },
+                ToolExecutorOptions::default()
+                    .with_before(vec![Arc::new(CollisionBatch(existing.id()))]),
             )
             .unwrap(),
         ),

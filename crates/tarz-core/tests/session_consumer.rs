@@ -19,15 +19,12 @@ impl Tool for BoundTool {
     }
     async fn execute(&self, call: &ToolCallContext, _: &CallControl) -> ToolResultPayload {
         self.calls.lock().unwrap().push(self.work.clone());
-        {
-            let mut result = ToolResultPayload::new(
-                call.call_block_id,
-                ToolResultStatus::Succeeded,
-                ToolOutput::new(call.input.arguments.clone()),
-            );
-            result.notes = vec![TextPayload::new(self.work.turn_id.0.as_str())];
-            result
-        }
+        ToolResultPayload::new(
+            call.call_block_id,
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(call.input.arguments.clone()),
+        )
+        .with_notes(vec![TextPayload::new(self.work.turn_id.0.as_str())])
     }
 }
 struct BoundPreparer {
@@ -103,26 +100,22 @@ async fn public_consumer_runs_tools_summarizes_replays_and_rebuilds_only_materia
                         work: work.clone(),
                         calls: tools,
                     })],
-                    {
-                        let mut options = ToolExecutorOptions::default();
-                        options.before = vec![Arc::new(BoundProcessor {
-                            work: work.clone(),
-                            seen: processors,
-                        })];
-                        options
-                    },
+                    ToolExecutorOptions::default().with_before(vec![Arc::new(BoundProcessor {
+                        work: work.clone(),
+                        seen: processors,
+                    })]),
                 )
                 .unwrap();
                 let runner = Arc::new(TurnRunner::new(gateway, Arc::new(executor)));
-                let mut options = TurnRunOptions::new(ModelRef::new(format!(
+                let options = TurnRunOptions::new(ModelRef::new(format!(
                     "model:{}",
                     work.turn_id.0.as_str()
-                )));
-                options.preparer = Some(Arc::new(BoundPreparer {
+                )))
+                .with_preparer(Arc::new(BoundPreparer {
                     work: work.clone(),
                     seen: prepared,
-                }));
-                options.observer = Some(Arc::new(move |event| {
+                }))
+                .with_observer(Arc::new(move |event| {
                     if let RunEvent::ModelRequestReady { request } = event {
                         assert_eq!(request.invocation_id.turn_id, work.turn_id);
                         observed.lock().unwrap().push(work.clone());
@@ -252,15 +245,16 @@ impl ToolBatchProcessor for PrefixResult {
     ) -> Result<(), ProcessorError> {
         let call = batch.calls()[0].call().clone();
         batch
-            .resolve_at(0, new_block_id(), {
-                let mut result = ToolResultPayload::new(
+            .resolve_at(
+                0,
+                new_block_id(),
+                ToolResultPayload::new(
                     call.call_block_id,
                     ToolResultStatus::Succeeded,
                     ToolOutput::new(serde_json::json!({"preserved":true})),
-                );
-                result.notes = vec![TextPayload::new("completed before dispatch")];
-                result
-            })
+                )
+                .with_notes(vec![TextPayload::new("completed before dispatch")]),
+            )
             .unwrap();
         Ok(())
     }
@@ -303,11 +297,7 @@ async fn cancelled_batch_preserves_completed_unknown_pending_and_owner_takes_it_
                 started: unstarted.clone(),
             }),
         ],
-        {
-            let mut options = ToolExecutorOptions::default();
-            options.before = vec![Arc::new(PrefixResult)];
-            options
-        },
+        ToolExecutorOptions::default().with_before(vec![Arc::new(PrefixResult)]),
     )
     .unwrap();
     let model = Arc::new(TurnRunner::new(gateway.clone(), Arc::new(executor)));

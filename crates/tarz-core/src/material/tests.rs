@@ -109,11 +109,10 @@ fn tool_result_media_and_artifacts_are_both_verified() {
         ArtifactKind::FullOutput,
         true,
     ));
-    let context = Context::from_blocks(vec![block(BlockContent::ToolResult({
-        let mut built = ToolResultPayload::new(new_block_id(), ToolResultStatus::Succeeded, output);
-        built.media = vec![MediaRef::new("image/png", "result-image")];
-        built
-    }))])
+    let context = Context::from_blocks(vec![block(BlockContent::ToolResult(
+        ToolResultPayload::new(new_block_id(), ToolResultStatus::Succeeded, output)
+            .with_media(vec![MediaRef::new("image/png", "result-image")]),
+    ))])
     .unwrap();
     assert!(matches!(
         save(&path, &context),

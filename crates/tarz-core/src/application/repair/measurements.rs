@@ -27,11 +27,7 @@ async fn repair_resource_probe() {
                 "read_file",
                 serde_json::json!({"path":format!("file-{index}")}),
             )),
-            {
-                let mut meta = BlockMeta::default();
-                meta.provider_call_id = Some(format!("probe-{index}"));
-                meta
-            },
+            BlockMeta::default().with_provider_call_id(format!("probe-{index}")),
         )
     }));
     let context = Context::from_blocks(blocks).unwrap();

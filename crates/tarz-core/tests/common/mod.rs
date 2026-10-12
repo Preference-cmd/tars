@@ -20,12 +20,9 @@ pub fn block(text: &str) -> ContextBlock {
     ContextBlock::new(
         new_block_id(),
         BlockContent::Parts(vec![ContentPart::Text(TextPayload::new(text))]),
-        {
-            let mut meta = BlockMeta::default();
-            meta.source = Some("user".into());
-            meta.provider_call_id = Some(format!("provenance:{text}"));
-            meta
-        },
+        BlockMeta::default()
+            .with_source("user")
+            .with_provider_call_id(format!("provenance:{text}")),
     )
 }
 pub fn request(key: &str, blocks: Vec<ContextBlock>) -> SubmitRequest {
@@ -48,12 +45,10 @@ pub fn tool_output(names: &[&str]) -> ModelOutput {
             items: names
                 .iter()
                 .map(|name| {
-                    ModelItem::tool_call({
-                        let mut call =
-                            ToolCallDraft::new(*name, serde_json::json!({"original":name}));
-                        call.provider_call_id = Some(format!("provider:{name}"));
-                        call
-                    })
+                    ModelItem::tool_call(
+                        ToolCallDraft::new(*name, serde_json::json!({"original":name}))
+                            .with_provider_call_id(format!("provider:{name}")),
+                    )
                 })
                 .collect(),
         },

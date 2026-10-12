@@ -112,12 +112,9 @@ async fn managed_reopen_preserves_definition_material_identity_and_restores_no_w
             "old-tool",
             serde_json::json!({"already_completed":true}),
         )),
-        {
-            let mut meta = BlockMeta::default();
-            meta.source = Some("preserved-source".into());
-            meta.provider_call_id = Some("old-provider-call".into());
-            meta
-        },
+        BlockMeta::default()
+            .with_source("preserved-source")
+            .with_provider_call_id("old-provider-call"),
     );
     let old_result = ContextBlock::new(
         new_block_id(),
