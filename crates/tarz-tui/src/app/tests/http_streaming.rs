@@ -298,7 +298,7 @@ async fn visible_partial_text_is_cleared_after_error_eof_or_cancellation_and_nev
             let (label, notice) = if mode == "error" {
                 (
                     "Temporary provider failure",
-                    "provider stream error (server_error)",
+                    "provider error (server_error)",
                 )
             } else {
                 (
