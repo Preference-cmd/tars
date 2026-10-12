@@ -56,7 +56,7 @@ pub(super) fn save_label(save: &SaveStatus) -> String {
 }
 fn result_label(result: &WorkResult) -> &'static str {
     use causa::{
-        kernel::{ControlError, ModelInvokeErrorKind},
+        kernel::ControlError,
         runtime::{TurnInterruption, TurnResult},
     };
     match result {
@@ -89,14 +89,15 @@ fn result_label(result: &WorkResult) -> &'static str {
         }) => "Tool call limit reached; submit new work to continue",
         WorkResult::Run(TurnResult::Interrupted {
             cause: TurnInterruption::ModelCallFailed { error, .. },
-        }) => match error.kind {
-            ModelInvokeErrorKind::InvalidRequest => {
+        }) => match ModelFailure::of(error).kind {
+            "invalid_request" => {
                 "Request rejected as invalid; check model and max_tokens (required by anthropic)"
             }
-            ModelInvokeErrorKind::Transient => {
-                "Temporary provider failure; retry later or set max_model_attempts"
-            }
-            ModelInvokeErrorKind::UnknownOutcome => "Response stream ended early; outcome unknown",
+            "transient" => "Temporary provider failure; retry later or set max_model_attempts",
+            "unknown_outcome" => "Response stream ended early; outcome unknown",
+            "credential_rejected" => "Credential rejected; check the API key",
+            "not_found" => "Model or endpoint not found; check the model name and endpoint URL",
+            "undecodable" => "Response could not be read; check the endpoint's protocol",
             _ => "Failed; check model, endpoint and credential configuration",
         },
         WorkResult::Faulted(_) => "Worker fault; materials may be unavailable",

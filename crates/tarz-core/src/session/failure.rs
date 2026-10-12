@@ -8,13 +8,14 @@ pub struct ModelFailure {
     pub kind: &'static str,
     /// What the user can do about this kind of failure.
     pub hint: &'static str,
-    /// The gateway's message on one line with control characters removed,
-    /// since it can carry text chosen by the provider.
+    /// The gateway's message. It can carry text chosen by the provider; the
+    /// gateway keeps that text short and on one line.
     pub detail: String,
 }
 
 impl ModelFailure {
-    /// Describes a failed model call.
+    /// Describes a failed model call. A refusal is named by its cause when
+    /// the gateway reported an HTTP status or a provider error code.
     pub fn of(error: &ModelInvokeError) -> Self {
         let (kind, hint) = match error.kind {
             ModelInvokeErrorKind::Transient => (
@@ -31,15 +32,29 @@ impl ModelFailure {
                 "unknown_outcome",
                 "the response stream ended early; the outcome of this request is unknown",
             ),
-            ModelInvokeErrorKind::Permanent => (
-                "permanent",
-                "model request failed; check provider, endpoint, model and credential",
+            ModelInvokeErrorKind::Undecodable => (
+                "undecodable",
+                "the provider's response could not be read; check that the endpoint speaks the selected protocol, otherwise report it with the detail below",
             ),
+            ModelInvokeErrorKind::Permanent => match refusal(error) {
+                Refusal::Credential => (
+                    "credential_rejected",
+                    "the provider rejected the credential; check the API key and its access to this model",
+                ),
+                Refusal::NotFound => (
+                    "not_found",
+                    "the provider found no such model or path; check the model name and the endpoint URL",
+                ),
+                Refusal::Other => (
+                    "permanent",
+                    "model request was refused; check provider, endpoint, model and credential",
+                ),
+            },
         };
         Self {
             kind,
             hint,
-            detail: one_line(&error.message),
+            detail: error.message.clone(),
         }
     }
 
@@ -57,7 +72,24 @@ impl ModelFailure {
     }
 }
 
-/// Provider text on one line with control characters removed.
+/// Why a provider refused, as far as the status or error code tells.
+enum Refusal {
+    Credential,
+    NotFound,
+    Other,
+}
+
+fn refusal(error: &ModelInvokeError) -> Refusal {
+    match (error.status, error.code.as_deref()) {
+        (Some(401 | 403), _) | (None, Some("authentication_error" | "permission_error")) => {
+            Refusal::Credential
+        }
+        (Some(404), _) | (None, Some("not_found_error" | "model_not_found")) => Refusal::NotFound,
+        _ => Refusal::Other,
+    }
+}
+
+/// A raw provider value on one line with control characters removed.
 fn one_line(text: &str) -> String {
     text.split(|c: char| c.is_control())
         .filter(|part| !part.is_empty())
@@ -70,26 +102,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_kind_has_its_own_name_and_the_detail_is_one_safe_line() {
-        let kinds = [
-            (ModelInvokeErrorKind::Transient, "transient"),
-            (ModelInvokeErrorKind::TimedOut, "timed_out"),
-            (ModelInvokeErrorKind::Cancelled, "cancelled"),
-            (ModelInvokeErrorKind::InvalidRequest, "invalid_request"),
-            (ModelInvokeErrorKind::UnknownOutcome, "unknown_outcome"),
-            (ModelInvokeErrorKind::Permanent, "permanent"),
+    fn each_cause_has_its_own_name_and_hint() {
+        let new = ModelInvokeError::new;
+        let refused = |status| new(ModelInvokeErrorKind::Permanent, "x").with_status(status);
+        let coded = |code| new(ModelInvokeErrorKind::Permanent, "x").with_code(code);
+        let cases = [
+            (new(ModelInvokeErrorKind::Transient, "x"), "transient"),
+            (new(ModelInvokeErrorKind::TimedOut, "x"), "timed_out"),
+            (new(ModelInvokeErrorKind::Cancelled, "x"), "cancelled"),
+            (
+                new(ModelInvokeErrorKind::InvalidRequest, "x"),
+                "invalid_request",
+            ),
+            (
+                new(ModelInvokeErrorKind::UnknownOutcome, "x"),
+                "unknown_outcome",
+            ),
+            (new(ModelInvokeErrorKind::Undecodable, "x"), "undecodable"),
+            (refused(401), "credential_rejected"),
+            (refused(404), "not_found"),
+            (refused(418), "permanent"),
         ];
         let mut hints = std::collections::BTreeSet::new();
-        for (kind, name) in kinds {
-            let failure = ModelFailure::of(&ModelInvokeError::new(kind, "x"));
+        for (error, name) in cases {
+            let failure = ModelFailure::of(&error);
             assert_eq!(failure.kind, name);
-            assert!(hints.insert(failure.hint));
+            assert!(hints.insert(failure.hint), "{name} repeats a hint");
         }
-        let failure = ModelFailure::of(&ModelInvokeError::new(
+        // The same causes are recognized by status or, inside a stream, by code.
+        assert_eq!(ModelFailure::of(&refused(403)).kind, "credential_rejected");
+        assert_eq!(
+            ModelFailure::of(&coded("authentication_error")).kind,
+            "credential_rejected"
+        );
+        assert_eq!(
+            ModelFailure::of(&coded("not_found_error")).kind,
+            "not_found"
+        );
+        assert_eq!(ModelFailure::of(&coded("other_error")).kind, "permanent");
+        // The status wins over a code that names another cause.
+        assert_eq!(
+            ModelFailure::of(&refused(404).with_code("authentication_error")).kind,
+            "not_found"
+        );
+        // The gateway's message is shown as given.
+        let failure = ModelFailure::of(&new(
             ModelInvokeErrorKind::Permanent,
-            "openai error 401: bad\r\nkey\u{1b}[31m red",
+            "openai error 401: bad key",
         ));
-        assert_eq!(failure.detail, "openai error 401: bad key [31m red");
+        assert_eq!(failure.detail, "openai error 401: bad key");
     }
 
     #[test]

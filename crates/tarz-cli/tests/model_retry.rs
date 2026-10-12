@@ -18,6 +18,10 @@ mod tools;
 enum Reply {
     Stream(String),
     RateLimited,
+    /// A non-success status with a provider error envelope.
+    Refused(&'static str, Value),
+    /// A success status whose body is not the event stream that was asked for.
+    Unreadable,
 }
 
 /// Serves one scripted reply per connection and records each request body.
@@ -76,6 +80,10 @@ fn serve(provider: &str, script: Vec<Reply>) -> (String, Arc<Mutex<Vec<Value>>>)
                     "application/json",
                     json!({"error":{"message":"slow down"}}).to_string(),
                 ),
+                Reply::Refused(status, envelope) => {
+                    (status, "application/json", envelope.to_string())
+                }
+                Reply::Unreadable => ("200 OK", "application/json", "{}".to_owned()),
             };
             let _ = write!(
                 socket,
@@ -255,4 +263,45 @@ fn without_a_configured_limit_a_rate_limit_is_not_retried() {
     let output = run("openai-chat", &endpoint, &workspace, &[]);
     assert!(!output.status.success(), "{output:?}");
     assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_refusal_and_an_unreadable_response_are_reported_as_different_causes() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    for (reply, kind, hint) in [
+        (
+            Reply::Refused(
+                "401 Unauthorized",
+                json!({"error":{"type":"authentication_error","message":"bad\r\nkey"}}),
+            ),
+            "credential_rejected",
+            "check the API key",
+        ),
+        (
+            Reply::Refused(
+                "404 Not Found",
+                json!({"error":{"code":"model_not_found","message":"no such model"}}),
+            ),
+            "not_found",
+            "check the model name and the endpoint URL",
+        ),
+        (Reply::Unreadable, "undecodable", "could not be read"),
+    ] {
+        let (endpoint, requests) = serve("openai-chat", vec![reply]);
+        let output = run("openai-chat", &endpoint, &workspace, &[]);
+        assert_eq!(output.status.code(), Some(1), "{kind}: {output:?}");
+        assert_eq!(requests.lock().unwrap().len(), 1, "{kind}");
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "failed", "{kind}");
+        assert_eq!(report["error_kind"], kind);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(hint), "{kind}: {stderr}");
+        let detail = report["error_detail"].as_str().unwrap();
+        assert!(!detail.chars().any(char::is_control), "{kind}: {detail:?}");
+        assert!(
+            stderr.contains(&format!("Tarz: detail: {detail}")),
+            "{kind}: {stderr}"
+        );
+    }
 }
