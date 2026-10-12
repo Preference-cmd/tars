@@ -110,6 +110,9 @@ fn failure_notice(result: &WorkResult) -> Option<String> {
         WorkResult::Run(TurnResult::Interrupted {
             cause: TurnInterruption::ModelCallFailed { error, .. },
         }) => Some(format!("Model error: {}", ModelFailure::of(error).detail)),
+        WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::ModelStopUnrecognized { output, .. },
+        }) => Some(ModelFailure::unrecognized_stop(output).detail),
         _ => None,
     }
 }

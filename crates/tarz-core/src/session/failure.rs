@@ -1,4 +1,4 @@
-use causa::kernel::{ModelInvokeError, ModelInvokeErrorKind};
+use causa::kernel::{ModelInvokeError, ModelInvokeErrorKind, ModelOutput};
 
 /// What a failed model call means for the user: a stable name for the kind,
 /// what to do about it, and the gateway's own description of the failure.
@@ -36,14 +36,33 @@ impl ModelFailure {
                 "model request failed; check provider, endpoint, model and credential",
             ),
         };
-        let detail = error
-            .message
-            .split(|c: char| c.is_control())
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        Self { kind, hint, detail }
+        Self {
+            kind,
+            hint,
+            detail: one_line(&error.message),
+        }
     }
+
+    /// Describes a stop whose provider value this version has no meaning for.
+    /// The detail is that value, so the user can tell what the provider said.
+    pub fn unrecognized_stop(output: &ModelOutput) -> Self {
+        Self {
+            kind: "unrecognized_stop",
+            hint: "the provider stopped for a reason this version does not recognize",
+            detail: match &output.raw_stop_reason {
+                Some(raw) => format!("provider stop value: {}", one_line(raw)),
+                None => "the provider gave no stop value".to_owned(),
+            },
+        }
+    }
+}
+
+/// Provider text on one line with control characters removed.
+fn one_line(text: &str) -> String {
+    text.split(|c: char| c.is_control())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -71,5 +90,25 @@ mod tests {
             "openai error 401: bad\r\nkey\u{1b}[31m red",
         ));
         assert_eq!(failure.detail, "openai error 401: bad key [31m red");
+    }
+
+    #[test]
+    fn an_unrecognized_stop_reports_the_provider_value_or_its_absence() {
+        use causa::kernel::{ModelResponse, ModelStopReason};
+        let mut output = ModelOutput {
+            response: ModelResponse { items: Vec::new() },
+            usage: None,
+            stop_reason: ModelStopReason::Unrecognized,
+            raw_stop_reason: Some("pause\nturn".into()),
+            reasoning: None,
+        };
+        let failure = ModelFailure::unrecognized_stop(&output);
+        assert_eq!(failure.kind, "unrecognized_stop");
+        assert_eq!(failure.detail, "provider stop value: pause turn");
+        output.raw_stop_reason = None;
+        assert_eq!(
+            ModelFailure::unrecognized_stop(&output).detail,
+            "the provider gave no stop value"
+        );
     }
 }

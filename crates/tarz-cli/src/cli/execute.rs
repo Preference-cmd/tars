@@ -138,12 +138,16 @@ pub(super) fn classify(result: &WorkResult) -> (&'static str, String, Option<&'s
     }
 }
 
-/// The failed model call behind a result, when that is why the work stopped.
+/// The failed model call or unrecognized stop behind a result, when that is
+/// why the work stopped.
 pub(super) fn model_failure(result: &WorkResult) -> Option<ModelFailure> {
     match result {
         WorkResult::Run(TurnResult::Interrupted {
             cause: TurnInterruption::ModelCallFailed { error, .. },
         }) => Some(ModelFailure::of(error)),
+        WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::ModelStopUnrecognized { output, .. },
+        }) => Some(ModelFailure::unrecognized_stop(output)),
         _ => None,
     }
 }

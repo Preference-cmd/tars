@@ -36,7 +36,7 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 输入必须二选一：`--input <text>` 或 `--stdin`（读到 EOF，UTF-8，不能全空白）。`--timeout-secs` 默认 120，范围 1–86400，从工作受理起覆盖装配和执行；不覆盖读取 stdin、加载或保存文件。
 
-普通模式 stdout 只有完成文本，诊断走 stderr。`--json` 输出 `status`、`text`、`conversation_id`、`work_id`、`saved` 和 `error`；status 为 `not_started`、`completed`、`failed`、`cancelled` 或 `timed_out`。模型调用失败时另有 `error_kind`（`transient`、`timed_out`、`cancelled`、`invalid_request`、`unknown_outcome` 或 `permanent`）和 `error_detail`（网关给出的原始说明，可能含服务端返回的文本），其余情况两者为 null；普通模式下 `error_detail` 以 `Tarz: detail: …` 写入 stderr。参数错误只走 stderr。执行结果和文件结果分开：模型完成但保存失败时仍为 `completed`，同时 `saved=false`、`error` 非空且退出码为 1。判断命令整体成功应检查退出码。
+普通模式 stdout 只有完成文本，诊断走 stderr。`--json` 输出 `status`、`text`、`conversation_id`、`work_id`、`saved` 和 `error`；status 为 `not_started`、`completed`、`failed`、`cancelled` 或 `timed_out`。模型调用失败或以不认识的停止值结束时另有 `error_kind`（`transient`、`timed_out`、`cancelled`、`invalid_request`、`unknown_outcome`、`permanent`，或服务返回了本版本不认识的停止值时的 `unrecognized_stop`，此时 `error_detail` 是该停止值）和 `error_detail`（网关给出的原始说明，可能含服务端返回的文本），其余情况两者为 null；普通模式下 `error_detail` 以 `Tarz: detail: …` 写入 stderr。参数错误只走 stderr。执行结果和文件结果分开：模型完成但保存失败时仍为 `completed`，同时 `saved=false`、`error` 非空且退出码为 1。判断命令整体成功应检查退出码。
 
 退出码：0 完成；1 配置、执行或文件失败；2 参数错误；124 工作期限；130 取消。Ctrl-C 在执行期间请求取消并等待真实材料交还；`--save` 在成功、执行失败或受控中断后保存当前材料，没有该选项则不自动保存。它不保存未提交输出或未提交工具批次，也不恢复旧工作或请求键。默认材料接口拒绝外部媒体/资产引用。
 
