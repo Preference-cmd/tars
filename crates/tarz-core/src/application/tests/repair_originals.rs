@@ -1,8 +1,9 @@
 use super::support::*;
 use causa::kernel::{
     CallControl, ModelGateway, ModelInvokeError, ModelItem, ModelOutput, ModelRequest,
-    ModelResponse, ModelStopReason, TextPayload, Tool, ToolCallContext, ToolCallDraft,
-    ToolDefinition, ToolOutput, ToolResultPayload, ToolResultStatus,
+    ModelResponse, ModelStopReason, ProcessorContext, ProcessorError, TextPayload, Tool, ToolBatch,
+    ToolBatchProcessor, ToolCallContext, ToolCallDraft, ToolDefinition, ToolOutput,
+    ToolResultPayload, ToolResultStatus,
 };
 use causa::runtime::RunEvent;
 
@@ -108,6 +109,30 @@ impl Tool for FixtureTool {
     }
 }
 
+struct CancelsInAfterPhase;
+#[async_trait::async_trait]
+impl ToolBatchProcessor for CancelsInAfterPhase {
+    async fn process(
+        &self,
+        _: &mut ToolBatch,
+        context: &ProcessorContext<'_>,
+    ) -> Result<(), ProcessorError> {
+        context.control.cancellation_token().cancel();
+        Ok(())
+    }
+}
+struct NeverReached;
+#[async_trait::async_trait]
+impl ToolBatchProcessor for NeverReached {
+    async fn process(
+        &self,
+        _: &mut ToolBatch,
+        _: &ProcessorContext<'_>,
+    ) -> Result<(), ProcessorError> {
+        unreachable!("the stop is seen before the second after-processor")
+    }
+}
+
 async fn interrupted(
     shape: Shape,
     standard: bool,
@@ -129,7 +154,15 @@ async fn interrupted(
                     shape,
                     calls: tool_calls.clone(),
                 })],
-                ToolExecutorOptions::default(),
+                // The runner commits a batch that finished processing even
+                // when a stop arrives, so a complete batch is only returned
+                // uncommitted when the stop lands inside the after phase.
+                if matches!(shape, Shape::Pending | Shape::Mixed | Shape::Deadline) {
+                    ToolExecutorOptions::default()
+                } else {
+                    ToolExecutorOptions::default()
+                        .with_after(vec![Arc::new(CancelsInAfterPhase), Arc::new(NeverReached)])
+                },
             )
             .unwrap(),
         ),
@@ -143,10 +176,8 @@ async fn interrupted(
             move |_, control| {
                 let runner = runner.clone();
                 let options = options.clone().with_observer(Arc::new(move |event| {
-                    if (matches!(shape, Shape::Pending)
-                        && matches!(event, RunEvent::ToolBatchReady { .. }))
-                        || (!matches!(shape, Shape::Pending | Shape::Mixed | Shape::Deadline)
-                            && matches!(event, RunEvent::ToolBatchReturned { .. }))
+                    if matches!(shape, Shape::Pending)
+                        && matches!(event, RunEvent::ToolBatchReady { .. })
                     {
                         control.cancellation_token().cancel();
                     }
