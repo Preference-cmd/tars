@@ -45,7 +45,7 @@ submit → Dirty → 原 WorkResult::Finished → 固定返回材料 → Saving
 
 ## 4. JSON 提交与确认
 
-[Store](../crates/tarz-core/src/store/json.rs)是 core 内部具体后端。记录格式 `tarz-session-v2` 保存 ConversationId、revision、last_commit_id、definition、context；只接受规范 UUID 文件名，不把任意输入拼为路径。定义中的 workspace_root、tools、tool_limits 必须完整存在；旧 v1 明确拒绝，离线材料导出见[工作区工具](workspace-tools.md)。工作表、请求键、执行结果、未提交批次、任务与连接不序列化。
+[Store](../crates/tarz-core/src/store/json.rs)是 core 内部具体后端。记录格式 `tarz-session-v2` 保存 ConversationId、revision、last_commit_id、definition、context；只接受规范 UUID 文件名，不把任意输入拼为路径。定义中的 workspace_root、tools、tool_limits 必须完整存在；旧 v1 明确拒绝，离线材料导出见[工作区工具](workspace-tools.md)。工作表、请求键、执行结果、未提交批次、任务与连接不序列化。Causa 把工具结果状态和 artifact 类别的序列化形式改为 snake_case 之后，读取已存 Context 的三条路径（会话记录、材料文件、`export-materials`）都经过 [`material::vocabulary`](../crates/tarz-core/src/material/vocabulary.rs)：它在解码前把这两个字段的旧写法改成现行写法，对现行数据不做改动，所以不升记录格式；下一次写入即为现行写法。
 
 writer 持有稳定锁文件；每个在途 blocking 操作也持有它。提交先读最新版本：同 commit_id 必须完整内容相同；否则要求基线一致。写临时文件、同步后替换最终 JSON。回应丢失后读取确认原 commit；完整旧基线和持续同一写访问才可证明尚未提交。记录已推进或不可读时保留冲突/无法确认，不生成新身份或强行覆盖。
 

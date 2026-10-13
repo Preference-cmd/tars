@@ -107,7 +107,7 @@ pub fn load_with_references(
 /// or import into a newly configured session with an explicit tool selection.
 pub fn load_session_materials(path: impl AsRef<Path>) -> Result<Context, MaterialError> {
     let bytes = read_bounded(path.as_ref())?;
-    let record: SessionMaterials = serde_json::from_slice(&bytes)?;
+    let record: SessionMaterials = super::decode_stored(&bytes)?;
     let context = record.into_context()?;
     references::validate(&context, None)?;
     Ok(context)
@@ -164,10 +164,10 @@ fn read(path: &Path) -> Result<Context, MaterialError> {
     }
     let kind: Kind = serde_json::from_slice(&bytes)?;
     if kind.format.is_some() {
-        let record: SessionMaterials = serde_json::from_slice(&bytes)?;
+        let record: SessionMaterials = super::decode_stored(&bytes)?;
         record.into_context()
     } else {
-        Ok(serde_json::from_slice(&bytes)?)
+        Ok(super::decode_stored(&bytes)?)
     }
 }
 

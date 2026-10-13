@@ -17,7 +17,7 @@ pub(super) fn decode(bytes: &[u8], identity: &str) -> Result<SavedSessionRecord,
     if format.format != RECORD_FORMAT {
         return Err(StoreError::UnsupportedFormat(format.format));
     }
-    let record: SavedSessionRecord = serde_json::from_slice(bytes)?;
+    let record: SavedSessionRecord = crate::material::decode_stored(bytes)?;
     record.validate(identity)?;
     Ok(record)
 }
