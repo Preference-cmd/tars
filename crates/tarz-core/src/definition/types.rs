@@ -1,6 +1,6 @@
 use super::workspace::{WorkspaceTool, WorkspaceToolLimits};
 use crate::session::SessionConfig;
-use causa::kernel::{GenerationOptions, ModelRef};
+use causa::kernel::ModelRef;
 use causa::runtime::{TurnLimits, TurnRunOptions};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -160,16 +160,12 @@ impl SessionDefinition {
 
     /// Construct per-work options with the saved model and explicit execution limits.
     pub fn run_options(&self) -> TurnRunOptions {
-        let mut generation = GenerationOptions::default().with_extra_body(self.extra_body.clone());
-        if let Some(tokens) = self.max_tokens {
-            generation = generation.with_max_tokens(tokens);
-        }
-        if let Some(ref effort) = self.reasoning_effort {
-            generation = generation.with_reasoning_effort(effort);
-        }
-        TurnRunOptions::new(ModelRef::new(self.model.clone()))
-            .with_limits(TurnLimits::new(self.max_model_rounds, self.max_tool_calls))
-            .with_generation(generation)
+        let mut options = TurnRunOptions::new(ModelRef::new(self.model.clone()));
+        options.limits = TurnLimits::new(self.max_model_rounds, self.max_tool_calls);
+        options.generation.max_tokens = self.max_tokens;
+        options.generation.reasoning_effort = self.reasoning_effort.clone();
+        options.generation.extra_body = self.extra_body.clone();
+        options
     }
 }
 

@@ -95,9 +95,7 @@ fn session(gateway: ScriptGateway, previous: Option<Arc<RunObserver>>) -> Sessio
             let observer = previous.clone();
             async move {
                 let mut options = TurnRunOptions::new(ModelRef::new("script"));
-                if let Some(obs) = observer {
-                    options = options.with_observer(obs);
-                }
+                options.observer = observer;
                 Ok((runner, options))
             }
         },
