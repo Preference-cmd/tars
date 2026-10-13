@@ -57,7 +57,7 @@ async fn invoke(
     let call = call(kind.name(), arguments);
     let reporter = reporter(std::slice::from_ref(&call));
     let tool = shared.bind(&[kind], reporter.clone()).pop().unwrap();
-    let result = tool.execute(&call, &control()).await;
+    let result = tool.execute(&call, &control(), None).await;
     reporter.drain().await;
     result
 }
@@ -250,7 +250,7 @@ async fn waiting_cancellation_and_deadline_never_start_operations() {
     let task = tokio::spawn({
         let call = call.clone();
         let tool = tool.clone();
-        async move { tool.execute(&call, &control).await }
+        async move { tool.execute(&call, &control, None).await }
     });
     tokio::task::yield_now().await;
     cancellation.cancel();
@@ -258,7 +258,7 @@ async fn waiting_cancellation_and_deadline_never_start_operations() {
     assert_eq!(shared.metrics().started, 0);
     let deadline = CallControl::new(CancellationToken::new(), Some(Instant::now()));
     assert_eq!(
-        tool.execute(&call, &deadline).await.status,
+        tool.execute(&call, &deadline, None).await.status,
         ToolResultStatus::TimedOut
     );
     assert_eq!(shared.metrics().started, 0);
@@ -281,7 +281,7 @@ async fn dropped_future_retains_permits_until_actual_tracked_worker_cleanup() {
         .bind(&[WorkspaceTool::ReadFile], report.clone())
         .pop()
         .unwrap();
-    let task = tokio::spawn(async move { tool.execute(&call, &control()).await });
+    let task = tokio::spawn(async move { tool.execute(&call, &control(), None).await });
     tokio::time::timeout(Duration::from_secs(3), gate.reached.notified())
         .await
         .unwrap();
@@ -326,8 +326,8 @@ async fn returned_result_and_duplicate_declaration_identities_are_independent() 
         .unwrap();
     let control = control();
     let (one, two) = tokio::join!(
-        tool.execute(&first, &control),
-        tool.execute(&second, &control)
+        tool.execute(&first, &control, None),
+        tool.execute(&second, &control, None)
     );
     assert_eq!(one.call_block_id, first.call_block_id);
     assert_eq!(two.call_block_id, second.call_block_id);
@@ -359,7 +359,7 @@ async fn started_search_checks_cancellation_and_deadline_before_scanning() {
         let cancellation = CancellationToken::new();
         let end = Instant::now() + Duration::from_millis(100);
         let control = CallControl::new(cancellation.clone(), deadline.then_some(end));
-        let task = tokio::spawn(async move { tool.execute(&call, &control).await });
+        let task = tokio::spawn(async move { tool.execute(&call, &control, None).await });
         tokio::time::timeout(Duration::from_secs(3), gate.reached.notified())
             .await
             .unwrap();
@@ -399,7 +399,7 @@ async fn cancellation_at_return_boundary_preserves_observed_success() {
         .unwrap();
     let cancellation = CancellationToken::new();
     let control = CallControl::new(cancellation.clone(), None);
-    let task = tokio::spawn(async move { tool.execute(&call, &control).await });
+    let task = tokio::spawn(async move { tool.execute(&call, &control, None).await });
     tokio::time::timeout(Duration::from_secs(3), gate.reached.notified())
         .await
         .unwrap();
@@ -435,7 +435,7 @@ async fn shared_host_slots_bound_actual_operations_across_instances() {
         .unwrap();
     let task = tokio::spawn({
         let call = call.clone();
-        async move { tool.execute(&call, &control()).await }
+        async move { tool.execute(&call, &control(), None).await }
     });
     tokio::time::timeout(Duration::from_secs(3), gate.reached.notified())
         .await
@@ -447,7 +447,7 @@ async fn shared_host_slots_bound_actual_operations_across_instances() {
         .unwrap();
     let cancellation = CancellationToken::new();
     let control = CallControl::new(cancellation.clone(), None);
-    let waiting = tokio::spawn(async move { tool.execute(&call, &control).await });
+    let waiting = tokio::spawn(async move { tool.execute(&call, &control, None).await });
     tokio::time::timeout(Duration::from_secs(3), async {
         while second.local.available_permits() == 4 {
             tokio::task::yield_now().await;
@@ -704,7 +704,7 @@ async fn observation_probe() {
             batch: &ToolBatch::new(vec![call.clone()]).unwrap(),
         });
         let tool = shared.bind(&[kind], report.clone()).pop().unwrap();
-        let output = tool.execute(&call, &control()).await;
+        let output = tool.execute(&call, &control(), None).await;
         report.drain().await;
         let snapshot = report.snapshot();
         let mut events = 0;

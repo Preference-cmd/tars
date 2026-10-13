@@ -105,6 +105,7 @@ impl Tool for LocalTool {
         &self,
         context: &ToolCallContext,
         _control: &CallControl,
+        _store: Option<&dyn causa::kernel::ArtifactStore>,
     ) -> ToolResultPayload {
         self.counters.tools.fetch_add(1, Ordering::SeqCst);
         let matches_work =

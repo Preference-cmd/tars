@@ -136,7 +136,12 @@ impl Tool for WorkspaceToolImpl {
         )
     }
 
-    async fn execute(&self, call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
+    async fn execute(
+        &self,
+        call: &ToolCallContext,
+        control: &CallControl,
+        _store: Option<&dyn causa::kernel::ArtifactStore>,
+    ) -> ToolResultPayload {
         let params = if call.input.tool_name == self.definition().name {
             Params::decode(self.kind, &call.input.arguments, &self.shared.limits)
         } else {

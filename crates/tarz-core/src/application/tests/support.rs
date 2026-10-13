@@ -199,6 +199,7 @@ impl causa::kernel::Tool for HeldTool {
         &self,
         call: &causa::kernel::ToolCallContext,
         _: &causa::kernel::CallControl,
+        _store: Option<&dyn causa::kernel::ArtifactStore>,
     ) -> causa::kernel::ToolResultPayload {
         struct Stopped(Arc<AtomicUsize>);
         impl Drop for Stopped {

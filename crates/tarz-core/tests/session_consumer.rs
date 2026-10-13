@@ -17,7 +17,12 @@ impl Tool for BoundTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new("echo", "fixture", serde_json::json!({"type":"object"}))
     }
-    async fn execute(&self, call: &ToolCallContext, _: &CallControl) -> ToolResultPayload {
+    async fn execute(
+        &self,
+        call: &ToolCallContext,
+        _: &CallControl,
+        _store: Option<&dyn causa::kernel::ArtifactStore>,
+    ) -> ToolResultPayload {
         self.calls.lock().unwrap().push(self.work.clone());
         ToolResultPayload::new(
             call.call_block_id,
@@ -268,7 +273,12 @@ impl Tool for StopTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(self.name, "fixture", serde_json::json!({"type":"object"}))
     }
-    async fn execute(&self, _: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
+    async fn execute(
+        &self,
+        _: &ToolCallContext,
+        control: &CallControl,
+        _store: Option<&dyn causa::kernel::ArtifactStore>,
+    ) -> ToolResultPayload {
         self.started.fetch_add(1, Ordering::SeqCst);
         control.cancellation_token().cancel();
         std::future::pending().await

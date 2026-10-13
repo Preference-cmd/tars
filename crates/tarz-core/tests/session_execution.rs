@@ -523,7 +523,12 @@ impl Tool for UnknownResultTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new("unknown", "fixture", serde_json::json!({"type":"object"}))
     }
-    async fn execute(&self, call: &ToolCallContext, _: &CallControl) -> ToolResultPayload {
+    async fn execute(
+        &self,
+        call: &ToolCallContext,
+        _: &CallControl,
+        _store: Option<&dyn causa::kernel::ArtifactStore>,
+    ) -> ToolResultPayload {
         ToolResultPayload::new(
             call.call_block_id,
             ToolResultStatus::UnknownOutcome,

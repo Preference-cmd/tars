@@ -410,6 +410,7 @@ impl causa::kernel::Tool for RoundTool {
         &self,
         call: &causa::kernel::ToolCallContext,
         _: &CallControl,
+        _store: Option<&dyn causa::kernel::ArtifactStore>,
     ) -> causa::kernel::ToolResultPayload {
         self.0.fetch_add(1, Ordering::SeqCst);
         causa::kernel::ToolResultPayload::new(

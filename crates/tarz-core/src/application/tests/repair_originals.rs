@@ -65,7 +65,12 @@ impl Tool for FixtureTool {
             serde_json::json!({"type":"object"}),
         )
     }
-    async fn execute(&self, call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
+    async fn execute(
+        &self,
+        call: &ToolCallContext,
+        control: &CallControl,
+        _store: Option<&dyn causa::kernel::ArtifactStore>,
+    ) -> ToolResultPayload {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if matches!(self.shape, Shape::Mixed | Shape::Deadline)
             && call.input.arguments["index"] == 1
