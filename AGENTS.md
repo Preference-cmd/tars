@@ -44,12 +44,11 @@ features change; keep one authoritative acceptance list per proposal scope.
   `tarz-core` owns shared behavior and configuration; `tarz-cli` owns the `tarz`
   binary; `tarz-tui` owns the experimental terminal consumer and `tarz-tui` binary.
   Add other entry crates only with real consumers, never placeholder UI packages.
-- Use Causa's public facade. The current streaming integration has explicit user
-  authorization to use the sibling path `../agent-stack-oss/crates/causa`; see
-  [Current implementation](docs/README.md) for the tested source revision. Do not
-  include or copy Causa sources. Returning to a published registry dependency is
-  a separate delivery step. Tarz owns sessions, assembly, application policy and
-  persistence; Causa supplies material contracts and individual runs.
+- Use Causa's public facade from the published crates.io release pinned in
+  `Cargo.toml` and `Cargo.lock`. Do not include or copy Causa sources, and do
+  not switch to a path or git dependency without the user's say-so. Tarz owns
+  sessions, assembly, application policy and persistence; Causa supplies
+  material contracts and individual runs.
 - Keep shared application behavior independent of CLI/TUI/GUI presentation.
   Entry points adapt input, output and UI events to shared operations.
 - Shared TOML supplies new-session defaults. Explicit input overrides those

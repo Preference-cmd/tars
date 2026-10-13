@@ -19,7 +19,7 @@
 | `crates/tarz-tui/src/` | 单列对话、命令/会话选择、输入适配、流式预览与实际材料呈现 |
 | `crates/tarz-core/tests/`、`crates/tarz-cli/tests/` | 核心契约消费者、真实 CLI 与本地 HTTP 测试 |
 
-workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false`，binary 为 `tarz` 和 `tarz-tui`。CLI/TUI 各自单向依赖核心，核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。本轮按用户明确授权，以公开 facade 通过本地路径 `../agent-stack-oss/crates/causa` 消费 Causa 开发实现（验证基线 `9f955b4`，package version 仍是 `0.0.2`）。构建需要同级 Causa checkout；Cargo.lock 不锁定其源码提交。没有源码 include 或复制。恢复 registry 依赖与独立 CI/分发是后续交付步骤。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
+workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false`，binary 为 `tarz` 和 `tarz-tui`。CLI/TUI 各自单向依赖核心，核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。以公开 facade 消费 crates.io 上发布的 `causa 0.0.3`，版本由 Cargo.lock 固定，构建不需要同级 Causa checkout。没有源码 include 或复制。独立 CI/分发是后续交付步骤。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
 
 完整行为见 [Session 运行机制](session-lifecycle.md)，使用方法见 [README](../README.md)，逐项验收与本机证据见 [专项提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)和[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
 

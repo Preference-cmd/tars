@@ -65,7 +65,7 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 ## 项目入口
 
-根目录是 Cargo workspace；`crates/tarz-core/` 提供共享应用核心与配置，`crates/tarz-cli/` 提供 `tarz`，`crates/tarz-tui/` 提供 `tarz-tui` 原型。默认 `cargo run/build` 仍选择 CLI；TUI 使用 `cargo run -p tarz-tui -- --config /path/to/config.toml`，全部构建用 `cargo build --workspace --locked`。入口各自单向依赖核心，所有包 `publish = false`。本轮按用户授权通过 `../agent-stack-oss/crates/causa` 接入 Causa 最新开发实现，启用 runtime 与 providers；构建要求同级目录存在 Causa checkout，当前验证基线为 `9f955b4`。Cargo.lock 不固定本地路径中的源码提交。恢复 registry 依赖和独立分发另行处理。
+根目录是 Cargo workspace；`crates/tarz-core/` 提供共享应用核心与配置，`crates/tarz-cli/` 提供 `tarz`，`crates/tarz-tui/` 提供 `tarz-tui` 原型。默认 `cargo run/build` 仍选择 CLI；TUI 使用 `cargo run -p tarz-tui -- --config /path/to/config.toml`，全部构建用 `cargo build --workspace --locked`。入口各自单向依赖核心，所有包 `publish = false`。Causa 以 crates.io 上发布的 `causa 0.0.3` 接入，启用 runtime 与 providers，版本由 Cargo.lock 固定；构建不再需要同级目录的 Causa checkout。独立分发另行处理。
 
 CLI/TUI 共用 [TOML 配置](docs/configuration.md)，支持全局默认路径、`TARZ_CONFIG`、`--config` 和命名模型预设；显式参数优先。可从 [config.example.toml](config.example.toml) 开始填写。已有会话重开不受全局模型预设变更影响。
 
