@@ -160,9 +160,12 @@ async fn rejected_edit_preserves_materials_version_and_saved_baseline() {
     let mut media = request("media").blocks;
     media[0] = ContextBlock::new(
         media[0].id(),
-        BlockContent::Parts(vec![causa::kernel::ContentPart::Media(
-            causa::kernel::MediaRef::new("image/png", "unretained://asset"),
-        )]),
+        BlockContent::Message {
+            role: causa::kernel::Role::Assistant,
+            parts: vec![causa::kernel::ContentPart::Media(
+                causa::kernel::MediaRef::new("image/png", "unretained://asset"),
+            )],
+        },
         BlockMeta::default(),
     );
     assert!(matches!(

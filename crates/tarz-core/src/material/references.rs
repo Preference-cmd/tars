@@ -25,7 +25,7 @@ pub(crate) fn validate(
     };
     for block in context.blocks() {
         match block.content() {
-            BlockContent::Parts(parts) => {
+            BlockContent::Message { parts, .. } => {
                 for part in parts {
                     if let ContentPart::Media(media) = part {
                         check(block.id(), MaterialReference::Media(media))?;
@@ -40,7 +40,7 @@ pub(crate) fn validate(
                     check(block.id(), MaterialReference::Artifact(artifact))?;
                 }
             }
-            BlockContent::ToolCall(_) => {}
+            BlockContent::ToolCall(_) | BlockContent::ToolChange(_) => {}
         }
     }
     Ok(())

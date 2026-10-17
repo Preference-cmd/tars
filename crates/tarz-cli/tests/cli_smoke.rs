@@ -87,7 +87,7 @@ fn demo_save_contains_materials_only_and_roundtrips_public_context() {
         .blocks()
         .iter()
         .flat_map(|block| match block.content() {
-            BlockContent::Parts(parts) => parts
+            BlockContent::Message { parts, .. } => parts
                 .iter()
                 .filter_map(|part| match part {
                     ContentPart::Text(text) => Some(text.0.as_str()),

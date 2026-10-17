@@ -192,11 +192,11 @@ fn write(path: &Path, context: &Context, replace: bool) -> Result<(), MaterialEr
 #[cfg(test)]
 mod session_material_tests {
     use super::*;
-    use causa::kernel::{BlockContent, BlockMeta, ContentPart, ContextBlock, TextPayload};
+    use causa::kernel::{BlockContent, BlockMeta, ContextBlock};
     fn text_block(text: &str) -> ContextBlock {
         ContextBlock::new(
             causa::runtime::new_block_id(),
-            BlockContent::Parts(vec![ContentPart::Text(TextPayload::new(text))]),
+            BlockContent::text(causa::kernel::Role::Assistant, text),
             BlockMeta::default(),
         )
     }

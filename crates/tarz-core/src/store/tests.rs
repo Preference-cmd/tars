@@ -1,9 +1,7 @@
 use super::json::MAX_RECORD_BYTES;
 use super::*;
 use crate::definition::{CredentialRef, Provider, SessionDefinition};
-use causa::kernel::{
-    BlockContent, BlockMeta, ContentPart, Context, ContextBlock, MediaRef, TextPayload,
-};
+use causa::kernel::{BlockContent, BlockMeta, ContentPart, Context, ContextBlock, MediaRef};
 use causa::runtime::new_block_id;
 use std::{
     fs, io,
@@ -35,7 +33,7 @@ fn definition() -> SessionDefinition {
 fn context(text: &str) -> Context {
     Context::from_blocks(vec![ContextBlock::new(
         new_block_id(),
-        BlockContent::Parts(vec![ContentPart::Text(TextPayload::new(text))]),
+        BlockContent::text(causa::kernel::Role::Assistant, text),
         BlockMeta::default(),
     )])
     .unwrap()
@@ -250,10 +248,10 @@ fn bad_records_fail_individually_and_list_ignores_lock_and_pending() {
     let mut media = initial.record.clone();
     media.context = Context::from_blocks(vec![ContextBlock::new(
         new_block_id(),
-        BlockContent::Parts(vec![ContentPart::Media(MediaRef::new(
-            "image/png",
-            "missing",
-        ))]),
+        BlockContent::Message {
+            role: causa::kernel::Role::Assistant,
+            parts: vec![ContentPart::Media(MediaRef::new("image/png", "missing"))],
+        },
         BlockMeta::default(),
     )])
     .unwrap();
@@ -437,7 +435,7 @@ fn killed_processes_leave_complete_old_new_or_initial_absence() {
 fn assert_child_text(context: &Context) {
     assert_eq!(context.blocks().len(), 1);
     assert!(
-        matches!(context.blocks()[0].content(), BlockContent::Parts(parts)
+        matches!(context.blocks()[0].content(), BlockContent::Message { parts, .. }
         if matches!(&parts[0], ContentPart::Text(text) if text.0 == "new child content"))
     );
 }
@@ -469,4 +467,52 @@ fn oversized_save_stops_before_disk_write_and_store_hook_reaches_new_writer() {
             ..
         })
     ));
+}
+
+#[test]
+fn session_records_written_before_message_roles_load_and_save_in_the_current_form() {
+    use causa::kernel::Role;
+    let (folder, _store, id, writer) = setup();
+    let mut initial = op(&id, None, "unused");
+    initial.record.context = Context::from_blocks(vec![
+        ContextBlock::new(
+            new_block_id(),
+            BlockContent::text(Role::User, "question"),
+            BlockMeta::from_source("user"),
+        ),
+        ContextBlock::new(
+            new_block_id(),
+            BlockContent::text(Role::System, "repair note"),
+            BlockMeta::from_source("application:tarz:material-repair"),
+        ),
+    ])
+    .unwrap();
+    let path = folder.path().join("sessions").join(format!("{id}.json"));
+    let mut earlier = serde_json::to_value(&initial.record).unwrap();
+    for block in earlier["context"]["blocks"].as_array_mut().unwrap() {
+        let parts = block["content"]["value"]["parts"].take();
+        block["content"] = serde_json::json!({"shape": "parts", "value": parts});
+    }
+    fs::write(&path, serde_json::to_vec(&earlier).unwrap()).unwrap();
+
+    let loaded = writer.read_latest().unwrap().unwrap();
+    assert_eq!(loaded, initial.record);
+
+    let update = PreparedCommit::new(
+        Some(1),
+        SavedSessionRecord::new(
+            id.clone(),
+            Uuid::now_v7().to_string(),
+            Some(1),
+            definition(),
+            loaded.context.clone(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    writer.commit(&update).unwrap();
+    let written = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+    assert!(written.contains(r#""shape":"message""#));
+    assert!(!written.contains(r#""shape":"parts""#));
+    assert!(written.contains(r#""format":"tarz-session-v2""#));
 }

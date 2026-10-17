@@ -108,7 +108,7 @@ async fn assembled_work_uses_frozen_limits_and_supplied_conversation_identity() 
     assert!(matches!(
         &*result,
         WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::MaxModelRounds { limit: 0 }
+            cause: TurnInterruption::MaxModelRounds { limit: 0, .. }
         })
     ));
     session.shutdown().await;

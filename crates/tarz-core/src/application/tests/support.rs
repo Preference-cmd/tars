@@ -35,7 +35,10 @@ pub(super) fn request(key: &str) -> SubmitRequest {
         request_key: key.into(),
         blocks: vec![ContextBlock::new(
             BlockId::new(uuid::Uuid::now_v7()),
-            BlockContent::Parts(vec![]),
+            BlockContent::Message {
+                role: causa::kernel::Role::Assistant,
+                parts: vec![],
+            },
             BlockMeta::default(),
         )],
     }

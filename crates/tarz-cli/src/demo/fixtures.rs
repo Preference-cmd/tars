@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use causa::kernel::{
-    BlockContent, BlockMeta, CallControl, ContentPart, Context, ContextBlock, ModelGateway,
-    ModelInvokeError, ModelItem, ModelOutput, ModelRef, ModelRequest, ModelResponse,
-    ModelStopReason, TextPayload, Tool, ToolCallContext, ToolCallDraft, ToolDefinition, ToolOutput,
-    ToolResultPayload, ToolResultStatus,
+    BlockContent, BlockMeta, CallControl, Context, ContextBlock, ModelGateway, ModelInvokeError,
+    ModelItem, ModelOutput, ModelRef, ModelRequest, ModelResponse, ModelStopReason, Role, Tool,
+    ToolCallContext, ToolCallDraft, ToolDefinition, ToolOutput, ToolResultPayload,
+    ToolResultStatus,
 };
 use causa::runtime::{ToolExecutor, TurnRunOptions, TurnRunner, new_block_id};
 use std::sync::Arc;
@@ -20,7 +20,7 @@ pub(super) struct Counters {
 pub(super) fn input(text: &str) -> ContextBlock {
     ContextBlock::new(
         new_block_id(),
-        BlockContent::Parts(vec![ContentPart::Text(TextPayload::new(text))]),
+        BlockContent::text(Role::User, text),
         BlockMeta::from_source("user"),
     )
 }

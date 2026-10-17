@@ -15,6 +15,11 @@ impl Transcript {
         let mut text = String::new();
         let mut tool_details = Vec::new();
         for block in context.blocks() {
+            // The offered tool set is configuration the runner records, not
+            // conversation; it has no transcript entry.
+            if matches!(block.content(), BlockContent::ToolChange(_)) {
+                continue;
+            }
             match block.meta().source.as_deref() {
                 Some("user") => text.push_str("❯ You\n"),
                 Some(source) => {
@@ -25,7 +30,7 @@ impl Transcript {
                 None => text.push_str("●\n"),
             }
             match block.content() {
-                BlockContent::Parts(parts) => {
+                BlockContent::Message { parts, .. } => {
                     for part in parts {
                         match part {
                             ContentPart::Text(value) => text.push_str(&value.0),
@@ -63,6 +68,7 @@ impl Transcript {
                         display(&serde_json::to_string_pretty(result).unwrap_or_default())
                     ));
                 }
+                BlockContent::ToolChange(_) => {}
             }
             text.push_str("\n\n");
         }

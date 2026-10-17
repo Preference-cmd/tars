@@ -2,9 +2,7 @@ use super::types::*;
 use crate::application::{ApplicationError, ManagedSession};
 use crate::definition::{Provider, SessionDefinition};
 use crate::session::WorkRef;
-use causa::kernel::{
-    BlockContent, BlockId, CacheDirective, ContentPart, Context, ModelRef, ToolSurface,
-};
+use causa::kernel::{BlockContent, BlockId, CacheDirective, ContentPart, Context, ModelRef};
 use causa::protocol::translation::{
     anthropic::render_anthropic_messages,
     media::MediaSet,
@@ -77,7 +75,10 @@ pub(super) fn scan(context: &Context) -> Scan {
                     );
                 }
             }
-            BlockContent::Parts(parts) => {
+            // Tool definitions carry no references; their position is checked
+            // by the protocol render below.
+            BlockContent::ToolChange(_) => {}
+            BlockContent::Message { parts, .. } => {
                 if parts
                     .iter()
                     .any(|part| matches!(part, ContentPart::Media(_)))
@@ -115,7 +116,6 @@ pub(super) fn scan(context: &Context) -> Scan {
 pub(super) fn render(context: &Context, definition: &SessionDefinition) -> Result<(), String> {
     let frame = context.frame();
     let media = MediaSet::new();
-    let tools = ToolSurface::default();
     // Only the materials are checked and no request is sent, so a session
     // without an output limit gets a stand-in: the Anthropic renderer rejects
     // a missing limit, which says nothing about the materials.
@@ -126,7 +126,6 @@ pub(super) fn render(context: &Context, definition: &SessionDefinition) -> Resul
         Provider::OpenAiChat => render_openai_chat_messages(
             &frame,
             &media,
-            &tools,
             &generation,
             &model,
             CacheDirective::None,
@@ -135,7 +134,6 @@ pub(super) fn render(context: &Context, definition: &SessionDefinition) -> Resul
         Provider::OpenAiResponses => render_openai_responses_input(
             &frame,
             &media,
-            &tools,
             &generation,
             &model,
             CacheDirective::None,
@@ -144,7 +142,6 @@ pub(super) fn render(context: &Context, definition: &SessionDefinition) -> Resul
         Provider::Anthropic => render_anthropic_messages(
             &frame,
             &media,
-            &tools,
             &generation,
             &model,
             CacheDirective::None,

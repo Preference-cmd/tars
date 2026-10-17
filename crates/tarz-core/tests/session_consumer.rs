@@ -121,7 +121,7 @@ async fn public_consumer_runs_tools_summarizes_replays_and_rebuilds_only_materia
                     seen: prepared,
                 }))
                 .with_observer(Arc::new(move |event| {
-                    if let RunEvent::ModelRequestReady { request } = event {
+                    if let RunEvent::ModelRequestReady { request, .. } = event {
                         assert_eq!(request.invocation_id.turn_id, work.turn_id);
                         observed.lock().unwrap().push(work.clone());
                     }
@@ -176,8 +176,10 @@ async fn public_consumer_runs_tools_summarizes_replays_and_rebuilds_only_materia
     {
         let requests = gateway.requests.lock().unwrap();
         for request in requests.iter() {
-            assert_eq!(request.tool_surface.definitions.len(), 1);
-            let advertised = &request.tool_surface.definitions[0];
+            // The runner records the bound tools in the frame.
+            let tools = causa::kernel::current_tools(&request.frame.blocks);
+            assert_eq!(tools.len(), 1);
+            let advertised = &tools[0];
             assert_eq!(advertised.name, "echo");
             assert_eq!(advertised.description, "fixture");
             assert_eq!(advertised.parameters, serde_json::json!({"type":"object"}));

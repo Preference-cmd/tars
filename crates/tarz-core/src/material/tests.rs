@@ -1,7 +1,7 @@
 use super::*;
 use causa::kernel::{
     ArtifactKind, ArtifactRef, BlockContent, BlockMeta, ContentPart, Context, ContextBlock,
-    MediaRef, TextPayload, ToolOutput, ToolResultPayload, ToolResultStatus,
+    MediaRef, ToolOutput, ToolResultPayload, ToolResultStatus,
 };
 use causa::runtime::new_block_id;
 use std::fs;
@@ -10,9 +10,10 @@ fn block(content: BlockContent) -> ContextBlock {
     ContextBlock::new(new_block_id(), content, BlockMeta::default())
 }
 fn text_context() -> Context {
-    Context::from_blocks(vec![block(BlockContent::Parts(vec![ContentPart::Text(
-        TextPayload::new("saved material"),
-    )]))])
+    Context::from_blocks(vec![block(BlockContent::text(
+        causa::kernel::Role::Assistant,
+        "saved material",
+    ))])
     .unwrap()
 }
 
@@ -54,9 +55,13 @@ fn default_rejects_media_and_preserves_previous_destination() {
     let path = folder.path().join("material.json");
     let previous = text_context();
     save(&path, &previous).unwrap();
-    let context = Context::from_blocks(vec![block(BlockContent::Parts(vec![ContentPart::Media(
-        MediaRef::new("image/png", "missing-asset"),
-    )]))])
+    let context = Context::from_blocks(vec![block(BlockContent::Message {
+        role: causa::kernel::Role::Assistant,
+        parts: vec![ContentPart::Media(MediaRef::new(
+            "image/png",
+            "missing-asset",
+        ))],
+    })])
     .unwrap();
     assert!(matches!(
         save(&path, &context),
@@ -76,9 +81,13 @@ fn asset_readability_is_rechecked_on_load_and_errors_retain_the_cause() {
     let path = folder.path().join("material.json");
     let asset = folder.path().join("asset");
     fs::write(&asset, b"image bytes").unwrap();
-    let context = Context::from_blocks(vec![block(BlockContent::Parts(vec![ContentPart::Media(
-        MediaRef::new("image/png", "host-asset-key"),
-    )]))])
+    let context = Context::from_blocks(vec![block(BlockContent::Message {
+        role: causa::kernel::Role::Assistant,
+        parts: vec![ContentPart::Media(MediaRef::new(
+            "image/png",
+            "host-asset-key",
+        ))],
+    })])
     .unwrap();
     let verify = |reference: MaterialReference<'_>| {
         assert!(
@@ -163,4 +172,64 @@ fn failed_replacement_leaves_destination_directory_intact_and_removes_tempfile()
     ));
     assert!(path.is_dir());
     assert_eq!(fs::read_dir(folder.path()).unwrap().count(), 1);
+}
+
+/// A user input and the repair note, in the current form and in the form
+/// written before the message role became a fact of the block.
+fn message_role_fixture() -> (Context, serde_json::Value) {
+    use causa::kernel::Role;
+    let context = Context::from_blocks(vec![
+        ContextBlock::new(
+            new_block_id(),
+            BlockContent::text(Role::User, "question"),
+            BlockMeta::from_source("user"),
+        ),
+        ContextBlock::new(
+            new_block_id(),
+            BlockContent::text(Role::System, "repair note"),
+            BlockMeta::from_source("application:tarz:material-repair"),
+        ),
+    ])
+    .unwrap();
+    let mut earlier = serde_json::to_value(&context).unwrap();
+    for block in earlier["blocks"].as_array_mut().unwrap() {
+        let parts = block["content"]["value"]["parts"].take();
+        block["content"] = serde_json::json!({"shape": "parts", "value": parts});
+    }
+    (context, earlier)
+}
+
+#[test]
+fn material_files_and_session_exports_written_before_message_roles_still_load() {
+    let folder = tempfile::tempdir().unwrap();
+    let (context, earlier) = message_role_fixture();
+    let path = folder.path().join("material.json");
+    fs::write(&path, serde_json::to_vec(&earlier).unwrap()).unwrap();
+    assert_eq!(load(&path).unwrap().blocks(), context.blocks());
+
+    // export-materials reads a saved session record.
+    let record = folder.path().join("session.json");
+    let envelope = serde_json::json!({
+        "format": "tarz-session-v2",
+        "conversation_id": uuid::Uuid::now_v7().to_string(),
+        "revision": 1,
+        "last_commit_id": uuid::Uuid::now_v7().to_string(),
+        "definition": {},
+        "context": earlier,
+    });
+    fs::write(&record, serde_json::to_vec(&envelope).unwrap()).unwrap();
+    let exported = load_session_materials(&record).unwrap();
+    assert_eq!(exported.blocks(), context.blocks());
+
+    // The next write stores the current form.
+    save(&path, &exported).unwrap();
+    let written: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(written, serde_json::to_value(&context).unwrap());
+    assert!(
+        written["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|block| block["content"]["shape"] == "message")
+    );
 }

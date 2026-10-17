@@ -23,7 +23,10 @@ fn request(key: &str) -> SubmitRequest {
         request_key: key.to_owned(),
         blocks: vec![ContextBlock::new(
             BlockId::new(uuid::Uuid::from_u128(17)),
-            BlockContent::Parts(Vec::new()),
+            BlockContent::Message {
+                role: causa::kernel::Role::User,
+                parts: Vec::new(),
+            },
             BlockMeta::from_source("test"),
         )],
     }

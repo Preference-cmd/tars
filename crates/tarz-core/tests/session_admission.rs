@@ -274,7 +274,10 @@ async fn empty_submission_replay_and_forget_keep_material_and_result_independent
     assert_eq!(handle.submit(request("key", vec![])).unwrap(), receipt);
     let empty_parts = ContextBlock::new(
         new_block_id(),
-        BlockContent::Parts(vec![]),
+        BlockContent::Message {
+            role: causa::kernel::Role::Assistant,
+            parts: vec![],
+        },
         BlockMeta::default(),
     );
     assert!(matches!(

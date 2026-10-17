@@ -19,7 +19,7 @@ pub fn config(capacity: usize) -> SessionConfig {
 pub fn block(text: &str) -> ContextBlock {
     ContextBlock::new(
         new_block_id(),
-        BlockContent::Parts(vec![ContentPart::Text(TextPayload::new(text))]),
+        BlockContent::text(causa::kernel::Role::User, text),
         BlockMeta::default()
             .with_source("user")
             .with_provider_call_id(format!("provenance:{text}")),

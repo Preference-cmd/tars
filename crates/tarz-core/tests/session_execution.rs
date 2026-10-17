@@ -375,7 +375,7 @@ async fn malformed_output_is_returned_as_raw_typed_failure_without_material_comm
     };
     assert!(matches!(
         error,
-        ModelBlockError::EmptyToolName { tool_index: 0 }
+        ModelBlockError::EmptyToolName { tool_index: 0, .. }
     ));
     assert_eq!(output.response.text(), "original body");
     let calls: Vec<_> = output.response.tool_calls().collect();
@@ -512,8 +512,16 @@ async fn tool_commit_failure_keeps_raw_edit_input_and_owned_batch() {
             .unwrap()
             .is_none()
     );
-    assert_eq!(context(&mut session)[0], existing);
-    assert_eq!(context(&mut session).len(), 2);
+    // The runner records the bound tools before the model call, then the
+    // declaration; the uncommitted result is the only thing left out.
+    let materials = context(&mut session);
+    assert_eq!(materials[0], existing);
+    assert!(matches!(
+        materials[1].content(),
+        BlockContent::ToolChange(_)
+    ));
+    assert!(matches!(materials[2].content(), BlockContent::ToolCall(_)));
+    assert_eq!(materials.len(), 3);
     assert!(Arc::ptr_eq(&old, &finished(&handle, &receipt.work).await));
 }
 
@@ -561,12 +569,16 @@ async fn unknown_tool_outcome_commits_result_without_leaving_a_second_batch() {
         })
     ));
     let materials = context(&mut session);
-    assert_eq!(materials.len(), 2);
-    let BlockContent::ToolResult(raw) = materials[1].content() else {
+    assert_eq!(materials.len(), 3);
+    assert!(matches!(
+        materials[0].content(),
+        BlockContent::ToolChange(_)
+    ));
+    let BlockContent::ToolResult(raw) = materials[2].content() else {
         panic!("missing actual result")
     };
     assert_eq!(raw.status, ToolResultStatus::UnknownOutcome);
-    assert_eq!(raw.call_block_id, materials[0].id());
+    assert_eq!(raw.call_block_id, materials[1].id());
     assert!(
         session
             .take_uncommitted_tool_batch(&receipt.work)

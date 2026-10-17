@@ -24,12 +24,13 @@ pub(super) fn observer(
             return;
         }
         let (invocation_id, update) = match event {
-            RunEvent::ModelRequestReady { request } => {
+            RunEvent::ModelRequestReady { request, .. } => {
                 (&request.invocation_id, ProgressUpdate::ModelStarted)
             }
             RunEvent::ModelDelta {
                 invocation_id,
                 delta: StreamDelta::TextDelta { delta },
+                ..
             } => {
                 let mut end = delta.len().min(MAX_TEXT_BYTES);
                 while !delta.is_char_boundary(end) {

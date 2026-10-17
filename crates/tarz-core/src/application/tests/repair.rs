@@ -90,14 +90,20 @@ async fn repair_remove_preserves_facts_and_protocol_readiness_for_all_providers(
         assert_eq!(plan.summary().removed, vec![unpaired.id()]);
         assert_eq!(plan.summary().adopted_count, 0);
         assert_eq!(&plan.candidate().blocks()[..3], &originals[..3]);
-        assert!(
-            plan.candidate().blocks()[3]
-                .meta()
-                .source
-                .as_deref()
-                .unwrap()
-                .starts_with("application:tarz:")
+        // The note is application guidance to the model, not user input;
+        // its source tag stays provenance only.
+        let note = &plan.candidate().blocks()[3];
+        assert_eq!(
+            note.meta().source.as_deref(),
+            Some("application:tarz:material-repair")
         );
+        assert!(matches!(
+            note.content(),
+            BlockContent::Message {
+                role: causa::kernel::Role::System,
+                ..
+            }
+        ));
         assert_eq!(session.read_materials().unwrap().version, before.version);
         session.apply_repair(&plan).unwrap();
         assert!(session.inspect_repair(None).unwrap().diagnosis.is_ready());
@@ -140,9 +146,12 @@ async fn repair_rejects_orphans_duplicate_results_wire_ambiguity_and_media_witho
             vec![
                 ContextBlock::new(
                     BlockId::new(uuid::Uuid::now_v7()),
-                    BlockContent::Parts(vec![causa::kernel::ContentPart::Media(
-                        causa::kernel::MediaRef::new("image/png", "not resolved"),
-                    )]),
+                    BlockContent::Message {
+                        role: causa::kernel::Role::Assistant,
+                        parts: vec![causa::kernel::ContentPart::Media(
+                            causa::kernel::MediaRef::new("image/png", "not resolved"),
+                        )],
+                    },
                     BlockMeta::default(),
                 ),
                 declaration,
@@ -213,7 +222,15 @@ async fn repair_render_rejects_interleaved_history_and_diagnostics_are_bounded()
 async fn repair_reopen_has_no_original_batch_and_rejects_old_instance_or_material_plan() {
     let root = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(root.path().into()));
-    let session = session(&host, vec![call("pending")], Provider::Anthropic, true).await;
+    // Materials open with user input, as every real session does: a candidate
+    // holding only the system repair note renders no Anthropic message.
+    let session = session(
+        &host,
+        vec![text_input("original user"), call("pending")],
+        Provider::Anthropic,
+        true,
+    )
+    .await;
     let old_plan = session.plan_repair(RepairMode::RemoveUnpaired).unwrap();
     let id = session.target().conversation_id().clone();
     host.close(&session.target(), ClosePolicy::Save)

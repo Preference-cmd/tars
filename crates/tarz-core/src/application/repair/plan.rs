@@ -3,9 +3,7 @@ use super::types::*;
 use crate::application::{ApplicationError, ManagedSession, MaterialVersion};
 use crate::definition::SessionDefinition;
 use crate::session::{SessionError, WorkResult};
-use causa::kernel::{
-    BlockContent, BlockId, BlockMeta, ContentPart, Context, ContextBlock, TextPayload, ToolBatch,
-};
+use causa::kernel::{BlockContent, BlockId, BlockMeta, Context, ContextBlock, Role, ToolBatch};
 use causa::runtime::{TurnInterruption, TurnResult, new_block_id};
 use std::collections::{HashMap, HashSet};
 
@@ -171,9 +169,7 @@ impl ManagedSession {
         });
         blocks.push(ContextBlock::new(
             explanation_id,
-            BlockContent::Parts(vec![ContentPart::Text(TextPayload::new(
-                explanation.to_string(),
-            ))]),
+            BlockContent::text(Role::System, explanation.to_string()),
             BlockMeta::from_source("application:tarz:material-repair"),
         ));
         let candidate = Context::from_blocks(blocks)
