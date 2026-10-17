@@ -6,7 +6,7 @@ use causa::kernel::{
     BlockContent, BlockMeta, ContextBlock, InvocationId, RoundId, ToolBatch, ToolCallContext,
     ToolCallPayload, ToolOutput, ToolResultPayload, ToolResultStatus, TurnId,
 };
-use causa::runtime::{RunEvent, TurnRunOptions, new_block_id};
+use causa::runtime::{TurnRunOptions, new_block_id};
 use std::sync::{Arc, Mutex, atomic::AtomicUsize};
 use std::time::Duration;
 use tokio::sync::{Notify, broadcast};
@@ -41,10 +41,7 @@ fn ready(
     calls: Vec<ToolCallContext>,
 ) -> ToolBatch {
     let batch = ToolBatch::new(calls).unwrap();
-    reporter.observe(&RunEvent::ToolBatchReady {
-        invocation_id: invocation,
-        batch: &batch,
-    });
+    reporter.batch_ready(invocation, &batch);
     batch
 }
 
@@ -63,21 +60,14 @@ fn reliable_snapshot_survives_lost_events_and_tracks_actual_commit() {
     batch
         .resolve_at(0, new_block_id(), payload.clone())
         .unwrap();
-    reporter.observe(&RunEvent::ToolBatchReturned {
-        invocation_id: &invocation,
-        batch: &batch,
-        result: Ok(()),
-    });
+    reporter.batch_returned(&invocation, &batch);
     assert_eq!(reporter.snapshot().calls[0].phase, ToolPhase::Returned);
     let blocks = [ContextBlock::new(
         new_block_id(),
         BlockContent::ToolResult(payload),
         BlockMeta::default(),
     )];
-    reporter.observe(&RunEvent::BlocksCommitted {
-        invocation_id: &invocation,
-        blocks: &blocks,
-    });
+    reporter.blocks_committed(&invocation, &blocks);
     assert!(matches!(
         receiver.try_recv(),
         Err(broadcast::error::TryRecvError::Lagged(_))
@@ -115,11 +105,7 @@ fn controlled_unknown_and_pending_win_over_late_blocking_callbacks() {
             ),
         )
         .unwrap();
-    reporter.observe(&RunEvent::ToolBatchReturned {
-        invocation_id: &invocation,
-        batch: &batch,
-        result: Ok(()),
-    });
+    reporter.batch_returned(&invocation, &batch);
     reporter.returned(&started, ToolResultStatus::Succeeded);
     reporter.running(&unstarted);
     let snapshot = reporter.snapshot();
@@ -149,11 +135,7 @@ fn identical_wrapper_and_batch_result_still_seals_authoritative_facts() {
             ),
         )
         .unwrap();
-    reporter.observe(&RunEvent::ToolBatchReturned {
-        invocation_id: &invocation,
-        batch: &batch,
-        result: Ok(()),
-    });
+    reporter.batch_returned(&invocation, &batch);
     reporter.returned(&call, ToolResultStatus::Succeeded);
     assert_eq!(
         reporter.snapshot().calls[0].status,
@@ -193,16 +175,9 @@ fn drained_wrapper_start_facts_refine_unknown_without_changing_original_results(
             ));
             batch.resolve_at(index, id, payload).unwrap();
         }
-        reporter.observe(&RunEvent::ToolBatchReturned {
-            invocation_id: &invocation,
-            batch: &batch,
-            result: Ok(()),
-        });
+        reporter.batch_returned(&invocation, &batch);
         if committed {
-            reporter.observe(&RunEvent::BlocksCommitted {
-                invocation_id: &invocation,
-                blocks: &blocks,
-            });
+            reporter.blocks_committed(&invocation, &blocks);
         }
         // A queued blocking job can enter after the conservative return. Its
         // actual start still matters even though it cannot overwrite that result.

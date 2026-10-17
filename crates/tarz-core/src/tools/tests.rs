@@ -7,7 +7,6 @@ use causa::kernel::{
     BlockId, CallControl, InvocationId, RoundId, ToolBatch, ToolCallContext, ToolCallPayload,
     ToolResultStatus, TurnId,
 };
-use causa::runtime::RunEvent;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,13 +28,13 @@ fn reporter(calls: &[ToolCallContext]) -> ToolReporter {
         tokio::sync::broadcast::channel(128).0,
     );
     let batch = ToolBatch::new(calls.to_vec()).unwrap();
-    reporter.observe(&RunEvent::ToolBatchReady {
-        invocation_id: &InvocationId {
+    reporter.batch_ready(
+        &InvocationId {
             turn_id,
             round_id: RoundId(0),
         },
-        batch: &batch,
-    });
+        &batch,
+    );
     reporter
 }
 fn tools(limits: WorkspaceToolLimits) -> (tempfile::TempDir, Arc<WorkspaceTools>) {
@@ -696,13 +695,13 @@ async fn observation_probe() {
             turn_id: turn_id.clone(),
         };
         let report = ToolReporter::new(work, sender);
-        report.observe(&RunEvent::ToolBatchReady {
-            invocation_id: &InvocationId {
+        report.batch_ready(
+            &InvocationId {
                 turn_id,
                 round_id: RoundId(0),
             },
-            batch: &ToolBatch::new(vec![call.clone()]).unwrap(),
-        });
+            &ToolBatch::new(vec![call.clone()]).unwrap(),
+        );
         let tool = shared.bind(&[kind], report.clone()).pop().unwrap();
         let output = tool.execute(&call, &control(), None).await;
         report.drain().await;

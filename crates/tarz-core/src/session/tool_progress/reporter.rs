@@ -1,6 +1,8 @@
 use super::types::{ToolPhase, ToolProgress, ToolProgressSnapshot};
 use crate::session::{ProgressUpdate, WorkProgress, WorkRef};
-use causa::kernel::{BlockContent, InvocationId, ToolCallContext, ToolResultStatus};
+use causa::kernel::{
+    BlockContent, ContextBlock, InvocationId, ToolBatch, ToolCallContext, ToolResultStatus,
+};
 use causa::runtime::RunEvent;
 use std::collections::HashSet;
 use std::io::{self, Write};
@@ -165,78 +167,93 @@ impl ToolReporter {
         }
     }
 
+    /// Routes the runner's observations to the state updates below. The
+    /// updates take their facts as arguments, so tests drive any event order
+    /// without building a `RunEvent`.
     pub(crate) fn observe(&self, event: &RunEvent<'_>) {
         match event {
             RunEvent::ToolBatchReady {
                 invocation_id,
                 batch,
-            } => {
-                for entry in batch.calls() {
-                    self.update(entry.call(), invocation_id, ToolPhase::Waiting, None, false);
-                }
-            }
+                ..
+            } => self.batch_ready(invocation_id, batch),
             RunEvent::ToolBatchReturned {
                 invocation_id,
                 batch,
                 ..
-            } => {
-                for entry in batch.results() {
-                    if let Some((_, result)) = entry.result() {
-                        self.update(
-                            entry.call(),
-                            invocation_id,
-                            ToolPhase::Returned,
-                            Some(result.status.clone()),
-                            true,
-                        );
-                    }
-                }
-                for entry in batch.calls() {
-                    self.update(
-                        entry.call(),
-                        invocation_id,
-                        ToolPhase::NotStarted,
-                        None,
-                        true,
-                    );
-                }
-            }
+            } => self.batch_returned(invocation_id, batch),
             RunEvent::BlocksCommitted {
                 invocation_id,
                 blocks,
-            } => {
-                for block in *blocks {
-                    if let BlockContent::ToolResult(result) = block.content() {
-                        let event = {
-                            let mut state = self
-                                .0
-                                .state
-                                .lock()
-                                .expect("tool observations have no callbacks");
-                            if state.frozen {
-                                return;
-                            }
-                            state
-                                .snapshot
-                                .calls
-                                .iter_mut()
-                                .find(|call| {
-                                    call.call_block_id == result.call_block_id
-                                        && call.invocation_id == **invocation_id
-                                })
-                                .map(|call| {
-                                    call.phase = ToolPhase::Committed;
-                                    call.status = Some(result.status.clone());
-                                    call.clone()
-                                })
-                        };
-                        if let Some(event) = event {
-                            self.send(event);
-                        }
+                ..
+            } => self.blocks_committed(invocation_id, blocks),
+            _ => {}
+        }
+    }
+
+    /// Newly declared calls are waiting for tool processing.
+    pub(crate) fn batch_ready(&self, invocation_id: &InvocationId, batch: &ToolBatch) {
+        for entry in batch.calls() {
+            self.update(entry.call(), invocation_id, ToolPhase::Waiting, None, false);
+        }
+    }
+
+    /// Tool processing returned: resolved calls carry their status, the rest
+    /// never started. Both are authoritative over later wrapper callbacks.
+    pub(crate) fn batch_returned(&self, invocation_id: &InvocationId, batch: &ToolBatch) {
+        for entry in batch.results() {
+            if let Some((_, result)) = entry.result() {
+                self.update(
+                    entry.call(),
+                    invocation_id,
+                    ToolPhase::Returned,
+                    Some(result.status.clone()),
+                    true,
+                );
+            }
+        }
+        for entry in batch.calls() {
+            self.update(
+                entry.call(),
+                invocation_id,
+                ToolPhase::NotStarted,
+                None,
+                true,
+            );
+        }
+    }
+
+    /// Results reached the context; only an actual append marks a call committed.
+    pub(crate) fn blocks_committed(&self, invocation_id: &InvocationId, blocks: &[ContextBlock]) {
+        for block in blocks {
+            if let BlockContent::ToolResult(result) = block.content() {
+                let event = {
+                    let mut state = self
+                        .0
+                        .state
+                        .lock()
+                        .expect("tool observations have no callbacks");
+                    if state.frozen {
+                        return;
                     }
+                    state
+                        .snapshot
+                        .calls
+                        .iter_mut()
+                        .find(|call| {
+                            call.call_block_id == result.call_block_id
+                                && call.invocation_id == *invocation_id
+                        })
+                        .map(|call| {
+                            call.phase = ToolPhase::Committed;
+                            call.status = Some(result.status.clone());
+                            call.clone()
+                        })
+                };
+                if let Some(event) = event {
+                    self.send(event);
                 }
             }
-            _ => {}
         }
     }
 
