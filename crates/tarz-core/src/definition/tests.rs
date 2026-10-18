@@ -14,6 +14,7 @@ fn definition() -> SessionDefinition {
         reasoning_effort: None,
         extra_body: Default::default(),
         max_model_attempts: None,
+        render_options: Default::default(),
         workspace_root: None,
         tools: vec![],
         tool_limits: Default::default(),
@@ -188,4 +189,86 @@ fn the_attempt_limit_is_optional_positive_and_absent_from_older_records() {
         .unwrap();
     let read = serde_json::from_value::<SessionDefinition>(encoded).unwrap();
     assert_eq!(read.max_model_attempts, None);
+}
+
+#[test]
+fn render_options_are_read_as_the_protocol_type_and_kept_as_written() {
+    use super::RenderOptions;
+    use causa::providers::ChatMaxTokensField;
+    let mut candidate = definition();
+    candidate.provider = Provider::OpenAiChat;
+    assert!(matches!(
+        candidate.protocol_render_options().unwrap(),
+        RenderOptions::Chat(options) if options.max_tokens_field == ChatMaxTokensField::MaxCompletionTokens
+    ));
+    // An empty table is left out of the record.
+    assert!(
+        serde_json::to_value(&candidate)
+            .unwrap()
+            .get("render_options")
+            .is_none()
+    );
+
+    candidate.render_options =
+        serde_json::from_value(serde_json::json!({"max_tokens_field": "max_tokens"})).unwrap();
+    candidate.validate().unwrap();
+    let RenderOptions::Chat(options) = candidate.protocol_render_options().unwrap() else {
+        panic!("chat options");
+    };
+    assert_eq!(options.max_tokens_field, ChatMaxTokensField::MaxTokens);
+    // Only the written key is saved; defaults are not expanded into the record.
+    let mut encoded = serde_json::to_value(&candidate).unwrap();
+    assert_eq!(
+        encoded["render_options"],
+        serde_json::json!({"max_tokens_field": "max_tokens"})
+    );
+    assert_eq!(
+        serde_json::from_value::<SessionDefinition>(encoded.clone()).unwrap(),
+        candidate
+    );
+    // A record saved before the field existed reads as empty.
+    encoded.as_object_mut().unwrap().remove("render_options");
+    let read = serde_json::from_value::<SessionDefinition>(encoded).unwrap();
+    assert!(read.render_options.is_empty());
+
+    let mut responses = definition();
+    responses.render_options = serde_json::from_value(serde_json::json!({"store": true})).unwrap();
+    assert!(matches!(
+        responses.protocol_render_options().unwrap(),
+        RenderOptions::Responses(options) if options.store == Some(true)
+    ));
+}
+
+#[test]
+fn render_options_the_protocol_does_not_accept_are_rejected_without_echoing_them() {
+    for (provider, table) in [
+        (
+            Provider::OpenAiChat,
+            serde_json::json!({"secret_marker_key": true}),
+        ),
+        (
+            Provider::OpenAiChat,
+            serde_json::json!({"max_tokens_field": "secret_marker_value"}),
+        ),
+        (
+            Provider::OpenAiChat,
+            serde_json::json!({"max_tokens_field": 300}),
+        ),
+        // A Chat option is unknown to the other protocols.
+        (
+            Provider::Anthropic,
+            serde_json::json!({"max_tokens_field": "max_tokens"}),
+        ),
+        (
+            Provider::OpenAiResponses,
+            serde_json::json!({"max_tokens_field": "max_tokens"}),
+        ),
+    ] {
+        let mut candidate = definition();
+        candidate.provider = provider;
+        candidate.render_options = serde_json::from_value(table).unwrap();
+        let error = candidate.validate().unwrap_err();
+        assert_eq!(error, DefinitionError::InvalidRenderOptions);
+        assert!(!error.to_string().contains("secret_marker"));
+    }
 }

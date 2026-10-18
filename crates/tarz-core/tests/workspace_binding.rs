@@ -32,6 +32,7 @@ fn definition(provider: Provider, endpoint: &str, root: &Path) -> SessionDefinit
         reasoning_effort: None,
         extra_body: Default::default(),
         max_model_attempts: None,
+        render_options: Default::default(),
         workspace_root: Some(root.canonicalize().unwrap()),
         tools: vec![WorkspaceTool::ReadFile],
         tool_limits: Default::default(),

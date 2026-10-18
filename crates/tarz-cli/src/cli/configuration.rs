@@ -87,6 +87,12 @@ pub(super) fn definition(
                     .map_err(|_| "--extra-body must be a JSON object".to_owned())
             })
             .transpose()?,
+        render_options: string(values, "--render-options")?
+            .map(|value| {
+                serde_json::from_str(&value)
+                    .map_err(|_| "--render-options must be a JSON object".to_owned())
+            })
+            .transpose()?,
     };
     config
         .definition(string(values, "--profile")?.as_deref(), overrides)

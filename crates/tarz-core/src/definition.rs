@@ -5,6 +5,7 @@ mod workspace;
 
 pub use workspace::{WorkspaceTool, WorkspaceToolLimits};
 
+pub(crate) use types::RenderOptions;
 pub use types::{CredentialRef, DefinitionError, Provider, SessionDefinition};
 
 #[cfg(test)]

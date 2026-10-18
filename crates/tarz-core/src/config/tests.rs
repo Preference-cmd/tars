@@ -265,3 +265,62 @@ fn effort_text_and_extra_request_fields_are_kept_as_written() {
     let reread: crate::definition::SessionDefinition = serde_json::from_value(saved).unwrap();
     assert!(reread.extra_body.is_empty());
 }
+
+#[test]
+fn render_options_come_from_the_profile_and_an_explicit_table_replaces_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let text =
+        format!("{CONFIG}[profiles.local.render_options]\nmax_tokens_field = \"max_tokens\"\n");
+    std::fs::write(&path, text).unwrap();
+    let config = Config::load(ConfigSource::File(path)).unwrap();
+    let preset = config
+        .definition(None, DefinitionOverrides::default())
+        .unwrap();
+    assert_eq!(
+        serde_json::Value::Object(preset.render_options.clone()),
+        serde_json::json!({"max_tokens_field": "max_tokens"})
+    );
+
+    let mut replacement = serde_json::Map::new();
+    replacement.insert("replay_reasoning_content".into(), serde_json::json!(false));
+    let overridden = config
+        .definition(
+            None,
+            DefinitionOverrides {
+                render_options: Some(replacement.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(overridden.render_options, replacement);
+
+    // The profile's Chat option does not fit another protocol.
+    let switched = config.definition(
+        None,
+        DefinitionOverrides {
+            provider: Some(Provider::Anthropic),
+            ..Default::default()
+        },
+    );
+    assert!(matches!(
+        switched,
+        Err(super::ConfigError::Definition(
+            crate::definition::DefinitionError::InvalidRenderOptions
+        ))
+    ));
+}
+
+#[test]
+fn a_profile_with_an_unknown_render_option_is_refused_at_load_without_its_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let text =
+        format!("{CONFIG}[profiles.local.render_options]\nmax_tokens_field = \"secret_marker\"\n");
+    std::fs::write(&path, text).unwrap();
+    let error = Config::load(ConfigSource::File(path))
+        .err()
+        .expect("refused");
+    assert!(!error.to_string().contains("secret_marker"));
+    assert!(error.to_string().contains("render_options"));
+}

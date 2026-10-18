@@ -2,7 +2,8 @@
 //! Model retries through the real CLI process against a scripted local
 //! server: a rate-limited later round is repeated with the same request,
 //! and an exhausted attempt limit ends as a failure that keeps the earlier
-//! materials usable for new work.
+//! materials usable for new work. Generation settings and render options
+//! are checked here too, on the request bodies the server records.
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -346,4 +347,99 @@ fn effort_text_and_extra_request_fields_reach_the_provider_as_written() {
     );
     assert!(!output.status.success());
     assert!(requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn render_options_reach_the_gateway_and_unfit_ones_are_refused_before_a_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    let chat_body = |extra: &[&str]| {
+        let (endpoint, requests) = serve(
+            "openai-chat",
+            vec![Reply::Stream(tools::answer("openai-chat"))],
+        );
+        let mut args = vec!["--max-tokens", "300"];
+        args.extend_from_slice(extra);
+        let output = run("openai-chat", &endpoint, &workspace, &args);
+        assert!(output.status.success(), "{output:?}");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        requests[0].clone()
+    };
+    // The default writes the limit under the newer name only.
+    let body = chat_body(&[]);
+    assert_eq!(body["max_completion_tokens"], 300);
+    assert!(body.get("max_tokens").is_none());
+    // The chosen field is the only one sent.
+    let body = chat_body(&["--render-options", r#"{"max_tokens_field":"max_tokens"}"#]);
+    assert_eq!(body["max_tokens"], 300);
+    assert!(body.get("max_completion_tokens").is_none());
+
+    // The same table from a TOML profile.
+    let config = dir.path().join("config.toml");
+    let (endpoint, requests) = serve(
+        "openai-chat",
+        vec![Reply::Stream(tools::answer("openai-chat"))],
+    );
+    std::fs::write(
+        &config,
+        format!(
+            "version = 1\ndefault_profile = \"p\"\n[profiles.p]\nprovider = \"openai-chat\"\nmodel = \"fixture-model\"\napi_key_env = \"PATH\"\nendpoint = \"{endpoint}\"\nmax_tokens = 300\n[profiles.p.render_options]\nmax_tokens_field = \"max_tokens\"\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tarz"))
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--input", "Find recovery path", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let body = requests.lock().unwrap()[0].clone();
+    assert_eq!(body["max_tokens"], 300);
+    assert!(body.get("max_completion_tokens").is_none());
+
+    // Another protocol's option takes effect too: Responses leaves out the
+    // encrypted-reasoning include when told to.
+    let responses_body = |extra: &[&str]| {
+        let (endpoint, requests) = serve(
+            "openai-responses",
+            vec![Reply::Stream(tools::answer("openai-responses"))],
+        );
+        let output = run("openai-responses", &endpoint, &workspace, extra);
+        assert!(output.status.success(), "{output:?}");
+        requests.lock().unwrap()[0].clone()
+    };
+    assert_eq!(
+        responses_body(&[])["include"],
+        json!(["reasoning.encrypted_content"])
+    );
+    let body = responses_body(&[
+        "--render-options",
+        r#"{"include_encrypted_reasoning":false}"#,
+    ]);
+    assert!(body.get("include").is_none());
+
+    // A Chat option on another protocol, an unknown value and a non-object
+    // are refused before any request.
+    for (provider, table) in [
+        ("anthropic", r#"{"max_tokens_field":"max_tokens"}"#),
+        ("openai-chat", r#"{"max_tokens_field":"secret_marker"}"#),
+        ("openai-chat", "[1]"),
+    ] {
+        let (endpoint, requests) = serve(provider, Vec::new());
+        let output = run(
+            provider,
+            &endpoint,
+            &workspace,
+            &["--render-options", table],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{provider} {table}: {output:?}"
+        );
+        assert!(requests.lock().unwrap().is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("secret_marker"));
+    }
 }

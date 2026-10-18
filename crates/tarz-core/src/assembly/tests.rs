@@ -26,6 +26,7 @@ fn definition() -> SessionDefinition {
         reasoning_effort: None,
         extra_body: Default::default(),
         max_model_attempts: None,
+        render_options: Default::default(),
         workspace_root: None,
         tools: vec![],
         tool_limits: Default::default(),

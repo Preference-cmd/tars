@@ -32,6 +32,8 @@ pub struct DefinitionOverrides {
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
     /// Explicit total model calls per invocation on transient failure.
     pub max_model_attempts: Option<u32>,
+    /// Explicit protocol render options; replaces the preset's as a whole.
+    pub render_options: Option<serde_json::Map<String, serde_json::Value>>,
     /// Explicit root resolved relative to the current directory at resolution time.
     pub workspace_root: Option<PathBuf>,
     /// Explicit selected tools; Some(empty) disables preset tools.
@@ -55,6 +57,7 @@ pub(super) struct Profile {
     reasoning_effort: Option<String>,
     extra_body: Option<serde_json::Map<String, serde_json::Value>>,
     max_model_attempts: Option<u32>,
+    render_options: Option<serde_json::Map<String, serde_json::Value>>,
     pub(super) workspace_root: Option<PathBuf>,
     tools: Option<Vec<WorkspaceTool>>,
     tool_limits: Option<ProfileToolLimits>,
@@ -166,6 +169,10 @@ pub(super) fn resolve(
         max_model_attempts: options
             .max_model_attempts
             .or(profile.and_then(|p| p.max_model_attempts)),
+        render_options: options
+            .render_options
+            .or_else(|| profile.and_then(|p| p.render_options.clone()))
+            .unwrap_or_default(),
         workspace_root,
         tools: options
             .tools

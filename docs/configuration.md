@@ -32,9 +32,15 @@ max_tool_calls = 64
 # max_model_attempts = 3
 # [profiles.work.extra_body.thinking]
 # type = "adaptive"
+# [profiles.work.render_options]
+# max_tokens_field = "max_tokens"
 ```
 
-`version` 必须为 1；`store`、`recovery_dir`、`default_profile` 和 `profiles` 可省略。每个模型预设必须包含 provider 与非空 model。provider 为 `openai-chat`、`openai-responses` 或 `anthropic`。其余字段省略时采用表中默认：期限 120 秒、保留工作 256 项、每次工作最多 10 次模型调用和 64 个工具声明；`api_key_env` 随协议默认为 OPENAI_API_KEY 或 ANTHROPIC_API_KEY。`max_tokens`（每次模型调用的输出 token 上限）和 `reasoning_effort` 没有默认值，省略即不发送；`anthropic` 协议要求 `max_tokens`，未配置时请求在发出前被拒绝。对应的命令行参数是 `--max-tokens` 与 `--reasoning-effort`。`reasoning_effort` 是一段文本，原样写入请求里该协议的强度字段，Tarz 不维护可用值列表：可用值因模型和服务而异（常见的有 `low`、`medium`、`high`，有的服务用 `off` 关闭推理），服务不接受时返回的错误会原样显示。`extra_body` 是一个表，原样并入请求体，用于只有某个协议或模型才有的设置，例如 `anthropic` 协议的 `thinking` 对象。与 Tarz 自己写入的键重名时，两边都是表则逐键合并，例如在 `openai-responses` 协议上写 `reasoning = { summary = "auto" }` 会与 `reasoning_effort` 写入的强度并存；其他情况下保留 Tarz 写入的值（如 `model`、消息、工具），表里的值被忽略且不报错。命令行参数是 `--extra-body`，值为一个 JSON 对象，给出时整体替换预设里的表。在 `anthropic` 协议上，只设置 `reasoning_effort` 不会自动附带 `thinking` 对象，需要时在 `extra_body` 里写明。`max_model_attempts` 是每轮模型调用在瞬时故障或限流时允许的总次数（含第一次），省略或为 1 时不重试，命令行参数是 `--max-model-attempts`；重试只发生在任何输出可见之前，等待时间不超过工作期限。已保存会话的记录里没有这几项时按未配置读取。临时 `tarz run` 只保留其单次工作，容量固定为 1。
+`version` 必须为 1；`store`、`recovery_dir`、`default_profile` 和 `profiles` 可省略。每个模型预设必须包含 provider 与非空 model。provider 为 `openai-chat`、`openai-responses` 或 `anthropic`。其余字段省略时采用表中默认：期限 120 秒、保留工作 256 项、每次工作最多 10 次模型调用和 64 个工具声明；`api_key_env` 随协议默认为 OPENAI_API_KEY 或 ANTHROPIC_API_KEY。`max_tokens`（每次模型调用的输出 token 上限）和 `reasoning_effort` 没有默认值，省略即不发送；`anthropic` 协议要求 `max_tokens`，未配置时请求在发出前被拒绝。对应的命令行参数是 `--max-tokens` 与 `--reasoning-effort`。`reasoning_effort` 是一段文本，原样写入请求里该协议的强度字段，Tarz 不维护可用值列表：可用值因模型和服务而异（常见的有 `low`、`medium`、`high`，有的服务用 `off` 关闭推理），服务不接受时返回的错误会原样显示。`extra_body` 是一个表，原样并入请求体，用于只有某个协议或模型才有的设置，例如 `anthropic` 协议的 `thinking` 对象。与 Tarz 自己写入的键重名时，两边都是表则逐键合并，例如在 `openai-responses` 协议上写 `reasoning = { summary = "auto" }` 会与 `reasoning_effort` 写入的强度并存；其他情况下保留 Tarz 写入的值（如 `model`、消息、工具），表里的值被忽略且不报错。命令行参数是 `--extra-body`，值为一个 JSON 对象，给出时整体替换预设里的表。在 `anthropic` 协议上，只设置 `reasoning_effort` 不会自动附带 `thinking` 对象，需要时在 `extra_body` 里写明。`max_model_attempts` 是每轮模型调用在瞬时故障或限流时允许的总次数（含第一次），省略或为 1 时不重试，命令行参数是 `--max-model-attempts`；重试只发生在任何输出可见之前，等待时间不超过工作期限。已保存会话的记录里没有这几项时按未配置读取。
+
+`render_options` 是一个表，设置所选协议在 Causa 里的渲染选项。例如 `openai-chat` 默认把输出上限写成 `max_completion_tokens`；服务只认 `max_tokens` 时写 `max_tokens_field = "max_tokens"`，请求里就只有 `max_tokens`。可用的键和取值以所用 Causa 版本中该协议的渲染选项类型为准（`ChatRenderOptions`、`ResponsesRenderOptions`、`AnthropicRenderOptions`），Tarz 不另列清单，也不按服务自动选择；没写的键用 Causa 的默认值。未知的键、无效的取值和不属于所选协议的键在加载配置或建会话时报错，不发请求，错误信息不显示表的内容。所以用 `--provider` 换协议时，预设里的表也必须适用于新协议。命令行参数是 `--render-options`，值为一个 JSON 对象，给出时整体替换预设里的表。会话记录保存写下的键值，没有这一项时按空表读取。
+
+临时 `tarz run` 只保留其单次工作，容量固定为 1。
 
 所有预设在加载时校验，未知字段、重复键、无效类型、无效预设、空路径和不支持的版本都报错。文件最多 1 MiB。解析诊断只显示行列，不回显 TOML 值；`api_key` 明文字段不被接受。真正凭据在打开会话时从指定环境变量读取。
 
@@ -49,7 +55,7 @@ tarz-tui --config ./config.toml --profile work
 
 选择 `--profile NAME` 优先于 default_profile。参数按字段覆盖所选预设；没有覆盖的 endpoint、凭据引用、期限和限制仍沿用预设。CLI 模型参数用于 `run` 与 `session create`；`session run` 不接受 `--profile` 或模型覆盖。`--store`、`--recovery-dir` 覆盖配置中的相应路径。
 
-TUI 新建表单从所选预设填充，修改只影响本次新会话，预设中未显示的容量/调用限制原样保留。首版配置由用户编辑文件，TUI 不自动保存或覆盖全局配置。后续 GUI 应复用相同加载与解析模块。
+TUI 新建表单从所选预设填充，修改只影响本次新会话，预设中未显示的容量/调用限制、生成设置和 `render_options` 原样保留。首版配置由用户编辑文件，TUI 不自动保存或覆盖全局配置。后续 GUI 应复用相同加载与解析模块。
 
 ## 工作区与只读工具
 

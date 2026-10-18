@@ -26,6 +26,7 @@ Run options:
   --max-tokens   Output token limit per model call (no default; required by anthropic)
   --reasoning-effort  Effort text sent as written, e.g. low, high (default: provider's)
   --extra-body   JSON object of further request fields, sent as written
+  --render-options  JSON object of the protocol's render options, e.g. max_tokens_field
   --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
   --workspace    Root directory for read-only tools; relative to current directory
   --tools        Comma-separated list_directory,read_file,search_text (default empty)

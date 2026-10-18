@@ -1,4 +1,4 @@
-use crate::definition::{CredentialRef, DefinitionError, Provider, SessionDefinition};
+use crate::definition::{CredentialRef, DefinitionError, RenderOptions, SessionDefinition};
 use crate::session::{ConversationId, Session};
 use crate::tools::{ToolResources, WorkspaceTools};
 use crate::workspace::{Workspace, WorkspaceError};
@@ -48,7 +48,7 @@ pub(crate) fn assemble(
         .filter(|value| !value.trim().is_empty())
         .ok_or(AssemblyError::CredentialUnavailable)?;
     let gateway = gateway(
-        definition.provider,
+        definition.protocol_render_options()?,
         api_key,
         definition.endpoint.clone(),
         definition.max_model_attempts,
@@ -105,14 +105,14 @@ pub(crate) fn assemble_with_runner(
 }
 
 pub(crate) fn gateway(
-    provider: Provider,
+    render_options: RenderOptions,
     api_key: String,
     endpoint: Option<String>,
     max_attempts: Option<u32>,
 ) -> Arc<dyn ModelGateway> {
     macro_rules! gateway {
-        ($kind:ty) => {{
-            let gateway = <$kind>::new(api_key);
+        ($kind:ty, $options:expr) => {{
+            let gateway = <$kind>::new(api_key).with_render_options($options);
             let gateway = match endpoint {
                 Some(endpoint) => gateway.with_endpoint(endpoint),
                 None => gateway,
@@ -128,9 +128,9 @@ pub(crate) fn gateway(
             }
         }};
     }
-    match provider {
-        Provider::OpenAiChat => gateway!(OpenAiChatCompletionsGateway),
-        Provider::OpenAiResponses => gateway!(OpenAiResponsesGateway),
-        Provider::Anthropic => gateway!(AnthropicMessagesGateway),
+    match render_options {
+        RenderOptions::Chat(options) => gateway!(OpenAiChatCompletionsGateway, options),
+        RenderOptions::Responses(options) => gateway!(OpenAiResponsesGateway, options),
+        RenderOptions::Anthropic(options) => gateway!(AnthropicMessagesGateway, options),
     }
 }

@@ -76,6 +76,7 @@ async fn managed_reopen_preserves_definition_material_identity_and_restores_no_w
         reasoning_effort: None,
         extra_body: Default::default(),
         max_model_attempts: None,
+        render_options: Default::default(),
         workspace_root: None,
         tools: Vec::new(),
         tool_limits: Default::default(),

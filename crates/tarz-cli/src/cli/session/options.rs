@@ -106,6 +106,7 @@ impl SessionCommand {
                 | "--max-tokens"
                 | "--reasoning-effort"
                 | "--extra-body"
+                | "--render-options"
                 | "--max-model-attempts"
                 | "--profile"
                 | "--workspace"

@@ -40,6 +40,7 @@ impl RunOptions {
                 | "--max-tokens"
                 | "--reasoning-effort"
                 | "--extra-body"
+                | "--render-options"
                 | "--max-model-attempts" => {
                     let value = args.next().ok_or("option needs a value")?;
                     if (value.is_empty() && flag != "--tools")

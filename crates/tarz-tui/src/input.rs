@@ -46,6 +46,9 @@ pub(crate) struct Form {
     ),
     /// Model attempt limit carried over from the preset.
     pub max_model_attempts: Option<u32>,
+    /// Protocol render options carried over from the preset. A provider
+    /// changed in the form must accept them, or creation is refused.
+    pub render_options: serde_json::Map<String, serde_json::Value>,
     pub tool_limits: WorkspaceToolLimits,
 }
 pub(crate) const FIELD_NAMES: [&str; 7] = [
@@ -70,6 +73,7 @@ impl Default for Form {
             limits: (256, 10, 64),
             generation: (None, None, Default::default()),
             max_model_attempts: None,
+            render_options: Default::default(),
             tool_limits: WorkspaceToolLimits::default(),
         }
     }
@@ -117,6 +121,7 @@ impl Form {
                 preset.extra_body.clone(),
             ),
             max_model_attempts: preset.max_model_attempts,
+            render_options: preset.render_options.clone(),
             limits: (
                 preset.retained_work_capacity,
                 preset.max_model_rounds,
@@ -156,6 +161,7 @@ impl Form {
                     reasoning_effort: self.generation.1.clone(),
                     extra_body: Some(self.generation.2.clone()),
                     max_model_attempts: self.max_model_attempts,
+                    render_options: Some(self.render_options.clone()),
                     workspace_root: (!values[5].is_empty()).then(|| values[5].clone().into()),
                     tools: Some(parse_tools(&values[6]).map_err(|e| e.to_string())?),
                     tool_limits: Some(self.tool_limits.clone()),

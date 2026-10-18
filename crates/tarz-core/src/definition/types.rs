@@ -1,6 +1,7 @@
 use super::workspace::{WorkspaceTool, WorkspaceToolLimits};
 use crate::session::SessionConfig;
 use causa::kernel::ModelRef;
+use causa::providers::{AnthropicRenderOptions, ChatRenderOptions, ResponsesRenderOptions};
 use causa::runtime::{TurnLimits, TurnRunOptions};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -71,6 +72,12 @@ pub struct SessionDefinition {
     /// a single call. A record saved before this field existed reads as none.
     #[serde(default)]
     pub max_model_attempts: Option<u32>,
+    /// Render options for the provider's protocol, as written. Keys left out
+    /// take the protocol's defaults; the accepted keys and values are those
+    /// of the protocol's render options type. A record saved before this
+    /// field existed reads as empty.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub render_options: serde_json::Map<String, serde_json::Value>,
     /// Absolute workspace root frozen at creation; never resolved against reopen cwd.
     #[serde(deserialize_with = "required_workspace_root")]
     pub workspace_root: Option<PathBuf>,
@@ -138,6 +145,7 @@ impl SessionDefinition {
         if self.max_model_attempts == Some(0) {
             return Err(DefinitionError::InvalidModelAttempts);
         }
+        self.protocol_render_options()?;
         if !self.tools.is_empty() && self.workspace_root.is_none() {
             return Err(DefinitionError::WorkspaceRequired);
         }
@@ -158,6 +166,23 @@ impl SessionDefinition {
         }
     }
 
+    /// Read the render options as the provider's protocol type. The protocol
+    /// types reject unknown keys and values, so a key meant for another
+    /// protocol fails here instead of being ignored.
+    pub(crate) fn protocol_render_options(&self) -> Result<RenderOptions, DefinitionError> {
+        fn read<T: serde::de::DeserializeOwned>(
+            table: &serde_json::Map<String, serde_json::Value>,
+        ) -> Result<T, DefinitionError> {
+            serde_json::from_value(serde_json::Value::Object(table.clone()))
+                .map_err(|_| DefinitionError::InvalidRenderOptions)
+        }
+        Ok(match self.provider {
+            Provider::OpenAiChat => RenderOptions::Chat(read(&self.render_options)?),
+            Provider::OpenAiResponses => RenderOptions::Responses(read(&self.render_options)?),
+            Provider::Anthropic => RenderOptions::Anthropic(read(&self.render_options)?),
+        })
+    }
+
     /// Construct per-work options with the saved model and explicit execution limits.
     pub fn run_options(&self) -> TurnRunOptions {
         let mut options = TurnRunOptions::new(ModelRef::new(self.model.clone()));
@@ -167,6 +192,14 @@ impl SessionDefinition {
         options.generation.extra_body = self.extra_body.clone();
         options
     }
+}
+
+/// Render options read for one protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RenderOptions {
+    Chat(ChatRenderOptions),
+    Responses(ResponsesRenderOptions),
+    Anthropic(AnthropicRenderOptions),
 }
 
 /// A definition rejected before credential resolution or provider execution.
@@ -199,6 +232,10 @@ pub enum DefinitionError {
     /// At least the first model call must be allowed.
     #[error("max_model_attempts must be positive when set")]
     InvalidModelAttempts,
+    /// A render option is unknown to the provider's protocol or has an
+    /// invalid value. The message omits the table's contents.
+    #[error("render_options has a key or value the provider's protocol does not accept")]
+    InvalidRenderOptions,
     /// The deadline cannot be represented on this platform.
     #[error("work timeout cannot be represented")]
     UnrepresentableTimeout,

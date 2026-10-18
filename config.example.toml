@@ -29,5 +29,10 @@ max_tool_calls = 64
 # call_timeout_secs = 5
 # max_output_bytes = 32768
 
+# Render options for the protocol, checked against Causa's options type for it.
+# For openai-chat, a server that reads only max_tokens needs:
+# [profiles.default.render_options]
+# max_tokens_field = "max_tokens"
+
 # Add more [profiles.NAME] sections, selected by --profile NAME.
 # Existing saved sessions keep their original definition when reopened.
