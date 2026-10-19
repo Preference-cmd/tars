@@ -87,9 +87,9 @@ dependencies = [
 
 [[package]]
 name = "causa"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4773e1f036dec35dcba69cb2aae3c90840579e64e46cabd0187bdacbea5191d6"
+checksum = "2eebe08177593462d60a016f80495412d3ac01bfa125e31ca0c66515121f91ca"
 dependencies = [
  "causa-kernel",
  "causa-protocol",
@@ -99,9 +99,9 @@ dependencies = [
 
 [[package]]
 name = "causa-kernel"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d8bcfc714fa2981e74d78beaab7b92aca95d4f008bbe778b24b3c9dcf869e39"
+checksum = "233d53c37e547f1ceac8eeae3a391f22989d139cbb19cbc46c0efeccde7fe04e"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -114,9 +114,9 @@ dependencies = [
 
 [[package]]
 name = "causa-protocol"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae3ace5b314a6dfdc21eacd1a235c98d57e2b17539c28b16ac758932e6014922"
+checksum = "3b5a7572b37f660ad2187e332fc6e53b4044e8fb867c3bdcd522d3b1c9c45ba7"
 dependencies = [
  "causa-kernel",
  "serde",
@@ -125,9 +125,9 @@ dependencies = [
 
 [[package]]
 name = "causa-provider"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4620534fc6bdb3c475ec85cb244adbb076bf59dad3ecc4ec855148cd6afbc520"
+checksum = "d1457b2082827e0d64ccab1873c0d793e6a717139623d3fc3cf89055c05e4a77"
 dependencies = [
  "async-trait",
  "causa-kernel",
@@ -142,9 +142,9 @@ dependencies = [
 
 [[package]]
 name = "causa-runtime"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebaa9696cef9d69cfa44dae70d2d0ff9bfae5958884686055a3682285b22350f"
+checksum = "65e0f1b6992c7cc818001ee0cb47f5d68f86b84ce82a34c5e1ee3c7f1eb39b66"
 dependencies = [
  "async-trait",
  "causa-kernel",
