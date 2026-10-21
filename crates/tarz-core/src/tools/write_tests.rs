@@ -3,6 +3,7 @@ use super::{DiffSummary, ToolResources, WorkspaceTools, compute_diff};
 use crate::definition::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::session::{ToolReporter, WorkRef};
 use crate::workspace::Workspace;
+use causa::kernel::ToolBatchProcessor;
 use causa::kernel::{
     BlockId, CallControl, InvocationId, RoundId, ToolBatch, ToolCallContext, ToolCallPayload,
     ToolResultPayload, ToolResultStatus, TurnId,
@@ -71,7 +72,34 @@ async fn invoke_with_control(
 ) -> ToolResultPayload {
     let call = call(kind.name(), arguments);
     let reporter = reporter(std::slice::from_ref(&call));
-    let tool = shared.bind(&[kind], reporter.clone()).pop().unwrap();
+    let prepared_writes = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let tool = shared
+        .bind_with_prepared(&[kind], reporter.clone(), prepared_writes.clone())
+        .pop()
+        .unwrap();
+
+    if matches!(kind, WorkspaceTool::WriteFile | WorkspaceTool::EditFile) {
+        let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
+        let turn_id = TurnId::new("precheck");
+        let declaration_order = [call.call_block_id];
+        let ctx = causa::kernel::ProcessorContext::new(
+            &turn_id,
+            RoundId(0),
+            &declaration_order,
+            &control,
+        );
+        let precheck = crate::permission::PrecheckProcessor::new(
+            shared.clone(),
+            reporter.clone(),
+            prepared_writes,
+        );
+        let _ = precheck.process(&mut batch, &ctx).await;
+        if let Some((_, res)) = batch.results().first().and_then(|e| e.result()) {
+            reporter.drain().await;
+            return res.clone();
+        }
+    }
+
     let result = tool.execute(&call, &control, None).await;
     reporter.drain().await;
     result
@@ -658,7 +686,7 @@ async fn in_instance_observation_and_stale_detection() {
 async fn hints_for_all_five_tools_match_specification() {
     let (_dir, shared) = tools(WorkspaceToolLimits::default(), WriteToolLimits::default());
     let reporter = reporter(&[]);
-    let bound = shared.bind(
+    let bound = shared.bind_for_test(
         &[
             WorkspaceTool::ListDirectory,
             WorkspaceTool::ReadFile,
@@ -996,4 +1024,27 @@ async fn deleted_after_reading_returns_rejected_for_edit_and_creates_for_write()
     assert_eq!(write_res.output.content["action"], "created");
     assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "recreated\n");
     assert!(!has_temporary_files(dir.path()));
+}
+
+#[tokio::test]
+async fn execute_without_precheck_returns_rejected() {
+    let (_dir, shared) = tools(Default::default(), Default::default());
+    let call = call(
+        "write_file",
+        serde_json::json!({
+            "path": "test.txt",
+            "content": "hello"
+        }),
+    );
+    let reporter = reporter(std::slice::from_ref(&call));
+    let tool = shared
+        .bind_for_test(&[WorkspaceTool::WriteFile], reporter.clone())
+        .pop()
+        .unwrap();
+    let result = tool.execute(&call, &control(), None).await;
+    assert_eq!(result.status, ToolResultStatus::Rejected);
+    assert_eq!(
+        result.output.content["error"],
+        "write operation was not prepared by precheck"
+    );
 }

@@ -3,14 +3,14 @@ use crate::workspace::Workspace;
 use serde::Deserialize;
 use std::borrow::Cow;
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ListParams {
     pub path: String,
     pub limit: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadParams {
     pub path: String,
@@ -18,7 +18,7 @@ pub(crate) struct ReadParams {
     pub max_lines: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SearchParams {
     pub path: String,
@@ -26,7 +26,7 @@ pub(crate) struct SearchParams {
     pub max_matches: Option<usize>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct WriteParams {
     pub path: String,
@@ -40,13 +40,14 @@ pub(crate) struct EditSegment {
     pub new_text: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EditParams {
     pub path: String,
     pub edits: Vec<EditSegment>,
 }
 
+#[derive(Clone)]
 pub(crate) enum Params {
     List(ListParams),
     Read(ReadParams),

@@ -1,9 +1,11 @@
+use super::PreparedWrite;
 use super::compute_diff;
 use super::parameters::{
     EditParams, EditSegment, ListParams, Params, ReadParams, SearchParams, WriteParams,
 };
 use super::resources::Counters;
 use crate::definition::{WorkspaceToolLimits, WriteToolLimits};
+use crate::permission::WriteAction;
 use crate::workspace::{FileVersion, Workspace, WorkspaceError};
 use causa::kernel::{CallControl, ControlError, ToolResultStatus};
 use serde_json::{Value, json};
@@ -40,6 +42,8 @@ pub(crate) enum OperationError {
     UnsupportedContent,
     #[error("{0}")]
     Rejected(String),
+    #[error("{0}")]
+    Failed(String),
 }
 impl OperationError {
     pub fn status(&self) -> ToolResultStatus {
@@ -50,6 +54,7 @@ impl OperationError {
             Self::Control(ControlError::Cancelled) => ToolResultStatus::Cancelled,
             Self::Control(ControlError::TimedOut) => ToolResultStatus::TimedOut,
             Self::Rejected(_) => ToolResultStatus::Rejected,
+            Self::Failed(_) => ToolResultStatus::Failed,
             _ => ToolResultStatus::Failed,
         }
     }
@@ -300,15 +305,14 @@ fn read(
 }
 
 #[cfg(unix)]
-fn write_operation(
+pub(crate) fn precheck_write(
     workspace: &Workspace,
     p: &WriteParams,
     limits: &WorkspaceToolLimits,
     write_limits: &WriteToolLimits,
     observations: &Mutex<HashMap<String, FileVersion>>,
     control: &OperationControl,
-    #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
-) -> Result<Value, OperationError> {
+) -> Result<PreparedWrite, OperationError> {
     control.check()?;
     let components = Workspace::components(&p.path)?;
     if components.is_empty() {
@@ -317,8 +321,11 @@ fn write_operation(
         ));
     }
     let normalized = components.join("/");
-    let parent_components = &components[..components.len() - 1];
-    let file_name = &components[components.len() - 1];
+    let parent_components: Vec<String> = components[..components.len() - 1]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let file_name = components[components.len() - 1].to_string();
 
     if p.content.len() > write_limits.max_write_bytes {
         return Err(OperationError::Rejected(format!(
@@ -328,14 +335,14 @@ fn write_operation(
         )));
     }
 
-    let parent_dir_opt = match workspace.parent_directory(parent_components) {
+    let parent_dir_opt = match workspace.parent_directory(&parent_components) {
         Ok(parent_dir) => Some(parent_dir),
         Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => return Err(OperationError::Access(err)),
     };
 
     let existing_target = match parent_dir_opt {
-        Some(parent_dir) => match workspace.child_file(&parent_dir, file_name) {
+        Some(parent_dir) => match workspace.child_file(&parent_dir, &file_name) {
             Ok(file) => Some((parent_dir, file)),
             Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => None,
             Err(err) => return Err(OperationError::Access(err)),
@@ -343,10 +350,11 @@ fn write_operation(
         None => None,
     };
 
-    let (original_text, final_content, action, existing_mode) = if let Some((
+    let (original_text, final_content, action, existing_mode, expected_version) = if let Some((
         _parent_dir,
         mut target_file,
-    )) = existing_target
+    )) =
+        existing_target
     {
         let stat = rustix::fs::fstat(&target_file).map_err(crate::workspace::map_errno)?;
         let recorded_version = {
@@ -405,76 +413,47 @@ fn write_operation(
         (
             original_text,
             final_content,
-            "updated",
+            WriteAction::Updated,
             Some((stat.st_mode & 0o7777) as u32),
+            Some(current_version),
         )
     } else {
-        (String::new(), p.content.clone(), "created", None)
+        (
+            String::new(),
+            p.content.clone(),
+            WriteAction::Created,
+            None,
+            None,
+        )
     };
 
     let diff_summary = compute_diff(&p.path, &original_text, &final_content);
     let bytes_written = final_content.len();
 
-    let parent_dir = workspace.ensure_parent_directory(parent_components)?;
-
-    let write_res = workspace.atomic_write(
-        &parent_dir,
-        file_name,
-        final_content.as_bytes(),
+    Ok(PreparedWrite {
+        path: p.path.clone(),
+        normalized_path: normalized,
+        expected_version,
         existing_mode,
-        || {
-            #[cfg(test)]
-            if let Some(gate) = write_gate.lock().expect("write gate lock").clone() {
-                gate.pause(false);
-            }
-            control.check()
-        },
-    );
-
-    let new_version = match write_res {
-        Ok(version) => version,
-        Err(crate::workspace::AtomicWriteError::AlreadyExists) => {
-            return Err(OperationError::Rejected(format!(
-                "file '{}' already exists and must be read with read_file before overwriting",
-                p.path
-            )));
-        }
-        Err(crate::workspace::AtomicWriteError::CancelledOrTimedOut(err)) => return Err(err),
-        Err(crate::workspace::AtomicWriteError::Workspace(err)) => {
-            return Err(OperationError::Access(err));
-        }
-    };
-
-    control
-        .counters
-        .bytes
-        .fetch_add(bytes_written, Ordering::Relaxed);
-    control
-        .host_counters
-        .bytes
-        .fetch_add(bytes_written, Ordering::Relaxed);
-
-    observations.lock().unwrap().insert(normalized, new_version);
-
-    Ok(json!({
-        "path": p.path,
-        "action": action,
-        "bytes_written": bytes_written,
-        "lines_added": diff_summary.lines_added,
-        "lines_removed": diff_summary.lines_removed,
-    }))
+        final_content,
+        diff: diff_summary.diff.clone(),
+        diff_summary,
+        action,
+        parent_components,
+        file_name,
+        bytes_written,
+    })
 }
 
 #[cfg(unix)]
-fn edit_operation(
+pub(crate) fn precheck_edit(
     workspace: &Workspace,
     p: &EditParams,
     limits: &WorkspaceToolLimits,
     write_limits: &WriteToolLimits,
     observations: &Mutex<HashMap<String, FileVersion>>,
     control: &OperationControl,
-    #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
-) -> Result<Value, OperationError> {
+) -> Result<PreparedWrite, OperationError> {
     control.check()?;
     let components = Workspace::components(&p.path)?;
     if components.is_empty() {
@@ -483,8 +462,11 @@ fn edit_operation(
         ));
     }
     let normalized = components.join("/");
-    let parent_components = &components[..components.len() - 1];
-    let file_name = &components[components.len() - 1];
+    let parent_components: Vec<String> = components[..components.len() - 1]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let file_name = components[components.len() - 1].to_string();
 
     if p.edits.is_empty() {
         return Err(OperationError::Rejected(
@@ -510,7 +492,7 @@ fn edit_operation(
         )));
     };
 
-    let parent_dir = match workspace.parent_directory(parent_components) {
+    let parent_dir = match workspace.parent_directory(&parent_components) {
         Ok(dir) => dir,
         Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
             return Err(OperationError::Rejected(format!(
@@ -521,7 +503,7 @@ fn edit_operation(
         Err(err) => return Err(OperationError::Access(err)),
     };
 
-    let mut target_file = match workspace.child_file(&parent_dir, file_name) {
+    let mut target_file = match workspace.child_file(&parent_dir, &file_name) {
         Ok(file) => file,
         Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
             return Err(OperationError::Rejected(format!(
@@ -661,11 +643,71 @@ fn edit_operation(
     let diff_summary = compute_diff(&p.path, &original_text, &new_content);
     let bytes_written = new_content.len();
 
+    Ok(PreparedWrite {
+        path: p.path.clone(),
+        normalized_path: normalized,
+        expected_version: Some(current_version),
+        existing_mode: Some((stat.st_mode & 0o7777) as u32),
+        final_content: new_content,
+        diff: diff_summary.diff.clone(),
+        diff_summary,
+        action: WriteAction::Updated,
+        parent_components,
+        file_name,
+        bytes_written,
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn execute_prepared_write(
+    workspace: &Workspace,
+    prepared: &PreparedWrite,
+    observations: &Mutex<HashMap<String, FileVersion>>,
+    control: &OperationControl,
+    #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
+) -> Result<Value, OperationError> {
+    control.check()?;
+
+    let parent_dir = workspace.ensure_parent_directory(&prepared.parent_components)?;
+
+    if let Some(expected_version) = prepared.expected_version {
+        let mut target_file = match workspace.child_file(&parent_dir, &prepared.file_name) {
+            Ok(file) => file,
+            Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(OperationError::Failed(
+                    "file changed after confirmation".into(),
+                ));
+            }
+            Err(err) => return Err(OperationError::Access(err)),
+        };
+        let stat = rustix::fs::fstat(&target_file).map_err(crate::workspace::map_errno)?;
+        let mut original_bytes = Vec::new();
+        target_file
+            .read_to_end(&mut original_bytes)
+            .map_err(WorkspaceError::Io)?;
+        let current_version = FileVersion::from_stat_and_content(&stat, &original_bytes);
+        if current_version != expected_version {
+            return Err(OperationError::Failed(
+                "file changed after confirmation".into(),
+            ));
+        }
+    } else {
+        match workspace.child_file(&parent_dir, &prepared.file_name) {
+            Ok(_) => {
+                return Err(OperationError::Failed(
+                    "target file already exists after confirmation".into(),
+                ));
+            }
+            Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(OperationError::Access(err)),
+        }
+    }
+
     let write_res = workspace.atomic_write(
         &parent_dir,
-        file_name,
-        new_content.as_bytes(),
-        Some((stat.st_mode & 0o7777) as u32),
+        &prepared.file_name,
+        prepared.final_content.as_bytes(),
+        prepared.existing_mode,
         || {
             #[cfg(test)]
             if let Some(gate) = write_gate.lock().expect("write gate lock").clone() {
@@ -680,7 +722,7 @@ fn edit_operation(
         Err(crate::workspace::AtomicWriteError::AlreadyExists) => {
             return Err(OperationError::Rejected(format!(
                 "file '{}' already exists and must be read with read_file before overwriting",
-                p.path
+                prepared.path
             )));
         }
         Err(crate::workspace::AtomicWriteError::CancelledOrTimedOut(err)) => return Err(err),
@@ -692,21 +734,101 @@ fn edit_operation(
     control
         .counters
         .bytes
-        .fetch_add(bytes_written, Ordering::Relaxed);
+        .fetch_add(prepared.bytes_written, Ordering::Relaxed);
     control
         .host_counters
         .bytes
-        .fetch_add(bytes_written, Ordering::Relaxed);
+        .fetch_add(prepared.bytes_written, Ordering::Relaxed);
 
-    observations.lock().unwrap().insert(normalized, new_version);
+    observations
+        .lock()
+        .unwrap()
+        .insert(prepared.normalized_path.clone(), new_version);
 
     Ok(json!({
-        "path": p.path,
-        "action": "updated",
-        "bytes_written": bytes_written,
-        "lines_added": diff_summary.lines_added,
-        "lines_removed": diff_summary.lines_removed,
+        "path": prepared.path,
+        "action": prepared.action.as_str(),
+        "bytes_written": prepared.bytes_written,
+        "lines_added": prepared.diff_summary.lines_added,
+        "lines_removed": prepared.diff_summary.lines_removed,
     }))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn precheck_write(
+    _workspace: &Workspace,
+    _p: &WriteParams,
+    _limits: &WorkspaceToolLimits,
+    _write_limits: &WriteToolLimits,
+    _observations: &Mutex<HashMap<String, FileVersion>>,
+    _control: &OperationControl,
+) -> Result<PreparedWrite, OperationError> {
+    Err(WorkspaceError::UnsupportedPlatform.into())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn precheck_edit(
+    _workspace: &Workspace,
+    _p: &EditParams,
+    _limits: &WorkspaceToolLimits,
+    _write_limits: &WriteToolLimits,
+    _observations: &Mutex<HashMap<String, FileVersion>>,
+    _control: &OperationControl,
+) -> Result<PreparedWrite, OperationError> {
+    Err(WorkspaceError::UnsupportedPlatform.into())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn execute_prepared_write(
+    _workspace: &Workspace,
+    _prepared: &PreparedWrite,
+    _observations: &Mutex<HashMap<String, FileVersion>>,
+    _control: &OperationControl,
+    #[cfg(test)] _write_gate: &Mutex<Option<Arc<TestGate>>>,
+) -> Result<Value, OperationError> {
+    Err(WorkspaceError::UnsupportedPlatform.into())
+}
+
+#[cfg(unix)]
+fn write_operation(
+    workspace: &Workspace,
+    p: &WriteParams,
+    limits: &WorkspaceToolLimits,
+    write_limits: &WriteToolLimits,
+    observations: &Mutex<HashMap<String, FileVersion>>,
+    control: &OperationControl,
+    #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
+) -> Result<Value, OperationError> {
+    let prepared = precheck_write(workspace, p, limits, write_limits, observations, control)?;
+    execute_prepared_write(
+        workspace,
+        &prepared,
+        observations,
+        control,
+        #[cfg(test)]
+        write_gate,
+    )
+}
+
+#[cfg(unix)]
+fn edit_operation(
+    workspace: &Workspace,
+    p: &EditParams,
+    limits: &WorkspaceToolLimits,
+    write_limits: &WriteToolLimits,
+    observations: &Mutex<HashMap<String, FileVersion>>,
+    control: &OperationControl,
+    #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
+) -> Result<Value, OperationError> {
+    let prepared = precheck_edit(workspace, p, limits, write_limits, observations, control)?;
+    execute_prepared_write(
+        workspace,
+        &prepared,
+        observations,
+        control,
+        #[cfg(test)]
+        write_gate,
+    )
 }
 
 #[cfg(unix)]

@@ -2,6 +2,7 @@ use crate::definition::{CredentialRef, DefinitionError, RenderOptions, SessionDe
 use crate::session::{ConversationId, Session};
 use crate::tools::{ToolResources, WorkspaceTools};
 use crate::workspace::{Workspace, WorkspaceError};
+use causa::kernel::ToolBatchProcessor;
 use causa::kernel::{Context, ModelGateway};
 use causa::providers::{
     AnthropicMessagesGateway, OpenAiChatCompletionsGateway, OpenAiResponsesGateway,
@@ -58,19 +59,60 @@ pub(crate) fn assemble(
     let selected = definition.tools.clone();
     let call_timeout = (!selected.is_empty())
         .then(|| std::time::Duration::from_secs(definition.tool_limits.call_timeout_secs));
-    Ok(Session::new_with_tools(
+    let permissions = Arc::new(crate::permission::PermissionHub::new(
+        crate::permission::PermissionMode::Ask,
+    ));
+    let view = permissions.view();
+    let approvals = permissions.approvals();
+    let session_permissions = permissions.clone();
+    #[cfg(test)]
+    let test_processors = Arc::new(std::sync::Mutex::new(
+        Vec::<Arc<dyn ToolBatchProcessor>>::new(),
+    ));
+    #[cfg(test)]
+    let test_processors_capture = test_processors.clone();
+
+    let session = Session::new_with_tools(
         conversation_id,
         context,
-        move |_, _, reporter| {
+        move |work, _control, reporter| {
             let gateway = gateway.clone();
-            let options = options.clone();
-            let tools = workspace_tools
-                .as_ref()
-                .map_or_else(Vec::new, |tools| tools.bind(&selected, reporter));
+            let options = options
+                .clone()
+                .with_processor_data(causa::kernel::ProcessorData::new(view.clone()));
+            let prepared_writes = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+                causa::kernel::BlockId,
+                crate::tools::PreparedWrite,
+            >::new()));
+            let tools = workspace_tools.as_ref().map_or_else(Vec::new, |tools| {
+                tools.bind_with_prepared(&selected, reporter.clone(), prepared_writes.clone())
+            });
+            let mut before: Vec<Arc<dyn ToolBatchProcessor>> = Vec::new();
+            if let Some(wt) = &workspace_tools {
+                before.push(Arc::new(crate::permission::PrecheckProcessor::new(
+                    wt.clone(),
+                    reporter.clone(),
+                    prepared_writes.clone(),
+                )));
+                before.push(Arc::new(crate::permission::PermissionProcessor::new(
+                    work,
+                    reporter,
+                    approvals.clone(),
+                    prepared_writes,
+                )));
+            }
+            #[cfg(test)]
+            {
+                let extras = test_processors_capture
+                    .lock()
+                    .expect("test processors lock");
+                before.extend(extras.iter().cloned());
+            }
             async move {
                 let executor = ToolExecutor::new(tools, {
                     let mut options = ToolExecutorOptions::default();
                     options.call_timeout = call_timeout;
+                    options.before = before;
                     options
                 })
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
@@ -82,7 +124,17 @@ pub(crate) fn assemble(
         },
         definition.session_config(),
     )
-    .allow_readonly_repair())
+    .allow_readonly_repair()
+    .with_permissions(session_permissions);
+
+    #[cfg(test)]
+    let session = {
+        let mut session = session;
+        session.test_before_processors = test_processors;
+        session
+    };
+
+    Ok(session)
 }
 
 #[cfg(test)]

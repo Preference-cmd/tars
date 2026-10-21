@@ -1,3 +1,4 @@
+use crate::permission::PermissionDecision;
 use causa::kernel::{BlockId, InvocationId, ToolResultStatus};
 
 /// Observed execution/material phase, independent of work completion and saving.
@@ -37,6 +38,8 @@ pub struct ToolProgress {
     /// False alone does not prove a start. This can refine a conservative
     /// runtime UnknownOutcome without modifying the original result or batch.
     pub operation_not_started: bool,
+    /// Permission decision recorded for this declaration, if one was made.
+    pub permission_decision: Option<PermissionDecision>,
 }
 
 /// Bounded state available through reliable work observation even after event loss.

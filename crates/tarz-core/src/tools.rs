@@ -2,14 +2,16 @@
 
 mod diff;
 mod execute;
-mod operations;
-mod parameters;
-mod resources;
+pub(crate) mod operations;
+pub(crate) mod parameters;
+pub(crate) mod resources;
 
 #[cfg(test)]
 pub use diff::DiffSummary;
 pub use diff::compute_diff;
+pub(crate) use execute::PreparedWrite;
 pub use execute::WorkspaceTools;
+pub(crate) use execute::result;
 #[cfg(test)]
 pub use resources::ToolMetrics;
 pub use resources::ToolResources;

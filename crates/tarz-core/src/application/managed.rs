@@ -15,6 +15,58 @@ pub struct ManagedSession {
     pub(super) entry: Arc<Entry>,
 }
 impl ManagedSession {
+    /// Read the instance's active permission mode and revision.
+    ///
+    /// For instances assembled without permission state (such as test fixtures),
+    /// this returns `None`.
+    pub fn permission_mode(&self) -> Option<(crate::permission::PermissionMode, u64)> {
+        let state = self.entry.lock();
+        state
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.permission_mode())
+    }
+
+    /// Change the instance's active permission mode, incrementing revision on actual change.
+    ///
+    /// For instances assembled without permission state (such as test fixtures),
+    /// this returns `Err(ApplicationError::PermissionUnavailable)`.
+    pub fn set_permission_mode(
+        &self,
+        mode: crate::permission::PermissionMode,
+    ) -> Result<(crate::permission::PermissionMode, u64), ApplicationError> {
+        let state = self.entry.lock();
+        let owner = state.owner.as_ref().ok_or(ApplicationError::InstanceGone)?;
+        owner.set_permission_mode(mode)
+    }
+
+    /// Connect the instance's approval channel receiver.
+    ///
+    /// At most one receiver is connected at any time; calling this again replaces
+    /// any previously connected receiver. For instances assembled without permission
+    /// state (such as test fixtures), this returns an immediately closed receiver.
+    pub fn connect_approvals(&self) -> crate::permission::ApprovalReceiver {
+        let state = self.entry.lock();
+        state.owner.as_ref().map_or_else(
+            || {
+                let (_, rx) = tokio::sync::mpsc::channel(1);
+                rx
+            },
+            |owner| owner.connect_approvals(),
+        )
+    }
+
+    /// Append an extra before processor after the permission processor during test runs.
+    #[cfg(test)]
+    pub(crate) fn add_test_before_processor(
+        &self,
+        processor: Arc<dyn causa::kernel::ToolBatchProcessor>,
+    ) {
+        let state = self.entry.lock();
+        if let Some(owner) = &state.owner {
+            owner.add_test_before_processor(processor);
+        }
+    }
     /// Subscribe to this instance's bounded, temporary model observations.
     /// Subscribe before submit; late subscriptions have no history. Capacity is
     /// 128 observations, each text fragment at most 16 KiB. `Lagged` does not

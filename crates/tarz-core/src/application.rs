@@ -30,7 +30,7 @@ pub use types::{
 #[cfg(test)]
 mod measurements;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(test)]
 mod roundtrip_tests;

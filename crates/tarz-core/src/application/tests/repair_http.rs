@@ -1,8 +1,7 @@
 use super::support::*;
+use super::workspace_http as wire;
 use crate::definition::WorkspaceTool;
 use causa::kernel::ToolResultStatus;
-#[path = "../../../tests/common/workspace_http.rs"]
-mod wire;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn repair_real_three_protocols_cancel_adopt_or_reopen_remove_save_and_continue() {

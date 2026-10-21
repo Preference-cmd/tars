@@ -10,6 +10,7 @@ pub(crate) mod assembly;
 pub mod config;
 pub mod definition;
 pub mod material;
+pub mod permission;
 pub mod session;
 mod store;
 pub(crate) mod tools;

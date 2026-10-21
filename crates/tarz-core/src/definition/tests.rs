@@ -275,25 +275,22 @@ fn render_options_the_protocol_does_not_accept_are_rejected_without_echoing_them
 }
 
 #[test]
-fn write_tools_are_rejected_during_definition_validation() {
+fn write_tools_are_accepted_during_definition_validation() {
     use super::WorkspaceTool;
 
     let mut def = definition();
     def.workspace_root = Some(std::path::PathBuf::from("/workspace"));
     def.tools = vec![WorkspaceTool::WriteFile];
-    assert_eq!(
-        def.validate().unwrap_err(),
-        DefinitionError::WriteToolsUnavailable
-    );
+    assert!(def.validate().is_ok());
 
     def.tools = vec![WorkspaceTool::EditFile];
-    assert_eq!(
-        def.validate().unwrap_err(),
-        DefinitionError::WriteToolsUnavailable
-    );
+    assert!(def.validate().is_ok());
 
-    // Read-only tool is accepted
-    def.tools = vec![WorkspaceTool::ReadFile];
+    def.tools = vec![
+        WorkspaceTool::ReadFile,
+        WorkspaceTool::WriteFile,
+        WorkspaceTool::EditFile,
+    ];
     assert!(def.validate().is_ok());
 }
 

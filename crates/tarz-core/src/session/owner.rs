@@ -12,9 +12,70 @@ use std::sync::{Arc, Mutex};
 pub struct Session {
     pub(super) shared: Arc<Shared>,
     standard_readonly_repair: bool,
+    pub(crate) permissions: Option<Arc<crate::permission::PermissionHub>>,
+    #[cfg(test)]
+    pub(crate) test_before_processors:
+        Arc<std::sync::Mutex<Vec<Arc<dyn causa::kernel::ToolBatchProcessor>>>>,
 }
 
 impl Session {
+    pub(crate) fn with_permissions(
+        mut self,
+        permissions: Arc<crate::permission::PermissionHub>,
+    ) -> Self {
+        self.permissions = Some(permissions);
+        self
+    }
+
+    /// Read the instance's active permission mode and revision.
+    ///
+    /// Returns `None` for instances constructed without permission state (such as test fixtures).
+    pub fn permission_mode(&self) -> Option<(crate::permission::PermissionMode, u64)> {
+        self.permissions.as_ref().map(|p| p.get())
+    }
+
+    /// Change the instance's active permission mode, incrementing revision on actual change.
+    ///
+    /// Returns an error for instances constructed without permission state (such as test fixtures).
+    pub fn set_permission_mode(
+        &self,
+        mode: crate::permission::PermissionMode,
+    ) -> Result<(crate::permission::PermissionMode, u64), crate::application::ApplicationError>
+    {
+        self.permissions
+            .as_ref()
+            .map(|p| Ok(p.set(mode)))
+            .unwrap_or(Err(
+                crate::application::ApplicationError::PermissionUnavailable,
+            ))
+    }
+
+    /// Connect the instance's approval channel receiver.
+    ///
+    /// At most one receiver is connected at any time; calling this again replaces
+    /// any previously connected receiver. For instances constructed without permission
+    /// state (such as test fixtures), this returns an immediately closed receiver.
+    pub fn connect_approvals(&self) -> crate::permission::ApprovalReceiver {
+        self.permissions.as_ref().map_or_else(
+            || {
+                let (_, rx) = tokio::sync::mpsc::channel(1);
+                rx
+            },
+            |p| p.connect_approvals(),
+        )
+    }
+
+    /// Append an extra before processor after the permission processor during test runs.
+    #[cfg(test)]
+    pub(crate) fn add_test_before_processor(
+        &self,
+        processor: Arc<dyn causa::kernel::ToolBatchProcessor>,
+    ) {
+        self.test_before_processors
+            .lock()
+            .expect("test processors lock")
+            .push(processor);
+    }
     /// Construct without assembly, worker creation, input edits or history recovery.
     pub fn new<F, Fut>(
         conversation_id: ConversationId,
@@ -52,6 +113,9 @@ impl Session {
     {
         Self {
             standard_readonly_repair: false,
+            permissions: None,
+            #[cfg(test)]
+            test_before_processors: Arc::new(std::sync::Mutex::new(Vec::new())),
             shared: Arc::new(Shared {
                 conversation_id,
                 state: Mutex::new(State {

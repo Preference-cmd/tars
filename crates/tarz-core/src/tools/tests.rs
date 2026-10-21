@@ -55,7 +55,10 @@ async fn invoke(
 ) -> causa::kernel::ToolResultPayload {
     let call = call(kind.name(), arguments);
     let reporter = reporter(std::slice::from_ref(&call));
-    let tool = shared.bind(&[kind], reporter.clone()).pop().unwrap();
+    let tool = shared
+        .bind_for_test(&[kind], reporter.clone())
+        .pop()
+        .unwrap();
     let result = tool.execute(&call, &control(), None).await;
     reporter.drain().await;
     result
@@ -241,7 +244,7 @@ async fn waiting_cancellation_and_deadline_never_start_operations() {
     let call = call("list_directory", json!({"path":"."}));
     let reporter = reporter(std::slice::from_ref(&call));
     let tool = shared
-        .bind(&[WorkspaceTool::ListDirectory], reporter.clone())
+        .bind_for_test(&[WorkspaceTool::ListDirectory], reporter.clone())
         .pop()
         .unwrap();
     let cancellation = CancellationToken::new();
@@ -277,7 +280,7 @@ async fn dropped_future_retains_permits_until_actual_tracked_worker_cleanup() {
     let call = call("read_file", json!({"path":"file"}));
     let report = reporter(std::slice::from_ref(&call));
     let tool = shared
-        .bind(&[WorkspaceTool::ReadFile], report.clone())
+        .bind_for_test(&[WorkspaceTool::ReadFile], report.clone())
         .pop()
         .unwrap();
     let task = tokio::spawn(async move { tool.execute(&call, &control(), None).await });
@@ -320,7 +323,7 @@ async fn returned_result_and_duplicate_declaration_identities_are_independent() 
     let second = call("read_file", json!({"path":"file"}));
     let report = reporter(&[first.clone(), second.clone()]);
     let tool = shared
-        .bind(&[WorkspaceTool::ReadFile], report.clone())
+        .bind_for_test(&[WorkspaceTool::ReadFile], report.clone())
         .pop()
         .unwrap();
     let control = control();
@@ -352,7 +355,7 @@ async fn started_search_checks_cancellation_and_deadline_before_scanning() {
         let call = call("search_text", json!({"path":".","query":"data"}));
         let report = reporter(std::slice::from_ref(&call));
         let tool = shared
-            .bind(&[WorkspaceTool::SearchText], report.clone())
+            .bind_for_test(&[WorkspaceTool::SearchText], report.clone())
             .pop()
             .unwrap();
         let cancellation = CancellationToken::new();
@@ -393,7 +396,7 @@ async fn cancellation_at_return_boundary_preserves_observed_success() {
     let call = call("read_file", json!({"path":"file"}));
     let report = reporter(std::slice::from_ref(&call));
     let tool = shared
-        .bind(&[WorkspaceTool::ReadFile], report.clone())
+        .bind_for_test(&[WorkspaceTool::ReadFile], report.clone())
         .pop()
         .unwrap();
     let cancellation = CancellationToken::new();
@@ -429,7 +432,7 @@ async fn shared_host_slots_bound_actual_operations_across_instances() {
     let call = call("read_file", json!({"path":"file"}));
     let report = reporter(std::slice::from_ref(&call));
     let tool = first
-        .bind(&[WorkspaceTool::ReadFile], report.clone())
+        .bind_for_test(&[WorkspaceTool::ReadFile], report.clone())
         .pop()
         .unwrap();
     let task = tokio::spawn({
@@ -441,7 +444,7 @@ async fn shared_host_slots_bound_actual_operations_across_instances() {
         .unwrap();
     let report_second = reporter(std::slice::from_ref(&call));
     let tool = second
-        .bind(&[WorkspaceTool::ReadFile], report_second.clone())
+        .bind_for_test(&[WorkspaceTool::ReadFile], report_second.clone())
         .pop()
         .unwrap();
     let cancellation = CancellationToken::new();
@@ -702,7 +705,7 @@ async fn observation_probe() {
             },
             &ToolBatch::new(vec![call.clone()]).unwrap(),
         );
-        let tool = shared.bind(&[kind], report.clone()).pop().unwrap();
+        let tool = shared.bind_for_test(&[kind], report.clone()).pop().unwrap();
         let output = tool.execute(&call, &control(), None).await;
         report.drain().await;
         let snapshot = report.snapshot();

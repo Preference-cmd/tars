@@ -273,6 +273,48 @@ impl ToolReporter {
         }
     }
 
+    pub(crate) fn record_permission_decision(
+        &self,
+        call: &ToolCallContext,
+        invocation: &InvocationId,
+        decision: crate::permission::PermissionDecision,
+    ) {
+        let event = {
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .expect("tool observations have no callbacks");
+            if state.frozen {
+                return;
+            }
+            let position = state.snapshot.calls.iter().position(|entry| {
+                entry.call_block_id == call.call_block_id && entry.invocation_id == *invocation
+            });
+            if let Some(pos) = position {
+                state.snapshot.calls[pos].permission_decision = Some(decision);
+                state.snapshot.calls[pos].clone()
+            } else if state.snapshot.calls.len() < MAX_CALLS {
+                let next = ToolProgress {
+                    invocation_id: invocation.clone(),
+                    call_block_id: call.call_block_id,
+                    tool_name: bounded(&call.input.tool_name, 128),
+                    arguments_summary: argument_summary(&call.input.arguments),
+                    phase: ToolPhase::Waiting,
+                    status: None,
+                    operation_not_started: false,
+                    permission_decision: Some(decision),
+                };
+                state.snapshot.calls.push(next.clone());
+                next
+            } else {
+                state.snapshot.truncated = true;
+                return;
+            }
+        };
+        self.send(event);
+    }
+
     fn update(
         &self,
         call: &ToolCallContext,
@@ -299,6 +341,8 @@ impl ToolReporter {
             if authoritative && position.is_some() {
                 state.settled.insert(call.call_block_id);
             }
+            let existing_decision =
+                position.and_then(|pos| state.snapshot.calls[pos].permission_decision.clone());
             let next = ToolProgress {
                 invocation_id: invocation.clone(),
                 call_block_id: call.call_block_id,
@@ -307,6 +351,7 @@ impl ToolReporter {
                 phase,
                 status,
                 operation_not_started: phase == ToolPhase::NotStarted,
+                permission_decision: existing_decision,
             };
             if let Some(position) = position {
                 let previous = &state.snapshot.calls[position];

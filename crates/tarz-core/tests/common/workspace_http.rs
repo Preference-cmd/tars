@@ -10,37 +10,74 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct ScriptedToolCall {
+    pub name: String,
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum Reply {
     Read(&'static str),
     Answer,
+    Call(String, Value),
+    Calls(Vec<ScriptedToolCall>),
 }
 
 fn data(value: Value) -> String {
     format!("data: {value}\n\n")
 }
 fn body(provider: &str, reply: Reply, index: usize) -> String {
-    // Repeated arguments still produce distinct declarations. Protocol wire IDs
-    // remain unique throughout the retained conversation material.
-    let id = format!("provider-call-{index}");
-    let (tool_name, arguments) = match reply {
-        Reply::Read(path) => (
-            "read_file",
-            json!({"path":path,"start_line":1,"max_lines":1}).to_string(),
-        ),
-        Reply::Answer => ("", String::new()),
+    let calls_list: Vec<(String, String)> = match reply {
+        Reply::Read(path) => vec![(
+            "read_file".to_string(),
+            json!({"path": path, "start_line": 1, "max_lines": 1}).to_string(),
+        )],
+        Reply::Answer => Vec::new(),
+        Reply::Call(name, args) => vec![(name, args.to_string())],
+        Reply::Calls(calls) => calls
+            .into_iter()
+            .map(|c| (c.name, c.arguments.to_string()))
+            .collect(),
     };
     let text = "checked workspace";
+    let is_tool = !calls_list.is_empty();
+    let id = format!("provider-call-{index}");
+
+    let (tool_name, arguments) = calls_list
+        .first()
+        .cloned()
+        .unwrap_or_else(|| (String::new(), String::new()));
     let tool = !tool_name.is_empty();
+
     match provider {
         "openai-chat" => {
-            let delta = if tool {
-                json!({"tool_calls":[{"index":0,"id":id,"type":"function","function":{"name":tool_name,"arguments":arguments}}]})
+            let delta = if is_tool {
+                let deltas: Vec<Value> = calls_list
+                    .iter()
+                    .enumerate()
+                    .map(|(call_idx, (name, args))| {
+                        let call_id = format!("provider-call-{index}-{call_idx}");
+                        json!({
+                            "index": call_idx,
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": args,
+                            }
+                        })
+                    })
+                    .collect();
+                json!({"tool_calls": deltas})
             } else {
-                json!({"content":text})
+                json!({"content": text})
             };
             data(json!({"id":"chat","choices":[{"index":0,"delta":delta,"finish_reason":null}]}))
                 + &data(
-                    json!({"id":"chat","choices":[{"index":0,"delta":{},"finish_reason":if tool {"tool_calls"} else {"stop"}}]}),
+                    json!({"id":"chat","choices":[{"index":0,"delta":{},"finish_reason":if is_tool {"tool_calls"} else {"stop"}}]}),
                 )
                 + "data: [DONE]\n\n"
         }
@@ -102,6 +139,7 @@ fn body(provider: &str, reply: Reply, index: usize) -> String {
     }
 }
 
+#[allow(dead_code)]
 pub struct Fixture {
     pub endpoint: String,
     pub requests: Arc<Mutex<Vec<Value>>>,
@@ -110,6 +148,7 @@ pub struct Fixture {
     stop: Arc<AtomicBool>,
     task: Option<std::thread::JoinHandle<()>>,
 }
+#[allow(dead_code)]
 impl Fixture {
     pub fn new(provider: &str, replies: Vec<Reply>, pause_at: Option<usize>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

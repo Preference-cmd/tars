@@ -157,13 +157,6 @@ impl SessionDefinition {
                 return Err(DefinitionError::DuplicateTool);
             }
         }
-        if self
-            .tools
-            .iter()
-            .any(|tool| matches!(tool, WorkspaceTool::WriteFile | WorkspaceTool::EditFile))
-        {
-            return Err(DefinitionError::WriteToolsUnavailable);
-        }
         self.tool_limits.validate()?;
         if let Some(write_limits) = &self.write_limits {
             write_limits.validate()?;
@@ -252,7 +245,4 @@ pub enum DefinitionError {
     /// The deadline cannot be represented on this platform.
     #[error("work timeout cannot be represented")]
     UnrepresentableTimeout,
-    /// Workspace write tools require an approval processor that is not available in this release.
-    #[error("workspace write tools are unavailable in this configuration")]
-    WriteToolsUnavailable,
 }

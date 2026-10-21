@@ -232,6 +232,9 @@ pub enum ApplicationError {
     /// Requested persistent record does not exist.
     #[error("saved conversation not found")]
     NotFound,
+    /// Permission state is not available on this session instance.
+    #[error("permission state is not available for this session instance")]
+    PermissionUnavailable,
 }
 impl From<StoreError> for ApplicationError {
     fn from(error: StoreError) -> Self {

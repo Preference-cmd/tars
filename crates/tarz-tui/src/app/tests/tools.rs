@@ -41,6 +41,7 @@ fn call(phase: ToolPhase) -> ToolProgress {
         phase,
         status: None,
         operation_not_started: false,
+        permission_decision: None,
     }
 }
 fn event(call: ToolProgress) -> Arc<WorkProgress> {
