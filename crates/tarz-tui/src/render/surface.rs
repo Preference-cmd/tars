@@ -113,6 +113,20 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         );
         return;
     }
+    if app.panel.is_none() && entry.is_some_and(|e| !e.approval_queue.is_empty()) {
+        super::panels::approval(
+            frame,
+            app,
+            entry.unwrap(),
+            Rect {
+                y: regions[1].y,
+                height: regions[1].height + regions[2].height,
+                ..body
+            },
+        );
+        footer(frame, app, regions[3]);
+        return;
+    }
     if let Some(entry) = entry {
         let history = entry.rows.as_ref().map_or(0, |rows| rows.ranges.len());
         let height = usize::from(regions[1].height);
@@ -326,28 +340,74 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             })),
         sections[0],
     );
-    let status = entry
-        .map(|e| {
+    if let Some(e) = entry {
+        let mut spans = vec![
+            Span::styled(e.execution.clone(), Style::default().fg(MUTED)),
+            Span::styled(" · ", Style::default().fg(MUTED)),
+            Span::styled(
+                e.status.clone(),
+                Style::default().fg(if e.status.contains("BLOCKED") {
+                    Color::Yellow
+                } else {
+                    MUTED
+                }),
+            ),
+        ];
+        if let Some(b) = e.busy {
+            spans.push(Span::styled(format!(" · {b}"), Style::default().fg(MUTED)));
+        }
+        if let Some((mode, _)) = e.session.as_ref().and_then(|s| s.permission_mode()) {
+            spans.push(Span::styled(" · mode ", Style::default().fg(MUTED)));
+            let mode_style = if mode == tarz_core::permission::PermissionMode::FullAccess {
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED)
+            };
+            spans.push(Span::styled(mode.to_string(), mode_style));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), sections[1]);
+    } else {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{} saved sessions · F1 commands",
+                app.entries.len()
+            ))
+            .style(Style::default().fg(MUTED)),
+            sections[1],
+        );
+    }
+
+    let other_waiting = app
+        .entries
+        .iter()
+        .enumerate()
+        .find(|(i, e)| *i != app.selected && !e.approval_queue.is_empty())
+        .map(|(_, e)| {
             format!(
-                "{} · {}{}",
-                e.execution,
-                e.status,
-                e.busy.map_or(String::new(), |b| format!(" · {b}"))
+                "Session {} is waiting for confirmation",
+                e.id().get(..8).unwrap_or(e.id())
+            )
+        });
+
+    let self_waiting = if (app.panel.is_some() || app.form.is_some() || app.confirmation.is_some())
+        && entry.is_some_and(|e| !e.approval_queue.is_empty())
+    {
+        entry.and_then(|e| e.approval_queue.front()).map(|req| {
+            format!(
+                "{} is waiting for confirmation · Esc to return",
+                tarz_core::permission::escape_untrusted_text(&req.tool_name)
             )
         })
-        .unwrap_or_else(|| format!("{} saved sessions · F1 commands", app.entries.len()));
-    frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(
-            if entry.is_some_and(|e| e.status.contains("BLOCKED")) {
-                Color::Yellow
-            } else {
-                MUTED
-            },
-        )),
-        sections[1],
-    );
+    } else {
+        None
+    };
+
+    let waiting_hint = self_waiting.or(other_waiting);
+
     let entry_notice = entry.map_or("", |e| e.notice.as_str());
-    let notice = if app.notice.starts_with("Exit paused") {
+    let mut notice = if app.notice.starts_with("Exit paused") {
         format!("Exit paused · resolve the save failure to quit.\n{entry_notice}")
     } else if !app.notice.starts_with("Config:")
         && !app.notice.starts_with("F2 ")
@@ -357,11 +417,19 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         entry_notice.to_owned()
     };
+    if let Some(hint) = waiting_hint {
+        if notice.is_empty() {
+            notice = hint;
+        } else {
+            notice = format!("{hint}\n{notice}");
+        }
+    }
     let warning = notice.contains("failed")
         || notice.contains("Failed")
         || notice.contains("paused")
         || notice.contains("retained")
-        || notice.contains("UNRESOLVED");
+        || notice.contains("UNRESOLVED")
+        || notice.contains("waiting for confirmation");
     frame.render_widget(
         Paragraph::new(notice)
             .wrap(Wrap { trim: false })

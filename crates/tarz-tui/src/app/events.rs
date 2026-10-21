@@ -77,7 +77,11 @@ impl App {
             if let Some(form) = &mut self.form {
                 input::paste(&mut form.fields[form.selected], text, false);
             } else if let Some(entry) = self.entries.get_mut(self.selected) {
-                input::paste(&mut entry.editor, text, true);
+                if let Some(reason) = &mut entry.approval_reason {
+                    reason.extend(text.chars().filter(|c| !c.is_control()));
+                } else if entry.approval_queue.is_empty() {
+                    input::paste(&mut entry.editor, text, true);
+                }
             }
             return;
         }
@@ -122,6 +126,113 @@ impl App {
             } else {
                 form.key(key);
             }
+            return;
+        }
+        if let Some(entry) = self.entries.get_mut(self.selected)
+            && !entry.approval_queue.is_empty()
+        {
+            if key.kind != KeyEventKind::Press {
+                return;
+            }
+            if input::control(key, 'w') {
+                self.request_close();
+                return;
+            }
+            let is_backtab = key.code == KeyCode::BackTab
+                || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
+            if is_backtab {
+                self.cycle_permission_mode();
+                return;
+            }
+            if entry.approval_reason.is_some() {
+                match key.code {
+                    KeyCode::Enter => {
+                        let reason = entry.approval_reason.take().unwrap();
+                        let trimmed = reason.trim();
+                        let reason_opt = if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        };
+                        if let Some(req) = entry.approval_queue.pop_front() {
+                            let _ = req
+                                .reply
+                                .send(tarz_core::permission::ApprovalDecision::Deny {
+                                    reason: reason_opt,
+                                });
+                        }
+                    }
+                    KeyCode::Esc => {
+                        entry.approval_reason = None;
+                    }
+                    KeyCode::Backspace => {
+                        if let Some(r) = &mut entry.approval_reason {
+                            r.pop();
+                        }
+                    }
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                            && !c.is_control() =>
+                    {
+                        if let Some(r) = &mut entry.approval_reason {
+                            r.push(c);
+                        }
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y' | 'Y')
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    if let Some(req) = entry.approval_queue.pop_front() {
+                        let _ = req
+                            .reply
+                            .send(tarz_core::permission::ApprovalDecision::Allow);
+                    }
+                }
+                KeyCode::Char('n' | 'N')
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    entry.approval_reason = Some(String::new());
+                }
+                KeyCode::Esc | KeyCode::Char('c')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.code == KeyCode::Esc =>
+                {
+                    entry.approval_queue.clear();
+                    entry.approval_reason = None;
+                    entry.approval_scroll = 0;
+                    self.cancel();
+                }
+                KeyCode::Up => {
+                    entry.approval_scroll = entry.approval_scroll.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    entry.approval_scroll = entry.approval_scroll.saturating_add(1);
+                }
+                KeyCode::PageUp => {
+                    entry.approval_scroll = entry.approval_scroll.saturating_sub(5);
+                }
+                KeyCode::PageDown => {
+                    entry.approval_scroll = entry.approval_scroll.saturating_add(5);
+                }
+                _ => {}
+            }
+            return;
+        }
+        let is_backtab = key.code == KeyCode::BackTab
+            || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
+        if is_backtab {
+            self.cycle_permission_mode();
             return;
         }
         if key.kind == KeyEventKind::Press

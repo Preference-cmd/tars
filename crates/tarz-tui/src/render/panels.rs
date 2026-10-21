@@ -14,6 +14,70 @@ use ratatui::{
 pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) {
     frame.render_widget(Clear, area);
     let (query, selected, commands) = match panel {
+        Panel::ModeSelect { selected } => {
+            let regions = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Min(1),
+                Constraint::Length(2),
+            ])
+            .split(area);
+            frame.render_widget(
+                Paragraph::new("Permission Mode")
+                    .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                regions[0],
+            );
+            const MODES: [(&str, &str); 4] = [
+                (
+                    "read-only",
+                    "Execute read-only tools; reject writes without confirmation",
+                ),
+                (
+                    "ask",
+                    "Ask for confirmation before write tools or prompted MCP tools (default)",
+                ),
+                (
+                    "accept-edits",
+                    "Workspace write tools execute without asking; ask for prompted tools",
+                ),
+                ("full-access", "All tools execute without asking"),
+            ];
+            let current_mode = app
+                .entries
+                .get(app.selected)
+                .and_then(|e| e.session.as_ref())
+                .and_then(|s| s.permission_mode())
+                .map(|(m, _)| m.as_str());
+
+            let items: Vec<_> = MODES
+                .iter()
+                .map(|&(name, desc)| {
+                    let is_current = current_mode == Some(name);
+                    let title = if is_current {
+                        format!("{name}  (current)")
+                    } else {
+                        name.to_string()
+                    };
+                    ListItem::new(vec![
+                        Line::from(title),
+                        Line::styled(format!("  {desc}"), Style::default().fg(MUTED)),
+                    ])
+                })
+                .collect();
+            let mut state = ListState::default().with_selected(Some(*selected));
+            frame.render_stateful_widget(
+                List::new(items)
+                    .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+                    .highlight_symbol("❯ "),
+                regions[1],
+                &mut state,
+            );
+            frame.render_widget(
+                Paragraph::new("↑↓ select · Enter apply · Esc return")
+                    .style(Style::default().fg(MUTED)),
+                regions[2],
+            );
+            return;
+        }
         Panel::Repair(panel) => {
             let regions = Layout::vertical([
                 Constraint::Length(2),
@@ -100,6 +164,11 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
             .iter()
             .map(|&index| {
                 let entry = &app.entries[index];
+                let waiting = if !entry.approval_queue.is_empty() {
+                    " · waiting for confirmation"
+                } else {
+                    ""
+                };
                 ListItem::new(vec![
                     Line::from(format!(
                         "{}  {}",
@@ -107,8 +176,12 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
                         entry.title
                     )),
                     Line::styled(
-                        format!("{} · {}", entry.execution, entry.status),
-                        Style::default().fg(MUTED),
+                        format!("{} · {}{waiting}", entry.execution, entry.status),
+                        Style::default().fg(if waiting.is_empty() {
+                            MUTED
+                        } else {
+                            Color::Yellow
+                        }),
                     ),
                 ])
             })
@@ -236,5 +309,116 @@ pub(super) fn confirm(frame: &mut Frame<'_>, confirmation: &crate::app::Confirma
             .wrap(Wrap { trim: false })
             .style(Style::default().fg(ACCENT)),
         rows[2],
+    );
+}
+
+pub(super) fn approval(frame: &mut Frame<'_>, _app: &App, entry: &crate::app::Entry, area: Rect) {
+    frame.render_widget(Clear, area);
+    let Some(req) = entry.approval_queue.front() else {
+        return;
+    };
+    let tarz_core::permission::ApprovalSubject::FileWrite { path, action, diff } = &req.subject;
+    let action_str = match action {
+        tarz_core::permission::WriteAction::Created => "create",
+        tarz_core::permission::WriteAction::Updated => "update",
+    };
+
+    let title_line = format!(
+        "{} wants to {} {} (permission mode: {})",
+        tarz_core::permission::escape_untrusted_text(&req.tool_name),
+        action_str,
+        tarz_core::permission::escape_untrusted_text(path),
+        req.mode,
+    );
+
+    let current_mode = entry
+        .session
+        .as_ref()
+        .and_then(|s| s.permission_mode())
+        .map(|(m, _)| m);
+
+    let mut header_lines = vec![Line::styled(
+        title_line,
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    )];
+    if let Some(m) = current_mode.filter(|m| *m != req.mode) {
+        header_lines.push(Line::styled(
+            format!("Permission mode changed to {m}; this pending call still requires a response."),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if entry.approval_queue.len() > 1 {
+        header_lines.push(Line::styled(
+            format!(
+                "({} more pending write confirmation(s) in queue)",
+                entry.approval_queue.len() - 1
+            ),
+            Style::default().fg(MUTED),
+        ));
+    }
+
+    let escaped_diff = tarz_core::permission::escape_untrusted_text(diff);
+    let diff_lines: Vec<&str> = escaped_diff.lines().collect();
+
+    let header_len = header_lines.len() as u16;
+    let reason_height = if entry.approval_reason.is_some() {
+        2
+    } else {
+        0
+    };
+    let regions = Layout::vertical([
+        Constraint::Length(header_len + 1),
+        Constraint::Min(1),
+        Constraint::Length(reason_height),
+        Constraint::Length(2),
+    ])
+    .split(area);
+
+    frame.render_widget(Paragraph::new(header_lines), regions[0]);
+
+    let diff_height = usize::from(regions[1].height.saturating_sub(2));
+    let visible_diff: Vec<Line> = diff_lines
+        .iter()
+        .skip(entry.approval_scroll)
+        .take(diff_height)
+        .map(|&line| {
+            let style = if line.starts_with('+') && !line.starts_with("+++") {
+                Style::default().fg(Color::Green)
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                Style::default().fg(Color::Red)
+            } else if line.starts_with("@@") {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            Line::styled(line, style)
+        })
+        .collect();
+
+    let diff_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MUTED));
+    frame.render_widget(Paragraph::new(visible_diff).block(diff_block), regions[1]);
+
+    if let Some(reason) = &entry.approval_reason {
+        frame.render_widget(
+            Paragraph::new(vec![Line::styled(
+                format!("Reason for the model (optional, Enter to skip): {reason}"),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )]),
+            regions[2],
+        );
+    }
+
+    let hint = if entry.approval_reason.is_some() {
+        "Enter confirm deny · Esc cancel"
+    } else {
+        "Enter / y allow · n deny · Esc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
+    };
+    frame.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(MUTED)),
+        regions[3],
     );
 }

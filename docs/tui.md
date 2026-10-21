@@ -1,6 +1,6 @@
 # TUI 原型
 
-`tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；已接通工作区只读工具配置与状态；没有 GUI、命令/MCP 配置或安装分发；写入确认面板尚未接通。本轮使用用户授权的同级 Causa 本地依赖，源码基线与构建要求见[当前实现](README.md)。
+`tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；已接通工作区工具（包括写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换）；没有 GUI、命令/MCP 配置或安装分发。本轮使用用户授权的同级 Causa 本地依赖，源码基线与构建要求见[当前实现](README.md)。
 
 ```sh
 cargo build -p tarz-tui --locked
@@ -15,6 +15,8 @@ stdin 和 stdout 都必须是交互终端。至少 30×12；矮窗口表单一�
 | --- | --- |
 | 命令菜单 | 空输入时键入 `/`，或任意草稿下 F1；输入筛选，↑↓ 选择，Enter 执行，Esc 返回 |
 | 新建/填写模型配置 | `/new` 或 F2；Tab/Shift-Tab 换字段，Ctrl-S 创建，Esc 返回 |
+| 许可模式切换 | `Shift-Tab`（在主视图与确认面板内循环切换 ask / accept-edits / read-only）；或 `/mode` / `/mode <name>` |
+| 写入确认 | 确认面板中 `Enter` / `y` 允许；`n` 拒绝并可输理由；`Esc` / `Ctrl-C` 取消本轮；`Shift-Tab` 切换模式；`↑` `↓` `PgUp` `PgDn` 滚动 diff |
 | 会话选择 | `/sessions`，按模型名或 ID 筛选，Enter 切换并打开 |
 | 帮助 / 完整状态与错误详情 | `/help` / `/status`；↑↓ 或 PageUp/PageDown 滚动 |
 | 完整工具调用/结果 | `/tools` 或 F6；↑↓ / PageUp/PageDown 滚动 |
@@ -32,7 +34,7 @@ stdin 和 stdout 都必须是交互终端。至少 30×12；矮窗口表单一�
 
 界面采用单列对话布局：顶部是 Tarz、模型和会话信息，正文以 `❯ You` 和 `●` 区分输入与其他材料，输入区只有上下分隔线，随内容增高至最多 6 行，并受终端高度限制。背景和主文字沿用终端配色，暖橙色突出选择，灰色用于辅助信息，黄色用于错误和确认。没有常驻侧栏，宽窄终端采用相同结构；退出/放弃使用独立确认视图。
 
-命令菜单包含 `/new`、`/sessions`、`/help`、`/status`、`/tools`、`/repair`、`/open`、`/cancel`、`/retry`、`/export`、`/close`、`/discard` 和 `/quit`。菜单出现期间输入只用于筛选；需要在正文输入以 `/` 开头的文本时可以粘贴。`/status` 显示打开时的详情快照，再次打开可刷新。F2–F7 和保存恢复快捷键在主视图可用；菜单内按键用于菜单操作，Ctrl-Q 仍可发起退出。
+命令菜单包含 `/new`、`/sessions`、`/mode`、`/help`、`/status`、`/tools`、`/repair`、`/open`、`/cancel`、`/retry`、`/export`、`/close`、`/discard` 和 `/quit`。菜单出现期间输入只用于筛选；需要在正文输入以 `/` 开头的文本时可以粘贴。`/status` 显示打开时的详情快照，再次打开可刷新。F2–F7 和保存恢复快捷键在主视图可用；菜单内按键用于菜单操作，Ctrl-Q 仍可发起退出。
 
 会话各自保留未提交草稿。切换视图和重绘不取消工作、不重复提交；粘贴只插入文本，控制字符会被过滤，粘贴 `/quit` 等字符串也不会执行命令。Enter 在本轮改为发送；换行请使用 Ctrl-J。Ctrl-Q/关闭遇到草稿先确认；未提交草稿不属于自动保存的 Context。执行和保存状态分别显示，Completed 不等于 Saved。历史材料按内容显示，不恢复旧工作表或执行旧工具。
 

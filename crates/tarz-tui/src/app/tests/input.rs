@@ -141,7 +141,7 @@ fn workspace_form_uses_shared_resolver_and_preserves_profile_limits() {
             .unwrap()
             .unwrap();
     let mut form = input::Form::new(options.preset.as_ref());
-    assert_eq!(form.fields.len(), 7);
+    assert_eq!(form.fields.len(), 8);
     let frozen = form.definition().unwrap();
     assert_eq!(
         frozen.workspace_root,

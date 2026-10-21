@@ -18,11 +18,15 @@ pub(crate) enum Panel {
         scroll: usize,
     },
     Repair(Box<super::repair::RepairPanel>),
+    ModeSelect {
+        selected: usize,
+    },
 }
 
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("new", "Create a session with model settings"),
     ("sessions", "Find and open a saved or active session"),
+    ("mode", "Show or change the permission mode"),
     ("help", "Keyboard shortcuts and session behavior"),
     ("tools", "Expand recorded tool calls and complete results"),
     (
@@ -40,11 +44,18 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
 ];
 
 pub(crate) fn matching_commands(query: &str) -> Vec<usize> {
-    let query = query.trim_start_matches('/').to_lowercase();
+    let clean = query.trim_start_matches('/').trim().to_lowercase();
+    let word = clean.split_whitespace().next().unwrap_or("");
     COMMANDS
         .iter()
         .enumerate()
-        .filter_map(|(i, (name, _))| name.contains(&query).then_some(i))
+        .filter_map(|(i, (name, _))| {
+            if name.contains(&clean) || (!word.is_empty() && *name == word) {
+                Some(i)
+            } else {
+                None
+            }
+        })
         .collect()
 }
 
@@ -85,7 +96,7 @@ impl App {
             self.close(self.selected, ClosePolicy::Save);
         }
     }
-    fn command(&mut self, index: usize) {
+    fn command(&mut self, index: usize, query: &str) {
         match COMMANDS[index].0 {
             "new" => self.form = Some(input::Form::new(self.options.preset.as_ref())),
             "sessions" => {
@@ -95,9 +106,49 @@ impl App {
                     selected: self.selected,
                 });
             }
+            "mode" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = if let Some(rest) = clean.strip_prefix("mode") {
+                    rest.trim()
+                } else {
+                    ""
+                };
+                if arg.is_empty() {
+                    if let Some(entry) = self.entries.get(self.selected) {
+                        if let Some(session) = &entry.session {
+                            let current_mode = session
+                                .permission_mode()
+                                .map_or(tarz_core::permission::PermissionMode::Ask, |(m, _)| m);
+                            let selected_idx = match current_mode {
+                                tarz_core::permission::PermissionMode::ReadOnly => 0,
+                                tarz_core::permission::PermissionMode::Ask => 1,
+                                tarz_core::permission::PermissionMode::AcceptEdits => 2,
+                                tarz_core::permission::PermissionMode::FullAccess => 3,
+                            };
+                            self.panel = Some(Panel::ModeSelect { selected: selected_idx });
+                        } else {
+                            self.notice = "Open a session first to change its permission mode".into();
+                        }
+                    } else {
+                        self.notice = "Open a session first to change its permission mode".into();
+                    }
+                } else {
+                    match arg.parse::<tarz_core::permission::PermissionMode>() {
+                        Ok(mode) => {
+                            self.apply_permission_mode(mode);
+                        }
+                        Err(err) => {
+                            self.notice = err.to_string();
+                        }
+                    }
+                }
+            }
             "help" => self.panel = Some(Panel::Info {
                 title: "Keyboard shortcuts".into(), scroll: 0,
                 lines: ["Enter / Ctrl-S   Send input", "Ctrl-J / Alt-Enter   New line",
+                    "Shift-Tab   Cycle mode (ask -> accept-edits -> read-only)",
+                    "/mode [name]   Show or change the permission mode",
+                    "Enter / y allow · n deny (optional reason)   Confirmation panel",
                     "Esc / Ctrl-C   Interrupt work", "/ or F1   Commands; Esc returns",
                     "F2 new · F3 open · F4 next · F5 refresh", "F6 / /tools   Expand complete recorded tool results", "F7 / /repair   Preview and apply material repair", "PageUp / PageDown   Read conversation",
                     "Ctrl-Z undo · Ctrl-Y redo", "Ctrl-W close · Ctrl-Q save and quit",
@@ -157,6 +208,27 @@ impl App {
         }
         let (query, selected, commands) = match &mut panel {
             Panel::Repair(_) => unreachable!("repair keys handled separately"),
+            Panel::ModeSelect { selected } => {
+                const MODES: [tarz_core::permission::PermissionMode; 4] = [
+                    tarz_core::permission::PermissionMode::ReadOnly,
+                    tarz_core::permission::PermissionMode::Ask,
+                    tarz_core::permission::PermissionMode::AcceptEdits,
+                    tarz_core::permission::PermissionMode::FullAccess,
+                ];
+                match key.code {
+                    KeyCode::Up => *selected = selected.saturating_sub(1),
+                    KeyCode::Down => *selected = (*selected + 1).min(3),
+                    KeyCode::Enter if key.kind == KeyEventKind::Press => {
+                        let chosen = MODES[*selected];
+                        self.panel = None;
+                        self.apply_permission_mode(chosen);
+                        return;
+                    }
+                    _ => {}
+                }
+                self.panel = Some(panel);
+                return;
+            }
             Panel::Commands { query, selected } => (query, selected, true),
             Panel::Sessions { query, selected } => (query, selected, false),
             Panel::Info { scroll, lines, .. } => {
@@ -187,8 +259,11 @@ impl App {
             KeyCode::Enter if key.kind == KeyEventKind::Press => {
                 if let Some(&index) = matches.get(*selected) {
                     if commands {
-                        self.command(index);
+                        let query_str = query.clone();
+                        self.panel = None;
+                        self.command(index, &query_str);
                     } else {
+                        self.panel = None;
                         self.selected = index;
                         self.open();
                     }

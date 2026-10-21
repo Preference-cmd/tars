@@ -5,8 +5,10 @@ use crate::{
     transcript::{Rows, Transcript},
 };
 use ratatui_textarea::TextArea;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tarz_core::application::{ManagedSession, MaterialVersion, PreparedCreate, SessionHost};
+use tarz_core::permission::{ApprovalReceiver, ApprovalRequest};
 use tarz_core::session::WorkRef;
 use tokio::task::JoinSet;
 
@@ -42,6 +44,10 @@ pub(crate) struct Entry {
     pub(super) material_reads: usize,
     pub(super) refreshing: bool,
     pub(super) wrapping: bool,
+    pub(crate) approvals_rx: Option<ApprovalReceiver>,
+    pub(crate) approval_queue: VecDeque<ApprovalRequest>,
+    pub(crate) approval_reason: Option<String>,
+    pub(crate) approval_scroll: usize,
 }
 impl Entry {
     pub(super) fn new(id: String, title: String) -> Self {
@@ -69,6 +75,10 @@ impl Entry {
             material_reads: 0,
             refreshing: false,
             wrapping: false,
+            approvals_rx: None,
+            approval_queue: VecDeque::new(),
+            approval_reason: None,
+            approval_scroll: 0,
         }
     }
     pub fn id(&self) -> &str {

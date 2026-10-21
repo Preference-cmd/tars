@@ -2,7 +2,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui_textarea::{TextArea, WrapMode};
 use tarz_core::{
     config::{Config, ConfigSource, DefinitionOverrides, parse_tools},
-    definition::{CredentialRef, Provider, SessionDefinition, WorkspaceToolLimits},
+    definition::{
+        CredentialRef, Provider, SessionDefinition, WorkspaceToolLimits, WriteToolLimits,
+    },
+    permission::PermissionMode,
 };
 
 mod graphemes;
@@ -50,24 +53,35 @@ pub(crate) struct Form {
     /// changed in the form must accept them, or creation is refused.
     pub render_options: serde_json::Map<String, serde_json::Value>,
     pub tool_limits: WorkspaceToolLimits,
+    pub write_limits: Option<WriteToolLimits>,
 }
-pub(crate) const FIELD_NAMES: [&str; 7] = [
+pub(crate) const FIELD_NAMES: [&str; 8] = [
     "Provider",
     "Model",
     "Endpoint (optional, full URL)",
     "Credential environment variable",
     "Timeout seconds (1..86400)",
     "Workspace root (optional; does not enable tools)",
-    "Tools (comma-separated list_directory,read_file,search_text)",
+    "Tools (comma-separated list_directory,read_file,search_text,write_file,edit_file)",
+    "Permission mode (read-only | ask | accept-edits | full-access)",
 ];
 
 impl Default for Form {
     fn default() -> Self {
         Self {
-            fields: ["openai-chat", "", "", "OPENAI_API_KEY", "120", "", ""]
-                .into_iter()
-                .map(|s| TextArea::from([s]))
-                .collect(),
+            fields: [
+                "openai-chat",
+                "",
+                "",
+                "OPENAI_API_KEY",
+                "120",
+                "",
+                "",
+                "ask",
+            ]
+            .into_iter()
+            .map(|s| TextArea::from([s]))
+            .collect(),
             selected: 1,
             error: String::new(),
             limits: (256, 10, 64),
@@ -75,6 +89,7 @@ impl Default for Form {
             max_model_attempts: None,
             render_options: Default::default(),
             tool_limits: WorkspaceToolLimits::default(),
+            write_limits: None,
         }
     }
 }
@@ -89,6 +104,7 @@ impl Form {
             Provider::Anthropic => "anthropic",
         };
         let CredentialRef::Environment(name) = &preset.credential;
+        let mode_str = preset.permission_mode.map_or("ask", |m| m.as_str());
         let values = [
             provider.to_owned(),
             preset.model.clone(),
@@ -106,6 +122,7 @@ impl Form {
                 .map(|tool| tool.name())
                 .collect::<Vec<_>>()
                 .join(","),
+            mode_str.to_owned(),
         ];
         Self {
             fields: values
@@ -115,6 +132,7 @@ impl Form {
             selected: 1,
             error: String::new(),
             tool_limits: preset.tool_limits.clone(),
+            write_limits: preset.write_limits,
             generation: (
                 preset.max_tokens,
                 preset.reasoning_effort.clone(),
@@ -142,6 +160,10 @@ impl Form {
             .ok()
             .filter(|n| (1..=86400).contains(n))
             .ok_or("Timeout must be 1..86400 seconds")?;
+        let permission_mode = values[7]
+            .trim()
+            .parse::<PermissionMode>()
+            .map_err(|_| "Permission mode: read-only | ask | accept-edits | full-access")?;
         // Resolve explicit form values through the same core path as CLI input.
         // Profile limits were frozen when the selected startup preset was loaded.
         Config::load(ConfigSource::Disabled)
@@ -165,8 +187,8 @@ impl Form {
                     workspace_root: (!values[5].is_empty()).then(|| values[5].clone().into()),
                     tools: Some(parse_tools(&values[6]).map_err(|e| e.to_string())?),
                     tool_limits: Some(self.tool_limits.clone()),
-                    write_limits: None,
-                    permission_mode: None,
+                    write_limits: self.write_limits,
+                    permission_mode: Some(permission_mode),
                 },
             )
             .map_err(|e| e.to_string())

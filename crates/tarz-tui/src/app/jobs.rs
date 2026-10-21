@@ -181,6 +181,10 @@ impl App {
                     entry.busy = None;
                     match result {
                         Ok(session) => {
+                            entry.approvals_rx = Some(session.connect_approvals());
+                            entry.approval_queue.clear();
+                            entry.approval_reason = None;
+                            entry.approval_scroll = 0;
                             entry.title = session.definition().model;
                             entry.session = Some(session);
                             entry.prepared = None;
@@ -202,6 +206,9 @@ impl App {
                         entry.tools.reconcile(tools);
                     }
                     entry.clear_progress();
+                    entry.approval_queue.clear();
+                    entry.approval_reason = None;
+                    entry.approval_scroll = 0;
                     entry.scroll = None;
                     entry.execution = result
                         .as_ref()
@@ -266,6 +273,10 @@ impl App {
             Message::Closed(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     entry.busy = None;
+                    entry.approvals_rx = None;
+                    entry.approval_queue.clear();
+                    entry.approval_reason = None;
+                    entry.approval_scroll = 0;
                     match &result {
                         Ok(outcome) => {
                             entry.session = None;

@@ -69,6 +69,10 @@ impl App {
         entry.clear_progress();
         entry.tools = super::tool_progress::ToolView::default();
         entry.key.generation += 1;
+        entry.approvals_rx = None;
+        entry.approval_queue.clear();
+        entry.approval_reason = None;
+        entry.approval_scroll = 0;
         entry.material_version = None;
         entry.requested_material_version = None;
         entry.repair_job = None;
@@ -170,6 +174,9 @@ impl App {
             return;
         };
         entry.busy = Some("closing");
+        entry.approval_queue.clear();
+        entry.approval_reason = None;
+        entry.approval_scroll = 0;
         let host = self.host.clone();
         let key = entry.key.clone();
         self.jobs
@@ -230,6 +237,12 @@ impl App {
     pub(super) fn poll(&mut self) {
         self.poll_progress();
         for entry in &mut self.entries {
+            if let Some(rx) = &mut entry.approvals_rx {
+                while let Ok(request) = rx.try_recv() {
+                    entry.approval_queue.push_back(request);
+                    self.dirty = true;
+                }
+            }
             if let Some(status) = self.host.lookup(&entry.id().into()) {
                 let label = format!("{:?} | {}", status.lifecycle, save_label(&status.save));
                 if entry.status != label {
@@ -340,5 +353,54 @@ impl App {
             }
         }
         reports
+    }
+    pub(super) fn apply_permission_mode(&mut self, mode: tarz_core::permission::PermissionMode) {
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            self.notice = "Open a session first to change its permission mode".into();
+            return;
+        };
+        let Some(session) = &entry.session else {
+            self.notice = "Open a session first to change its permission mode".into();
+            return;
+        };
+        match session.set_permission_mode(mode) {
+            Ok((new_mode, _)) => {
+                self.notice = format!("Permission mode: {new_mode}");
+                self.dirty = true;
+            }
+            Err(error) => {
+                self.notice = format!("Failed to set permission mode: {error}");
+                self.dirty = true;
+            }
+        }
+    }
+
+    pub(super) fn cycle_permission_mode(&mut self) {
+        let Some(entry) = self.entries.get(self.selected) else {
+            self.notice = "Open a session first to change its permission mode".into();
+            return;
+        };
+        let Some(session) = &entry.session else {
+            self.notice = "Open a session first to change its permission mode".into();
+            return;
+        };
+        let current_mode = session
+            .permission_mode()
+            .map_or(tarz_core::permission::PermissionMode::Ask, |(m, _)| m);
+        let next_mode = match current_mode {
+            tarz_core::permission::PermissionMode::Ask => {
+                tarz_core::permission::PermissionMode::AcceptEdits
+            }
+            tarz_core::permission::PermissionMode::AcceptEdits => {
+                tarz_core::permission::PermissionMode::ReadOnly
+            }
+            tarz_core::permission::PermissionMode::ReadOnly => {
+                tarz_core::permission::PermissionMode::Ask
+            }
+            tarz_core::permission::PermissionMode::FullAccess => {
+                tarz_core::permission::PermissionMode::Ask
+            }
+        };
+        self.apply_permission_mode(next_mode);
     }
 }
