@@ -30,6 +30,7 @@ fn definition() -> SessionDefinition {
         tools: Vec::new(),
         tool_limits: Default::default(),
         write_limits: None,
+        permission_mode: None,
     }
 }
 fn context(text: &str) -> Context {
@@ -49,6 +50,7 @@ fn op(id: &str, prior: Option<u64>, text: &str) -> PreparedCommit {
             prior,
             definition(),
             context(text),
+            None,
         )
         .unwrap(),
     )
@@ -324,7 +326,8 @@ fn resource_limit_rejects_oversized_load_and_checked_revisions() {
             Uuid::now_v7().to_string(),
             Some(u64::MAX),
             definition(),
-            Context::new()
+            Context::new(),
+            None,
         )
         .is_err()
     );
@@ -508,6 +511,7 @@ fn session_records_written_before_message_roles_load_and_save_in_the_current_for
             Some(1),
             definition(),
             loaded.context.clone(),
+            None,
         )
         .unwrap(),
     )
@@ -517,4 +521,66 @@ fn session_records_written_before_message_roles_load_and_save_in_the_current_for
     assert!(written.contains(r#""shape":"message""#));
     assert!(!written.contains(r#""shape":"parts""#));
     assert!(written.contains(r#""format":"tarz-session-v2""#));
+}
+
+#[test]
+fn record_omits_permission_mode_when_matching_initial_mode() {
+    let id = Uuid::now_v7().to_string();
+    let mut def = definition();
+    def.permission_mode = Some(crate::permission::PermissionMode::AcceptEdits);
+
+    // Current mode equals initial mode (AcceptEdits) -> permission_mode is None
+    let record_same = SavedSessionRecord::new(
+        id.clone(),
+        Uuid::now_v7().to_string(),
+        None,
+        def.clone(),
+        Context::new(),
+        Some(crate::permission::PermissionMode::AcceptEdits),
+    )
+    .unwrap();
+    assert_eq!(record_same.permission_mode, None);
+    let val_same = serde_json::to_value(&record_same).unwrap();
+    assert!(val_same.get("permission_mode").is_none());
+
+    // Current mode differs from initial mode (ReadOnly vs AcceptEdits) -> permission_mode is Some(ReadOnly)
+    let record_diff = SavedSessionRecord::new(
+        id.clone(),
+        Uuid::now_v7().to_string(),
+        None,
+        def,
+        Context::new(),
+        Some(crate::permission::PermissionMode::ReadOnly),
+    )
+    .unwrap();
+    assert_eq!(
+        record_diff.permission_mode,
+        Some(crate::permission::PermissionMode::ReadOnly)
+    );
+    let val_diff = serde_json::to_value(&record_diff).unwrap();
+    assert_eq!(val_diff["permission_mode"], "read-only");
+}
+
+#[test]
+fn legacy_v2_record_deserializes_with_none_permission_fields() {
+    let id = Uuid::now_v7().to_string();
+    let commit = Uuid::now_v7().to_string();
+    let json_text = format!(
+        r#"{{"format":"tarz-session-v2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"LEGACY_KEY"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+    );
+
+    let record: SavedSessionRecord = serde_json::from_str(&json_text).unwrap();
+    assert_eq!(record.permission_mode, None);
+    assert_eq!(record.definition.permission_mode, None);
+    assert_eq!(record.definition.write_limits, None);
+    assert_eq!(
+        record.definition.initial_permission_mode(),
+        crate::permission::PermissionMode::Ask
+    );
+
+    // Reserialization does not introduce permission_mode or write_limits
+    let val = serde_json::to_value(&record).unwrap();
+    assert!(val.get("permission_mode").is_none());
+    assert!(val["definition"].get("permission_mode").is_none());
+    assert!(val["definition"].get("write_limits").is_none());
 }

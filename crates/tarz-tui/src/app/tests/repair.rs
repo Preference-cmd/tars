@@ -44,6 +44,7 @@ async fn incomplete(app: &mut crate::app::App, provider: Provider, endpoint: &st
         tools: vec![],
         tool_limits: Default::default(),
         write_limits: None,
+        permission_mode: None,
     };
     let context = Context::from_blocks(vec![
         tarz_core::application::text_input("old input"),

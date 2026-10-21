@@ -1,5 +1,6 @@
 use super::{Config, ConfigSource, DefinitionOverrides};
-use crate::definition::{CredentialRef, Provider};
+use crate::definition::{CredentialRef, DefinitionError, Provider, WriteToolLimits};
+use crate::permission::PermissionMode;
 
 const CONFIG: &str = r#"
 version = 1
@@ -323,4 +324,172 @@ fn a_profile_with_an_unknown_render_option_is_refused_at_load_without_its_value(
         .expect("refused");
     assert!(!error.to_string().contains("secret_marker"));
     assert!(error.to_string().contains("render_options"));
+}
+
+#[test]
+fn config_preset_sets_permission_mode_and_write_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let text = format!(
+        "{CONFIG}permission_mode = \"accept-edits\"
+[profiles.local.write_limits]
+max_write_bytes = 500000
+max_edit_file_bytes = 1000000
+max_edit_segments = 10
+"
+    );
+    std::fs::write(&path, text).unwrap();
+    let config = Config::load(ConfigSource::File(path)).unwrap();
+    let def = config
+        .definition(None, DefinitionOverrides::default())
+        .unwrap();
+    assert_eq!(def.permission_mode, Some(PermissionMode::AcceptEdits));
+    let wl = def.write_limits.unwrap();
+    assert_eq!(wl.max_write_bytes, 500000);
+    assert_eq!(wl.max_edit_file_bytes, 1000000);
+    assert_eq!(wl.max_edit_segments, 10);
+}
+
+#[test]
+fn config_explicit_overrides_permission_mode_and_write_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let text = format!(
+        "{CONFIG}permission_mode = \"accept-edits\"
+"
+    );
+    std::fs::write(&path, text).unwrap();
+    let config = Config::load(ConfigSource::File(path)).unwrap();
+
+    // Explicit override replaces preset
+    let overridden = config
+        .definition(
+            None,
+            DefinitionOverrides {
+                permission_mode: Some(PermissionMode::ReadOnly),
+                write_limits: Some(WriteToolLimits {
+                    max_write_bytes: 200000,
+                    max_edit_file_bytes: 800000,
+                    max_edit_segments: 5,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(overridden.permission_mode, Some(PermissionMode::ReadOnly));
+    assert_eq!(overridden.write_limits.unwrap().max_write_bytes, 200000);
+
+    // Explicit Ask normalizes to None
+    let ask_overridden = config
+        .definition(
+            None,
+            DefinitionOverrides {
+                permission_mode: Some(PermissionMode::Ask),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(ask_overridden.permission_mode, None);
+}
+
+#[test]
+fn config_unknown_permission_mode_is_rejected_at_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let text = format!(
+        "{CONFIG}permission_mode = \"super-admin\"
+"
+    );
+    std::fs::write(&path, text).unwrap();
+    let error = Config::load(ConfigSource::File(path))
+        .err()
+        .expect("must fail");
+    assert!(matches!(error, super::ConfigError::Syntax { .. }));
+}
+
+#[test]
+fn config_write_limits_can_only_be_lowered_not_raised() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    // Exceeds max_write_bytes
+    let text_high = format!(
+        "{CONFIG}[profiles.local.write_limits]
+max_write_bytes = 99999999
+"
+    );
+    std::fs::write(&path, text_high).unwrap();
+    let err_high = Config::load(ConfigSource::File(path.clone()))
+        .err()
+        .expect("must reject high limit");
+    assert!(matches!(
+        err_high,
+        super::ConfigError::Definition(DefinitionError::InvalidToolLimits)
+    ));
+
+    // Zero is rejected
+    let text_zero = format!(
+        "{CONFIG}[profiles.local.write_limits]
+max_write_bytes = 0
+"
+    );
+    std::fs::write(&path, text_zero).unwrap();
+    let err_zero = Config::load(ConfigSource::File(path))
+        .err()
+        .expect("must reject zero limit");
+    assert!(matches!(
+        err_zero,
+        super::ConfigError::Definition(DefinitionError::InvalidToolLimits)
+    ));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn modifying_config_file_does_not_affect_reopened_session() {
+    use crate::application::{ClosePolicy, PreparedCreate, SessionHost};
+    let dir = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.toml");
+    let text1 = format!(
+        "{CONFIG}permission_mode = \"accept-edits\"
+"
+    );
+    std::fs::write(&cfg_path, &text1).unwrap();
+
+    let config = Config::load(ConfigSource::File(cfg_path.clone())).unwrap();
+    let mut def = config
+        .definition(None, DefinitionOverrides::default())
+        .unwrap();
+    def.credential = CredentialRef::Environment("PATH".into());
+    assert_eq!(def.permission_mode, Some(PermissionMode::AcceptEdits));
+
+    let host = SessionHost::new(Some(storage.path().to_owned()));
+    let prepared = PreparedCreate::persistent(def, causa::kernel::Context::default());
+    let id = prepared.conversation_id().clone();
+    let session = host.create(prepared).await.unwrap();
+    assert_eq!(
+        session.permission_mode(),
+        Some((PermissionMode::AcceptEdits, 0))
+    );
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // Now rewrite config with a different permission mode
+    let text2 = format!(
+        "{CONFIG}permission_mode = \"read-only\"
+"
+    );
+    std::fs::write(&cfg_path, &text2).unwrap();
+
+    // Reopen session: it still uses its saved definition, unaffected by config change
+    let reopened = host.open(id).await.unwrap();
+    assert_eq!(
+        reopened.definition().permission_mode,
+        Some(PermissionMode::AcceptEdits)
+    );
+    assert_eq!(
+        reopened.permission_mode(),
+        Some((PermissionMode::AcceptEdits, 0))
+    );
 }

@@ -1,7 +1,8 @@
 use super::file::ConfigError;
 use crate::definition::{
-    CredentialRef, Provider, SessionDefinition, WorkspaceTool, WorkspaceToolLimits,
+    CredentialRef, Provider, SessionDefinition, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
 };
+use crate::permission::PermissionMode;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +41,10 @@ pub struct DefinitionOverrides {
     pub tools: Option<Vec<WorkspaceTool>>,
     /// Explicit effective tool limits, which may only lower supported bounds.
     pub tool_limits: Option<WorkspaceToolLimits>,
+    /// Explicit effective write tool limits, which may only lower supported bounds.
+    pub write_limits: Option<WriteToolLimits>,
+    /// Explicit initial permission mode.
+    pub permission_mode: Option<PermissionMode>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +66,8 @@ pub(super) struct Profile {
     pub(super) workspace_root: Option<PathBuf>,
     tools: Option<Vec<WorkspaceTool>>,
     tool_limits: Option<ProfileToolLimits>,
+    write_limits: Option<ProfileWriteLimits>,
+    permission_mode: Option<PermissionMode>,
 }
 
 // Sparse startup defaults are deliberately separate from the complete persisted limits.
@@ -100,6 +107,25 @@ impl ProfileToolLimits {
             max_search_matches: self
                 .max_search_matches
                 .unwrap_or(defaults.max_search_matches),
+        }
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileWriteLimits {
+    max_edit_file_bytes: Option<usize>,
+    max_write_bytes: Option<usize>,
+    max_edit_segments: Option<usize>,
+}
+impl ProfileWriteLimits {
+    fn effective(&self) -> WriteToolLimits {
+        let defaults = WriteToolLimits::default();
+        WriteToolLimits {
+            max_edit_file_bytes: self
+                .max_edit_file_bytes
+                .unwrap_or(defaults.max_edit_file_bytes),
+            max_write_bytes: self.max_write_bytes.unwrap_or(defaults.max_write_bytes),
+            max_edit_segments: self.max_edit_segments.unwrap_or(defaults.max_edit_segments),
         }
     }
 }
@@ -184,7 +210,16 @@ pub(super) fn resolve(
                 profile.and_then(|p| p.tool_limits.as_ref().map(ProfileToolLimits::effective))
             })
             .unwrap_or_default(),
-        write_limits: None,
+        write_limits: options.write_limits.or_else(|| {
+            profile.and_then(|p| p.write_limits.as_ref().map(ProfileWriteLimits::effective))
+        }),
+        permission_mode: match options
+            .permission_mode
+            .or(profile.and_then(|p| p.permission_mode))
+        {
+            Some(PermissionMode::Ask) | None => None,
+            Some(mode) => Some(mode),
+        },
     };
     definition.validate().map_err(ConfigError::Definition)?;
     Ok(definition)

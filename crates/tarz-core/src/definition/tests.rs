@@ -19,6 +19,7 @@ fn definition() -> SessionDefinition {
         tools: vec![],
         tool_limits: Default::default(),
         write_limits: None,
+        permission_mode: None,
     }
 }
 

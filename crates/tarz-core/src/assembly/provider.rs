@@ -25,6 +25,7 @@ pub(crate) fn assemble(
     conversation_id: ConversationId,
     context: Context,
     resources: Arc<ToolResources>,
+    current_mode: crate::permission::PermissionMode,
 ) -> Result<Session, AssemblyError> {
     definition.validate()?;
     let workspace_tools = if definition.tools.is_empty() {
@@ -59,9 +60,7 @@ pub(crate) fn assemble(
     let selected = definition.tools.clone();
     let call_timeout = (!selected.is_empty())
         .then(|| std::time::Duration::from_secs(definition.tool_limits.call_timeout_secs));
-    let permissions = Arc::new(crate::permission::PermissionHub::new(
-        crate::permission::PermissionMode::Ask,
-    ));
+    let permissions = Arc::new(crate::permission::PermissionHub::new(current_mode));
     let view = permissions.view();
     let approvals = permissions.approvals();
     let session_permissions = permissions.clone();

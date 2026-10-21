@@ -51,6 +51,7 @@ fn definition() -> SessionDefinition {
         tools: Vec::new(),
         tool_limits: Default::default(),
         write_limits: None,
+        permission_mode: None,
     }
 }
 fn fixture(host: &SessionHost, calls: Arc<AtomicU64>, assemblies: Arc<AtomicU64>) {

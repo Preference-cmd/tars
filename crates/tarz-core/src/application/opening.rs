@@ -28,19 +28,34 @@ pub(super) async fn initialize(
     } else {
         None
     };
-    let (definition, context, revision) = match &prepared {
+    let (definition, context, revision, current_mode) = match &prepared {
         Some(prepared) => {
             if record.is_some() {
                 return Err(ApplicationError::CreationConflict);
             }
-            {
-                entry.cloned_snapshot();
-                (prepared.definition.clone(), prepared.context.clone(), None)
+            entry.cloned_snapshot();
+            let mut definition = prepared.definition.clone();
+            if definition.permission_mode == Some(crate::permission::PermissionMode::Ask) {
+                definition.permission_mode = None;
             }
+            let initial = definition.initial_permission_mode();
+            (definition, prepared.context.clone(), None, initial)
         }
         None => {
             let record = record.ok_or(ApplicationError::NotFound)?;
-            (record.definition, record.context, Some(record.revision))
+            let initial_mode = record.definition.initial_permission_mode();
+            let mut mode = record.permission_mode.unwrap_or(initial_mode);
+            if mode == crate::permission::PermissionMode::FullAccess
+                && initial_mode != crate::permission::PermissionMode::FullAccess
+            {
+                mode = crate::permission::PermissionMode::Ask;
+            }
+            (
+                record.definition,
+                record.context,
+                Some(record.revision),
+                mode,
+            )
         }
     };
     definition.validate()?;
@@ -52,6 +67,7 @@ pub(super) async fn initialize(
             None,
             definition.clone(),
             context.clone(),
+            definition.permission_mode,
         )?;
         Some(Arc::new(PreparedCommit::new(None, record)?))
     } else {
@@ -68,6 +84,7 @@ pub(super) async fn initialize(
             entry.target.conversation_id.clone(),
             context,
             host.tool_resources.clone(),
+            current_mode,
         )
         .map_err(|error| ApplicationError::Assembly(error.to_string()))?
     };
@@ -77,6 +94,7 @@ pub(super) async fn initialize(
         entry.target.conversation_id.clone(),
         context,
         host.tool_resources.clone(),
+        current_mode,
     )
     .map_err(|error| ApplicationError::Assembly(error.to_string()))?;
     let mut state = entry.lock();

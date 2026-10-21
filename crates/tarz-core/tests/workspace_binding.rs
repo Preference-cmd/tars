@@ -37,6 +37,7 @@ fn definition(provider: Provider, endpoint: &str, root: &Path) -> SessionDefinit
         tools: vec![WorkspaceTool::ReadFile],
         tool_limits: Default::default(),
         write_limits: None,
+        permission_mode: None,
     }
 }
 fn submit(session: &ManagedSession, key: &str) -> WorkRef {

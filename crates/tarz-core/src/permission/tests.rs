@@ -10,6 +10,7 @@ use causa::kernel::{
 use causa::runtime::{TurnInterruption, TurnResult};
 use serde_json::json;
 
+use crate::application::SaveStatus;
 use crate::application::{
     ApplicationError, ClosePolicy, ManagedSession, PreparedCreate, SessionHost, text_input,
 };
@@ -21,6 +22,7 @@ use crate::permission::{
 };
 use crate::session::ToolPhase;
 use crate::session::{SubmitRequest, WorkObservation, WorkRef, WorkResult, WorkState};
+use crate::store::{CommitStage, FaultAction};
 
 use crate::application::tests::workspace_http::*;
 
@@ -49,6 +51,7 @@ fn base_definition(endpoint: &str, root: &Path) -> SessionDefinition {
         ],
         tool_limits: WorkspaceToolLimits::default(),
         write_limits: None,
+        permission_mode: None,
     }
 }
 
@@ -1160,4 +1163,685 @@ async fn session_without_permissions_behavior() {
     // connect_approvals returns immediately closed receiver
     let mut rx = session.connect_approvals();
     assert!(rx.recv().await.is_none());
+}
+
+fn tool_result_error(session: &ManagedSession, call_block_id: causa::kernel::BlockId) -> String {
+    let context = session.read_materials().unwrap().context;
+    let payload = context
+        .blocks()
+        .iter()
+        .find_map(|b| match b.content() {
+            BlockContent::ToolResult(p) if p.call_block_id == call_block_id => Some(p),
+            _ => None,
+        })
+        .unwrap();
+    payload.output.content["error"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+// Old V2 record tests
+
+#[tokio::test]
+async fn legacy_v2_record_fixture_reopen_preserves_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("store");
+    let sessions_dir = storage.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+
+    let id = uuid::Uuid::now_v7().to_string();
+    let commit = uuid::Uuid::now_v7().to_string();
+    let record_path = sessions_dir.join(format!("{id}.json"));
+    let raw_json = format!(
+        r#"{{"format":"tarz-session-v2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+    );
+    std::fs::write(&record_path, raw_json.as_bytes()).unwrap();
+    let original_bytes = std::fs::read(&record_path).unwrap();
+
+    let host = SessionHost::new(Some(storage));
+    let session = host.open(id.clone().into()).await.unwrap();
+
+    assert!(session.definition().tools.is_empty());
+    assert_eq!(session.definition().write_limits, None);
+    assert_eq!(session.definition().permission_mode, None);
+    assert_eq!(
+        session.definition().initial_permission_mode(),
+        PermissionMode::Ask
+    );
+    assert_eq!(session.permission_mode(), Some((PermissionMode::Ask, 0)));
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    let after_bytes = std::fs::read(&record_path).unwrap();
+    assert_eq!(after_bytes, original_bytes);
+}
+
+#[tokio::test]
+async fn field_writing_rules_and_omissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("store");
+
+    // Part A: New session without new features
+    let mut def = base_definition("https://example.test", dir.path());
+    def.permission_mode = None;
+    def.write_limits = None;
+
+    let host = SessionHost::new(Some(storage.clone()));
+    let prepared = PreparedCreate::persistent(def.clone(), Context::default());
+    let id_a = prepared.conversation_id().clone();
+    let session_a = host.create(prepared).await.unwrap();
+    host.close(&session_a.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    let record_a_path = storage
+        .join("sessions")
+        .join(format!("{}.json", id_a.as_str()));
+    let json_a: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_a_path).unwrap()).unwrap();
+    assert!(json_a.get("permission_mode").is_none());
+    assert!(json_a["definition"].get("permission_mode").is_none());
+    assert!(json_a["definition"].get("write_limits").is_none());
+
+    // Part B: Current mode equals initial mode
+    let mut def_b = base_definition("https://example.test", dir.path());
+    def_b.permission_mode = Some(PermissionMode::AcceptEdits);
+
+    let prepared_b = PreparedCreate::persistent(def_b, Context::default());
+    let id_b = prepared_b.conversation_id().clone();
+    let session_b = host.create(prepared_b).await.unwrap();
+    session_b.wait_saved().await.unwrap();
+
+    let record_b_path = storage
+        .join("sessions")
+        .join(format!("{}.json", id_b.as_str()));
+    let json_b: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_b_path).unwrap()).unwrap();
+    assert_eq!(json_b["definition"]["permission_mode"], "accept-edits");
+    assert!(json_b.get("permission_mode").is_none());
+
+    // Switch to ReadOnly: current != initial
+    session_b
+        .set_permission_mode(PermissionMode::ReadOnly)
+        .unwrap();
+    session_b.wait_saved().await.unwrap();
+
+    let json_b2: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_b_path).unwrap()).unwrap();
+    assert_eq!(json_b2["permission_mode"], "read-only");
+
+    // Switch back to AcceptEdits: current == initial
+    session_b
+        .set_permission_mode(PermissionMode::AcceptEdits)
+        .unwrap();
+    session_b.wait_saved().await.unwrap();
+
+    let json_b3: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_b_path).unwrap()).unwrap();
+    assert!(json_b3.get("permission_mode").is_none());
+
+    host.close(&session_b.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn explicit_ask_normalized_to_none_on_session_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("store");
+
+    let mut def = base_definition("https://example.test", dir.path());
+    def.permission_mode = Some(PermissionMode::Ask);
+
+    let host = SessionHost::new(Some(storage.clone()));
+    let prepared = PreparedCreate::persistent(def, Context::default());
+    let id = prepared.conversation_id().clone();
+    let session = host.create(prepared).await.unwrap();
+
+    assert_eq!(session.definition().permission_mode, None);
+    assert_eq!(
+        session.definition().initial_permission_mode(),
+        PermissionMode::Ask
+    );
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    let record_path = storage
+        .join("sessions")
+        .join(format!("{}.json", id.as_str()));
+    let record_str = std::fs::read_to_string(&record_path).unwrap();
+    assert!(
+        !record_str.contains("permission_mode"),
+        "saved record must omit permission_mode key"
+    );
+
+    let reopened = host.open(id).await.unwrap();
+    assert_eq!(reopened.definition().permission_mode, None);
+    assert_eq!(
+        reopened.definition().initial_permission_mode(),
+        PermissionMode::Ask
+    );
+    host.close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn wm17_reopen_permission_mode_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("store");
+    let host = SessionHost::new(Some(storage.clone()));
+
+    // Case 1: Switched to accept-edits -> reopens as accept-edits
+    let def1 = base_definition("https://example.test", dir.path());
+    let p1 = PreparedCreate::persistent(def1, Context::default());
+    let id1 = p1.conversation_id().clone();
+    let s1 = host.create(p1).await.unwrap();
+    s1.set_permission_mode(PermissionMode::AcceptEdits).unwrap();
+    s1.wait_saved().await.unwrap();
+    host.close(&s1.target(), ClosePolicy::Save).await.unwrap();
+
+    let r1 = host.open(id1).await.unwrap();
+    assert_eq!(r1.permission_mode(), Some((PermissionMode::AcceptEdits, 0)));
+    host.close(&r1.target(), ClosePolicy::Save).await.unwrap();
+
+    // Case 2: Initial is ask, switched to full-access -> reopens as ask
+    let def2 = base_definition("https://example.test", dir.path());
+    let p2 = PreparedCreate::persistent(def2, Context::default());
+    let id2 = p2.conversation_id().clone();
+    let s2 = host.create(p2).await.unwrap();
+    s2.set_permission_mode(PermissionMode::FullAccess).unwrap();
+    s2.wait_saved().await.unwrap();
+    host.close(&s2.target(), ClosePolicy::Save).await.unwrap();
+
+    let r2 = host.open(id2).await.unwrap();
+    assert_eq!(r2.permission_mode(), Some((PermissionMode::Ask, 0)));
+    host.close(&r2.target(), ClosePolicy::Save).await.unwrap();
+
+    // Case 3: Initial is full-access -> reopens as full-access
+    let mut def3 = base_definition("https://example.test", dir.path());
+    def3.permission_mode = Some(PermissionMode::FullAccess);
+    let p3 = PreparedCreate::persistent(def3, Context::default());
+    let id3 = p3.conversation_id().clone();
+    let s3 = host.create(p3).await.unwrap();
+    assert_eq!(s3.permission_mode(), Some((PermissionMode::FullAccess, 0)));
+    host.close(&s3.target(), ClosePolicy::Save).await.unwrap();
+
+    let r3 = host.open(id3).await.unwrap();
+    assert_eq!(r3.permission_mode(), Some((PermissionMode::FullAccess, 0)));
+    host.close(&r3.target(), ClosePolicy::Save).await.unwrap();
+}
+
+// Saving scenarios
+
+#[tokio::test]
+async fn saving_scenario_1_idle_switch_triggers_save_context_unchanged_revision_incremented() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("store");
+    let host = SessionHost::new(Some(storage));
+
+    let def = base_definition("https://example.test", dir.path());
+    let initial_context = Context::default();
+    let p = PreparedCreate::persistent(def, initial_context.clone());
+    let s = host.create(p).await.unwrap();
+    let initial_status = s.wait_saved().await.unwrap();
+    let initial_rev = match initial_status {
+        SaveStatus::Saved { revision, .. } => revision,
+        _ => panic!("must be saved"),
+    };
+
+    let before_blocks = s.read_materials().unwrap().context.blocks().to_vec();
+
+    // Idle switch: triggers save, revision + 1
+    s.set_permission_mode(PermissionMode::AcceptEdits).unwrap();
+    let after_status = s.wait_saved().await.unwrap();
+    let after_rev = match after_status {
+        SaveStatus::Saved { revision, .. } => revision,
+        _ => panic!("must be saved"),
+    };
+    assert_eq!(after_rev, initial_rev + 1);
+
+    // Context unchanged
+    let after_blocks = s.read_materials().unwrap().context.blocks().to_vec();
+    assert_eq!(before_blocks, after_blocks);
+
+    host.close(&s.target(), ClosePolicy::Save).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saving_scenario_2_switch_during_active_work_saved_after_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("store");
+
+    let replies = vec![
+        call_write("work_file.txt", "initial content"),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(Some(storage.clone()));
+    let def = base_definition(&fixture.endpoint, dir.path());
+    let p = PreparedCreate::persistent(def, Context::default());
+    let id = p.conversation_id().clone();
+    let s = host.create(p).await.unwrap();
+
+    let mut rx = s.connect_approvals();
+    let s_clone = s.clone();
+
+    let work = submit(&s, "active work");
+
+    // Receive approval request while work is active
+    let req = rx.recv().await.expect("request received");
+    // Switch multiple times during active work
+    s_clone
+        .set_permission_mode(PermissionMode::ReadOnly)
+        .unwrap();
+    s_clone
+        .set_permission_mode(PermissionMode::AcceptEdits)
+        .unwrap();
+
+    // Now reply to allow
+    req.reply.send(ApprovalDecision::Allow).unwrap();
+
+    let obs = finish(&s, &work).await;
+    assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
+
+    // The single save after work contains the latest mode
+    let record_path = storage
+        .join("sessions")
+        .join(format!("{}.json", id.as_str()));
+    let json_val: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    assert_eq!(json_val["permission_mode"], "accept-edits");
+
+    host.close(&s.target(), ClosePolicy::Save).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn saving_scenario_3_switch_with_pending_failed_commit_retries_original_then_saves_new_mode()
+{
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("store");
+    let host = SessionHost::new(Some(storage.clone()));
+
+    let def = base_definition("https://example.test", dir.path());
+    let p = PreparedCreate::persistent(def, Context::default());
+    let id = p.conversation_id().clone();
+    let s = host.create(p).await.unwrap();
+    s.wait_saved().await.unwrap();
+
+    // Inject save failure on the writer
+    s.set_writer_fault_hook(Some(Arc::new(|stage| {
+        if stage == CommitStage::Write {
+            FaultAction::Fail(std::io::Error::other("injected storage error"))
+        } else {
+            FaultAction::Continue
+        }
+    })));
+
+    // Trigger save via edit
+    let _ = s.edit(
+        s.read_materials().unwrap().version,
+        vec![crate::application::text_input("mutated")],
+    );
+
+    // Wait until save is blocked
+    crate::application::tests::support::until(|| {
+        matches!(s.status().save, SaveStatus::SaveBlocked { .. })
+    })
+    .await;
+
+    // Pending commit is fixed with original Ask mode (permission_mode is None)
+    let pending_commit_id = s.pending_commit_id().unwrap();
+    assert_eq!(s.pending_commit_permission_mode(), Some(None));
+
+    // Switch mode while save is blocked
+    s.set_permission_mode(PermissionMode::AcceptEdits).unwrap();
+
+    // Pending commit is UNTOUCHED
+    assert_eq!(s.pending_commit_id().unwrap(), pending_commit_id);
+    assert_eq!(s.pending_commit_permission_mode(), Some(None));
+
+    // Clear fault hook and retry
+    s.set_writer_fault_hook(None);
+
+    let retry_status = s.retry_save().await.unwrap();
+    assert!(matches!(retry_status, SaveStatus::Saved { .. }));
+
+    // Verify disk record now contains AcceptEdits
+    let record_path = storage
+        .join("sessions")
+        .join(format!("{}.json", id.as_str()));
+    let json_val: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    assert_eq!(json_val["permission_mode"], "accept-edits");
+
+    host.close(&s.target(), ClosePolicy::Save).await.unwrap();
+}
+
+#[tokio::test]
+async fn saving_scenario_4_close_save_guarantees_latest_mode_saved() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("store");
+    let host = SessionHost::new(Some(storage.clone()));
+
+    let def = base_definition("https://example.test", dir.path());
+    let p = PreparedCreate::persistent(def, Context::default());
+    let id = p.conversation_id().clone();
+    let s = host.create(p).await.unwrap();
+    s.wait_saved().await.unwrap();
+
+    // Switch mode and close with Save immediately
+    s.set_permission_mode(PermissionMode::AcceptEdits).unwrap();
+    let outcome = host.close(&s.target(), ClosePolicy::Save).await.unwrap();
+    assert!(matches!(outcome.save, SaveStatus::Saved { .. }));
+
+    // Reopen confirms latest mode is saved
+    let reopened = host.open(id).await.unwrap();
+    assert_eq!(
+        reopened.permission_mode(),
+        Some((PermissionMode::AcceptEdits, 0))
+    );
+    host.close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn saving_scenario_5_transient_session_switch_does_not_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("store");
+    let host = SessionHost::new(Some(storage.clone()));
+
+    let def = base_definition("https://example.test", dir.path());
+    let p = PreparedCreate::transient(def, Context::default());
+    let s = host.create(p).await.unwrap();
+
+    s.set_permission_mode(PermissionMode::AcceptEdits).unwrap();
+    let status = s.wait_saved().await.unwrap();
+    assert!(matches!(status, SaveStatus::NotTracked));
+
+    // No sessions dir or file created
+    let sessions_dir = storage.join("sessions");
+    assert!(!sessions_dir.exists() || std::fs::read_dir(sessions_dir).unwrap().next().is_none());
+
+    host.close(&s.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm03_reopen_requires_read_before_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("store");
+    let ws_dir = dir.path().join("workspace");
+    std::fs::create_dir_all(&ws_dir).unwrap();
+    let file_path = ws_dir.join("test.txt");
+    std::fs::write(&file_path, "alpha beta\n").unwrap();
+
+    let replies = vec![
+        // Round 1: read_file
+        call_read("test.txt"),
+        Reply::Answer,
+        // Round 2 (in reopened session): edit_file without reading
+        call_edit("test.txt", "alpha", "gamma"),
+        Reply::Answer,
+        // Round 3 (in reopened session): re-read file
+        call_read("test.txt"),
+        Reply::Answer,
+        // Round 4 (in reopened session): edit_file after re-reading
+        call_edit("test.txt", "alpha", "gamma"),
+        Reply::Answer,
+    ];
+
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let mut def = base_definition(&fixture.endpoint, &ws_dir);
+    def.permission_mode = Some(PermissionMode::AcceptEdits);
+
+    let host = SessionHost::new(Some(storage.clone()));
+    let prepared = PreparedCreate::persistent(def.clone(), Context::default());
+    let id = prepared.conversation_id().clone();
+    let session = host.create(prepared).await.unwrap();
+
+    // Round 1: read_file succeeds
+    let work1 = submit(&session, "round 1 read");
+    let obs1 = finish(&session, &work1).await;
+    assert_eq!(
+        obs1.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+
+    // Close session
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // Reopen session
+    let reopened = host.open(id.clone()).await.unwrap();
+
+    // Round 2: edit_file without prior read in reopened session fails precheck
+    let work2 = submit(&reopened, "round 2 edit");
+    let obs2 = finish(&reopened, &work2).await;
+    assert_eq!(obs2.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    let err_msg = tool_result_error(&reopened, obs2.tools.calls[0].call_block_id);
+    assert!(err_msg.contains("must be read with read_file before editing"));
+    assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "alpha beta\n");
+
+    // Round 3: read_file to re-observe file
+    let work3 = submit(&reopened, "round 3 re-read");
+    let obs3 = finish(&reopened, &work3).await;
+    assert_eq!(
+        obs3.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+
+    // Round 4: edit_file now succeeds after re-reading
+    let work4 = submit(&reopened, "round 4 edit after read");
+    let obs4 = finish(&reopened, &work4).await;
+    assert_eq!(
+        obs4.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "gamma beta\n");
+
+    host.close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_dir = dir.path().join("workspace");
+    std::fs::create_dir_all(&ws_dir).unwrap();
+
+    let target_file = ws_dir.join("target.txt");
+    std::fs::write(&target_file, "alpha\nbeta\nalpha\none two three four\n").unwrap();
+    let original_bytes = std::fs::read(&target_file).unwrap();
+
+    let link_file = ws_dir.join("link.txt");
+    std::os::unix::fs::symlink(&target_file, &link_file).unwrap();
+
+    let fifo_file = ws_dir.join("fifo.txt");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo_file)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let replies = vec![
+        // Round 1: read_file target.txt to observe it for edit_file tests
+        call_read("target.txt"),
+        Reply::Answer,
+        // Negative test 1: write_file absolute path
+        call_write("/tmp/abs_path.txt", "evil"),
+        Reply::Answer,
+        // Negative test 2: write_file parent .. path
+        call_write("../outside.txt", "evil"),
+        Reply::Answer,
+        // Negative test 3: write_file target is symlink
+        call_write("link.txt", "evil"),
+        Reply::Answer,
+        // Negative test 4: write_file target is FIFO
+        call_write("fifo.txt", "evil"),
+        Reply::Answer,
+        // Negative test 5: edit_file not found
+        call_edit("target.txt", "nonexistent", "new"),
+        Reply::Answer,
+        // Negative test 6: edit_file matches multiple places
+        call_edit("target.txt", "alpha", "new"),
+        Reply::Answer,
+        // Negative test 7: edit_file overlapping segments
+        Reply::Call(
+            "edit_file".into(),
+            json!({
+                "path": "target.txt",
+                "edits": [
+                    {"old_text": "one two", "new_text": "1 2"},
+                    {"old_text": "two three", "new_text": "2 3"}
+                ]
+            }),
+        ),
+        Reply::Answer,
+        // Negative test 8: edit_file empty old_text
+        Reply::Call(
+            "edit_file".into(),
+            json!({
+                "path": "target.txt",
+                "edits": [{"old_text": "", "new_text": "something"}]
+            }),
+        ),
+        Reply::Answer,
+        // Directory creation 1: write_file a/b/c.txt, denied
+        call_write("a/b/c.txt", "nested content\n"),
+        Reply::Answer,
+        // Directory creation 2: write_file a/b/c.txt, allowed
+        call_write("a/b/c.txt", "nested content\n"),
+        Reply::Answer,
+    ];
+
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let mut def = base_definition(&fixture.endpoint, &ws_dir);
+    def.retained_work_capacity = 32;
+    let session = host
+        .create(PreparedCreate::transient(def, Context::default()))
+        .await
+        .unwrap();
+
+    let mut rx = session.connect_approvals();
+
+    // Round 1: observe target.txt
+    let w0 = submit(&session, "observe");
+    let o0 = finish(&session, &w0).await;
+    assert_eq!(o0.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
+
+    // Test 1: absolute path
+    let w1 = submit(&session, "abs write");
+    let o1 = finish(&session, &w1).await;
+    assert_eq!(o1.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    assert!(rx.try_recv().is_err(), "no approval request for abs path");
+
+    // Test 2: parent ..
+    let w2 = submit(&session, "parent write");
+    let o2 = finish(&session, &w2).await;
+    assert_eq!(o2.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    assert!(rx.try_recv().is_err(), "no approval request for parent ..");
+
+    // Test 3: symlink
+    let w3 = submit(&session, "symlink write");
+    let o3 = finish(&session, &w3).await;
+    assert_eq!(o3.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    assert!(rx.try_recv().is_err(), "no approval request for symlink");
+
+    // Test 4: fifo
+    let w4 = submit(&session, "fifo write");
+    let o4 = finish(&session, &w4).await;
+    assert_eq!(o4.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    assert!(rx.try_recv().is_err(), "no approval request for fifo");
+
+    // Test 5: edit not found
+    let w5 = submit(&session, "edit not found");
+    let o5 = finish(&session, &w5).await;
+    assert_eq!(o5.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    let err5 = tool_result_error(&session, o5.tools.calls[0].call_block_id);
+    assert!(err5.contains("edits[0]"), "must indicate segment 0: {err5}");
+    assert!(
+        rx.try_recv().is_err(),
+        "no approval request for edit not found"
+    );
+
+    // Test 6: edit multiple matches
+    let w6 = submit(&session, "edit multi");
+    let o6 = finish(&session, &w6).await;
+    assert_eq!(o6.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    let err6 = tool_result_error(&session, o6.tools.calls[0].call_block_id);
+    assert!(err6.contains("edits[0]"), "must indicate segment 0: {err6}");
+    assert!(
+        rx.try_recv().is_err(),
+        "no approval request for multi match"
+    );
+
+    // Test 7: edit overlapping
+    let w7 = submit(&session, "edit overlap");
+    let o7 = finish(&session, &w7).await;
+    assert_eq!(o7.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    let err7 = tool_result_error(&session, o7.tools.calls[0].call_block_id);
+    assert!(err7.contains("edits[1]"), "must indicate segment 1: {err7}");
+    assert!(rx.try_recv().is_err(), "no approval request for overlap");
+
+    // Test 8: edit empty old_text
+    let w8 = submit(&session, "edit empty");
+    let o8 = finish(&session, &w8).await;
+    assert_eq!(o8.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    let err8 = tool_result_error(&session, o8.tools.calls[0].call_block_id);
+    assert!(err8.contains("edits[0]"), "must indicate segment 0: {err8}");
+    assert!(
+        rx.try_recv().is_err(),
+        "no approval request for empty old_text"
+    );
+
+    // Verify target file bytes remain completely unchanged
+    assert_eq!(std::fs::read(&target_file).unwrap(), original_bytes);
+
+    // Directory creation Part A: Deny
+    assert!(!ws_dir.join("a").exists());
+    let w9 = submit(&session, "create a/b/c.txt deny");
+    let req9 = rx
+        .recv()
+        .await
+        .expect("must request approval for directory write");
+    req9.reply
+        .send(ApprovalDecision::Deny {
+            reason: Some("declined".into()),
+        })
+        .unwrap();
+    let o9 = finish(&session, &w9).await;
+    assert_eq!(o9.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    assert!(
+        !ws_dir.join("a").exists(),
+        "directory a must not be created when denied"
+    );
+
+    // Directory creation Part B: Allow
+    let w10 = submit(&session, "create a/b/c.txt allow");
+    let req10 = rx
+        .recv()
+        .await
+        .expect("must request approval for directory write again");
+    req10.reply.send(ApprovalDecision::Allow).unwrap();
+    let o10 = finish(&session, &w10).await;
+    assert_eq!(o10.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
+    assert!(
+        ws_dir.join("a/b/c.txt").exists(),
+        "file a/b/c.txt must exist"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws_dir.join("a/b/c.txt")).unwrap(),
+        "nested content\n"
+    );
 }

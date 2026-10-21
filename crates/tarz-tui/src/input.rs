@@ -165,6 +165,8 @@ impl Form {
                     workspace_root: (!values[5].is_empty()).then(|| values[5].clone().into()),
                     tools: Some(parse_tools(&values[6]).map_err(|e| e.to_string())?),
                     tool_limits: Some(self.tool_limits.clone()),
+                    write_limits: None,
+                    permission_mode: None,
                 },
             )
             .map_err(|e| e.to_string())

@@ -30,6 +30,7 @@ pub(super) fn definition() -> SessionDefinition {
         tools: Vec::new(),
         tool_limits: Default::default(),
         write_limits: None,
+        permission_mode: None,
     }
 }
 pub(super) fn request(key: &str) -> SubmitRequest {
@@ -148,7 +149,7 @@ impl Gate {
         self.release.notify_all();
     }
 }
-pub(super) async fn until(mut ready: impl FnMut() -> bool) {
+pub(crate) async fn until(mut ready: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(5), async {
         while !ready() {
             tokio::task::yield_now().await;

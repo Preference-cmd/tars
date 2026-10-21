@@ -13,12 +13,17 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
             entry.cloned_snapshot();
             context.clone()
         })?;
+    let current_mode = state
+        .owner
+        .as_ref()
+        .and_then(|o| o.permission_mode().map(|(m, _)| m));
     let record = SavedSessionRecord::new(
         entry.target.conversation_id.as_str().to_owned(),
         uuid::Uuid::now_v7().to_string(),
         state.revision,
         state.definition.clone().expect("assembled definition"),
         context,
+        current_mode,
     )?;
     state.pending = Some(Arc::new(PreparedCommit::new(state.revision, record)?));
     state.save_requested = true;
@@ -76,6 +81,32 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
             state.initialized = true;
             if state.closing.is_none() {
                 state.lifecycle = Lifecycle::Open;
+            }
+            if state.persistent {
+                let initial_mode = state
+                    .definition
+                    .as_ref()
+                    .map(crate::definition::SessionDefinition::initial_permission_mode)
+                    .unwrap_or(crate::permission::PermissionMode::Ask);
+                let committed_mode = record.permission_mode.unwrap_or(initial_mode);
+                let current_mode = state
+                    .owner
+                    .as_ref()
+                    .and_then(|o| o.permission_mode())
+                    .map(|(m, _)| m)
+                    .unwrap_or(initial_mode);
+                if current_mode != committed_mode
+                    && state.active.is_none()
+                    && state.closing != Some(ClosePolicy::DiscardLocal)
+                {
+                    if let Err(error) = prepare(entry, &mut state) {
+                        state.lifecycle = Lifecycle::Faulted;
+                        state.error = Some(error);
+                        state.fault = state.error.clone();
+                    } else {
+                        entry.wake.notify_one();
+                    }
+                }
             }
         }
         Err(error) => {

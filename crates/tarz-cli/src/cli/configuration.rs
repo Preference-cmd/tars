@@ -55,6 +55,8 @@ pub(super) fn definition(
             .map(|value| parse_tools(&value).map_err(|e| e.to_string()))
             .transpose()?,
         tool_limits: None,
+        write_limits: None,
+        permission_mode: None,
         model: string(values, "--model")?,
         endpoint: string(values, "--endpoint")?,
         api_key_env: string(values, "--api-key-env")?,

@@ -1,4 +1,5 @@
 use super::entry::Entry;
+use super::saving;
 use super::types::*;
 use crate::definition::SessionDefinition;
 use crate::session::{
@@ -29,15 +30,38 @@ impl ManagedSession {
 
     /// Change the instance's active permission mode, incrementing revision on actual change.
     ///
+    /// If the session is closing, this returns `Err(ApplicationError::Closing)`.
+    /// If the session is already closed, this returns `Err(ApplicationError::Closed)`.
     /// For instances assembled without permission state (such as test fixtures),
     /// this returns `Err(ApplicationError::PermissionUnavailable)`.
+    ///
+    /// When switching modes in an idle persistent session, a save operation is initiated.
+    /// If active work or another save is in progress, the latest mode will be included in the
+    /// subsequent save.
     pub fn set_permission_mode(
         &self,
         mode: crate::permission::PermissionMode,
     ) -> Result<(crate::permission::PermissionMode, u64), ApplicationError> {
-        let state = self.entry.lock();
+        let mut state = self.entry.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return Err(ApplicationError::Closed);
+        }
+        if state.lifecycle == Lifecycle::Closing {
+            return Err(ApplicationError::Closing);
+        }
         let owner = state.owner.as_ref().ok_or(ApplicationError::InstanceGone)?;
-        owner.set_permission_mode(mode)
+        let prev_mode = owner.permission_mode().map(|(m, _)| m);
+        let (new_mode, rev) = owner.set_permission_mode(mode)?;
+        if prev_mode != Some(new_mode)
+            && state.persistent
+            && state.active.is_none()
+            && state.pending.is_none()
+            && state.lifecycle == Lifecycle::Open
+        {
+            saving::prepare(&self.entry, &mut state)?;
+            self.entry.notify();
+        }
+        Ok((new_mode, rev))
     }
 
     /// Connect the instance's approval channel receiver.
@@ -239,6 +263,10 @@ impl ManagedSession {
             .generation
             .checked_add(1)
             .ok_or_else(|| ApplicationError::Faulted("material generation exhausted".into()))?;
+        let current_mode = state
+            .owner
+            .as_ref()
+            .and_then(|o| o.permission_mode().map(|(m, _)| m));
         let pending = if state.persistent {
             self.entry.cloned_snapshot();
             let record = SavedSessionRecord::new(
@@ -247,6 +275,7 @@ impl ManagedSession {
                 state.revision,
                 state.definition.clone().expect("definition"),
                 candidate.clone(),
+                current_mode,
             )?;
             Some(Arc::new(PreparedCommit::new(state.revision, record)?))
         } else {
@@ -319,6 +348,34 @@ impl ManagedSession {
         }
         self.wait_saved().await
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_writer_fault_hook(&self, hook: Option<crate::store::FaultHook>) {
+        if let Some(writer) = &self.entry.lock().writer {
+            writer.set_fault_hook(hook);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_commit_id(&self) -> Option<String> {
+        self.entry
+            .lock()
+            .pending
+            .as_ref()
+            .map(|p| p.record.last_commit_id.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_commit_permission_mode(
+        &self,
+    ) -> Option<Option<crate::permission::PermissionMode>> {
+        self.entry
+            .lock()
+            .pending
+            .as_ref()
+            .map(|p| p.record.permission_mode)
+    }
+
     /// Forget a terminal record after its associated persistence barrier is handled.
     pub fn forget(&self, work: &WorkRef) -> Result<(), ApplicationError> {
         let mut state = self.entry.lock();

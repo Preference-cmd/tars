@@ -31,6 +31,7 @@ fn definition() -> SessionDefinition {
         tools: vec![],
         tool_limits: Default::default(),
         write_limits: None,
+        permission_mode: None,
     }
 }
 
@@ -43,7 +44,8 @@ fn invalid_definition_is_rejected_before_credential_resolution() {
             &definition,
             "id".into(),
             Context::default(),
-            crate::tools::ToolResources::new(16)
+            crate::tools::ToolResources::new(16),
+            crate::permission::PermissionMode::Ask,
         ),
         Err(AssemblyError::Definition(DefinitionError::BlankModel))
     ));
@@ -57,6 +59,7 @@ fn missing_credentials_report_only_a_sanitized_resolution_error() {
         "id".into(),
         Context::default(),
         crate::tools::ToolResources::new(16),
+        crate::permission::PermissionMode::Ask,
     ) {
         Ok(_) => panic!("missing credential accepted"),
         Err(error) => error,
@@ -130,7 +133,8 @@ fn unavailable_workspace_is_rejected_before_credentials_or_model_access() {
             &definition,
             "id".into(),
             Context::default(),
-            crate::tools::ToolResources::new(16)
+            crate::tools::ToolResources::new(16),
+            crate::permission::PermissionMode::Ask,
         ),
         Err(AssemblyError::Workspace(_))
     ));
@@ -179,7 +183,7 @@ fn unsupported_platform_rejects_enabled_workspace_but_still_assembles_empty_cata
     chosen.workspace_root = Some(std::env::current_dir().unwrap());
     chosen.tools = vec![crate::definition::WorkspaceTool::ReadFile];
     assert!(matches!(
-        assemble(&chosen, "id".into(), Context::default(), crate::tools::ToolResources::new(16)),
+        assemble(&chosen, "id".into(), Context::default(), crate::tools::ToolResources::new(16), crate::permission::PermissionMode::Ask),
         Err(AssemblyError::Workspace(error)) if matches!(&*error, crate::workspace::WorkspaceError::UnsupportedPlatform)
     ));
     chosen.tools.clear();
@@ -188,7 +192,8 @@ fn unsupported_platform_rejects_enabled_workspace_but_still_assembles_empty_cata
             &chosen,
             "id".into(),
             Context::default(),
-            crate::tools::ToolResources::new(16)
+            crate::tools::ToolResources::new(16),
+            crate::permission::PermissionMode::Ask,
         )
         .is_ok()
     );

@@ -320,3 +320,147 @@ fn legacy_record_has_an_offline_non_overwriting_material_export_path() {
     assert_eq!(overwrite.status.code(), Some(1));
     assert_eq!(std::fs::read(exported).unwrap(), previous);
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn wm10_definition_save_and_reopen_and_export_omits_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_dir = dir.path().join("workspace");
+    std::fs::create_dir_all(&ws_dir).unwrap();
+
+    let secret_env = "TARZ_WM10_SECRET";
+    let secret_val = "wm10-secret-6f1c";
+
+    let config_path = dir.path().join("config.toml");
+    let config_toml = format!(
+        r#"version = 1
+store = "store"
+recovery_dir = "recoveries"
+default_profile = "wm10"
+
+[profiles.wm10]
+provider = "openai-chat"
+model = "wm10-model"
+api_key_env = "{secret_env}"
+workspace_root = "{}"
+tools = ["read_file", "write_file", "edit_file"]
+permission_mode = "accept-edits"
+
+[profiles.wm10.write_limits]
+max_write_bytes = 524288
+max_edit_file_bytes = 1048576
+max_edit_segments = 16
+"#,
+        ws_dir.display()
+    );
+    std::fs::write(&config_path, config_toml).unwrap();
+
+    let create_output = cli(dir.path())
+        .env(secret_env, secret_val)
+        .args(["session", "create", "--config"])
+        .arg(&config_path)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let created = json(create_output);
+    let id = created["conversation_id"].as_str().unwrap();
+
+    let record_path = dir.path().join("store/sessions").join(format!("{id}.json"));
+    let record_bytes = std::fs::read(&record_path).unwrap();
+    let record_str = String::from_utf8_lossy(&record_bytes);
+
+    assert!(
+        !record_str.contains(secret_val),
+        "record bytes must not contain credential value"
+    );
+    assert!(
+        record_str.contains(secret_env),
+        "record must contain credential variable name reference"
+    );
+
+    let exported = dir.path().join("exported.json");
+    let export_res = cli(dir.path())
+        .env(secret_env, secret_val)
+        .args(["session", "export-materials", "--record"])
+        .arg(&record_path)
+        .arg("--output")
+        .arg(&exported)
+        .output()
+        .unwrap();
+    assert!(export_res.status.success(), "{export_res:?}");
+
+    let export_stdout = String::from_utf8_lossy(&export_res.stdout);
+    let export_stderr = String::from_utf8_lossy(&export_res.stderr);
+    assert!(
+        !export_stdout.contains(secret_val),
+        "export-materials stdout must not contain credential value"
+    );
+    assert!(
+        !export_stderr.contains(secret_val),
+        "export-materials stderr must not contain credential value"
+    );
+
+    let exported_bytes = std::fs::read(&exported).unwrap();
+    let exported_str = String::from_utf8_lossy(&exported_bytes);
+    assert!(
+        !exported_str.contains(secret_val),
+        "exported materials must not contain credential value"
+    );
+
+    let list_output = cli(dir.path())
+        .env(secret_env, secret_val)
+        .args(["session", "list", "--config"])
+        .arg(&config_path)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let listing = json(list_output);
+    let sessions = listing["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    let def = &sessions[0]["definition"];
+    assert_eq!(
+        def["tools"],
+        serde_json::json!(["read_file", "write_file", "edit_file"])
+    );
+    assert_eq!(def["permission_mode"], "accept-edits");
+    assert_eq!(def["write_limits"]["max_write_bytes"], 524288);
+    assert_eq!(def["write_limits"]["max_edit_file_bytes"], 1048576);
+    assert_eq!(def["write_limits"]["max_edit_segments"], 16);
+
+    let repair_res = cli(dir.path())
+        .env(secret_env, secret_val)
+        .args(["session", "repair", id, "--config"])
+        .arg(&config_path)
+        .args(["--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(repair_res.status.success(), "{repair_res:?}");
+    let repair_val = json(repair_res);
+    assert_eq!(repair_val["conversation_id"], id);
+    assert_eq!(repair_val["status"], "not_needed");
+
+    let host = tarz_core::application::SessionHost::new(Some(dir.path().join("store")));
+    let host_list = host.list().await.unwrap();
+    assert_eq!(host_list.len(), 1);
+    let record_summary = host_list[0].record.as_ref().unwrap();
+    assert_eq!(
+        record_summary.definition.tools,
+        vec![
+            tarz_core::definition::WorkspaceTool::ReadFile,
+            tarz_core::definition::WorkspaceTool::WriteFile,
+            tarz_core::definition::WorkspaceTool::EditFile,
+        ]
+    );
+    assert_eq!(
+        record_summary.definition.permission_mode,
+        Some(tarz_core::permission::PermissionMode::AcceptEdits)
+    );
+    assert_eq!(
+        record_summary.definition.write_limits,
+        Some(tarz_core::definition::WriteToolLimits {
+            max_write_bytes: 524288,
+            max_edit_file_bytes: 1048576,
+            max_edit_segments: 16,
+        })
+    );
+}

@@ -32,6 +32,8 @@ pub(crate) struct SavedSessionRecord {
     pub(crate) last_commit_id: String,
     pub(crate) definition: SessionDefinition,
     pub(crate) context: Context,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) permission_mode: Option<crate::permission::PermissionMode>,
 }
 impl PartialEq for SavedSessionRecord {
     fn eq(&self, other: &Self) -> bool {
@@ -41,6 +43,7 @@ impl PartialEq for SavedSessionRecord {
             && self.last_commit_id == other.last_commit_id
             && self.definition == other.definition
             && self.context.blocks() == other.context.blocks()
+            && self.permission_mode == other.permission_mode
     }
 }
 impl SavedSessionRecord {
@@ -50,7 +53,10 @@ impl SavedSessionRecord {
         expected_revision: Option<u64>,
         definition: SessionDefinition,
         context: Context,
+        current_mode: Option<crate::permission::PermissionMode>,
     ) -> Result<Self, StoreError> {
+        let initial_mode = definition.initial_permission_mode();
+        let permission_mode = current_mode.filter(|&mode| mode != initial_mode);
         let record = Self {
             format: RECORD_FORMAT.into(),
             conversation_id,
@@ -58,6 +64,7 @@ impl SavedSessionRecord {
             last_commit_id,
             definition,
             context,
+            permission_mode,
         };
         record.validate(&record.conversation_id)?;
         Ok(record)

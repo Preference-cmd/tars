@@ -88,6 +88,11 @@ pub struct SessionDefinition {
     /// Explicit bounds for workspace write and edit operations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_limits: Option<WriteToolLimits>,
+    /// Initial execution permission mode; None defaults to Ask.
+    /// Explicit Ask is normalized to None when creating a new session to keep records
+    /// without new features unmodified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<crate::permission::PermissionMode>,
 }
 
 // Unlike sparse startup configuration, a record must explicitly retain no-root
@@ -162,6 +167,12 @@ impl SessionDefinition {
             write_limits.validate()?;
         }
         Ok(())
+    }
+
+    /// Returns the effective initial permission mode, treating None as Ask.
+    pub fn initial_permission_mode(&self) -> crate::permission::PermissionMode {
+        self.permission_mode
+            .unwrap_or(crate::permission::PermissionMode::Ask)
     }
 
     /// Construct the low-level session's explicit record and lifetime bounds.
