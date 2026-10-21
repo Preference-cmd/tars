@@ -4,7 +4,7 @@ Tarz 是基于 Causa 的 Agent 应用，以可安装、可运行程序交付，�
 
 当前已实现单会话工作闭环，并提供离线 CLI 演示：原子提交、同键重放、逐工作装配、取消与结果观察、材料编辑及保存/导入。演示使用脚本模型和真实本地工具，经过 Session 与 Causa runner 执行，不需要凭据或网络。
 
-`tarz run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tarz session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。`tarz-tui` 提供原生终端原型与临时流式正文预览，两端共用 TOML 配置，并可显式选择工作区和三种只读工具。GUI、文件写入、命令执行、MCP 配置、父子 Agent 和安装渠道尚未实现。当前开发版本为 `0.0.0`，尚无公开发布。
+`tarz run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tarz session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。`tarz-tui` 提供原生终端原型与临时流式正文预览，两端共用 TOML 配置，并可显式选择工作区和工作区工具。GUI、命令执行、MCP 配置、父子 Agent 和安装渠道尚未实现；CLI 可以写入文件：`ask` 模式在终端确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；TUI 确认面板尚未接通。当前开发版本为 `0.0.0`，尚无公开发布。
 
 ## 本地构建与运行
 
@@ -32,7 +32,7 @@ Windows 使用 `target\release\tarz.exe`。不带参数显示帮助；参数错�
 printf '继续分析材料' | ./target/release/tarz run --provider openai-responses --model "$MODEL_ID" --stdin --load materials.json --save materials.json --json
 ```
 
-`MODEL_ID` 由你设置为服务端可用模型。协议选项为 `openai-chat`、`openai-responses`、`anthropic`；`--endpoint` 覆盖完整 URL（包括路径），`--api-key-env` 指定其他凭据环境变量名。凭据不会由配置层写入材料或结果报告。默认工具目录为空；使用 `--workspace DIR --tools list_directory,read_file,search_text` 启用只读能力，仍仅输出最终结果。访问范围、限额和旧记录导出见[工作区工具](docs/workspace-tools.md)。
+`MODEL_ID` 由你设置为服务端可用模型。协议选项为 `openai-chat`、`openai-responses`、`anthropic`；`--endpoint` 覆盖完整 URL（包括路径），`--api-key-env` 指定其他凭据环境变量名。凭据不会由配置层写入材料或结果报告。默认工具目录为空；使用 `--workspace DIR --tools list_directory,read_file,search_text,write_file,edit_file` 启用工作区工具能力，仍仅输出最终结果。访问范围、限额和旧记录导出见[工作区工具](docs/workspace-tools.md)。
 
 输入必须二选一：`--input <text>` 或 `--stdin`（读到 EOF，UTF-8，不能全空白）。`--timeout-secs` 默认 120，范围 1–86400，从工作受理起覆盖装配和执行；不覆盖读取 stdin、加载或保存文件。
 

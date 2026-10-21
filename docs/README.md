@@ -1,6 +1,6 @@
 # 当前实现
 
-2026-10-05：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tarz-tui` 已接通会话、输入、临时流式正文预览、结果、取消及保存恢复；工作区只读工具与可靠状态已接通；GUI、写入/命令/MCP、父子 Agent、安装和发布仍在后续范围。
+2026-10-05：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tarz-tui` 已接通会话、输入、临时流式正文预览、结果、取消及保存恢复；工作区只读工具与可靠状态已接通；CLI 可以写入文件：`ask` 模式在终端确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；TUI 确认面板仍在后续范围；GUI、命令/MCP、父子 Agent、安装和发布仍在后续范围。
 
 ## 代码结构
 
@@ -9,7 +9,7 @@
 | `crates/tarz-core/src/application/` | 活动目录、opening/关闭监督、实例视图、保存门禁与版本编辑 |
 | `crates/tarz-core/src/definition/` | 可序列化的固定定义与纯校验 |
 | `crates/tarz-core/src/config/` | 共享 TOML 加载、路径、命名模型预设与新定义默认值 |
-| `crates/tarz-core/src/workspace/`、`tools/` | 固定根目录句柄、三种只读工具、有界扫描与受监督文件任务 |
+| `crates/tarz-core/src/workspace/`、`tools/` | 固定根目录句柄、工作区工具（三个只读工具与两个写入工具）、有界扫描与受监督文件任务 |
 | `crates/tarz-core/src/assembly/` | 打开时解析凭据、装配 gateway/runner 与固定执行选项 |
 | `crates/tarz-core/src/session/` | 单会话 owner/handle、原工作受理、监督、去重、可靠结果与有界临时观察 |
 | `crates/tarz-core/src/store/` | 私有 JSON 后端、活动期文件锁、提交与确认 |

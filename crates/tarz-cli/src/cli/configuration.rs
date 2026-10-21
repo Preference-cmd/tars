@@ -56,7 +56,16 @@ pub(super) fn definition(
             .transpose()?,
         tool_limits: None,
         write_limits: None,
-        permission_mode: None,
+        permission_mode: string(values, "--permission-mode")?
+            .map(|value| {
+                value
+                    .parse::<tarz_core::permission::PermissionMode>()
+                    .map_err(|_| {
+                        "--permission-mode must be read-only, ask, accept-edits, or full-access"
+                            .to_owned()
+                    })
+            })
+            .transpose()?,
         model: string(values, "--model")?,
         endpoint: string(values, "--endpoint")?,
         api_key_env: string(values, "--api-key-env")?,

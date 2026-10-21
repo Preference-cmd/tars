@@ -30,7 +30,16 @@ pub(super) fn input_text(input: Option<String>) -> Result<String, &'static str> 
     Ok(text)
 }
 
-pub(super) async fn work(session: &ManagedSession, input: String) -> Result<WorkReport, String> {
+pub(super) async fn work(
+    session: &ManagedSession,
+    input: String,
+    connect_approvals: bool,
+) -> Result<WorkReport, String> {
+    let approver = if connect_approvals {
+        Some(crate::cli::approval::spawn_approver(session))
+    } else {
+        None
+    };
     let receipt = session
         .submit(SubmitRequest {
             request_key: new_block_id().0.to_string(),
@@ -47,6 +56,9 @@ pub(super) async fn work(session: &ManagedSession, input: String) -> Result<Work
             },
             signal = tokio::signal::ctrl_c(), if !stopping => {
                 signal_failed = signal.is_err();
+                if let Some(approver) = &approver {
+                    approver.on_cancel();
+                }
                 session.cancel(&receipt.work).map_err(|error| error.to_string())?;
                 stopping = true;
                 continue;
@@ -56,6 +68,9 @@ pub(super) async fn work(session: &ManagedSession, input: String) -> Result<Work
             break result;
         }
     };
+    if let Some(approver) = approver {
+        approver.finish();
+    }
     // A raw Finished observation precedes persistence. Keep the runtime alive
     // through the independent host save barrier, including cancelled work.
     let save = session.wait_saved().await;

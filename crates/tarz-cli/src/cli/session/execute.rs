@@ -48,9 +48,10 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 store,
                 id,
                 input,
+                permission_mode,
                 recovery_dir,
                 json,
-            } => run_saved(store, id, input, recovery_dir, json).await,
+            } => run_saved(store, id, input, permission_mode, recovery_dir, json).await,
             SessionCommand::List { store, json } => list(store, json).await,
             SessionCommand::Repair {
                 store,
@@ -156,9 +157,11 @@ async fn run_saved(
     store: PathBuf,
     id: String,
     input: Option<String>,
+    permission_mode: Option<tarz_core::permission::PermissionMode>,
     recovery_dir: PathBuf,
     json_output: bool,
 ) -> ExitCode {
+    let used_stdin_input = input.is_none();
     let input = match managed_execution::input_text(input) {
         Ok(input) => input,
         Err(error) => return early_failure(json_output, error),
@@ -168,7 +171,22 @@ async fn run_saved(
         Ok(session) => session,
         Err(error) => return early_failure(json_output, &error.to_string()),
     };
-    let report = match managed_execution::work(&session, input).await {
+    if let Some(mode) = permission_mode {
+        if let Err(error) = session.set_permission_mode(mode) {
+            let _ = host
+                .close(&session.target(), ClosePolicy::DiscardLocal)
+                .await;
+            return early_failure(json_output, &error.to_string());
+        }
+        if let Err(error) = session.wait_saved().await {
+            let _ = host
+                .close(&session.target(), ClosePolicy::DiscardLocal)
+                .await;
+            return early_failure(json_output, &error.to_string());
+        }
+    }
+    let connect_approvals = crate::cli::approval::should_connect_stdio(used_stdin_input);
+    let report = match managed_execution::work(&session, input, connect_approvals).await {
         Ok(report) => report,
         Err(error) => {
             let _ = host.close(&session.target(), ClosePolicy::Save).await;

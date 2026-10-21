@@ -1,6 +1,6 @@
 # TUI 原型
 
-`tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；已接通工作区只读工具配置与状态；没有 GUI、写入/命令/MCP 配置或安装分发。本轮使用用户授权的同级 Causa 本地依赖，源码基线与构建要求见[当前实现](README.md)。
+`tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；已接通工作区只读工具配置与状态；没有 GUI、命令/MCP 配置或安装分发；写入确认面板尚未接通。本轮使用用户授权的同级 Causa 本地依赖，源码基线与构建要求见[当前实现](README.md)。
 
 ```sh
 cargo build -p tarz-tui --locked

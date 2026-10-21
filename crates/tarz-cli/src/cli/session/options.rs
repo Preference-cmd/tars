@@ -20,6 +20,7 @@ pub(crate) enum SessionCommand {
         store: PathBuf,
         id: String,
         input: Option<String>,
+        permission_mode: Option<tarz_core::permission::PermissionMode>,
         recovery_dir: PathBuf,
         json: bool,
     },
@@ -118,6 +119,9 @@ impl SessionCommand {
                 "--input" if command == "run" => {
                     insert(&mut values, flag, &mut args)?;
                 }
+                "--permission-mode" if matches!(command, "create" | "run") => {
+                    insert(&mut values, flag, &mut args)?;
+                }
                 "--expected-revision" if command == "repair" => {
                     insert(&mut values, flag, &mut args)?;
                 }
@@ -194,10 +198,18 @@ impl SessionCommand {
                 if input.as_ref().is_some_and(|value| value.trim().is_empty()) {
                     return Err("input must not be blank".into());
                 }
+                let permission_mode = string("--permission-mode")?
+                    .map(|value| {
+                        value
+                            .parse::<tarz_core::permission::PermissionMode>()
+                            .map_err(|_| "--permission-mode must be read-only, ask, accept-edits, or full-access".to_owned())
+                    })
+                    .transpose()?;
                 Ok(Self::Run {
                     store,
                     id: id.expect("run ID parsed"),
                     input,
+                    permission_mode,
                     recovery_dir: values
                         .get("--recovery-dir")
                         .map(PathBuf::from)

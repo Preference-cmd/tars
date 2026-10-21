@@ -28,8 +28,12 @@ Run options:
   --extra-body   JSON object of further request fields, sent as written
   --render-options  JSON object of the protocol's render options, e.g. max_tokens_field
   --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
-  --workspace    Root directory for read-only tools; relative to current directory
-  --tools        Comma-separated list_directory,read_file,search_text (default empty)
+  --workspace    Root directory for workspace tools; relative to current directory
+  --tools        Comma-separated list_directory,read_file,search_text,write_file,edit_file (default empty)
+  --permission-mode  read-only | ask | accept-edits | full-access (default: profile or ask)
+                 Initial permission mode for transient work. In ask mode, asks for
+                 confirmation when stdin and stderr are interactive terminals and input is
+                 not from --stdin; otherwise rejects without blocking.
   --load         Import a Context material file into a new session
   --save         Replace a material file after completion or controlled interruption
   --json         Output a structured result instead of answer text

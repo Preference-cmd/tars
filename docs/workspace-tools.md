@@ -57,4 +57,4 @@ tarz session create --store ./data --provider openai-chat --model "$MODEL_ID" \
   --load ./materials-new.json --json
 ```
 
-导出最多读取 64 MiB，目标必须不存在；不读取凭据或调用模型，不复用旧定义。新建时如需工具，仍须显式选择工具和工作区。文件写入、命令执行、MCP 服务和父子 Agent 不在本阶段范围。
+导出最多读取 64 MiB，目标必须不存在；不读取凭据或调用模型，不复用旧定义。新建时如需工具，仍须显式选择工具和工作区。命令执行、MCP 服务和父子 Agent 不在当前范围；CLI 可以写入文件：`ask` 模式在终端确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；TUI 确认面板仍在后续范围。

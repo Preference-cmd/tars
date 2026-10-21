@@ -1,5 +1,6 @@
 //! Command-line entry point. Agent execution is implemented separately.
 
+mod approval;
 mod command;
 mod configuration;
 mod execute;

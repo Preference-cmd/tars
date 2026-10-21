@@ -29,6 +29,7 @@ async fn execute(options: RunOptions) -> ExitCode {
         },
         None => Context::new(),
     };
+    let used_stdin_input = options.input.is_none();
     let input = match managed_execution::input_text(options.input) {
         Ok(input) => input,
         Err(error) => return early_failure(options.json, error),
@@ -41,7 +42,8 @@ async fn execute(options: RunOptions) -> ExitCode {
         Ok(session) => session,
         Err(error) => return early_failure(options.json, &error.to_string()),
     };
-    let report = match managed_execution::work(&session, input).await {
+    let connect_approvals = super::approval::should_connect_stdio(used_stdin_input);
+    let report = match managed_execution::work(&session, input, connect_approvals).await {
         Ok(report) => report,
         Err(error) => {
             let _ = host

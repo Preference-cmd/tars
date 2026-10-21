@@ -30,13 +30,20 @@ Create options:
   --extra-body   JSON object of further request fields, sent as written
   --render-options    JSON object of the protocol's render options, e.g. max_tokens_field
   --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
-  --workspace         Root directory for selected read-only tools
-  --tools             Comma-separated list_directory,read_file,search_text (default empty)
+  --workspace         Root directory for selected workspace tools
+  --tools             Comma-separated list_directory,read_file,search_text,write_file,edit_file (default empty)
+  --permission-mode   read-only | ask | accept-edits | full-access (default: profile or ask)
+                      Initial permission mode saved in the definition. In ask mode, asks
+                      when stdin and stderr are terminals and input is not from --stdin;
+                      otherwise rejects without blocking.
   --load              Initial Context material file; creates a new conversation
 
 Run options:
   --input             User text; mutually exclusive with --stdin
   --stdin             Read UTF-8 user text until EOF
+  --permission-mode   read-only | ask | accept-edits | full-access
+                      Change and save the current permission mode for this session.
+                      Reopening reverts full-access to ask unless created as full-access.
   --recovery-dir      Material recovery directory on save failure (default current directory)
 
 Common options:

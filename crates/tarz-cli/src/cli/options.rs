@@ -41,7 +41,8 @@ impl RunOptions {
                 | "--reasoning-effort"
                 | "--extra-body"
                 | "--render-options"
-                | "--max-model-attempts" => {
+                | "--max-model-attempts"
+                | "--permission-mode" => {
                     let value = args.next().ok_or("option needs a value")?;
                     if (value.is_empty() && flag != "--tools")
                         || values.insert(flag, value).is_some()

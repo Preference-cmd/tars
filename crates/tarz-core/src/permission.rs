@@ -1,6 +1,7 @@
 //! Permission modes, approval channels, and execution pipeline processors.
 
 mod approval;
+mod escape;
 mod mode;
 mod precheck;
 mod processor;
@@ -10,6 +11,7 @@ pub use approval::{
     ApprovalDecision, ApprovalReceiver, ApprovalReply, ApprovalRequest, ApprovalSubject,
     WriteAction,
 };
+pub use escape::escape_untrusted_text;
 pub use mode::{ParsePermissionModeError, PermissionMode};
 pub use processor::{PermissionDecision, PermissionDecisionKind, ToolPermissionClass};
 pub use view::PermissionView;

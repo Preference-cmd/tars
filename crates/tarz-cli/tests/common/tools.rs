@@ -13,6 +13,7 @@ use std::{
 fn data(value: Value) -> String {
     format!("data: {value}\n\n")
 }
+
 pub fn tool(provider: &str, name: &str, args: Value, id: &str) -> String {
     let arguments = args.to_string();
     match provider {
@@ -48,8 +49,9 @@ pub fn tool(provider: &str, name: &str, args: Value, id: &str) -> String {
         _ => unreachable!(),
     }
 }
-pub fn answer(provider: &str) -> String {
-    let text = "recovery.rs:2 retry original material";
+
+#[allow(dead_code)]
+pub fn answer_with_text(provider: &str, text: &str) -> String {
     match provider {
         "openai-chat" => {
             data(
@@ -86,6 +88,11 @@ pub fn answer(provider: &str) -> String {
         _ => unreachable!(),
     }
 }
+
+pub fn answer(provider: &str) -> String {
+    answer_with_text(provider, "recovery.rs:2 retry original material")
+}
+
 pub struct Fixture {
     pub endpoint: String,
     pub requests: Arc<Mutex<Vec<Value>>>,
@@ -93,8 +100,34 @@ pub struct Fixture {
     stop: Arc<AtomicBool>,
     task: Option<std::thread::JoinHandle<()>>,
 }
+
 impl Fixture {
     pub fn new(provider: &str, paused: bool) -> Self {
+        let responses = vec![
+            tool(
+                provider,
+                "search_text",
+                json!({"path":".","query":"retry original","max_matches":10}),
+                "search1",
+            ),
+            tool(
+                provider,
+                "read_file",
+                json!({"path":"recovery.rs","start_line":2,"max_lines":1}),
+                "read1",
+            ),
+            answer(provider),
+        ];
+        Self::with_responses_and_pause(provider, responses, paused)
+    }
+
+    #[allow(dead_code)]
+    pub fn with_responses(provider: &str, responses: Vec<String>) -> Self {
+        Self::with_responses_and_pause(provider, responses, false)
+    }
+
+    #[allow(dead_code)]
+    pub fn with_responses_and_pause(provider: &str, responses: Vec<String>, paused: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let path = match provider {
@@ -109,10 +142,10 @@ impl Fixture {
         let gate = release.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
-        let provider = provider.to_owned();
+        let total = responses.len();
         let task = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(15);
-            for round in 0..3 {
+            for (round, body) in responses.into_iter().enumerate() {
                 let mut socket = loop {
                     if stopped.load(Ordering::SeqCst) || Instant::now() > deadline {
                         return;
@@ -165,7 +198,7 @@ impl Fixture {
                     .lock()
                     .unwrap()
                     .push(serde_json::from_slice(&bytes[start..start + length]).unwrap());
-                if round == 2 {
+                if paused && round == total.saturating_sub(1) {
                     while !gate.load(Ordering::SeqCst) {
                         if stopped.load(Ordering::SeqCst) || Instant::now() > deadline {
                             return;
@@ -173,21 +206,6 @@ impl Fixture {
                         std::thread::sleep(Duration::from_millis(5));
                     }
                 }
-                let body = match round {
-                    0 => tool(
-                        &provider,
-                        "search_text",
-                        json!({"path":".","query":"retry original","max_matches":10}),
-                        "search1",
-                    ),
-                    1 => tool(
-                        &provider,
-                        "read_file",
-                        json!({"path":"recovery.rs","start_line":2,"max_lines":1}),
-                        "read1",
-                    ),
-                    _ => answer(&provider),
-                };
                 let _ = write!(
                     socket,
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -203,10 +221,12 @@ impl Fixture {
             task: Some(task),
         }
     }
+
     pub fn finish(&self) {
         self.release.store(true, Ordering::SeqCst);
     }
 }
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
