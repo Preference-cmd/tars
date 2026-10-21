@@ -187,7 +187,7 @@ async fn interrupted(
             definition.session_config(),
         );
         Ok(if standard {
-            owner.allow_readonly_repair()
+            owner.allow_builtin_repair()
         } else {
             owner
         })
@@ -502,7 +502,7 @@ async fn repair_processor_failures_and_commit_collisions_cannot_be_adopted_as_co
                 },
                 definition.session_config(),
             )
-            .allow_readonly_repair())
+            .allow_builtin_repair())
         }));
         let mut def = definition();
         def.max_model_rounds = 4;

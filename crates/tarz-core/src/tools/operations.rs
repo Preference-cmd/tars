@@ -745,6 +745,11 @@ pub(crate) fn execute_prepared_write(
         .unwrap()
         .insert(prepared.normalized_path.clone(), new_version);
 
+    #[cfg(test)]
+    if let Some(gate) = write_gate.lock().expect("write gate lock").clone() {
+        gate.pause(true);
+    }
+
     Ok(json!({
         "path": prepared.path,
         "action": prepared.action.as_str(),

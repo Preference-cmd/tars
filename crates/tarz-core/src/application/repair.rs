@@ -6,7 +6,7 @@ mod types;
 
 pub use types::{
     OriginalBatchPreview, OriginalResultPreview, RepairDiagnosis, RepairError, RepairInspection,
-    RepairIssue, RepairIssueKind, RepairMode, RepairPlan, RepairSummary,
+    RepairIssue, RepairIssueKind, RepairMode, RepairPlan, RepairSummary, RepairWriteWarning,
 };
 
 pub(super) use inspect::admission_check;

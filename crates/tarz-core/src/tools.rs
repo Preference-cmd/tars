@@ -10,6 +10,8 @@ pub(crate) mod resources;
 pub use diff::DiffSummary;
 pub use diff::compute_diff;
 pub(crate) use execute::PreparedWrite;
+#[cfg(test)]
+pub(crate) use execute::TestGate;
 pub use execute::WorkspaceTools;
 pub(crate) use execute::result;
 #[cfg(test)]

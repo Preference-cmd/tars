@@ -19,7 +19,7 @@ pub use host::SessionHost;
 pub use managed::ManagedSession;
 pub use repair::{
     OriginalBatchPreview, OriginalResultPreview, RepairDiagnosis, RepairError, RepairInspection,
-    RepairIssue, RepairIssueKind, RepairMode, RepairPlan, RepairSummary,
+    RepairIssue, RepairIssueKind, RepairMode, RepairPlan, RepairSummary, RepairWriteWarning,
 };
 pub use types::{
     ApplicationError, CloseOutcome, ClosePolicy, CommitDisposition, HostOptions, Lifecycle,

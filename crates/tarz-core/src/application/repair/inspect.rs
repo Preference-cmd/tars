@@ -2,7 +2,9 @@ use super::types::*;
 use crate::application::{ApplicationError, ManagedSession};
 use crate::definition::{Provider, SessionDefinition};
 use crate::session::WorkRef;
-use causa::kernel::{BlockContent, BlockId, CacheDirective, ContentPart, Context, ModelRef};
+use causa::kernel::{
+    BlockContent, BlockId, CacheDirective, ContentPart, Context, ModelRef, ToolResultStatus,
+};
 use causa::protocol::translation::{
     anthropic::render_anthropic_messages,
     media::MediaSet,
@@ -230,6 +232,19 @@ impl ManagedSession {
             .map(|work| {
                 owner.inspect_uncommitted(work, |standard, result, batch| {
                     let adoption_error = super::plan::source_check(standard, result, batch).err();
+                    let write_warnings_count = batch
+                        .map(|b| {
+                            b.results()
+                                .iter()
+                                .filter(|entry| {
+                                    is_write_tool(&entry.call().input.tool_name)
+                                        && entry.result().is_some_and(|(_, r)| {
+                                            r.status == ToolResultStatus::UnknownOutcome
+                                        })
+                                })
+                                .count()
+                        })
+                        .unwrap_or(0);
                     OriginalBatchPreview {
                         work: work.clone(),
                         available: batch.is_some(),
@@ -240,15 +255,33 @@ impl ManagedSession {
                             .flat_map(|batch| batch.results())
                             .take(DISPLAY_LIMIT)
                             .filter_map(|entry| {
-                                entry.result().map(|(id, result)| OriginalResultPreview {
-                                    result_id: *id,
-                                    call_block_id: result.call_block_id,
-                                    status: result.status.clone(),
-                                    excerpt: json_excerpt(result, 1024),
+                                entry.result().map(|(id, result)| {
+                                    let write_warning =
+                                        if is_write_tool(&entry.call().input.tool_name)
+                                            && result.status == ToolResultStatus::UnknownOutcome
+                                        {
+                                            Some(RepairWriteWarning {
+                                                call_block_id: result.call_block_id,
+                                                tool_name: entry.call().input.tool_name.clone(),
+                                                path: extract_call_path(
+                                                    &entry.call().input.arguments,
+                                                ),
+                                            })
+                                        } else {
+                                            None
+                                        };
+                                    OriginalResultPreview {
+                                        result_id: *id,
+                                        call_block_id: result.call_block_id,
+                                        status: result.status.clone(),
+                                        excerpt: json_excerpt(result, 1024),
+                                        write_warning,
+                                    }
                                 })
                             })
                             .collect(),
                         adoption_error,
+                        write_warnings_count,
                     }
                 })
             })
@@ -295,4 +328,16 @@ fn json_excerpt(value: &impl serde::Serialize, limit: usize) -> String {
     };
     let _ = serde_json::to_writer(&mut output, value);
     bounded(&String::from_utf8_lossy(&output.bytes), limit)
+}
+
+pub(super) fn is_write_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "write_file" | "edit_file")
+}
+
+pub(super) fn extract_call_path(arguments: &serde_json::Value) -> String {
+    arguments
+        .get("path")
+        .and_then(|v| v.as_str())
+        .map(|p| bounded(p, 512))
+        .unwrap_or_default()
 }

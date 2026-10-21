@@ -277,3 +277,97 @@ fn repair_cli_save_failure_exports_the_applied_candidate_without_repeating_work(
         0
     );
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn repair_cli_shows_write_warning_for_unpaired_write_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+
+    let context = Context::from_blocks(vec![
+        tarz_core::application::text_input("prior input"),
+        ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "write_file",
+                serde_json::json!({"path": "written.txt", "content": "data\n"}),
+            )),
+            BlockMeta::default().with_provider_call_id("unpaired-write-call"),
+        ),
+    ])
+    .unwrap();
+    let input = dir.path().join("input.json");
+    tarz_core::material::save_new(&input, &context).unwrap();
+
+    let fixture = wire::Fixture::new("openai-chat", vec![], None);
+    fixture.release();
+
+    let create_output = Command::new(env!("CARGO_BIN_EXE_tarz"))
+        .args([
+            "session",
+            "create",
+            "--no-config",
+            "--json",
+            "--provider",
+            "openai-chat",
+            "--model",
+            "fixture",
+            "--api-key-env",
+            "PATH",
+            "--endpoint",
+            &fixture.endpoint,
+            "--tools",
+            "write_file",
+            "--workspace",
+        ])
+        .arg(&workspace)
+        .arg("--store")
+        .arg(&store)
+        .arg("--load")
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(create_output.status.success(), "{create_output:?}");
+    let id = report(&create_output)["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // 1. JSON output preview has plan.write_warnings
+    let json_preview = command(&store, &id).output().unwrap();
+    assert!(json_preview.status.success(), "{json_preview:?}");
+    let val = report(&json_preview);
+    assert_eq!(val["status"], "preview");
+    assert_eq!(val["plan"]["removed_count"], 1);
+    assert_eq!(val["plan"]["write_warnings_count"], 1);
+    let warnings = val["plan"]["write_warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["tool_name"], "write_file");
+    assert_eq!(warnings[0]["path"], "written.txt");
+
+    // 2. Human-readable text output preview has warning line
+    let text_preview = Command::new(env!("CARGO_BIN_EXE_tarz"))
+        .args(["session", "repair", &id, "--no-config", "--store"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(text_preview.status.success(), "{text_preview:?}");
+    let stdout = String::from_utf8_lossy(&text_preview.stdout);
+    assert!(
+        stdout.contains(
+            "write_file written.txt may have changed the file; read it again before continuing"
+        ),
+        "stdout: {stdout}"
+    );
+
+    // 3. Apply repair succeeds and saves record
+    let applied = command(&store, &id)
+        .args(["--apply", "--expected-revision", "1"])
+        .output()
+        .unwrap();
+    assert!(applied.status.success(), "{applied:?}");
+    assert_eq!(report(&applied)["applied"], true);
+    assert_eq!(report(&applied)["saved"], true);
+}

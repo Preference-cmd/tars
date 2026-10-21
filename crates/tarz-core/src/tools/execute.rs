@@ -149,7 +149,7 @@ impl WorkspaceTools {
     }
 
     #[cfg(test)]
-    pub(super) fn set_write_gate(&self, gate: Option<Arc<TestGate>>) {
+    pub(crate) fn set_write_gate(&self, gate: Option<Arc<TestGate>>) {
         *self.write_gate.lock().expect("write gate lock") = gate;
     }
 }
@@ -420,15 +420,15 @@ impl Tool for WorkspaceToolImpl {
 
 #[cfg(test)]
 pub(crate) struct TestGate {
-    pub before_return: bool,
-    pub reached: tokio::sync::Notify,
-    pub released: std::sync::Mutex<bool>,
-    pub changed: std::sync::Condvar,
+    pub(crate) before_return: bool,
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) released: std::sync::Mutex<bool>,
+    pub(crate) changed: std::sync::Condvar,
 }
 #[cfg(test)]
 impl TestGate {
     #[allow(dead_code)]
-    pub fn new(before_return: bool) -> Arc<Self> {
+    pub(crate) fn new(before_return: bool) -> Arc<Self> {
         Arc::new(Self {
             before_return,
             reached: tokio::sync::Notify::new(),
@@ -446,7 +446,7 @@ impl TestGate {
             released = self.changed.wait(released).expect("gate wait");
         }
     }
-    pub fn release(&self) {
+    pub(crate) fn release(&self) {
         *self.released.lock().expect("gate release lock") = true;
         self.changed.notify_all();
     }

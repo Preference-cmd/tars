@@ -25,6 +25,17 @@ pub enum RepairIssueKind {
     ProtocolStructure,
 }
 
+/// Notification of a write or edit tool call that may have modified a file before interruption.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RepairWriteWarning {
+    /// Identity of the tool call declaration block.
+    pub call_block_id: BlockId,
+    /// Name of the tool ("write_file" or "edit_file").
+    pub tool_name: String,
+    /// Target path from the call arguments, bounded to 512 UTF-8 bytes (empty if missing or invalid).
+    pub path: String,
+}
+
 /// One bounded diagnostic, with identities rather than copies of user content.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RepairIssue {
@@ -76,6 +87,9 @@ pub struct OriginalResultPreview {
     pub status: ToolResultStatus,
     /// At most 1024 UTF-8 bytes of the original JSON result (including notes).
     pub excerpt: String,
+    /// Warning if this write or edit call may have modified a file before interruption.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_warning: Option<RepairWriteWarning>,
 }
 
 /// Read-only view of the retained batch; inspection does not claim it.
@@ -93,6 +107,8 @@ pub struct OriginalBatchPreview {
     pub results: Vec<OriginalResultPreview>,
     /// Reason adoption is unavailable; absence still requires plan validation.
     pub adoption_error: Option<RepairError>,
+    /// Total number of completed original results that have write warnings.
+    pub write_warnings_count: usize,
 }
 
 /// Inspection of actual current materials, optionally with one retained work.
@@ -132,6 +148,10 @@ pub struct RepairSummary {
     pub adopted: Vec<BlockId>,
     /// Identity of the new application explanation, placed after the exchange.
     pub explanation_id: BlockId,
+    /// Number of write or edit declarations that may have modified files before interruption.
+    pub write_warnings_count: usize,
+    /// First 128 write warnings in deterministic scan order.
+    pub write_warnings: Vec<RepairWriteWarning>,
 }
 
 /// Opaque candidate tied to one instance, material generation and claim revision.
@@ -175,9 +195,9 @@ pub enum RepairError {
     /// An original batch has been claimed, forgotten or was never returned.
     #[error("original uncommitted results are unavailable")]
     OriginalUnavailable,
-    /// Assembly or interruption provenance is outside the reviewed read-only path.
+    /// Assembly or interruption provenance is outside the reviewed built-in tool path.
     #[error(
-        "original-result adoption requires the standard read-only assembly and controlled cancellation or deadline"
+        "original-result adoption requires the standard built-in tool assembly and controlled cancellation or deadline"
     )]
     UnsupportedSource,
     /// The original batch no longer exactly matches the unresolved tail exchange.

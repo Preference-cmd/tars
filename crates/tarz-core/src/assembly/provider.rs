@@ -70,6 +70,8 @@ pub(crate) fn assemble(
     ));
     #[cfg(test)]
     let test_processors_capture = test_processors.clone();
+    #[cfg(test)]
+    let tools_for_session = workspace_tools.clone();
 
     let session = Session::new_with_tools(
         conversation_id,
@@ -123,13 +125,14 @@ pub(crate) fn assemble(
         },
         definition.session_config(),
     )
-    .allow_readonly_repair()
+    .allow_builtin_repair()
     .with_permissions(session_permissions);
 
     #[cfg(test)]
     let session = {
         let mut session = session;
         session.test_before_processors = test_processors;
+        session.workspace_tools = tools_for_session;
         session
     };
 

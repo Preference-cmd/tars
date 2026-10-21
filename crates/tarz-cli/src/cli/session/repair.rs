@@ -129,6 +129,29 @@ pub(super) async fn run(
                 }
             }
         }
+        if let Some(count) = value["plan"]["write_warnings_count"].as_u64()
+            && count > 0
+        {
+            text.push_str(&format!(
+                "{count} write call(s) may have changed files before interruption; read them again before continuing.\n"
+            ));
+            if let Some(warnings) = value["plan"]["write_warnings"].as_array() {
+                for warning in warnings {
+                    let tool = warning["tool_name"].as_str().unwrap_or("write");
+                    let path = warning["path"].as_str().unwrap_or("");
+                    if path.is_empty() {
+                        text.push_str(&format!(
+                            "  {tool} may have changed the file; read it again before continuing\n"
+                        ));
+                    } else {
+                        text.push_str(&format!("  {tool} {path} may have changed the file; read it again before continuing\n"));
+                    }
+                }
+                if count > warnings.len() as u64 {
+                    text.push_str("  Write warning display limited to 128 items.\n");
+                }
+            }
+        }
         if !apply && value["status"] == "preview" {
             text.push_str(&format!("Apply explicitly with --apply --expected-revision {current_revision}; no new work will be sent.\n"));
         }

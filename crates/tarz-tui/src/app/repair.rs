@@ -144,7 +144,7 @@ impl App {
                         if let Some(error) = original.adoption_error {
                             lines.push(format!("Original-result adoption unavailable: {error}"));
                         }
-                        for result in original.results {
+                        for result in &original.results {
                             lines.push(format!(
                                 "Original result {} → {}: {:?}",
                                 result.result_id.0, result.call_block_id.0, result.status
@@ -152,6 +152,25 @@ impl App {
                             lines.push(format!(
                                 "Result excerpt (up to 1024 bytes): {}",
                                 result.excerpt
+                            ));
+                            if let Some(warning) = &result.write_warning {
+                                if warning.path.is_empty() {
+                                    lines.push(format!(
+                                        "  {} may have changed the file; read it again before continuing",
+                                        warning.tool_name
+                                    ));
+                                } else {
+                                    lines.push(format!(
+                                        "  {} {} may have changed the file; read it again before continuing",
+                                        warning.tool_name, warning.path
+                                    ));
+                                }
+                            }
+                        }
+                        if original.write_warnings_count > 0 {
+                            lines.push(format!(
+                                "{} write call(s) may have changed files before interruption; read them again before continuing.",
+                                original.write_warnings_count
                             ));
                         }
                     }
@@ -250,6 +269,30 @@ impl App {
                         .iter()
                         .map(|id| format!("Adopt original result {}", id.0)),
                 );
+                if summary.write_warnings_count > 0 {
+                    panel.lines.push(format!(
+                        "{} write call(s) may have changed files before interruption; read them again before continuing:",
+                        summary.write_warnings_count
+                    ));
+                    for warning in &summary.write_warnings {
+                        if warning.path.is_empty() {
+                            panel.lines.push(format!(
+                                "  {} may have changed the file; read it again before continuing",
+                                warning.tool_name
+                            ));
+                        } else {
+                            panel.lines.push(format!(
+                                "  {} {} may have changed the file; read it again before continuing",
+                                warning.tool_name, warning.path
+                            ));
+                        }
+                    }
+                    if summary.write_warnings_count > summary.write_warnings.len() {
+                        panel
+                            .lines
+                            .push("Write warning display limited to 128 items.".into());
+                    }
+                }
                 if summary.removed_count > summary.removed.len()
                     || summary.adopted_count > summary.adopted.len()
                 {

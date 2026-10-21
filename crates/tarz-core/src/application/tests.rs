@@ -6,6 +6,8 @@ mod repair;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod repair_http;
 mod repair_originals;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod repair_write;
 mod saving;
 pub(crate) mod support;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

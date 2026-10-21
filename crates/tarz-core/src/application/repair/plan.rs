@@ -3,7 +3,10 @@ use super::types::*;
 use crate::application::{ApplicationError, ManagedSession, MaterialVersion};
 use crate::definition::SessionDefinition;
 use crate::session::{SessionError, WorkResult};
-use causa::kernel::{BlockContent, BlockId, BlockMeta, Context, ContextBlock, Role, ToolBatch};
+use causa::kernel::{
+    BlockContent, BlockId, BlockMeta, Context, ContextBlock, Role, ToolBatch, ToolCallPayload,
+    ToolResultStatus,
+};
 use causa::runtime::{TurnInterruption, TurnResult, new_block_id};
 use std::collections::{HashMap, HashSet};
 
@@ -67,9 +70,12 @@ fn validate_original(
         let call = entry.call();
         if declarations.get(&call.call_block_id).copied() != Some(&call.input)
             || !call.result_notes.is_empty()
-            // Future capabilities must opt into a separately reviewed policy;
+            // Future capabilities (including MCP) require a separately reviewed policy;
             // extending WorkspaceTool alone cannot grant result adoption.
-            || !matches!(call.input.tool_name.as_str(), "list_directory" | "read_file" | "search_text")
+            || !matches!(
+                call.input.tool_name.as_str(),
+                "list_directory" | "read_file" | "search_text" | "write_file" | "edit_file"
+            )
             || !definition.tools.iter().any(|tool| tool.name() == call.input.tool_name)
         {
             return Err(RepairError::InvalidOriginal);
@@ -135,6 +141,61 @@ impl ManagedSession {
                 })??
             }
         };
+        let declarations: HashMap<BlockId, ToolCallPayload> = context
+            .blocks()
+            .iter()
+            .filter_map(|block| {
+                if let BlockContent::ToolCall(call) = block.content() {
+                    Some((block.id(), call.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut write_warnings = Vec::new();
+        let mut write_warnings_count = 0;
+        match &mode {
+            RepairMode::RemoveUnpaired => {
+                for id in &scan.unpaired {
+                    if let Some(call) = declarations.get(id)
+                        && super::inspect::is_write_tool(&call.tool_name)
+                    {
+                        write_warnings_count += 1;
+                        if write_warnings.len() < DISPLAY_LIMIT {
+                            write_warnings.push(RepairWriteWarning {
+                                call_block_id: *id,
+                                tool_name: call.tool_name.clone(),
+                                path: super::inspect::extract_call_path(&call.arguments),
+                            });
+                        }
+                    }
+                }
+            }
+            RepairMode::AdoptOriginal(_) => {
+                for id in &scan.unpaired {
+                    let is_unknown_write = match results.get(id).map(|b| b.content()) {
+                        Some(BlockContent::ToolResult(p)) => {
+                            p.status == ToolResultStatus::UnknownOutcome
+                                && declarations
+                                    .get(id)
+                                    .is_some_and(|c| super::inspect::is_write_tool(&c.tool_name))
+                        }
+                        _ => false,
+                    };
+                    if is_unknown_write {
+                        let call = &declarations[id];
+                        write_warnings_count += 1;
+                        if write_warnings.len() < DISPLAY_LIMIT {
+                            write_warnings.push(RepairWriteWarning {
+                                call_block_id: *id,
+                                tool_name: call.tool_name.clone(),
+                                path: super::inspect::extract_call_path(&call.arguments),
+                            });
+                        }
+                    }
+                }
+            }
+        }
         // Sorting, explanation construction and protocol rendering need no
         // coordination lock. The eventual apply rechecks this exact baseline.
         drop(state);
@@ -183,6 +244,8 @@ impl ManagedSession {
             adopted_count: adopted.len(),
             adopted: adopted.into_iter().take(DISPLAY_LIMIT).collect(),
             explanation_id,
+            write_warnings_count,
+            write_warnings,
         };
         Ok(RepairPlan {
             base,

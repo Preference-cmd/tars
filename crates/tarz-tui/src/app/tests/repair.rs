@@ -322,3 +322,79 @@ async fn repair_ui_save_failure_keeps_applied_materials_and_draft_then_retries_s
         .await
         .unwrap();
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_ui_shows_write_warning_for_unpaired_write_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let fixture = wire::Fixture::new("openai-chat", vec![wire::Reply::Answer], None);
+    fixture.release();
+    let mut app = app(dir.path());
+
+    let definition = SessionDefinition {
+        provider: Provider::OpenAiChat,
+        model: "fixture".into(),
+        endpoint: Some(fixture.endpoint.clone()),
+        credential: CredentialRef::Environment("PATH".into()),
+        work_timeout_secs: Some(30),
+        retained_work_capacity: 16,
+        max_model_rounds: 4,
+        max_tool_calls: 4,
+        max_tokens: None,
+        reasoning_effort: None,
+        extra_body: Default::default(),
+        max_model_attempts: None,
+        render_options: Default::default(),
+        workspace_root: Some(std::fs::canonicalize(&workspace).unwrap()),
+        tools: vec![tarz_core::definition::WorkspaceTool::WriteFile],
+        tool_limits: Default::default(),
+        write_limits: None,
+        permission_mode: None,
+    };
+    let context = Context::from_blocks(vec![
+        tarz_core::application::text_input("prior input"),
+        ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "write_file",
+                serde_json::json!({"path": "doc.txt", "content": "draft\n"}),
+            )),
+            BlockMeta::default().with_provider_call_id("unpaired-write-call"),
+        ),
+    ])
+    .unwrap();
+    let session = app
+        .host
+        .create(PreparedCreate::persistent(definition, context))
+        .await
+        .unwrap();
+    let mut entry = Entry::new(
+        session.target().conversation_id().as_str().into(),
+        "fixture".into(),
+    );
+    entry.session = Some(session);
+    entry.execution = "Interrupted write execution".into();
+    app.entries.push(entry);
+    until(&mut app, |app| {
+        app.entries[0].material_version.is_some() && app.entries[0].rows.is_some()
+    })
+    .await;
+
+    inspect(&mut app).await;
+
+    // Press "r" to plan RemoveUnpaired, which populates write warnings for removed write declarations.
+    plan(&mut app).await;
+    let text = screen(&app);
+    assert!(
+        text.contains(
+            "write_file doc.txt may have changed the file; read it again before continuing"
+        ),
+        "text was: {text}"
+    );
+    assert!(
+        text.contains("1 write call(s) may have changed files before interruption"),
+        "text was: {text}"
+    );
+}

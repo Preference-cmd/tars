@@ -80,6 +80,16 @@ impl ManagedSession {
         )
     }
 
+    /// Return the workspace tools instance for test instrumentation.
+    #[cfg(test)]
+    pub(crate) fn workspace_tools(&self) -> Option<Arc<crate::tools::WorkspaceTools>> {
+        let state = self.entry.lock();
+        state
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.workspace_tools())
+    }
+
     /// Append an extra before processor after the permission processor during test runs.
     #[cfg(test)]
     pub(crate) fn add_test_before_processor(

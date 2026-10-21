@@ -11,8 +11,10 @@ use std::sync::{Arc, Mutex};
 /// Exclusive lifecycle owner for one conversation's current materials.
 pub struct Session {
     pub(super) shared: Arc<Shared>,
-    standard_readonly_repair: bool,
+    standard_builtin_repair: bool,
     pub(crate) permissions: Option<Arc<crate::permission::PermissionHub>>,
+    #[cfg(test)]
+    pub(crate) workspace_tools: Option<Arc<crate::tools::WorkspaceTools>>,
     #[cfg(test)]
     pub(crate) test_before_processors:
         Arc<std::sync::Mutex<Vec<Arc<dyn causa::kernel::ToolBatchProcessor>>>>,
@@ -112,8 +114,10 @@ impl Session {
             + 'static,
     {
         Self {
-            standard_readonly_repair: false,
+            standard_builtin_repair: false,
             permissions: None,
+            #[cfg(test)]
+            workspace_tools: None,
             #[cfg(test)]
             test_before_processors: Arc::new(std::sync::Mutex::new(Vec::new())),
             shared: Arc::new(Shared {
@@ -146,9 +150,14 @@ impl Session {
 
     // Only the reviewed application assembly grants this provenance. Public
     // arbitrary runner/processor constructors must leave it disabled.
-    pub(crate) fn allow_readonly_repair(mut self) -> Self {
-        self.standard_readonly_repair = true;
+    pub(crate) fn allow_builtin_repair(mut self) -> Self {
+        self.standard_builtin_repair = true;
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn workspace_tools(&self) -> Option<Arc<crate::tools::WorkspaceTools>> {
+        self.workspace_tools.clone()
     }
 
     pub(crate) fn claims_revision(&self) -> u64 {
@@ -166,7 +175,7 @@ impl Session {
             return Err(SessionError::NotFinished { work: work.clone() });
         };
         Ok(inspect(
-            self.standard_readonly_repair,
+            self.standard_builtin_repair,
             &result,
             state
                 .records
