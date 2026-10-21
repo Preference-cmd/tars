@@ -80,6 +80,7 @@ async fn managed_reopen_preserves_definition_material_identity_and_restores_no_w
         workspace_root: None,
         tools: Vec::new(),
         tool_limits: Default::default(),
+        write_limits: None,
     };
     let requests = Arc::new(Mutex::new(vec![]));
     let tool_calls = Arc::new(AtomicUsize::new(0));

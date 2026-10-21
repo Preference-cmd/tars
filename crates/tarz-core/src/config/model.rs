@@ -184,6 +184,7 @@ pub(super) fn resolve(
                 profile.and_then(|p| p.tool_limits.as_ref().map(ProfileToolLimits::effective))
             })
             .unwrap_or_default(),
+        write_limits: None,
     };
     definition.validate().map_err(ConfigError::Definition)?;
     Ok(definition)
@@ -227,6 +228,8 @@ pub fn parse_tools(value: &str) -> Result<Vec<WorkspaceTool>, ConfigError> {
             "list_directory" => WorkspaceTool::ListDirectory,
             "read_file" => WorkspaceTool::ReadFile,
             "search_text" => WorkspaceTool::SearchText,
+            "write_file" => WorkspaceTool::WriteFile,
+            "edit_file" => WorkspaceTool::EditFile,
             _ => return Err(ConfigError::InvalidTools),
         };
         if tools.contains(&tool) {

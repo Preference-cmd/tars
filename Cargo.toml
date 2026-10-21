@@ -24,3 +24,4 @@ serde = { version = "1", features = ["derive"] }
 url = "2"
 toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
 rustix = { version = "1.1", features = ["fs"] }
+similar = "3"

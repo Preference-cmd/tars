@@ -1,12 +1,19 @@
-use super::parameters::{ListParams, Params, ReadParams, SearchParams};
+use super::compute_diff;
+use super::parameters::{
+    EditParams, EditSegment, ListParams, Params, ReadParams, SearchParams, WriteParams,
+};
 use super::resources::Counters;
-use crate::definition::WorkspaceToolLimits;
-use crate::workspace::{Workspace, WorkspaceError};
+use crate::definition::{WorkspaceToolLimits, WriteToolLimits};
+use crate::workspace::{FileVersion, Workspace, WorkspaceError};
 use causa::kernel::{CallControl, ControlError, ToolResultStatus};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::Read;
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::{Arc, Mutex, atomic::Ordering};
 use tokio_util::sync::CancellationToken;
+
+#[cfg(test)]
+use super::execute::TestGate;
 
 pub(crate) struct OperationControl {
     pub call: CallControl,
@@ -31,6 +38,8 @@ pub(crate) enum OperationError {
     Control(#[from] ControlError),
     #[error("file content is binary or invalid UTF-8")]
     UnsupportedContent,
+    #[error("{0}")]
+    Rejected(String),
 }
 impl OperationError {
     pub fn status(&self) -> ToolResultStatus {
@@ -40,6 +49,7 @@ impl OperationError {
             }
             Self::Control(ControlError::Cancelled) => ToolResultStatus::Cancelled,
             Self::Control(ControlError::TimedOut) => ToolResultStatus::TimedOut,
+            Self::Rejected(_) => ToolResultStatus::Rejected,
             _ => ToolResultStatus::Failed,
         }
     }
@@ -49,24 +59,83 @@ pub(crate) fn run(
     workspace: &Workspace,
     params: &Params,
     limits: &WorkspaceToolLimits,
+    write_limits: &WriteToolLimits,
+    observations: &Mutex<HashMap<String, FileVersion>>,
     control: &OperationControl,
+    #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
 ) -> Result<Value, OperationError> {
     control.check()?;
     #[cfg(unix)]
     match params {
         Params::List(p) => list(workspace, p, limits, control),
-        Params::Read(p) => read(workspace, p, limits, control),
+        Params::Read(p) => read(workspace, p, limits, observations, control),
         Params::Search(p) => search(workspace, p, limits, control),
+        Params::Write(p) => write_operation(
+            workspace,
+            p,
+            limits,
+            write_limits,
+            observations,
+            control,
+            #[cfg(test)]
+            write_gate,
+        ),
+        Params::Edit(p) => edit_operation(
+            workspace,
+            p,
+            limits,
+            write_limits,
+            observations,
+            control,
+            #[cfg(test)]
+            write_gate,
+        ),
     }
     #[cfg(not(unix))]
     {
-        let _ = (workspace, params, limits);
+        let _ = (
+            workspace,
+            params,
+            limits,
+            write_limits,
+            observations,
+            control,
+        );
         Err(WorkspaceError::UnsupportedPlatform.into())
     }
 }
 
 fn fits(value: &Value, limit: usize) -> bool {
     serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= limit.saturating_sub(1024))
+}
+
+#[cfg(unix)]
+fn is_crlf(content: &str) -> bool {
+    let bytes = content.as_bytes();
+    let has_crlf = bytes.windows(2).any(|w| w == b"\r\n");
+    if !has_crlf {
+        return false;
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'\n' && (i == 0 || bytes[i - 1] != b'\r') {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(unix)]
+fn normalize_lone_lf_to_crlf(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 16);
+    let mut prev = '\0';
+    for ch in s.chars() {
+        if ch == '\n' && prev != '\r' {
+            out.push('\r');
+        }
+        out.push(ch);
+        prev = ch;
+    }
+    out
 }
 
 #[cfg(unix)]
@@ -175,15 +244,15 @@ fn read(
     workspace: &Workspace,
     p: &ReadParams,
     limits: &WorkspaceToolLimits,
+    observations: &Mutex<HashMap<String, FileVersion>>,
     control: &OperationControl,
 ) -> Result<Value, OperationError> {
+    let file = workspace.file(&p.path)?;
+    let stat = rustix::fs::fstat(&file).map_err(crate::workspace::map_errno)?;
     let mut scanned = 0;
-    let (text, _, scan_limited) = bounded_text(
-        workspace.file(&p.path)?,
-        limits.max_file_scan_bytes,
-        control,
-        &mut scanned,
-    )?;
+    let (text, _, scan_limited) =
+        bounded_text(file, limits.max_file_scan_bytes, control, &mut scanned)?;
+    let version = FileVersion::from_stat_and_content(&stat, text.as_bytes());
     let start = p.start_line.unwrap_or(1);
     let max_lines = p.max_lines.unwrap_or(200);
     let mut output = json!({"path":p.path,"start_line":start,"end_line":null,"text":"","scanned_bytes":scanned,"truncated":scan_limited,"limit_reason":if scan_limited { Some("file_scan_bytes") } else { None }});
@@ -223,7 +292,421 @@ fn read(
         }
     }
     output["text"] = json!(content);
+    if !scan_limited {
+        let normalized = Workspace::components(&p.path)?.join("/");
+        observations.lock().unwrap().insert(normalized, version);
+    }
     Ok(output)
+}
+
+#[cfg(unix)]
+fn write_operation(
+    workspace: &Workspace,
+    p: &WriteParams,
+    limits: &WorkspaceToolLimits,
+    write_limits: &WriteToolLimits,
+    observations: &Mutex<HashMap<String, FileVersion>>,
+    control: &OperationControl,
+    #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
+) -> Result<Value, OperationError> {
+    control.check()?;
+    let components = Workspace::components(&p.path)?;
+    if components.is_empty() {
+        return Err(OperationError::Rejected(
+            "write_file requires a file path".into(),
+        ));
+    }
+    let normalized = components.join("/");
+    let parent_components = &components[..components.len() - 1];
+    let file_name = &components[components.len() - 1];
+
+    if p.content.len() > write_limits.max_write_bytes {
+        return Err(OperationError::Rejected(format!(
+            "content size ({} bytes) exceeds maximum write size of {} bytes",
+            p.content.len(),
+            write_limits.max_write_bytes
+        )));
+    }
+
+    let parent_dir_opt = match workspace.parent_directory(parent_components) {
+        Ok(parent_dir) => Some(parent_dir),
+        Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => None,
+        Err(err) => return Err(OperationError::Access(err)),
+    };
+
+    let existing_target = match parent_dir_opt {
+        Some(parent_dir) => match workspace.child_file(&parent_dir, file_name) {
+            Ok(file) => Some((parent_dir, file)),
+            Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(OperationError::Access(err)),
+        },
+        None => None,
+    };
+
+    let (original_text, final_content, action, existing_mode) = if let Some((
+        _parent_dir,
+        mut target_file,
+    )) = existing_target
+    {
+        let stat = rustix::fs::fstat(&target_file).map_err(crate::workspace::map_errno)?;
+        let recorded_version = {
+            let obs = observations.lock().unwrap();
+            obs.get(&normalized).copied()
+        };
+        let Some(recorded_version) = recorded_version else {
+            return Err(OperationError::Rejected(format!(
+                "file '{}' already exists and must be read with read_file before overwriting",
+                p.path
+            )));
+        };
+
+        if (stat.st_size as usize) > limits.max_file_scan_bytes {
+            return Err(OperationError::Rejected(format!(
+                "file '{}' size ({} bytes) exceeds maximum readable size of {} bytes and cannot be edited",
+                p.path, stat.st_size, limits.max_file_scan_bytes
+            )));
+        }
+        if (stat.st_size as usize) > write_limits.max_edit_file_bytes {
+            return Err(OperationError::Rejected(format!(
+                "file '{}' size ({} bytes) exceeds maximum editable size of {} bytes",
+                p.path, stat.st_size, write_limits.max_edit_file_bytes
+            )));
+        }
+
+        let mut original_bytes = Vec::new();
+        target_file
+            .read_to_end(&mut original_bytes)
+            .map_err(WorkspaceError::Io)?;
+        let original_text = String::from_utf8(original_bytes).map_err(|_| {
+            OperationError::Rejected("file content is binary or invalid UTF-8".into())
+        })?;
+        let current_version = FileVersion::from_stat_and_content(&stat, original_text.as_bytes());
+        if current_version != recorded_version {
+            return Err(OperationError::Rejected(format!(
+                "file '{}' has changed since it was read; read it again before overwriting",
+                p.path
+            )));
+        }
+
+        let final_content = if is_crlf(&original_text) {
+            normalize_lone_lf_to_crlf(&p.content)
+        } else {
+            p.content.clone()
+        };
+
+        if final_content.len() > write_limits.max_write_bytes {
+            return Err(OperationError::Rejected(format!(
+                "content size ({} bytes) exceeds maximum write size of {} bytes",
+                final_content.len(),
+                write_limits.max_write_bytes
+            )));
+        }
+
+        (
+            original_text,
+            final_content,
+            "updated",
+            Some((stat.st_mode & 0o7777) as u32),
+        )
+    } else {
+        (String::new(), p.content.clone(), "created", None)
+    };
+
+    let diff_summary = compute_diff(&p.path, &original_text, &final_content);
+    let bytes_written = final_content.len();
+
+    let parent_dir = workspace.ensure_parent_directory(parent_components)?;
+
+    let write_res = workspace.atomic_write(
+        &parent_dir,
+        file_name,
+        final_content.as_bytes(),
+        existing_mode,
+        || {
+            #[cfg(test)]
+            if let Some(gate) = write_gate.lock().expect("write gate lock").clone() {
+                gate.pause(false);
+            }
+            control.check()
+        },
+    );
+
+    let new_version = match write_res {
+        Ok(version) => version,
+        Err(crate::workspace::AtomicWriteError::AlreadyExists) => {
+            return Err(OperationError::Rejected(format!(
+                "file '{}' already exists and must be read with read_file before overwriting",
+                p.path
+            )));
+        }
+        Err(crate::workspace::AtomicWriteError::CancelledOrTimedOut(err)) => return Err(err),
+        Err(crate::workspace::AtomicWriteError::Workspace(err)) => {
+            return Err(OperationError::Access(err));
+        }
+    };
+
+    control
+        .counters
+        .bytes
+        .fetch_add(bytes_written, Ordering::Relaxed);
+    control
+        .host_counters
+        .bytes
+        .fetch_add(bytes_written, Ordering::Relaxed);
+
+    observations.lock().unwrap().insert(normalized, new_version);
+
+    Ok(json!({
+        "path": p.path,
+        "action": action,
+        "bytes_written": bytes_written,
+        "lines_added": diff_summary.lines_added,
+        "lines_removed": diff_summary.lines_removed,
+    }))
+}
+
+#[cfg(unix)]
+fn edit_operation(
+    workspace: &Workspace,
+    p: &EditParams,
+    limits: &WorkspaceToolLimits,
+    write_limits: &WriteToolLimits,
+    observations: &Mutex<HashMap<String, FileVersion>>,
+    control: &OperationControl,
+    #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
+) -> Result<Value, OperationError> {
+    control.check()?;
+    let components = Workspace::components(&p.path)?;
+    if components.is_empty() {
+        return Err(OperationError::Rejected(
+            "edit_file requires a file path".into(),
+        ));
+    }
+    let normalized = components.join("/");
+    let parent_components = &components[..components.len() - 1];
+    let file_name = &components[components.len() - 1];
+
+    if p.edits.is_empty() {
+        return Err(OperationError::Rejected(
+            "edits must contain at least one replacement".into(),
+        ));
+    }
+    if p.edits.len() > write_limits.max_edit_segments {
+        return Err(OperationError::Rejected(format!(
+            "edits count ({}) exceeds maximum allowed segments of {}",
+            p.edits.len(),
+            write_limits.max_edit_segments
+        )));
+    }
+
+    let recorded_version = {
+        let obs = observations.lock().unwrap();
+        obs.get(&normalized).copied()
+    };
+    let Some(recorded_version) = recorded_version else {
+        return Err(OperationError::Rejected(format!(
+            "file '{}' must be read with read_file before editing",
+            p.path
+        )));
+    };
+
+    let parent_dir = match workspace.parent_directory(parent_components) {
+        Ok(dir) => dir,
+        Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(OperationError::Rejected(format!(
+                "file '{}' has changed since it was read; read it again before editing",
+                p.path
+            )));
+        }
+        Err(err) => return Err(OperationError::Access(err)),
+    };
+
+    let mut target_file = match workspace.child_file(&parent_dir, file_name) {
+        Ok(file) => file,
+        Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(OperationError::Rejected(format!(
+                "file '{}' has changed since it was read; read it again before editing",
+                p.path
+            )));
+        }
+        Err(err) => return Err(OperationError::Access(err)),
+    };
+
+    let stat = rustix::fs::fstat(&target_file).map_err(crate::workspace::map_errno)?;
+
+    if (stat.st_size as usize) > limits.max_file_scan_bytes {
+        return Err(OperationError::Rejected(format!(
+            "file '{}' size ({} bytes) exceeds maximum readable size of {} bytes and cannot be edited",
+            p.path, stat.st_size, limits.max_file_scan_bytes
+        )));
+    }
+    if (stat.st_size as usize) > write_limits.max_edit_file_bytes {
+        return Err(OperationError::Rejected(format!(
+            "file '{}' size ({} bytes) exceeds maximum editable size of {} bytes",
+            p.path, stat.st_size, write_limits.max_edit_file_bytes
+        )));
+    }
+
+    let mut original_bytes = Vec::new();
+    target_file
+        .read_to_end(&mut original_bytes)
+        .map_err(WorkspaceError::Io)?;
+    let original_text = String::from_utf8(original_bytes)
+        .map_err(|_| OperationError::Rejected("file content is binary or invalid UTF-8".into()))?;
+    let current_version = FileVersion::from_stat_and_content(&stat, original_text.as_bytes());
+    if current_version != recorded_version {
+        return Err(OperationError::Rejected(format!(
+            "file '{}' has changed since it was read; read it again before editing",
+            p.path
+        )));
+    }
+
+    let is_crlf_file = is_crlf(&original_text);
+    let edits: Vec<EditSegment> = if is_crlf_file {
+        p.edits
+            .iter()
+            .map(|e| EditSegment {
+                old_text: normalize_lone_lf_to_crlf(&e.old_text),
+                new_text: normalize_lone_lf_to_crlf(&e.new_text),
+            })
+            .collect()
+    } else {
+        p.edits.clone()
+    };
+
+    struct ReplacementMatch {
+        index: usize,
+        start: usize,
+        end: usize,
+        new_text: String,
+    }
+
+    let mut matches = Vec::with_capacity(edits.len());
+    for (i, edit) in edits.iter().enumerate() {
+        if edit.old_text.is_empty() {
+            return Err(OperationError::Rejected(format!(
+                "edits[{}]: old_text must not be empty",
+                i
+            )));
+        }
+        if edit.old_text == edit.new_text {
+            return Err(OperationError::Rejected(format!(
+                "edits[{}]: old_text and new_text are identical",
+                i
+            )));
+        }
+        let occurrences: Vec<usize> = original_text
+            .match_indices(&edit.old_text)
+            .map(|(idx, _)| idx)
+            .collect();
+        if occurrences.is_empty() {
+            return Err(OperationError::Rejected(format!(
+                "edits[{}]: old_text not found in file",
+                i
+            )));
+        }
+        if occurrences.len() > 1 {
+            return Err(OperationError::Rejected(format!(
+                "edits[{}]: old_text matches multiple locations ({}) in file",
+                i,
+                occurrences.len()
+            )));
+        }
+        let start = occurrences[0];
+        let end = start + edit.old_text.len();
+        matches.push(ReplacementMatch {
+            index: i,
+            start,
+            end,
+            new_text: edit.new_text.clone(),
+        });
+    }
+
+    for a in 0..matches.len() {
+        for b in (a + 1)..matches.len() {
+            let m1 = &matches[a];
+            let m2 = &matches[b];
+            if m1.start < m2.end && m2.start < m1.end {
+                let (first, second) = if m1.index < m2.index {
+                    (m1.index, m2.index)
+                } else {
+                    (m2.index, m1.index)
+                };
+                return Err(OperationError::Rejected(format!(
+                    "edits[{}] and edits[{}]: replacement ranges overlap",
+                    first, second
+                )));
+            }
+        }
+    }
+
+    matches.sort_by_key(|m| m.start);
+    let mut new_content = String::with_capacity(original_text.len());
+    let mut last_offset = 0;
+    for m in &matches {
+        new_content.push_str(&original_text[last_offset..m.start]);
+        new_content.push_str(&m.new_text);
+        last_offset = m.end;
+    }
+    new_content.push_str(&original_text[last_offset..]);
+
+    if new_content.len() > write_limits.max_write_bytes {
+        return Err(OperationError::Rejected(format!(
+            "new content size ({} bytes) exceeds maximum write size of {} bytes",
+            new_content.len(),
+            write_limits.max_write_bytes
+        )));
+    }
+
+    let diff_summary = compute_diff(&p.path, &original_text, &new_content);
+    let bytes_written = new_content.len();
+
+    let write_res = workspace.atomic_write(
+        &parent_dir,
+        file_name,
+        new_content.as_bytes(),
+        Some((stat.st_mode & 0o7777) as u32),
+        || {
+            #[cfg(test)]
+            if let Some(gate) = write_gate.lock().expect("write gate lock").clone() {
+                gate.pause(false);
+            }
+            control.check()
+        },
+    );
+
+    let new_version = match write_res {
+        Ok(version) => version,
+        Err(crate::workspace::AtomicWriteError::AlreadyExists) => {
+            return Err(OperationError::Rejected(format!(
+                "file '{}' already exists and must be read with read_file before overwriting",
+                p.path
+            )));
+        }
+        Err(crate::workspace::AtomicWriteError::CancelledOrTimedOut(err)) => return Err(err),
+        Err(crate::workspace::AtomicWriteError::Workspace(err)) => {
+            return Err(OperationError::Access(err));
+        }
+    };
+
+    control
+        .counters
+        .bytes
+        .fetch_add(bytes_written, Ordering::Relaxed);
+    control
+        .host_counters
+        .bytes
+        .fetch_add(bytes_written, Ordering::Relaxed);
+
+    observations.lock().unwrap().insert(normalized, new_version);
+
+    Ok(json!({
+        "path": p.path,
+        "action": "updated",
+        "bytes_written": bytes_written,
+        "lines_added": diff_summary.lines_added,
+        "lines_removed": diff_summary.lines_removed,
+    }))
 }
 
 #[cfg(unix)]

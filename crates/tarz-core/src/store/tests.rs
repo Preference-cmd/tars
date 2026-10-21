@@ -29,6 +29,7 @@ fn definition() -> SessionDefinition {
         workspace_root: None,
         tools: Vec::new(),
         tool_limits: Default::default(),
+        write_limits: None,
     }
 }
 fn context(text: &str) -> Context {

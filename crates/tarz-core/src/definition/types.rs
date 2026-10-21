@@ -1,4 +1,4 @@
-use super::workspace::{WorkspaceTool, WorkspaceToolLimits};
+use super::workspace::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::session::SessionConfig;
 use causa::kernel::ModelRef;
 use causa::providers::{AnthropicRenderOptions, ChatRenderOptions, ResponsesRenderOptions};
@@ -85,6 +85,9 @@ pub struct SessionDefinition {
     pub tools: Vec<WorkspaceTool>,
     /// Fixed effective bounds for selected workspace tools.
     pub tool_limits: WorkspaceToolLimits,
+    /// Explicit bounds for workspace write and edit operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_limits: Option<WriteToolLimits>,
 }
 
 // Unlike sparse startup configuration, a record must explicitly retain no-root
@@ -154,7 +157,17 @@ impl SessionDefinition {
                 return Err(DefinitionError::DuplicateTool);
             }
         }
+        if self
+            .tools
+            .iter()
+            .any(|tool| matches!(tool, WorkspaceTool::WriteFile | WorkspaceTool::EditFile))
+        {
+            return Err(DefinitionError::WriteToolsUnavailable);
+        }
         self.tool_limits.validate()?;
+        if let Some(write_limits) = &self.write_limits {
+            write_limits.validate()?;
+        }
         Ok(())
     }
 
@@ -239,4 +252,7 @@ pub enum DefinitionError {
     /// The deadline cannot be represented on this platform.
     #[error("work timeout cannot be represented")]
     UnrepresentableTimeout,
+    /// Workspace write tools require an approval processor that is not available in this release.
+    #[error("workspace write tools are unavailable in this configuration")]
+    WriteToolsUnavailable,
 }

@@ -18,6 +18,7 @@ fn definition() -> SessionDefinition {
         workspace_root: None,
         tools: vec![],
         tool_limits: Default::default(),
+        write_limits: None,
     }
 }
 
@@ -271,4 +272,107 @@ fn render_options_the_protocol_does_not_accept_are_rejected_without_echoing_them
         assert_eq!(error, DefinitionError::InvalidRenderOptions);
         assert!(!error.to_string().contains("secret_marker"));
     }
+}
+
+#[test]
+fn write_tools_are_rejected_during_definition_validation() {
+    use super::WorkspaceTool;
+
+    let mut def = definition();
+    def.workspace_root = Some(std::path::PathBuf::from("/workspace"));
+    def.tools = vec![WorkspaceTool::WriteFile];
+    assert_eq!(
+        def.validate().unwrap_err(),
+        DefinitionError::WriteToolsUnavailable
+    );
+
+    def.tools = vec![WorkspaceTool::EditFile];
+    assert_eq!(
+        def.validate().unwrap_err(),
+        DefinitionError::WriteToolsUnavailable
+    );
+
+    // Read-only tool is accepted
+    def.tools = vec![WorkspaceTool::ReadFile];
+    assert!(def.validate().is_ok());
+}
+
+#[test]
+fn write_tool_limits_validation_and_serialization() {
+    use super::WriteToolLimits;
+
+    let default_limits = WriteToolLimits::default();
+    assert_eq!(default_limits.max_edit_file_bytes, 2 * 1024 * 1024);
+    assert_eq!(default_limits.max_write_bytes, 1024 * 1024);
+    assert_eq!(default_limits.max_edit_segments, 32);
+    assert!(default_limits.validate().is_ok());
+
+    // Rejects zero
+    let zero_edit = WriteToolLimits {
+        max_edit_file_bytes: 0,
+        ..default_limits
+    };
+    assert_eq!(
+        zero_edit.validate().unwrap_err(),
+        DefinitionError::InvalidToolLimits
+    );
+
+    let zero_write = WriteToolLimits {
+        max_write_bytes: 0,
+        ..default_limits
+    };
+    assert_eq!(
+        zero_write.validate().unwrap_err(),
+        DefinitionError::InvalidToolLimits
+    );
+
+    let zero_segments = WriteToolLimits {
+        max_edit_segments: 0,
+        ..default_limits
+    };
+    assert_eq!(
+        zero_segments.validate().unwrap_err(),
+        DefinitionError::InvalidToolLimits
+    );
+
+    // Rejects above ceiling
+    let high_edit = WriteToolLimits {
+        max_edit_file_bytes: default_limits.max_edit_file_bytes + 1,
+        ..default_limits
+    };
+    assert_eq!(
+        high_edit.validate().unwrap_err(),
+        DefinitionError::InvalidToolLimits
+    );
+
+    let high_write = WriteToolLimits {
+        max_write_bytes: default_limits.max_write_bytes + 1,
+        ..default_limits
+    };
+    assert_eq!(
+        high_write.validate().unwrap_err(),
+        DefinitionError::InvalidToolLimits
+    );
+
+    let high_segments = WriteToolLimits {
+        max_edit_segments: default_limits.max_edit_segments + 1,
+        ..default_limits
+    };
+    assert_eq!(
+        high_segments.validate().unwrap_err(),
+        DefinitionError::InvalidToolLimits
+    );
+
+    // Serde roundtrip on SessionDefinition
+    let mut def = definition();
+    def.write_limits = Some(WriteToolLimits {
+        max_edit_file_bytes: 1024 * 1024,
+        max_write_bytes: 512 * 1024,
+        max_edit_segments: 16,
+    });
+    assert!(def.validate().is_ok());
+    let json_val = serde_json::to_value(&def).unwrap();
+    assert_eq!(json_val["write_limits"]["max_edit_segments"], 16);
+    let roundtripped: SessionDefinition = serde_json::from_value(json_val).unwrap();
+    assert_eq!(roundtripped.write_limits, def.write_limits);
 }

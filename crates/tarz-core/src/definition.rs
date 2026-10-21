@@ -3,7 +3,7 @@
 mod types;
 mod workspace;
 
-pub use workspace::{WorkspaceTool, WorkspaceToolLimits};
+pub use workspace::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 
 pub(crate) use types::RenderOptions;
 pub use types::{CredentialRef, DefinitionError, Provider, SessionDefinition};

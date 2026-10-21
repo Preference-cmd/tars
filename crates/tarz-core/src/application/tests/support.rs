@@ -29,6 +29,7 @@ pub(super) fn definition() -> SessionDefinition {
         workspace_root: None,
         tools: Vec::new(),
         tool_limits: Default::default(),
+        write_limits: None,
     }
 }
 pub(super) fn request(key: &str) -> SubmitRequest {

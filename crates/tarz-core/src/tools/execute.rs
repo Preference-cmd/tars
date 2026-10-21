@@ -3,9 +3,9 @@ use super::ToolMetrics;
 use super::operations::{OperationControl, run};
 use super::parameters::Params;
 use super::resources::{Counters, OperationGuard, ToolResources};
-use crate::definition::{WorkspaceTool, WorkspaceToolLimits};
+use crate::definition::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::session::ToolReporter;
-use crate::workspace::Workspace;
+use crate::workspace::{FileVersion, Workspace};
 use causa::kernel::{
     CallControl, Tool, ToolCallContext, ToolDefinition, ToolOutput, ToolResultPayload,
     ToolResultStatus,
@@ -19,28 +19,48 @@ use tokio_util::sync::CancellationToken;
 pub struct WorkspaceTools {
     workspace: Arc<Workspace>,
     limits: WorkspaceToolLimits,
+    pub(super) write_limits: WriteToolLimits,
     pub(super) local: Arc<Semaphore>,
     host: Arc<ToolResources>,
     counters: Arc<Counters>,
+    pub(super) observations: std::sync::Mutex<std::collections::HashMap<String, FileVersion>>,
     #[cfg(test)]
     pub(super) gate: std::sync::Mutex<Option<Arc<TestGate>>>,
+    #[cfg(test)]
+    pub(super) write_gate: std::sync::Mutex<Option<Arc<TestGate>>>,
 }
 
 impl WorkspaceTools {
-    /// Bind a selected root to frozen application limits and shared host slots.
+    /// Bind a selected root to frozen application limits, default write
+    /// limits and shared host slots.
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     pub fn new(
         workspace: Arc<Workspace>,
         limits: WorkspaceToolLimits,
+        host: Arc<ToolResources>,
+    ) -> Arc<Self> {
+        Self::with_write_limits(workspace, limits, WriteToolLimits::default(), host)
+    }
+
+    /// Bind a selected root to application limits, write limits, and shared host slots.
+    pub fn with_write_limits(
+        workspace: Arc<Workspace>,
+        limits: WorkspaceToolLimits,
+        write_limits: WriteToolLimits,
         host: Arc<ToolResources>,
     ) -> Arc<Self> {
         Arc::new(Self {
             workspace,
             local: Arc::new(Semaphore::new(limits.max_concurrent_operations)),
             limits,
+            write_limits,
             host,
             counters: Arc::new(Counters::default()),
+            observations: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(test)]
             gate: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            write_gate: std::sync::Mutex::new(None),
         })
     }
 
@@ -66,6 +86,11 @@ impl WorkspaceTools {
     #[cfg(test)]
     pub fn metrics(&self) -> ToolMetrics {
         self.counters.snapshot()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_write_gate(&self, gate: Option<Arc<TestGate>>) {
+        *self.write_gate.lock().expect("write gate lock") = gate;
     }
 }
 
@@ -123,11 +148,38 @@ impl Tool for WorkspaceToolImpl {
                 "Search single-line literal text (at most 1024 UTF-8 bytes) in bounded workspace files; partial scans are explicitly marked.",
                 json!({"path":{"type":"string","maxLength":4096},"query":{"type":"string","minLength":1,"maxLength":1024},"max_matches":{"type":"integer","minimum":1,"maximum":self.shared.limits.max_search_matches}}),
             ),
+            WorkspaceTool::WriteFile => (
+                "write_file",
+                "Write full UTF-8 content to a workspace-relative file, creating missing directories or overwriting atomically.",
+                json!({"path":{"type":"string","maxLength":4096},"content":{"type":"string"}}),
+            ),
+            WorkspaceTool::EditFile => (
+                "edit_file",
+                "Replace exact text segments in a workspace-relative file; all edits apply simultaneously against the original content.",
+                json!({
+                    "path": {"type":"string","maxLength":4096},
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": self.shared.write_limits.max_edit_segments,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": {"type": "string"},
+                                "new_text": {"type": "string"}
+                            },
+                            "required": ["old_text", "new_text"],
+                            "additionalProperties": false
+                        }
+                    }
+                }),
+            ),
         };
-        let required = if matches!(self.kind, WorkspaceTool::SearchText) {
-            json!(["path", "query"])
-        } else {
-            json!(["path"])
+        let required = match self.kind {
+            WorkspaceTool::SearchText => json!(["path", "query"]),
+            WorkspaceTool::WriteFile => json!(["path", "content"]),
+            WorkspaceTool::EditFile => json!(["path", "edits"]),
+            _ => json!(["path"]),
         };
         ToolDefinition::new(
             name,
@@ -136,6 +188,25 @@ impl Tool for WorkspaceToolImpl {
         )
     }
 
+    fn hints(&self) -> causa::kernel::ToolHints {
+        match self.kind {
+            WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText => {
+                causa::kernel::ToolHints::default()
+                    .with_read_only(true)
+                    .with_open_world(false)
+            }
+            WorkspaceTool::WriteFile => causa::kernel::ToolHints::default()
+                .with_read_only(false)
+                .with_destructive(true)
+                .with_idempotent(true)
+                .with_open_world(false),
+            WorkspaceTool::EditFile => causa::kernel::ToolHints::default()
+                .with_read_only(false)
+                .with_destructive(true)
+                .with_idempotent(false)
+                .with_open_world(false),
+        }
+    }
     async fn execute(
         &self,
         call: &ToolCallContext,
@@ -143,9 +214,16 @@ impl Tool for WorkspaceToolImpl {
         _store: Option<&dyn causa::kernel::ArtifactStore>,
     ) -> ToolResultPayload {
         let params = if call.input.tool_name == self.definition().name {
-            Params::decode(self.kind, &call.input.arguments, &self.shared.limits)
+            Params::decode(
+                self.kind,
+                &call.input.arguments,
+                &self.shared.limits,
+                &self.shared.write_limits,
+            )
         } else {
-            Err("tool name does not match bound capability")
+            Err(std::borrow::Cow::Borrowed(
+                "tool name does not match bound capability",
+            ))
         };
         let params = match params {
             Ok(params) => params,
@@ -153,7 +231,7 @@ impl Tool for WorkspaceToolImpl {
                 let output = result(
                     call,
                     ToolResultStatus::Rejected,
-                    serde_json::json!({"error":error}),
+                    serde_json::json!({"error": error.to_string()}),
                 );
                 self.reporter.returned(call, output.status.clone());
                 return output;
@@ -212,7 +290,16 @@ impl Tool for WorkspaceToolImpl {
             if let Some(gate) = shared.gate.lock().expect("gate lock").clone() {
                 gate.pause(false);
             }
-            let output = run(&shared.workspace, &params, &shared.limits, &worker_control);
+            let output = run(
+                &shared.workspace,
+                &params,
+                &shared.limits,
+                &shared.write_limits,
+                &shared.observations,
+                &worker_control,
+                #[cfg(test)]
+                &shared.write_gate,
+            );
             let mut output = match output {
                 Ok(content) => result(&call_owned, ToolResultStatus::Succeeded, content),
                 Err(error) => result(&call_owned, error.status(), serde_json::json!({"error":error.to_string()})),
@@ -248,6 +335,7 @@ pub(super) struct TestGate {
 }
 #[cfg(test)]
 impl TestGate {
+    #[allow(dead_code)]
     pub fn new(before_return: bool) -> Arc<Self> {
         Arc::new(Self {
             before_return,
@@ -256,7 +344,7 @@ impl TestGate {
             changed: std::sync::Condvar::new(),
         })
     }
-    fn pause(&self, before_return: bool) {
+    pub(super) fn pause(&self, before_return: bool) {
         if self.before_return != before_return {
             return;
         }

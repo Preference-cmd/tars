@@ -4,7 +4,7 @@ use std::sync::Arc;
 /// A selected root resource, pinned for the lifetime of an open session.
 pub struct Workspace {
     #[cfg(unix)]
-    root: rustix::fd::OwnedFd,
+    pub(crate) root: rustix::fd::OwnedFd,
     #[cfg(unix)]
     device: rustix::fs::Dev,
 }

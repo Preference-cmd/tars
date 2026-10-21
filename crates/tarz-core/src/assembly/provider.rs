@@ -36,9 +36,10 @@ pub(crate) fn assemble(
                 .expect("validated root"),
         )
         .map_err(|error| AssemblyError::Workspace(Arc::new(error)))?;
-        Some(WorkspaceTools::new(
+        Some(WorkspaceTools::with_write_limits(
             workspace,
             definition.tool_limits.clone(),
+            definition.write_limits.unwrap_or_default(),
             resources,
         ))
     };

@@ -36,6 +36,7 @@ fn definition(provider: Provider, endpoint: &str, root: &Path) -> SessionDefinit
         workspace_root: Some(root.canonicalize().unwrap()),
         tools: vec![WorkspaceTool::ReadFile],
         tool_limits: Default::default(),
+        write_limits: None,
     }
 }
 fn submit(session: &ManagedSession, key: &str) -> WorkRef {

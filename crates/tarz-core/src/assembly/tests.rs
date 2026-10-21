@@ -30,6 +30,7 @@ fn definition() -> SessionDefinition {
         workspace_root: None,
         tools: vec![],
         tool_limits: Default::default(),
+        write_limits: None,
     }
 }
 
