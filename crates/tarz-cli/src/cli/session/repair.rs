@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     process::ExitCode,
 };
-use tarz_core::application::{ClosePolicy, RepairError, RepairMode, SaveStatus, SessionHost};
+use tarz_core::application::{ClosePolicy, RepairError, RepairMode, SaveStatus};
 
 pub(super) async fn run(
     store: PathBuf,
@@ -16,7 +16,8 @@ pub(super) async fn run(
     recovery_dir: PathBuf,
     json_output: bool,
 ) -> ExitCode {
-    let host = SessionHost::new(Some(store));
+    // Repair edits saved materials only; it never needs a server.
+    let host = managed_execution::definition_host(store);
     let session = match host.open(id.clone().into()).await {
         Ok(session) => session,
         Err(error) => return early_failure(json_output, &error.to_string()),

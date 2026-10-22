@@ -18,6 +18,20 @@ pub enum WorkspaceTool {
 }
 
 impl WorkspaceTool {
+    /// Every built-in tool, in declaration order.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::ListDirectory,
+        Self::ReadFile,
+        Self::SearchText,
+        Self::WriteFile,
+        Self::EditFile,
+    ];
+
+    /// Whether `name` is the model-facing name of a built-in tool.
+    pub(crate) fn is_builtin_name(name: &str) -> bool {
+        Self::ALL.iter().any(|tool| tool.name() == name)
+    }
+
     /// Stable tool name advertised to model providers.
     pub fn name(self) -> &'static str {
         match self {

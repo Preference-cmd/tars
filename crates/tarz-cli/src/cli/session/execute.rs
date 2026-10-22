@@ -83,7 +83,8 @@ async fn create(
     };
     let prepared = PreparedCreate::persistent(definition, context.clone());
     let id = prepared.conversation_id().clone();
-    let host = SessionHost::new(Some(store));
+    // Creating saves the definition and closes; it starts no MCP server.
+    let host = managed_execution::definition_host(store);
     let session = match host.create(prepared).await {
         Ok(session) => session,
         Err(error) => {
@@ -171,6 +172,7 @@ async fn run_saved(
         Ok(session) => session,
         Err(error) => return early_failure(json_output, &error.to_string()),
     };
+    managed_execution::report_mcp_status(&session);
     if let Some(mode) = permission_mode {
         if let Err(error) = session.set_permission_mode(mode) {
             let _ = host

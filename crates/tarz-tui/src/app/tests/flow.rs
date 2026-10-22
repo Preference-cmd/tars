@@ -162,3 +162,52 @@ async fn save_failure_keeps_result_owner_and_original_retry_then_export_is_indep
         .await
         .unwrap();
 }
+
+#[test]
+fn opened_notice_names_unavailable_mcp_servers_on_one_bounded_line() {
+    use crate::app::jobs::opened_notice;
+    use tarz_core::{McpServerStatus, McpSkippedTool};
+
+    assert_eq!(
+        opened_notice(&[]),
+        "Opened; only materials are restored, not old work records"
+    );
+    let skipped = McpSkippedTool {
+        name: "mcp_git_bad.name".into(),
+        reason: "invalid name".into(),
+    };
+    let status = vec![
+        McpServerStatus {
+            id: "git".into(),
+            ready: false,
+            reason: Some("startup timed out after 1s".into()),
+            skipped_tools: Vec::new(),
+        },
+        McpServerStatus {
+            id: "docs".into(),
+            ready: false,
+            reason: Some("x".repeat(600)),
+            skipped_tools: Vec::new(),
+        },
+        McpServerStatus {
+            id: "ok".into(),
+            ready: true,
+            reason: None,
+            skipped_tools: vec![skipped.clone(), skipped],
+        },
+    ];
+    assert_eq!(
+        opened_notice(&status),
+        "Opened; MCP server 'git' is unavailable: startup timed out after 1s \
+         (+1 more unavailable); 2 MCP tools skipped"
+    );
+    let long = vec![McpServerStatus {
+        id: "docs".into(),
+        ready: false,
+        reason: Some("漢".repeat(200)),
+        skipped_tools: Vec::new(),
+    }];
+    let notice = opened_notice(&long);
+    assert!(notice.len() <= 256 && !notice.contains('\n'));
+    assert!(notice.starts_with("Opened; MCP server 'docs' is unavailable: 漢"));
+}

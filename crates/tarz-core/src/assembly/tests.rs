@@ -47,6 +47,7 @@ fn invalid_definition_is_rejected_before_credential_resolution() {
             Context::default(),
             crate::tools::ToolResources::new(16),
             crate::permission::PermissionMode::Ask,
+            None,
         ),
         Err(AssemblyError::Definition(DefinitionError::BlankModel))
     ));
@@ -61,6 +62,7 @@ fn missing_credentials_report_only_a_sanitized_resolution_error() {
         Context::default(),
         crate::tools::ToolResources::new(16),
         crate::permission::PermissionMode::Ask,
+        None,
     ) {
         Ok(_) => panic!("missing credential accepted"),
         Err(error) => error,
@@ -136,6 +138,7 @@ fn unavailable_workspace_is_rejected_before_credentials_or_model_access() {
             Context::default(),
             crate::tools::ToolResources::new(16),
             crate::permission::PermissionMode::Ask,
+            None,
         ),
         Err(AssemblyError::Workspace(_))
     ));
@@ -195,6 +198,7 @@ fn unsupported_platform_rejects_enabled_workspace_but_still_assembles_empty_cata
             Context::default(),
             crate::tools::ToolResources::new(16),
             crate::permission::PermissionMode::Ask,
+            None,
         )
         .is_ok()
     );

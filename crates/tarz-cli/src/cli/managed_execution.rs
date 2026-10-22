@@ -1,9 +1,12 @@
 use causa::runtime::new_block_id;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tarz_core::application::{ApplicationError, ManagedSession, SaveStatus, text_input};
+use tarz_core::McpServerStatus;
+use tarz_core::application::{
+    ApplicationError, HostOptions, ManagedSession, SaveStatus, SessionHost, text_input,
+};
 use tarz_core::session::{SubmitRequest, WorkRef, WorkResult, WorkState};
 
 pub(super) struct WorkReport {
@@ -11,6 +14,46 @@ pub(super) struct WorkReport {
     pub result: Arc<WorkResult>,
     pub save: Result<SaveStatus, ApplicationError>,
     pub signal_failed: bool,
+}
+
+/// A host for commands that save or repair a session and run no work: it
+/// opens sessions without starting their MCP servers.
+pub(super) fn definition_host(store: PathBuf) -> SessionHost {
+    let options = HostOptions {
+        connect_mcp_servers: false,
+        ..HostOptions::default()
+    };
+    SessionHost::with_options(Some(store), options).expect("default bounds are positive")
+}
+
+/// Stderr lines for MCP servers that did not start and for tools left out of
+/// the model's list. The status text is already bounded and escaped.
+pub(super) fn mcp_notices(status: &[McpServerStatus]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for server in status {
+        if !server.ready {
+            let reason = server.reason.as_deref().unwrap_or("unknown reason");
+            lines.push(format!(
+                "Tarz: MCP server '{}' is unavailable: {reason}",
+                server.id
+            ));
+        }
+        for tool in &server.skipped_tools {
+            lines.push(format!(
+                "Tarz: MCP tool skipped: {} ({})",
+                tool.name, tool.reason
+            ));
+        }
+    }
+    lines
+}
+
+/// Print [`mcp_notices`] for an opened session to stderr.
+pub(super) fn report_mcp_status(session: &ManagedSession) {
+    let mut stderr = io::stderr().lock();
+    for line in mcp_notices(&session.mcp_status()) {
+        let _ = writeln!(stderr, "{line}");
+    }
 }
 
 pub(super) fn input_text(input: Option<String>) -> Result<String, &'static str> {
@@ -93,4 +136,39 @@ pub(super) fn recovery(
     tarz_core::material::save_new(&path, &snapshot.context)
         .map_err(|_| "recovery material export failed")?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mcp_notices;
+    use tarz_core::{McpServerStatus, McpSkippedTool};
+
+    #[test]
+    fn notices_name_unavailable_servers_and_skipped_tools() {
+        let status = [
+            McpServerStatus {
+                id: "git".into(),
+                ready: false,
+                reason: Some("startup timed out after 1s".into()),
+                skipped_tools: Vec::new(),
+            },
+            McpServerStatus {
+                id: "docs".into(),
+                ready: true,
+                reason: None,
+                skipped_tools: vec![McpSkippedTool {
+                    name: "mcp_docs_bad.name".into(),
+                    reason: "invalid name".into(),
+                }],
+            },
+        ];
+        assert_eq!(
+            mcp_notices(&status),
+            [
+                "Tarz: MCP server 'git' is unavailable: startup timed out after 1s",
+                "Tarz: MCP tool skipped: mcp_docs_bad.name (invalid name)",
+            ]
+        );
+        assert!(mcp_notices(&[]).is_empty());
+    }
 }

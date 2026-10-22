@@ -58,12 +58,17 @@ pub struct HostOptions {
     pub max_active_sessions: usize,
     /// Maximum concurrently running blocking storage operations; must be positive.
     pub max_storage_operations: usize,
+    /// Whether opening a session connects the MCP servers its definition names.
+    /// A host that only saves or repairs definitions turns this off so it
+    /// starts no server processes; its sessions then offer only built-in tools.
+    pub connect_mcp_servers: bool,
 }
 impl Default for HostOptions {
     fn default() -> Self {
         Self {
             max_active_sessions: 32,
             max_storage_operations: 4,
+            connect_mcp_servers: true,
         }
     }
 }

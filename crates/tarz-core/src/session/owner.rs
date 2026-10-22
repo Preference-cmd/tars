@@ -13,6 +13,7 @@ pub struct Session {
     pub(super) shared: Arc<Shared>,
     standard_builtin_repair: bool,
     pub(crate) permissions: Option<Arc<crate::permission::PermissionHub>>,
+    mcp: Option<Arc<crate::mcp::McpRuntime>>,
     #[cfg(test)]
     pub(crate) workspace_tools: Option<Arc<crate::tools::WorkspaceTools>>,
     #[cfg(test)]
@@ -27,6 +28,22 @@ impl Session {
     ) -> Self {
         self.permissions = Some(permissions);
         self
+    }
+
+    pub(crate) fn with_mcp(mut self, mcp: Arc<crate::mcp::McpRuntime>) -> Self {
+        self.mcp = Some(mcp);
+        self
+    }
+
+    /// Release the instance's MCP connections so the close path can await them
+    /// without holding the application lock.
+    pub(crate) fn take_mcp(&mut self) -> Option<Arc<crate::mcp::McpRuntime>> {
+        self.mcp.take()
+    }
+
+    /// Snapshot of this instance's MCP servers, or an empty list without MCP.
+    pub(crate) fn mcp_status(&self) -> Vec<crate::McpServerStatus> {
+        self.mcp.as_ref().map_or_else(Vec::new, |mcp| mcp.status())
     }
 
     /// Read the instance's active permission mode and revision.
@@ -116,6 +133,7 @@ impl Session {
         Self {
             standard_builtin_repair: false,
             permissions: None,
+            mcp: None,
             #[cfg(test)]
             workspace_tools: None,
             #[cfg(test)]

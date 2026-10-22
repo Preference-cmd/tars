@@ -26,6 +26,7 @@ pub(crate) fn assemble(
     context: Context,
     resources: Arc<ToolResources>,
     current_mode: crate::permission::PermissionMode,
+    mcp: Option<Arc<crate::mcp::McpRuntime>>,
 ) -> Result<Session, AssemblyError> {
     definition.validate()?;
     let workspace_tools = if definition.tools.is_empty() {
@@ -58,12 +59,21 @@ pub(crate) fn assemble(
     );
     let options = definition.run_options();
     let selected = definition.tools.clone();
-    let call_timeout = (!selected.is_empty())
+    let builtin_timeout = (!selected.is_empty())
         .then(|| std::time::Duration::from_secs(definition.tool_limits.call_timeout_secs));
+    // The executor deadline applies to every call, built-in and MCP alike.
+    // Each tool narrows it to its own frozen deadline (built-in limits or the
+    // server's `tool_timeout_sec`), so the shared value is the largest.
+    let mcp_timeout = mcp.as_ref().and_then(|mcp| mcp.max_tool_timeout());
+    let call_timeout = match (builtin_timeout, mcp_timeout) {
+        (Some(builtin), Some(mcp)) => Some(builtin.max(mcp)),
+        (builtin, mcp) => builtin.or(mcp),
+    };
     let permissions = Arc::new(crate::permission::PermissionHub::new(current_mode));
     let view = permissions.view();
     let approvals = permissions.approvals();
     let session_permissions = permissions.clone();
+    let mcp_for_work = mcp.clone();
     #[cfg(test)]
     let test_processors = Arc::new(std::sync::Mutex::new(
         Vec::<Arc<dyn ToolBatchProcessor>>::new(),
@@ -95,6 +105,10 @@ pub(crate) fn assemble(
                     reporter.clone(),
                     prepared_writes.clone(),
                 )));
+            }
+            // Every tool that can have effects is gated: built-in tools and
+            // MCP tools alike pass the permission processor.
+            if workspace_tools.is_some() || mcp_for_work.is_some() {
                 before.push(Arc::new(crate::permission::PermissionProcessor::new(
                     work,
                     reporter,
@@ -102,6 +116,7 @@ pub(crate) fn assemble(
                     prepared_writes,
                 )));
             }
+            let mcp = mcp_for_work.clone();
             #[cfg(test)]
             {
                 let extras = test_processors_capture
@@ -117,6 +132,13 @@ pub(crate) fn assemble(
                     options
                 })
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;
+                if let Some(mcp) = &mcp {
+                    for source in mcp.sources() {
+                        executor.register_dynamic(source).map_err(|error| {
+                            Box::new(error) as Box<dyn std::error::Error + Send + Sync>
+                        })?;
+                    }
+                }
                 Ok((
                     Arc::new(TurnRunner::new(gateway, Arc::new(executor))),
                     options,
@@ -127,6 +149,10 @@ pub(crate) fn assemble(
     )
     .allow_builtin_repair()
     .with_permissions(session_permissions);
+    let session = match mcp {
+        Some(mcp) => session.with_mcp(mcp),
+        None => session,
+    };
 
     #[cfg(test)]
     let session = {

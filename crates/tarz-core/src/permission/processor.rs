@@ -128,6 +128,41 @@ impl ToolBatchProcessor for PermissionProcessor {
             })?;
             let (mode, revision) = view.get();
 
+            // An MCP call reaches a third party with the user's authority. No
+            // confirmation subject describes such a call yet, so only full
+            // access runs it; every other mode refuses it. Every MCP tool name
+            // carries this prefix, and other unknown names keep the built-in
+            // classification below.
+            if tool_name.starts_with("mcp_") {
+                let refused = mode != PermissionMode::FullAccess;
+                self.reporter.record_permission_decision(
+                    &call,
+                    &invocation_id,
+                    PermissionDecision {
+                        mode,
+                        revision,
+                        kind: if refused {
+                            PermissionDecisionKind::ModeRefused
+                        } else {
+                            PermissionDecisionKind::DirectExecution
+                        },
+                    },
+                );
+                if refused {
+                    resolve_call(
+                        batch,
+                        call_block_id,
+                        ToolResultStatus::Rejected,
+                        serde_json::json!({
+                            "error": format!(
+                                "MCP tool calls run only in 'full-access' mode (current mode: {mode})"
+                            )
+                        }),
+                    )?;
+                }
+                continue;
+            }
+
             let tool_class = ToolPermissionClass::classify(ctx.hints(&tool_name));
 
             match tool_class {

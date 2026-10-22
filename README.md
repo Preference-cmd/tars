@@ -18,7 +18,7 @@ Tarz 是 Causa 的验证项目：用一个真实的 Agent 应用检验 Causa 的
 
 当前已实现单会话工作闭环，并提供离线 CLI 演示：原子提交、同键重放、逐工作装配、取消与结果观察、材料编辑及保存/导入。演示使用脚本模型和真实本地工具，经过 Session 与 Causa runner 执行，不需要凭据或网络。
 
-`tarz run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tarz session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。`tarz-tui` 提供原生终端原型与临时流式正文预览，两端共用 TOML 配置，并可显式选择工作区和工作区工具。MCP 的共享配置 `[mcp_servers.*]`、预设/CLI/TUI 选择与定义快照已接通，运行期连接尚未接通；GUI、命令执行、父子 Agent 和安装渠道尚未实现；CLI 与 TUI 可以写入文件：`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；`tarz-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。当前开发版本为 `0.0.0`，尚无公开发布。
+`tarz run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tarz session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。`tarz-tui` 提供原生终端原型与临时流式正文预览，两端共用 TOML 配置，并可显式选择工作区和工作区工具。MCP 的共享配置 `[mcp_servers.*]`、预设/CLI/TUI 选择、定义快照和运行期工具已接通（只接通工具，不含 resources/prompts/sampling），MCP 调用目前只在 `full-access` 模式下执行、其他模式拒绝，确认、完整文档与真实服务验证待补；GUI、命令执行、父子 Agent 和安装渠道尚未实现；CLI 与 TUI 可以写入文件：`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；`tarz-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。当前开发版本为 `0.0.0`，尚无公开发布。
 
 ## 本地构建与运行
 

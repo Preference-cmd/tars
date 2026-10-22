@@ -42,6 +42,7 @@ async fn execute(options: RunOptions) -> ExitCode {
         Ok(session) => session,
         Err(error) => return early_failure(options.json, &error.to_string()),
     };
+    managed_execution::report_mcp_status(&session);
     let connect_approvals = super::approval::should_connect_stdio(used_stdin_input);
     let report = match managed_execution::work(&session, input, connect_approvals).await {
         Ok(report) => report,

@@ -36,37 +36,56 @@ pub(super) async fn finish(host: &Arc<HostInner>, entry: &Arc<Entry>, policy: Cl
             .as_ref()
             .map(|_| CommitDisposition::NotSubmitted)
     };
+    // Release MCP connections before publishing Closed. The owner is removed
+    // from the lock scope so no application lock is held across the wait; a
+    // policy replacement while we wait leaves the rest to the next attempt.
+    let mcp = {
+        let entries = host.entries.lock().expect("directory has no callbacks");
+        let mut state = entry.lock();
+        if state.closing != Some(policy) {
+            return false;
+        }
+        if policy == ClosePolicy::Save && state.persistent {
+            let error = if state.fault.is_some() {
+                state.fault.clone()
+            } else if state.pending.is_some() {
+                state.error.clone().or(Some(ApplicationError::SavePending))
+            } else if !matches!(state.save, SaveStatus::Saved { .. }) {
+                state.error.clone().or_else(|| {
+                    Some(ApplicationError::Faulted(
+                        "latest materials are not confirmed".into(),
+                    ))
+                })
+            } else {
+                state
+                    .owner
+                    .as_mut()
+                    .and_then(|owner| owner.with_context(|_| ()).err())
+                    .map(Into::into)
+            };
+            if let Some(error) = error {
+                state.error = Some(error);
+                state.close_in_flight = false;
+                entry.changed();
+                return false;
+            }
+        }
+        let mcp = state.owner.as_mut().and_then(|owner| owner.take_mcp());
+        drop(state);
+        drop(entries);
+        mcp
+    };
+    if let Some(mcp) = mcp {
+        // Close failures are not a close outcome; the transport is gone either
+        // way and the session state must still be published.
+        mcp.close().await;
+    }
     let mut entries = host.entries.lock().expect("directory has no callbacks");
     let mut state = entry.lock();
     // Final external-host disposal may replace an abandoned Save with Discard.
     // A stale continuation must not clear that cleanup request or its authority.
     if state.closing != Some(policy) {
         return false;
-    }
-    if policy == ClosePolicy::Save && state.persistent {
-        let error = if state.fault.is_some() {
-            state.fault.clone()
-        } else if state.pending.is_some() {
-            state.error.clone().or(Some(ApplicationError::SavePending))
-        } else if !matches!(state.save, SaveStatus::Saved { .. }) {
-            state.error.clone().or_else(|| {
-                Some(ApplicationError::Faulted(
-                    "latest materials are not confirmed".into(),
-                ))
-            })
-        } else {
-            state
-                .owner
-                .as_mut()
-                .and_then(|owner| owner.with_context(|_| ()).err())
-                .map(Into::into)
-        };
-        if let Some(error) = error {
-            state.error = Some(error);
-            state.close_in_flight = false;
-            entry.changed();
-            return false;
-        }
     }
     if let Some(CommitDisposition::Applied { revision }) = &disposition {
         state.revision = Some(*revision);

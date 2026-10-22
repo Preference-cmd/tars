@@ -75,28 +75,40 @@ pub(super) async fn initialize(
     };
     #[cfg(test)]
     let fixture = host.assemble.lock().expect("test fixture").clone();
+    // A test fixture injects its own Session and never starts servers.
+    #[cfg(test)]
+    let connect = fixture.is_none() && host.options.connect_mcp_servers;
+    #[cfg(not(test))]
+    let connect = host.options.connect_mcp_servers;
+    let mcp = if connect {
+        start_mcp(&definition).await?
+    } else {
+        None
+    };
     #[cfg(test)]
     let owner = if let Some(assemble) = fixture {
         assemble(&definition, entry.target.conversation_id.clone(), context)?
     } else {
-        crate::assembly::assemble(
+        assembled(
+            host,
             &definition,
             entry.target.conversation_id.clone(),
             context,
-            host.tool_resources.clone(),
             current_mode,
+            mcp,
         )
-        .map_err(|error| ApplicationError::Assembly(error.to_string()))?
+        .await?
     };
     #[cfg(not(test))]
-    let owner = crate::assembly::assemble(
+    let owner = assembled(
+        host,
         &definition,
         entry.target.conversation_id.clone(),
         context,
-        host.tool_resources.clone(),
         current_mode,
+        mcp,
     )
-    .map_err(|error| ApplicationError::Assembly(error.to_string()))?;
+    .await?;
     let mut state = entry.lock();
     state.handle = Some(owner.handle());
     state.owner = Some(owner);
@@ -127,4 +139,39 @@ pub(super) async fn initialize(
     }
     entry.changed();
     Ok(())
+}
+
+async fn start_mcp(
+    definition: &crate::definition::SessionDefinition,
+) -> Result<Option<Arc<crate::mcp::McpRuntime>>, ApplicationError> {
+    crate::mcp::McpRuntime::start(definition)
+        .await
+        .map_err(|error| ApplicationError::Assembly(error.to_string()))
+}
+
+async fn assembled(
+    host: &Arc<HostInner>,
+    definition: &crate::definition::SessionDefinition,
+    conversation_id: crate::session::ConversationId,
+    context: causa::kernel::Context,
+    current_mode: crate::permission::PermissionMode,
+    mcp: Option<Arc<crate::mcp::McpRuntime>>,
+) -> Result<crate::session::Session, ApplicationError> {
+    match crate::assembly::assemble(
+        definition,
+        conversation_id,
+        context,
+        host.tool_resources.clone(),
+        current_mode,
+        mcp.clone(),
+    ) {
+        Ok(owner) => Ok(owner),
+        Err(error) => {
+            // Assembly owns nothing yet, so close the connections it cannot use.
+            if let Some(mcp) = mcp {
+                mcp.close().await;
+            }
+            Err(ApplicationError::Assembly(error.to_string()))
+        }
+    }
 }

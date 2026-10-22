@@ -28,6 +28,18 @@ impl ManagedSession {
             .and_then(|owner| owner.permission_mode())
     }
 
+    /// Snapshot of the instance's MCP servers, in definition order.
+    ///
+    /// Returns an empty list for instances without an MCP runtime and for an
+    /// instance whose session is already closed.
+    pub fn mcp_status(&self) -> Vec<crate::McpServerStatus> {
+        let state = self.entry.lock();
+        state
+            .owner
+            .as_ref()
+            .map_or_else(Vec::new, |owner| owner.mcp_status())
+    }
+
     /// Change the instance's active permission mode, incrementing revision on actual change.
     ///
     /// If the session is closing, this returns `Err(ApplicationError::Closing)`.

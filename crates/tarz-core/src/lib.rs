@@ -10,8 +10,11 @@ pub(crate) mod assembly;
 pub mod config;
 pub mod definition;
 pub mod material;
+mod mcp;
 pub mod permission;
 pub mod session;
 mod store;
 pub(crate) mod tools;
 pub(crate) mod workspace;
+
+pub use mcp::{McpServerStatus, McpSkippedTool};

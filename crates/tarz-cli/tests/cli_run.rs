@@ -376,3 +376,66 @@ fn the_configured_output_limit_and_effort_reach_the_request() {
     assert_eq!(body["max_tokens"], 2048);
     assert_eq!(body["output_config"]["effort"], "low");
 }
+
+#[test]
+fn mcp_servers_that_fail_to_start_are_reported_on_stderr_but_not_in_json() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "version = 1\nstore = 'store'\nrecovery_dir = '.'\n\
+         [mcp_servers.absent]\ncommand = '/nonexistent/tarz-mcp-absent'\n\
+         [mcp_servers.needed]\ncommand = '/nonexistent/tarz-mcp-needed'\nrequired = true\n",
+    )
+    .unwrap();
+    let (endpoint, _requests) = server(200, chat(), Duration::ZERO);
+    let output = command("openai-chat", &endpoint)
+        .env_remove("TARZ_CONFIG")
+        .env("XDG_CONFIG_HOME", directory.path())
+        .arg("--config")
+        .arg(&config)
+        .args(["--mcp", "absent", "--input", "user question", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Tarz: MCP server 'absent' is unavailable: "),
+        "{stderr}"
+    );
+    let run_report = report(&output);
+    assert_eq!(run_report["status"], "completed");
+    let keys: Vec<&str> = run_report
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(keys.iter().all(|key| !key.contains("mcp")), "{keys:?}");
+
+    // Creating saves the definition without starting servers, so even a
+    // required server that cannot start does not block it.
+    let created = Command::new(env!("CARGO_BIN_EXE_tarz"))
+        .env_remove("TARZ_CONFIG")
+        .env("XDG_CONFIG_HOME", directory.path())
+        .env("TARZ_TEST_KEY", "fixture-secret")
+        .current_dir(directory.path())
+        .args(["session", "create", "--config"])
+        .arg(&config)
+        .args([
+            "--provider",
+            "openai-chat",
+            "--model",
+            "fixture-model",
+            "--api-key-env",
+            "TARZ_TEST_KEY",
+            "--mcp",
+            "needed",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "{created:?}");
+    assert!(created.stderr.is_empty(), "{created:?}");
+    assert_eq!(report(&created)["status"], "created");
+}

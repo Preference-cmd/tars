@@ -104,6 +104,39 @@ fn result_label(result: &WorkResult) -> &'static str {
         _ => "Failed",
     }
 }
+/// Longest notice shown after opening, in bytes.
+const MAX_OPENED_NOTICE_BYTES: usize = 256;
+
+/// The one-line notice after opening. It names the first MCP server that did
+/// not start and counts the rest and the skipped tools; the status text is
+/// already escaped, and the line is cut to [`MAX_OPENED_NOTICE_BYTES`].
+pub(super) fn opened_notice(status: &[tarz_core::McpServerStatus]) -> String {
+    let mut notice = String::from("Opened; only materials are restored, not old work records");
+    let unavailable: Vec<_> = status.iter().filter(|server| !server.ready).collect();
+    let skipped: usize = status.iter().map(|server| server.skipped_tools.len()).sum();
+    if let Some(first) = unavailable.first() {
+        notice = format!(
+            "Opened; MCP server '{}' is unavailable: {}",
+            first.id,
+            first.reason.as_deref().unwrap_or("unknown reason")
+        );
+        if unavailable.len() > 1 {
+            notice.push_str(&format!(" (+{} more unavailable)", unavailable.len() - 1));
+        }
+    }
+    if skipped > 0 {
+        notice.push_str(&format!("; {skipped} MCP tools skipped"));
+    }
+    if notice.len() > MAX_OPENED_NOTICE_BYTES {
+        let mut end = MAX_OPENED_NOTICE_BYTES;
+        while !notice.is_char_boundary(end) {
+            end -= 1;
+        }
+        notice.truncate(end);
+    }
+    notice
+}
+
 /// The gateway's description of a failed model call, for the session notice.
 fn failure_notice(result: &WorkResult) -> Option<String> {
     use causa::runtime::{TurnInterruption, TurnResult};
@@ -186,10 +219,9 @@ impl App {
                             entry.approval_reason = None;
                             entry.approval_scroll = 0;
                             entry.title = session.definition().model;
+                            entry.notice = opened_notice(&session.mcp_status());
                             entry.session = Some(session);
                             entry.prepared = None;
-                            entry.notice =
-                                "Opened; only materials are restored, not old work records".into();
                         }
                         Err(error) => {
                             entry.notice =
