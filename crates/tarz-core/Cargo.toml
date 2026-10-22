@@ -25,4 +25,6 @@ similar.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "io-std", "io-util"] }
+# Test-only MCP server fixture; normal code uses Causa's client adapter.
+rmcp = { version = "3.6", features = ["server", "transport-async-rw"] }
