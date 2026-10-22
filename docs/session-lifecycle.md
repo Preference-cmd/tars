@@ -1,6 +1,6 @@
 # Session 的组装与运行机制
 
-本文说明 2026-10-05 的当前实现。设计与验收集中在 [Session 结构与存储提案](../.agents/pipelines/proposals/architecture/2026-10-03-session-structure-and-storage.md)，本机测试和资源原始数据见[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
+本文说明 2026-10-05 的当前实现。设计与验收集中在 [Session 结构与存储提案](../.agents/pipelines/archives/architecture/2026-10-03-session-structure-and-storage.md)，本机测试和资源原始数据见[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
 
 ## 1. 创建和重开
 
