@@ -1,11 +1,32 @@
 # AGENTS.md — Tarz
 
-Tarz is an agent application built on Causa. It ships as an application, not a
-crates.io library or a public Rust SDK. All Cargo packages must remain
-`publish = false`.
+Tarz is the validation project for Causa: a real agent application that
+exercises Causa's public contracts and feeds what it finds back into Causa.
+Validation comes first; the application is how it is done. Tarz ships as an
+application, not a crates.io library or a public Rust SDK. All Cargo packages
+must remain `publish = false`.
 
 `CLAUDE.md` is a symlink to this file; edit this file only. Read
 `AGENTS.local.md` when present for machine-local workflow rules.
+
+## Purpose
+
+- **Validate.** Use Causa the way an outside host does, through the public
+  facade and the published crates.io release, under real conditions:
+  persistent sessions, continuation after a cancel, workspace tools with
+  write confirmation, and live runs on the three wire protocols.
+- **Improve.** For each problem found, decide whether it belongs to Tarz,
+  Causa or their integration. A Causa change is made in the Causa repository
+  under its rules and released there; Tarz then adopts it by upgrading the
+  dependency and reruns the checks that found the problem.
+- **Order work by what it validates.** Tarz has to be usable, because only
+  real use produces evidence. Prefer work that exercises Causa; work that only
+  serves distribution (install channels, GUI, more platforms) comes later.
+- **Keep the layers apart.** Do not move Tarz policy into Causa. Ask Causa for
+  the general fact or channel a host needs and keep the vocabulary and the
+  decision in Tarz: Tarz's permission modes stay here, while Causa carries
+  only tool hints and per-run host data. A passing Tarz test is evidence for
+  that integration, not proof of a Causa guarantee.
 
 ## Read by task
 

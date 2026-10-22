@@ -1,6 +1,20 @@
 # Tarz
 
-Tarz 是基于 Causa 的 Agent 应用，以可安装、可运行程序交付，不发布到 crates.io。
+Tarz 是 Causa 的验证项目：用一个真实的 Agent 应用检验 Causa 的公开契约，再把使用中发现的问题反馈给 Causa，推动它改进。验证为主，应用是实现验证的载体。Tarz 以可安装、可运行的程序交付，不发布到 crates.io。
+
+## 目的
+
+- **验证。** Causa 只提供上下文材料的契约和单次执行，会话、保存、工具策略和界面都留给宿主。Tarz 就是这样一个宿主，在真实条件下使用这些契约：持久会话、取消后继续、工作区工具与写入确认，以及在三种协议的真实端点上运行。它要回答的是：这些契约放进真实应用里够不够用、行为对不对。
+- **改进。** 发现的问题先判断属于 Tarz、Causa 还是两者的接线。属于 Causa 的，在 Causa 仓库按它的规则修改并发布，Tarz 再升级依赖接入，并重跑发现问题的那项检查。例如 Causa 0.0.7 的 Chat 输出上限字段来自 Tarz 的真实端点测试，0.1.2 的工具提示与处理器数据来自 Tarz 的写入工具设计。
+- **应用是载体。** Tarz 是能实际使用的 CLI 和 TUI 应用，因为只有真实使用才能产生有效的证据。安排工作时，优先做能检验 Causa 的能力；只为分发服务的工作（安装渠道、GUI、更多平台）排在后面。
+
+边界：
+
+- Tarz 只经 Causa 的公开 facade 使用 crates.io 上已发布的版本，不复制或引入 Causa 源码，所以验证的就是外部用户实际拿到的东西。
+- 改进 Causa 时不把 Tarz 自己的策略放进去。例如许可模式归 Tarz，Causa 只携带工具声明的提示和每轮的宿主数据，许可的词汇和决定仍由 Tarz 定。
+- Tarz 的测试通过，只说明这一处接线可行，不能代替 Causa 自己的测试。
+
+## 当前状态
 
 当前已实现单会话工作闭环，并提供离线 CLI 演示：原子提交、同键重放、逐工作装配、取消与结果观察、材料编辑及保存/导入。演示使用脚本模型和真实本地工具，经过 Session 与 Causa runner 执行，不需要凭据或网络。
 
@@ -65,7 +79,7 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 ## 项目入口
 
-根目录是 Cargo workspace；`crates/tarz-core/` 提供共享应用核心与配置，`crates/tarz-cli/` 提供 `tarz`，`crates/tarz-tui/` 提供 `tarz-tui` 原型。默认 `cargo run/build` 仍选择 CLI；TUI 使用 `cargo run -p tarz-tui -- --config /path/to/config.toml`，全部构建用 `cargo build --workspace --locked`。入口各自单向依赖核心，所有包 `publish = false`。Causa 以 crates.io 上发布的 `causa 0.0.3` 接入，启用 runtime 与 providers，版本由 Cargo.lock 固定；构建不再需要同级目录的 Causa checkout。独立分发另行处理。
+根目录是 Cargo workspace；`crates/tarz-core/` 提供共享应用核心与配置，`crates/tarz-cli/` 提供 `tarz`，`crates/tarz-tui/` 提供 `tarz-tui` 原型。默认 `cargo run/build` 仍选择 CLI；TUI 使用 `cargo run -p tarz-tui -- --config /path/to/config.toml`，全部构建用 `cargo build --workspace --locked`。入口各自单向依赖核心，所有包 `publish = false`。Causa 以 crates.io 上发布的 `causa = "0.1"` 接入，启用 runtime 与 providers，具体版本由 Cargo.lock 固定；构建不再需要同级目录的 Causa checkout。独立分发另行处理。
 
 CLI/TUI 共用 [TOML 配置](docs/configuration.md)，支持全局默认路径、`TARZ_CONFIG`、`--config` 和命名模型预设；显式参数优先。可从 [config.example.toml](config.example.toml) 开始填写。已有会话重开不受全局模型预设变更影响。
 
