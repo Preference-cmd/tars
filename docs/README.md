@@ -78,6 +78,7 @@ cargo build --workspace --locked --release
 ./target/release/tarz-tui --help
 ./target/release/tarz demo
 node scripts/verify-proposals.mjs --links
+cargo deny check   # 安全公告、许可证、来源；规则在 deny.toml
 ```
 
 测试使用本地 HTTP、脚本模型/工具、真实文件、进程和确定性屏障，无线上模型凭据。Unix 测试发 SIGINT 与 kill；工具访问实现仅开放 Linux/macOS，本轮实测为 macOS。Windows 无工具功能与各平台远端 CI 尚需各自证据。CI 配置包含 Linux/macOS/Windows，不代表已在每个平台执行。
