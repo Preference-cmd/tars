@@ -1,3 +1,4 @@
+use super::mcp::McpServerConfig;
 use super::workspace::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::session::SessionConfig;
 use causa::kernel::ModelRef;
@@ -93,6 +94,11 @@ pub struct SessionDefinition {
     /// without new features unmodified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<crate::permission::PermissionMode>,
+    /// Frozen snapshots of the MCP servers selected when the session was created.
+    /// Empty when no server is enabled. A record saved before this field existed
+    /// reads as empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 // Unlike sparse startup configuration, a record must explicitly retain no-root
@@ -112,26 +118,15 @@ impl SessionDefinition {
             return Err(DefinitionError::BlankModel);
         }
         let CredentialRef::Environment(name) = &self.credential;
-        let mut bytes = name.bytes();
-        if !bytes
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
-            || !bytes.all(|c| c.is_ascii_alphanumeric() || c == b'_')
-        {
+        if !valid_environment_name(name) {
             return Err(DefinitionError::InvalidCredentialReference);
         }
-        if let Some(endpoint) = &self.endpoint {
-            let url = url::Url::parse(endpoint).map_err(|_| DefinitionError::InvalidEndpoint)?;
-            if !matches!(url.scheme(), "http" | "https")
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || endpoint.chars().any(char::is_whitespace)
-            {
-                return Err(DefinitionError::InvalidEndpoint);
-            }
+        if self
+            .endpoint
+            .as_deref()
+            .is_some_and(|endpoint| !valid_http_endpoint(endpoint))
+        {
+            return Err(DefinitionError::InvalidEndpoint);
         }
         if self.work_timeout_secs.is_some_and(|seconds| {
             Instant::now()
@@ -165,6 +160,18 @@ impl SessionDefinition {
         self.tool_limits.validate()?;
         if let Some(write_limits) = &self.write_limits {
             write_limits.validate()?;
+        }
+        if self.mcp_servers.len() > 8 {
+            return Err(DefinitionError::InvalidMcpConfig);
+        }
+        for (index, server) in self.mcp_servers.iter().enumerate() {
+            server.validate()?;
+            if self.mcp_servers[..index]
+                .iter()
+                .any(|other| other.id == server.id)
+            {
+                return Err(DefinitionError::InvalidMcpConfig);
+            }
         }
         Ok(())
     }
@@ -219,6 +226,28 @@ pub(crate) enum RenderOptions {
     Anthropic(AnthropicRenderOptions),
 }
 
+// Shared syntax for a stored credential reference and an MCP environment name.
+pub(super) fn valid_environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
+        && bytes.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+// Endpoint syntax shared by the model endpoint and remote MCP servers.
+pub(super) fn valid_http_endpoint(endpoint: &str) -> bool {
+    url::Url::parse(endpoint).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && !endpoint.chars().any(char::is_whitespace)
+    })
+}
+
 /// A definition rejected before credential resolution or provider execution.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DefinitionError {
@@ -256,4 +285,8 @@ pub enum DefinitionError {
     /// The deadline cannot be represented on this platform.
     #[error("work timeout cannot be represented")]
     UnrepresentableTimeout,
+    /// An MCP server snapshot is malformed, duplicated or exceeds the supported
+    /// count. The message is static and omits environment values.
+    #[error("MCP server configuration is invalid")]
+    InvalidMcpConfig,
 }

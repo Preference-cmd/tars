@@ -32,6 +32,7 @@ impl RunOptions {
                 | "--input"
                 | "--workspace"
                 | "--tools"
+                | "--mcp"
                 | "--load"
                 | "--save"
                 | "--timeout-secs"
@@ -44,7 +45,7 @@ impl RunOptions {
                 | "--max-model-attempts"
                 | "--permission-mode" => {
                     let value = args.next().ok_or("option needs a value")?;
-                    if (value.is_empty() && flag != "--tools")
+                    if (value.is_empty() && !matches!(flag, "--tools" | "--mcp"))
                         || values.insert(flag, value).is_some()
                     {
                         return Err("empty or duplicate option".into());

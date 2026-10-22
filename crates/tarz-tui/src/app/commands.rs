@@ -98,7 +98,13 @@ impl App {
     }
     fn command(&mut self, index: usize, query: &str) {
         match COMMANDS[index].0 {
-            "new" => self.form = Some(input::Form::new(self.options.preset.as_ref())),
+            "new" => {
+                self.form = Some(input::Form::new(
+                    self.options.config.clone(),
+                    self.options.profile.clone(),
+                    self.options.preset.as_ref(),
+                ))
+            }
             "sessions" => {
                 self.list();
                 self.panel = Some(Panel::Sessions {

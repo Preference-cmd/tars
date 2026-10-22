@@ -180,6 +180,7 @@ async fn three_real_protocols_read_actual_workspace_and_tool_details_are_on_dema
                 workspace.display().to_string(),
                 "list_directory,read_file,search_text".into(),
                 "ask".into(),
+                "".into(),
             ]
             .into_iter()
             .map(|value| TextArea::from([value]))
@@ -287,6 +288,7 @@ async fn save_blocked_after_real_tools_exports_and_retries_original_material_wit
             workspace.display().to_string(),
             "read_file,search_text".into(),
             "ask".into(),
+            "".into(),
         ]
         .into_iter()
         .map(|value| TextArea::from([value]))

@@ -464,3 +464,364 @@ max_edit_segments = 16
         })
     );
 }
+
+fn mcp_config(workspace: &Path) -> String {
+    format!(
+        r#"version = 1
+store = "store"
+recovery_dir = "."
+default_profile = "local"
+
+[mcp_servers.git]
+command = "uvx"
+args = ["mcp-server-git", "--repository", "."]
+env = {{ LOG_LEVEL = "warn" }}
+env_vars = ["GIT_AUTHOR_NAME"]
+startup_timeout_sec = 12
+tool_timeout_sec = 120
+enabled_tools = ["git_status", "git_diff"]
+approval = "writes"
+required = true
+
+[mcp_servers.git.tools.git_status]
+approval = "auto"
+
+[mcp_servers.docs]
+url = "https://example.invalid/mcp"
+bearer_token_env_var = "DOCS_MCP_TOKEN"
+disabled_tools = ["danger"]
+
+[mcp_servers.docs.tools.search]
+approval = "auto"
+
+[profiles.local]
+provider = "openai-chat"
+model = "mcp-model"
+api_key_env = "TARZ_CONFIG_TEST_KEY"
+workspace_root = "{}"
+tools = ["read_file"]
+mcp = ["git"]
+"#,
+        workspace.display()
+    )
+}
+
+fn session_record(dir: &Path, id: &str) -> (std::path::PathBuf, Value) {
+    let path = dir.join("store/sessions").join(format!("{id}.json"));
+    (
+        path.clone(),
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_save_list_and_reopen()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, mcp_config(&workspace)).unwrap();
+    let secret = "mcp-secret-value-6f1c";
+    let token_env = "DOCS_MCP_TOKEN";
+    let create = |extra: &[&str]| {
+        let mut command = cli(dir.path());
+        command
+            .env(token_env, secret)
+            .args(["session", "create", "--config"])
+            .arg(&config_path)
+            .arg("--json");
+        command.args(extra);
+        json(command.output().unwrap())
+    };
+
+    // Preset selection freezes the git server only.
+    let preset = create(&[]);
+    let preset_id = preset["conversation_id"].as_str().unwrap();
+    let (preset_record, preset_json) = session_record(dir.path(), preset_id);
+    let servers = preset_json["definition"]["mcp_servers"].as_array().unwrap();
+    assert_eq!(servers.len(), 1);
+    let git = &servers[0];
+    assert_eq!(git["id"], "git");
+    assert_eq!(git["command"], "uvx");
+    assert_eq!(
+        git["args"],
+        serde_json::json!(["mcp-server-git", "--repository", "."])
+    );
+    assert_eq!(git["env"], serde_json::json!({"LOG_LEVEL": "warn"}));
+    assert_eq!(git["env_vars"], serde_json::json!(["GIT_AUTHOR_NAME"]));
+    assert_eq!(git["startup_timeout_sec"], 12);
+    assert_eq!(git["tool_timeout_sec"], 120);
+    assert_eq!(
+        git["enabled_tools"],
+        serde_json::json!(["git_status", "git_diff"])
+    );
+    assert_eq!(git["approval"], "writes");
+    assert_eq!(git["tools"]["git_status"]["approval"], "auto");
+    assert_eq!(git["required"], true);
+    assert!(git.get("url").is_none());
+    assert!(git.get("bearer_token_env_var").is_none());
+    let preset_bytes = std::fs::read_to_string(&preset_record).unwrap();
+    assert!(!preset_bytes.contains(secret));
+    assert!(!preset_bytes.contains(token_env));
+
+    // Explicit --mcp replaces the preset and keeps only variable names.
+    let explicit = create(&["--mcp", "git,docs"]);
+    let explicit_id = explicit["conversation_id"].as_str().unwrap();
+    let (explicit_record, explicit_json) = session_record(dir.path(), explicit_id);
+    let servers = explicit_json["definition"]["mcp_servers"]
+        .as_array()
+        .unwrap();
+    assert_eq!(servers.len(), 2);
+    assert_eq!(servers[0]["id"], "git");
+    assert_eq!(servers[1]["id"], "docs");
+    assert_eq!(servers[1]["url"], "https://example.invalid/mcp");
+    assert_eq!(servers[1]["bearer_token_env_var"], token_env);
+    assert_eq!(servers[1]["startup_timeout_sec"], 10);
+    assert_eq!(servers[1]["tool_timeout_sec"], 60);
+    assert_eq!(servers[1]["approval"], "prompt");
+    assert_eq!(servers[1]["required"], false);
+    assert_eq!(servers[1]["disabled_tools"], serde_json::json!(["danger"]));
+    assert_eq!(servers[1]["tools"]["search"]["approval"], "auto");
+    assert!(servers[1].get("enabled_tools").is_none());
+    let explicit_bytes = std::fs::read_to_string(&explicit_record).unwrap();
+    assert!(explicit_bytes.contains(token_env));
+    assert!(!explicit_bytes.contains(secret));
+
+    // Listing and reopening read the saved definition without the secret.
+    let listing = cli(dir.path())
+        .env(token_env, secret)
+        .args(["session", "list", "--config"])
+        .arg(&config_path)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(listing.status.success(), "{listing:?}");
+    assert!(!String::from_utf8_lossy(&listing.stdout).contains(secret));
+    let listing: Value = serde_json::from_slice(&listing.stdout).unwrap();
+    let listed = listing["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["conversation_id"] == explicit_id)
+        .unwrap();
+    assert_eq!(
+        listed["definition"]["mcp_servers"].as_array().unwrap(),
+        servers
+    );
+    assert_eq!(listed["definition"]["permission_mode"], Value::Null);
+
+    let repair = cli(dir.path())
+        .env(token_env, secret)
+        .args(["session", "repair", explicit_id, "--config"])
+        .arg(&config_path)
+        .args(["--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(repair.status.success(), "{repair:?}");
+    let repair_json: Value = serde_json::from_slice(&repair.stdout).unwrap();
+    assert_eq!(repair_json["status"], "not_needed");
+    assert!(!String::from_utf8_lossy(&repair.stdout).contains(secret));
+
+    let host = tarz_core::application::SessionHost::new(Some(dir.path().join("store")));
+    let entries = host.list().await.unwrap();
+    let reopened = entries
+        .iter()
+        .find(|entry| entry.conversation_id.as_str() == explicit_id)
+        .unwrap()
+        .record
+        .as_ref()
+        .unwrap();
+    assert_eq!(reopened.definition.mcp_servers.len(), 2);
+    assert_eq!(reopened.definition.mcp_servers[1].id, "docs");
+    assert_eq!(
+        reopened.definition.mcp_servers[1]
+            .bearer_token_env_var
+            .as_deref(),
+        Some(token_env)
+    );
+
+    // An explicit empty selection clears the preset's server.
+    let cleared = create(&["--mcp", ""]);
+    let cleared_id = cleared["conversation_id"].as_str().unwrap();
+    let (cleared_record, cleared_json) = session_record(dir.path(), cleared_id);
+    assert!(cleared_json["definition"].get("mcp_servers").is_none());
+    assert!(
+        !std::fs::read_to_string(cleared_record)
+            .unwrap()
+            .contains("mcp_servers")
+    );
+
+    // Materials export contains no definition or credential value.
+    let exported = dir.path().join("exported.json");
+    let export = cli(dir.path())
+        .env(token_env, secret)
+        .args(["session", "export-materials", "--record"])
+        .arg(&explicit_record)
+        .arg("--output")
+        .arg(&exported)
+        .output()
+        .unwrap();
+    assert!(export.status.success(), "{export:?}");
+    assert!(!std::fs::read_to_string(&exported).unwrap().contains(secret));
+    assert!(!String::from_utf8_lossy(&export.stdout).contains(secret));
+    assert!(!String::from_utf8_lossy(&export.stderr).contains(secret));
+}
+
+#[tokio::test]
+async fn wm10_legacy_v2_record_without_mcp_servers_reads_as_empty_and_ask() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let sessions = store.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let id = "018f0c4e-0000-7000-8000-000000000001";
+    let commit = "018f0c4e-0000-7000-8000-000000000002";
+    let record_path = sessions.join(format!("{id}.json"));
+    // A fixed record written before MCP snapshots and initial modes existed.
+    let raw = format!(
+        r#"{{"format":"tarz-session-v2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+    );
+    std::fs::write(&record_path, raw.as_bytes()).unwrap();
+    let original = std::fs::read(&record_path).unwrap();
+
+    let listing = json(
+        cli(dir.path())
+            .args(["session", "list", "--no-config", "--store"])
+            .arg(&store)
+            .arg("--json")
+            .output()
+            .unwrap(),
+    );
+    let listed = listing["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["conversation_id"] == id)
+        .unwrap();
+    assert_eq!(listed["definition"]["model"], "legacy-model");
+    assert!(listed["definition"].get("mcp_servers").is_none());
+    assert!(listed["definition"].get("permission_mode").is_none());
+
+    // Opening through repair must accept the legacy record and leave it untouched.
+    let repair = cli(dir.path())
+        .args(["session", "repair", id, "--no-config", "--store"])
+        .arg(&store)
+        .args(["--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert!(repair.status.success(), "{repair:?}");
+    let opened: Value = serde_json::from_slice(&repair.stdout).unwrap();
+    assert_eq!(opened["status"], "not_needed");
+    assert_eq!(std::fs::read(&record_path).unwrap(), original);
+
+    let entries = tarz_core::application::SessionHost::new(Some(store))
+        .list()
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    let definition = &entries[0].record.as_ref().unwrap().definition;
+    assert!(definition.mcp_servers.is_empty());
+    assert_eq!(
+        definition.initial_permission_mode(),
+        tarz_core::permission::PermissionMode::Ask
+    );
+}
+
+#[test]
+fn wm11_cli_rejects_unknown_mcp_ids_and_keeps_secrets_out_of_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, mcp_config(&workspace)).unwrap();
+    let secret = "mcp-secret-error-value";
+
+    let run_unknown = cli(dir.path())
+        .env("DOCS_MCP_TOKEN", secret)
+        .args(["run", "--config"])
+        .arg(&config_path)
+        .args(["--mcp", "absent", "--input", "hello"])
+        .output()
+        .unwrap();
+    assert_eq!(run_unknown.status.code(), Some(2), "{run_unknown:?}");
+    assert!(!String::from_utf8_lossy(&run_unknown.stderr).contains(secret));
+
+    for args in [
+        vec!["--mcp", "absent"],
+        vec!["--mcp", "git,git"],
+        vec!["--mcp", "Git"],
+    ] {
+        let output = cli(dir.path())
+            .env("DOCS_MCP_TOKEN", secret)
+            .args(["session", "create", "--config"])
+            .arg(&config_path)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains(secret), "{error}");
+    }
+
+    // A malformed, unselected server fails at load without echoing values.
+    let broken = format!(
+        "{}\n[mcp_servers.broken]\ncommand = \"uvx\"\nenv = {{ \"BAD-NAME\" = \"secret-marker\" }}\n",
+        mcp_config(&workspace)
+    );
+    std::fs::write(&config_path, broken).unwrap();
+    let output = cli(dir.path())
+        .args(["session", "list", "--config"])
+        .arg(&config_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(!error.contains("secret-marker"), "{error}");
+
+    // --mcp needs a value and is not accepted when reopening a session.
+    let output = cli(dir.path())
+        .args(["session", "create", "--config"])
+        .arg(&config_path)
+        .arg("--mcp")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("option needs a value"));
+    let output = cli(dir.path())
+        .args([
+            "session",
+            "run",
+            "00000000-0000-0000-0000-000000000000",
+            "--mcp",
+            "git",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unknown, duplicate, or inapplicable")
+    );
+}
+
+#[test]
+fn wm11_mcp_selection_is_documented_in_cli_help() {
+    let dir = tempfile::tempdir().unwrap();
+    for arguments in [
+        vec!["--help"],
+        vec!["run", "--help"],
+        vec!["session", "--help"],
+        vec!["session", "create", "--help"],
+    ] {
+        let output = cli(dir.path()).args(&arguments).output().unwrap();
+        assert!(output.status.success(), "{arguments:?}");
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            help.contains("--mcp") && help.contains("mcp_servers"),
+            "{arguments:?}"
+        );
+        assert!(
+            help.contains("default: profile; empty disables"),
+            "{arguments:?}"
+        );
+    }
+}

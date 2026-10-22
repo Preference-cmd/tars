@@ -31,6 +31,7 @@ pub(super) fn definition() -> SessionDefinition {
         tool_limits: Default::default(),
         write_limits: None,
         permission_mode: None,
+        mcp_servers: Vec::new(),
     }
 }
 pub(super) fn request(key: &str) -> SubmitRequest {

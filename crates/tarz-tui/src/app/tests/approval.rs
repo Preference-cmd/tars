@@ -79,6 +79,7 @@ async fn create_test_session(
             &workspace.display().to_string(),
             "list_directory,read_file,search_text,write_file,edit_file",
             mode,
+            "",
         ]
         .into_iter()
         .map(|v| TextArea::from([v]))
@@ -91,6 +92,7 @@ async fn create_test_session(
         render_options: Default::default(),
         tool_limits: Default::default(),
         write_limits: None,
+        ..Form::default()
     });
     app.event(ctrl('s'));
     until(app, |a| a.entries[a.selected].session.is_some()).await;
@@ -1079,8 +1081,12 @@ fn wm17_new_session_form_permission_mode_and_write_limits() {
         max_edit_segments: 10,
     });
 
-    let form = Form::new(Some(&preset));
-    assert_eq!(form.fields.len(), 8);
+    let form = Form::new(
+        std::sync::Arc::new(tarz_core::config::Config::default()),
+        None,
+        Some(&preset),
+    );
+    assert_eq!(form.fields.len(), 9);
     assert_eq!(form.fields[7].lines().join(""), "accept-edits");
     assert_eq!(form.write_limits.as_ref().unwrap().max_write_bytes, 4096);
 
@@ -1089,13 +1095,21 @@ fn wm17_new_session_form_permission_mode_and_write_limits() {
     assert_eq!(def.write_limits.as_ref().unwrap().max_write_bytes, 4096);
 
     // Change to read-only
-    let mut form2 = Form::new(Some(&preset));
+    let mut form2 = Form::new(
+        std::sync::Arc::new(tarz_core::config::Config::default()),
+        None,
+        Some(&preset),
+    );
     form2.fields[7] = TextArea::from(["read-only"]);
     let def2 = form2.definition().unwrap();
     assert_eq!(def2.permission_mode, Some(PermissionMode::ReadOnly));
 
     // Invalid mode name errors with all four names
-    let mut form3 = Form::new(Some(&preset));
+    let mut form3 = Form::new(
+        std::sync::Arc::new(tarz_core::config::Config::default()),
+        None,
+        Some(&preset),
+    );
     form3.fields[7] = TextArea::from(["bogus"]);
     let err = form3.definition().unwrap_err();
     assert!(err.contains("read-only"));
@@ -1104,7 +1118,11 @@ fn wm17_new_session_form_permission_mode_and_write_limits() {
     assert!(err.contains("full-access"));
 
     // An empty mode is an error too, not a silent `ask`
-    let mut form4 = Form::new(Some(&preset));
+    let mut form4 = Form::new(
+        std::sync::Arc::new(tarz_core::config::Config::default()),
+        None,
+        Some(&preset),
+    );
     form4.fields[7] = TextArea::from([""]);
     let err = form4.definition().unwrap_err();
     assert!(err.contains("accept-edits"));

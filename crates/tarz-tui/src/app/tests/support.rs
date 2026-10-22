@@ -17,6 +17,8 @@ pub(super) fn app(dir: &std::path::Path) -> App {
     App::new(Options {
         store: dir.join("store"),
         recovery_dir: dir.to_path_buf(),
+        config: Arc::new(tarz_core::config::Config::default()),
+        profile: None,
         preset: None,
         config_path: None,
     })
@@ -55,6 +57,7 @@ pub(super) async fn create_provider(app: &mut App, provider: &str, endpoint: &st
             "",
             "",
             "ask",
+            "",
         ]
         .into_iter()
         .map(|v| TextArea::from([v]))

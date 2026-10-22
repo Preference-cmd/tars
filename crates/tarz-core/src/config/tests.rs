@@ -493,3 +493,333 @@ async fn modifying_config_file_does_not_affect_reopened_session() {
         Some((PermissionMode::AcceptEdits, 0))
     );
 }
+
+const MCP_CONFIG: &str = r#"
+version = 1
+store = "data"
+default_profile = "local"
+
+[mcp_servers.git]
+command = "uvx"
+args = ["mcp-server-git", "--repository", "."]
+env = { LOG_LEVEL = "warn" }
+env_vars = ["GIT_AUTHOR_NAME"]
+startup_timeout_sec = 12
+tool_timeout_sec = 120
+enabled_tools = ["git_status", "git_diff"]
+approval = "writes"
+required = true
+
+[mcp_servers.git.tools.git_status]
+approval = "auto"
+
+[mcp_servers.docs]
+url = "https://example.invalid/mcp"
+bearer_token_env_var = "DOCS_MCP_TOKEN"
+
+[profiles.local]
+provider = "openai-chat"
+model = "local-model"
+api_key_env = "FIXTURE_TOKEN"
+mcp = ["git"]
+"#;
+
+fn mcp_config(dir: &std::path::Path) -> Config {
+    let path = dir.join("config.toml");
+    std::fs::write(&path, MCP_CONFIG).unwrap();
+    Config::load(ConfigSource::File(path)).unwrap()
+}
+
+#[test]
+fn wm11_valid_mcp_servers_load_with_defaults_and_preset_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = mcp_config(dir.path());
+    let servers = config.mcp_servers();
+    assert_eq!(servers.len(), 2);
+    let git = &servers["git"];
+    assert_eq!(git.command.as_deref(), Some("uvx"));
+    assert_eq!(git.args, ["mcp-server-git", "--repository", "."]);
+    assert_eq!(git.env["LOG_LEVEL"], "warn");
+    assert_eq!(git.env_vars, ["GIT_AUTHOR_NAME"]);
+    assert_eq!(git.startup_timeout_sec, 12);
+    assert_eq!(git.tool_timeout_sec, 120);
+    assert_eq!(
+        git.enabled_tools.as_deref(),
+        Some(&["git_status".to_owned(), "git_diff".to_owned()][..])
+    );
+    assert_eq!(git.approval, crate::definition::McpApproval::Writes);
+    assert!(git.required);
+    assert_eq!(
+        git.tools["git_status"].approval,
+        crate::definition::McpApproval::Auto
+    );
+
+    let docs = &servers["docs"];
+    assert_eq!(docs.url.as_deref(), Some("https://example.invalid/mcp"));
+    assert_eq!(docs.bearer_token_env_var.as_deref(), Some("DOCS_MCP_TOKEN"));
+    // Omitted sparse fields take the documented snapshot defaults.
+    assert_eq!(docs.startup_timeout_sec, 10);
+    assert_eq!(docs.tool_timeout_sec, 60);
+    assert_eq!(docs.approval, crate::definition::McpApproval::Prompt);
+    assert!(!docs.required);
+    assert!(docs.args.is_empty());
+    assert!(docs.env.is_empty());
+    assert!(docs.tools.is_empty());
+
+    let preset = config.preset(None).unwrap().unwrap();
+    assert_eq!(preset.mcp_servers.len(), 1);
+    assert_eq!(preset.mcp_servers[0].id, "git");
+    let frozen = config
+        .definition(None, DefinitionOverrides::default())
+        .unwrap();
+    assert_eq!(frozen.mcp_servers, preset.mcp_servers);
+
+    let docs_only = config
+        .definition(
+            None,
+            DefinitionOverrides {
+                mcp: Some(vec!["docs".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(docs_only.mcp_servers.len(), 1);
+    assert_eq!(docs_only.mcp_servers[0], *docs);
+    let disabled = config
+        .definition(
+            None,
+            DefinitionOverrides {
+                mcp: Some(vec![]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(disabled.mcp_servers.is_empty());
+    // An empty snapshot stays out of the record.
+    assert!(
+        serde_json::to_value(&disabled)
+            .unwrap()
+            .get("mcp_servers")
+            .is_none()
+    );
+}
+
+#[test]
+fn wm11_tool_override_without_approval_inherits_the_server_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"version = 1
+[mcp_servers.git]
+command = "uvx"
+approval = "writes"
+enabled_tools = ["git_status", "git_diff"]
+[mcp_servers.git.tools.git_status]
+[mcp_servers.git.tools.git_diff]
+approval = "auto"
+[mcp_servers.docs]
+url = "https://example.invalid/mcp"
+[mcp_servers.docs.tools.search]
+"#,
+    )
+    .unwrap();
+    let config = Config::load(ConfigSource::File(path)).unwrap();
+    let git = &config.mcp_servers()["git"];
+    assert_eq!(
+        git.tools["git_status"].approval,
+        crate::definition::McpApproval::Writes
+    );
+    assert_eq!(
+        git.tools["git_diff"].approval,
+        crate::definition::McpApproval::Auto
+    );
+    // Without a server-level setting the inherited value is the documented default.
+    assert_eq!(
+        config.mcp_servers()["docs"].tools["search"].approval,
+        crate::definition::McpApproval::Prompt
+    );
+}
+
+#[test]
+fn wm11_unknown_duplicate_and_invalid_mcp_selections_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        MCP_CONFIG.replace("mcp = [\"git\"]", "mcp = [\"absent\"]"),
+    )
+    .unwrap();
+    let error = Config::load(ConfigSource::File(path.clone()))
+        .err()
+        .expect("must reject");
+    assert!(matches!(
+        error,
+        super::ConfigError::UnknownMcpServer(ref id) if id == "absent"
+    ));
+    std::fs::write(
+        &path,
+        MCP_CONFIG.replace("mcp = [\"git\"]", "mcp = [\"git\", \"git\"]"),
+    )
+    .unwrap();
+    let error = Config::load(ConfigSource::File(path.clone()))
+        .err()
+        .expect("must reject");
+    assert!(matches!(
+        error,
+        super::ConfigError::InvalidMcpServer(ref id) if id == "git"
+    ));
+    std::fs::write(&path, MCP_CONFIG.replace("mcp = [\"git\"]", "mcp = [\"\"]")).unwrap();
+    assert!(Config::load(ConfigSource::File(path.clone())).is_err());
+
+    // Explicit selection is checked against the same defined map.
+    std::fs::write(&path, MCP_CONFIG).unwrap();
+    let config = Config::load(ConfigSource::File(path)).unwrap();
+    assert!(matches!(
+        config.definition(
+            None,
+            DefinitionOverrides {
+                mcp: Some(vec!["absent".into()]),
+                ..Default::default()
+            },
+        ),
+        Err(super::ConfigError::UnknownMcpServer(id)) if id == "absent"
+    ));
+    assert!(matches!(
+        config.definition(
+            None,
+            DefinitionOverrides {
+                mcp: Some(vec!["git".into(), "git".into()]),
+                ..Default::default()
+            },
+        ),
+        Err(super::ConfigError::InvalidMcpServer(id)) if id == "git"
+    ));
+}
+
+#[test]
+fn wm11_parse_mcp_boundaries_are_explicit() {
+    assert!(super::parse_mcp("").unwrap().is_empty());
+    assert!(super::parse_mcp("   ").unwrap().is_empty());
+    assert_eq!(super::parse_mcp(" git , docs ").unwrap(), ["git", "docs"]);
+    for value in [
+        "git,,docs",
+        ",git",
+        "git,",
+        "git,git",
+        "Git",
+        "git_hub",
+        "git hub",
+    ] {
+        assert!(
+            matches!(
+                super::parse_mcp(value),
+                Err(super::ConfigError::InvalidMcpServer(_))
+            ),
+            "{value:?}"
+        );
+    }
+    assert!(matches!(
+        super::parse_mcp(&"a".repeat(17)),
+        Err(super::ConfigError::InvalidMcpServer(_))
+    ));
+}
+
+#[test]
+fn wm11_invalid_unselected_server_is_rejected_at_load_without_echoing_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    for fragment in [
+        "[mcp_servers.broken]\ncommand = \"uvx\"\nurl = \"https://example.invalid/mcp\"\n",
+        "[mcp_servers.git]\nunknown = \"secret-do-not-print\"\n",
+        "[mcp_servers.git]\ncommand = \"uvx\"\nenv = { \"BAD-NAME\" = \"secret-do-not-print\" }\n",
+        "[mcp_servers.git]\ncommand = \"uvx\"\ntool_timeout_sec = 0\nenv = { LOG_LEVEL = \"secret-do-not-print\" }\n",
+        "[mcp_servers.git]\nurl = \"file:///tmp/mcp\"\n",
+        "[mcp_servers.Git]\ncommand = \"uvx\"\n",
+        "[mcp_servers.git]\ncommand = \"uvx\"\nstartup_timeout_sec = \"ten\"\n",
+        "[mcp_servers.git]\ncommand = \"uvx\"\n[mcp_servers.git.tools.status]\nunknown = \"x\"\n",
+        "[mcp_servers.git]\ncommand = \"uvx\"\nenabled_tools = [\"a\"]\ndisabled_tools = [\"b\"]\n",
+    ] {
+        let text = format!(
+            "version = 1\n{fragment}[profiles.local]\nprovider = \"openai-chat\"\nmodel = \"m\"\n"
+        );
+        std::fs::write(&path, text).unwrap();
+        let error = Config::load(ConfigSource::File(path.clone()))
+            .err()
+            .expect("unselected server must still be validated")
+            .to_string();
+        assert!(!error.contains("secret-do-not-print"), "{error}");
+    }
+}
+
+#[test]
+fn wm11_more_than_eight_selected_servers_fail_definition_validation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut text = String::from("version = 1\n");
+    for index in 0..9 {
+        text.push_str(&format!(
+            "[mcp_servers.server-{index}]\nurl = \"https://example.invalid/mcp\"\n"
+        ));
+    }
+    let ids: Vec<String> = (0..9).map(|index| format!("\"server-{index}\"")).collect();
+    text.push_str(&format!(
+        "[profiles.local]\nprovider = \"openai-chat\"\nmodel = \"m\"\nmcp = [{}]\n",
+        ids.join(", ")
+    ));
+    std::fs::write(&path, text).unwrap();
+    assert!(matches!(
+        Config::load(ConfigSource::File(path)),
+        Err(super::ConfigError::Definition(
+            DefinitionError::InvalidMcpConfig
+        ))
+    ));
+}
+
+#[test]
+fn wm11_selection_without_any_configured_servers_is_unknown() {
+    let config = Config::load(ConfigSource::Disabled).unwrap();
+    assert!(config.mcp_servers().is_empty());
+    assert!(matches!(
+        config.definition(
+            None,
+            DefinitionOverrides {
+                provider: Some(Provider::OpenAiChat),
+                model: Some("fixture".into()),
+                mcp: Some(vec!["git".into()]),
+                ..Default::default()
+            },
+        ),
+        Err(super::ConfigError::UnknownMcpServer(id)) if id == "git"
+    ));
+}
+
+#[test]
+fn wm11_duplicate_mcp_tables_are_a_toml_syntax_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "version = 1\n[mcp_servers.git]\ncommand = \"uvx\"\n[mcp_servers.git]\ncommand = \"other\"\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        Config::load(ConfigSource::File(path)),
+        Err(super::ConfigError::Syntax { .. })
+    ));
+}
+
+#[test]
+fn wm11_mcp_selection_must_be_a_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "version = 1\n[mcp_servers.git]\ncommand = \"uvx\"\n[profiles.local]\nprovider = \"openai-chat\"\nmodel = \"m\"\nmcp = \"git\"\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        Config::load(ConfigSource::File(path)),
+        Err(super::ConfigError::Syntax { .. })
+    ));
+}

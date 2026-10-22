@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use tarz_core::{
     config::{Config, ConfigSource},
     definition::SessionDefinition,
@@ -7,6 +7,8 @@ use tarz_core::{
 pub(crate) struct Options {
     pub store: PathBuf,
     pub recovery_dir: PathBuf,
+    pub config: Arc<Config>,
+    pub profile: Option<String>,
     pub preset: Option<SessionDefinition>,
     pub config_path: Option<PathBuf>,
 }
@@ -22,7 +24,7 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "Tarz TUI prototype\n\nUsage: tarz-tui [--config FILE | --no-config] [--profile NAME]\n                [--store DIR] [--recovery-dir DIR]\n\nStore is required via a flag or shared TOML configuration. Explicit directories override configuration.\n/ or F1 commands  /mode change mode  Shift-Tab cycle mode\nEnter / Ctrl-S submit  Ctrl-J newline  PageUp/Down scroll\nF2 new  F3 open  F4 next session  F5 refresh  F6 tool materials\nEsc / Ctrl-C cancel  Ctrl-W close  Ctrl-Q quit  Ctrl-R retry save\nCtrl-E export  Ctrl-D discard (confirmation)\nConfirmation panel: Enter / y allow  n deny (optional reason)  Esc cancel turn\n\nNew-session forms start from the selected model preset. Credentials use environment variable references. Workspace/tool selection uses the same core configuration resolver.\nForm changes affect only the new session; they do not rewrite global configuration.\nRecovery exports never overwrite an existing file. GUI and installation are not included."
+                    "Tarz TUI prototype\n\nUsage: tarz-tui [--config FILE | --no-config] [--profile NAME]\n                [--store DIR] [--recovery-dir DIR]\n\nStore is required via a flag or shared TOML configuration. Explicit directories override configuration.\n/ or F1 commands  /mode change mode  Shift-Tab cycle mode\nEnter / Ctrl-S submit  Ctrl-J newline  PageUp/Down scroll\nF2 new  F3 open  F4 next session  F5 refresh  F6 tool materials\nEsc / Ctrl-C cancel  Ctrl-W close  Ctrl-Q quit  Ctrl-R retry save\nCtrl-E export  Ctrl-D discard (confirmation)\nConfirmation panel: Enter / y allow  n deny (optional reason)  Esc cancel turn\n\nNew-session forms start from the selected model preset. Credentials use environment variable references. Workspace/tool selection and MCP server ids use the same core configuration resolver.\nForm changes affect only the new session; they do not rewrite global configuration.\nRecovery exports never overwrite an existing file. GUI and installation are not included."
                 );
                 return Ok(None);
             }
@@ -63,7 +65,11 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         (None, true) => ConfigSource::Disabled,
         (None, false) => ConfigSource::Discover,
     };
-    let config = Config::load(source).map_err(|e| e.to_string())?;
+    let config = Arc::new(Config::load(source).map_err(|e| e.to_string())?);
+    let preset = config
+        .preset(profile.as_deref())
+        .map_err(|e| e.to_string())?;
+    let config_path = config.source().map(PathBuf::from);
     Ok(Some(Options {
         store: store
             .or_else(|| config.store_dir().map(PathBuf::from))
@@ -71,9 +77,9 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         recovery_dir: recovery_dir
             .or_else(|| config.recovery_dir().map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(".")),
-        preset: config
-            .preset(profile.as_deref())
-            .map_err(|e| e.to_string())?,
-        config_path: config.source().map(PathBuf::from),
+        config,
+        profile,
+        preset,
+        config_path,
     }))
 }

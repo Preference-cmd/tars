@@ -57,6 +57,8 @@ tarz-tui --config ./config.toml --profile work
 
 TUI 新建表单从所选预设填充，修改只影响本次新会话，预设中未显示的容量/调用限制、生成设置和 `render_options` 原样保留。首版配置由用户编辑文件，TUI 不自动保存或覆盖全局配置。后续 GUI 应复用相同加载与解析模块。
 
+顶层 `[mcp_servers.<id>]` 定义 MCP 服务器（stdio 用 `command`/`args`/`env`/`env_vars`，HTTP 用 `url`/`bearer_token_env_var`），预设用 `mcp = [...]` 选择已定义的 id；CLI `run` 和 `session create` 的 `--mcp ID,ID` 覆盖预设，空串表示不启用，TUI 新建表单有对应字段。所选服务器的配置快照随新会话定义保存，重开使用快照；运行期连接尚未接通。
+
 ## 工作区与只读工具
 
 预设可增加 `workspace_root = "../project"` 和 `tools = ["list_directory", "read_file", "search_text"]`。默认 tools 为空；工具启用时必须有根目录。CLI `run`、`session create` 和 TUI 启动选项接受 `--workspace DIR --tools NAME,NAME`；显式 `--tools ''` 清空预设。TUI 新建表单可修改 Workspace、Tools。重开仍采用原定义，不接受工具覆盖。

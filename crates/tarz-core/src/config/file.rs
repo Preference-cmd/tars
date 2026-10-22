@@ -1,5 +1,7 @@
 use super::model::{self, DefinitionOverrides, Profile};
-use crate::definition::{DefinitionError, SessionDefinition};
+use crate::definition::{
+    DefinitionError, McpApproval, McpServerConfig, McpToolSetting, SessionDefinition,
+};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -26,6 +28,74 @@ struct FileConfig {
     default_profile: Option<String>,
     #[serde(default)]
     profiles: BTreeMap<String, Profile>,
+    /// Sparse server definitions; defaults are filled during validation.
+    #[serde(default)]
+    mcp_servers: BTreeMap<String, RawMcpServer>,
+}
+
+// Configuration stays sparse while the frozen snapshot is always complete.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcpServer {
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    url: Option<String>,
+    env: Option<BTreeMap<String, String>>,
+    env_vars: Option<Vec<String>>,
+    bearer_token_env_var: Option<String>,
+    startup_timeout_sec: Option<u64>,
+    tool_timeout_sec: Option<u64>,
+    enabled_tools: Option<Vec<String>>,
+    disabled_tools: Option<Vec<String>>,
+    approval: Option<McpApproval>,
+    tools: Option<BTreeMap<String, RawMcpToolSetting>>,
+    required: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcpToolSetting {
+    approval: Option<McpApproval>,
+}
+
+impl RawMcpServer {
+    fn into_config(self, id: &str) -> Result<McpServerConfig, ConfigError> {
+        // A tool table that omits `approval` inherits the server setting rather
+        // than silently resetting it to the default.
+        let approval = self.approval.unwrap_or_default();
+        let config = McpServerConfig {
+            id: id.to_owned(),
+            command: self.command,
+            args: self.args.unwrap_or_default(),
+            url: self.url,
+            env: self.env.unwrap_or_default(),
+            env_vars: self.env_vars.unwrap_or_default(),
+            bearer_token_env_var: self.bearer_token_env_var,
+            startup_timeout_sec: self.startup_timeout_sec.unwrap_or(10),
+            tool_timeout_sec: self.tool_timeout_sec.unwrap_or(60),
+            enabled_tools: self.enabled_tools,
+            disabled_tools: self.disabled_tools,
+            approval,
+            tools: self
+                .tools
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, setting)| {
+                    (
+                        name,
+                        McpToolSetting {
+                            approval: setting.approval.unwrap_or(approval),
+                        },
+                    )
+                })
+                .collect(),
+            required: self.required.unwrap_or(false),
+        };
+        config
+            .validate()
+            .map_err(|_| ConfigError::InvalidMcpServer(id.to_owned()))?;
+        Ok(config)
+    }
 }
 
 /// Validated, immutable defaults shared by all application entry points.
@@ -36,6 +106,7 @@ pub struct Config {
     recovery_dir: Option<PathBuf>,
     default_profile: Option<String>,
     profiles: BTreeMap<String, Profile>,
+    mcp_servers: BTreeMap<String, McpServerConfig>,
 }
 impl Config {
     /// Load and validate up to 1 MiB of TOML. A missing discovered default file
@@ -122,18 +193,28 @@ impl Config {
                 .map(|path| model::absolute_root(path, Some(base)))
                 .transpose()?;
         }
+        let mut mcp_servers = BTreeMap::new();
+        for (id, server) in raw.mcp_servers {
+            let server = server.into_config(&id)?;
+            mcp_servers.insert(id, server);
+        }
         let config = Self {
             source: Some(source.to_owned()),
             store: resolve(raw.store)?,
             recovery_dir: resolve(raw.recovery_dir)?,
             default_profile: raw.default_profile,
             profiles,
+            mcp_servers,
         };
         for (name, profile) in &config.profiles {
             if name.trim().is_empty() {
                 return Err(ConfigError::EmptyProfile);
             }
-            model::resolve(Some(profile), DefinitionOverrides::default())?;
+            model::resolve(
+                Some(profile),
+                DefinitionOverrides::default(),
+                &config.mcp_servers,
+            )?;
         }
         config.selected(None)?;
         Ok(config)
@@ -150,7 +231,13 @@ impl Config {
     /// Read a selected preset, or None when no default/explicit profile exists.
     pub fn preset(&self, name: Option<&str>) -> Result<Option<SessionDefinition>, ConfigError> {
         self.selected(name)?
-            .map(|profile| model::resolve(Some(profile), DefinitionOverrides::default()))
+            .map(|profile| {
+                model::resolve(
+                    Some(profile),
+                    DefinitionOverrides::default(),
+                    &self.mcp_servers,
+                )
+            })
             .transpose()
     }
     /// Resolve explicit per-field choices over the selected preset and documented
@@ -160,7 +247,7 @@ impl Config {
         name: Option<&str>,
         overrides: DefinitionOverrides,
     ) -> Result<SessionDefinition, ConfigError> {
-        model::resolve(self.selected(name)?, overrides)
+        model::resolve(self.selected(name)?, overrides, &self.mcp_servers)
     }
     /// File actually read, or None when defaults are empty/disabled.
     pub fn source(&self) -> Option<&Path> {
@@ -173,6 +260,11 @@ impl Config {
     /// Configured recovery directory, resolved relative to the TOML file.
     pub fn recovery_dir(&self) -> Option<&Path> {
         self.recovery_dir.as_deref()
+    }
+    /// Every configured MCP server by id, selected or not. Selection happens
+    /// only when constructing a new session definition.
+    pub fn mcp_servers(&self) -> &BTreeMap<String, McpServerConfig> {
+        &self.mcp_servers
     }
 }
 
@@ -242,6 +334,13 @@ pub enum ConfigError {
         "tools must be a comma-separated selection of list_directory, read_file, search_text without duplicates"
     )]
     InvalidTools,
+    /// A configured MCP server is malformed or a selection repeats an id.
+    /// The message contains only the id, never environment values.
+    #[error("MCP server {0:?} has an invalid definition or is selected more than once")]
+    InvalidMcpServer(String),
+    /// A selected server id has no top-level definition.
+    #[error("unknown MCP server {0:?}")]
+    UnknownMcpServer(String),
     /// A fixed-definition value is invalid.
     #[error(transparent)]
     Definition(DefinitionError),

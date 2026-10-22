@@ -52,6 +52,7 @@ fn base_definition(endpoint: &str, root: &Path) -> SessionDefinition {
         tool_limits: WorkspaceToolLimits::default(),
         write_limits: None,
         permission_mode: None,
+        mcp_servers: Vec::new(),
     }
 }
 

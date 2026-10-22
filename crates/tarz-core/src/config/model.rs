@@ -1,10 +1,14 @@
 use super::file::ConfigError;
 use crate::definition::{
-    CredentialRef, Provider, SessionDefinition, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
+    CredentialRef, McpServerConfig, Provider, SessionDefinition, WorkspaceTool,
+    WorkspaceToolLimits, WriteToolLimits,
 };
 use crate::permission::PermissionMode;
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 /// Explicit entry-point choices layered over a selected model preset.
 #[derive(Default)]
@@ -45,6 +49,8 @@ pub struct DefinitionOverrides {
     pub write_limits: Option<WriteToolLimits>,
     /// Explicit initial permission mode.
     pub permission_mode: Option<PermissionMode>,
+    /// Explicit MCP server ids; Some(empty) disables preset servers.
+    pub mcp: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +74,7 @@ pub(super) struct Profile {
     tool_limits: Option<ProfileToolLimits>,
     write_limits: Option<ProfileWriteLimits>,
     permission_mode: Option<PermissionMode>,
+    mcp: Option<Vec<String>>,
 }
 
 // Sparse startup defaults are deliberately separate from the complete persisted limits.
@@ -133,6 +140,7 @@ impl ProfileWriteLimits {
 pub(super) fn resolve(
     profile: Option<&Profile>,
     options: DefinitionOverrides,
+    servers: &BTreeMap<String, McpServerConfig>,
 ) -> Result<SessionDefinition, ConfigError> {
     let provider = options
         .provider
@@ -153,6 +161,24 @@ pub(super) fn resolve(
         Some(path) => Some(absolute_root(path, None)?),
         None => profile.and_then(|p| p.workspace_root.clone()),
     };
+    let selected = options
+        .mcp
+        .or_else(|| profile.and_then(|p| p.mcp.clone()))
+        .unwrap_or_default();
+    let mut mcp_servers = Vec::with_capacity(selected.len());
+    for id in selected {
+        if id.is_empty()
+            || mcp_servers
+                .iter()
+                .any(|server: &McpServerConfig| server.id == id)
+        {
+            return Err(ConfigError::InvalidMcpServer(id));
+        }
+        let server = servers
+            .get(&id)
+            .ok_or_else(|| ConfigError::UnknownMcpServer(id.clone()))?;
+        mcp_servers.push(server.clone());
+    }
     let definition = SessionDefinition {
         provider,
         model,
@@ -220,6 +246,7 @@ pub(super) fn resolve(
             Some(PermissionMode::Ask) | None => None,
             Some(mode) => Some(mode),
         },
+        mcp_servers,
     };
     definition.validate().map_err(ConfigError::Definition)?;
     Ok(definition)
@@ -249,6 +276,23 @@ pub(super) fn absolute_root(path: PathBuf, base: Option<&Path>) -> Result<PathBu
         });
     }
     Ok(resolved)
+}
+
+/// Parse the shared comma-separated MCP server selection; an empty string
+/// disables all servers. Malformed and repeated ids are rejected here;
+/// resolving the selection also rejects ids without a configured server.
+pub fn parse_mcp(value: &str) -> Result<Vec<String>, ConfigError> {
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut ids: Vec<String> = Vec::new();
+    for id in value.split(',').map(str::trim) {
+        if !crate::definition::valid_server_id(id) || ids.iter().any(|selected| selected == id) {
+            return Err(ConfigError::InvalidMcpServer(id.to_owned()));
+        }
+        ids.push(id.to_owned());
+    }
+    Ok(ids)
 }
 
 /// Parse the shared comma-separated tool selection; an empty string disables all tools.

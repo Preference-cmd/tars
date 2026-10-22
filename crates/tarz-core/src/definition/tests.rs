@@ -20,6 +20,7 @@ fn definition() -> SessionDefinition {
         tool_limits: Default::default(),
         write_limits: None,
         permission_mode: None,
+        mcp_servers: Vec::new(),
     }
 }
 
@@ -373,4 +374,293 @@ fn write_tool_limits_validation_and_serialization() {
     assert_eq!(json_val["write_limits"]["max_edit_segments"], 16);
     let roundtripped: SessionDefinition = serde_json::from_value(json_val).unwrap();
     assert_eq!(roundtripped.write_limits, def.write_limits);
+}
+
+fn stdio_server() -> super::McpServerConfig {
+    use std::collections::BTreeMap;
+    super::McpServerConfig {
+        id: "git".into(),
+        command: Some("uvx".into()),
+        args: vec!["mcp-server-git".into(), "--repository".into(), ".".into()],
+        url: None,
+        env: BTreeMap::from([("LOG_LEVEL".into(), "warn".into())]),
+        env_vars: vec!["GIT_AUTHOR_NAME".into()],
+        bearer_token_env_var: None,
+        startup_timeout_sec: 10,
+        tool_timeout_sec: 60,
+        enabled_tools: None,
+        disabled_tools: None,
+        approval: super::McpApproval::Prompt,
+        tools: BTreeMap::new(),
+        required: false,
+    }
+}
+
+fn http_server() -> super::McpServerConfig {
+    super::McpServerConfig {
+        id: "docs".into(),
+        command: None,
+        args: vec![],
+        url: Some("https://example.invalid/mcp".into()),
+        env: Default::default(),
+        env_vars: vec![],
+        bearer_token_env_var: Some("DOCS_MCP_TOKEN".into()),
+        startup_timeout_sec: 10,
+        tool_timeout_sec: 60,
+        enabled_tools: Some(vec!["search".into()]),
+        disabled_tools: None,
+        approval: super::McpApproval::Writes,
+        tools: Default::default(),
+        required: true,
+    }
+}
+
+#[test]
+fn wm11_valid_stdio_and_http_servers_pass_and_definition_roundtrips() {
+    let mut candidate = definition();
+    candidate.mcp_servers = vec![stdio_server(), http_server()];
+    candidate.validate().unwrap();
+
+    let encoded = serde_json::to_value(&candidate).unwrap();
+    let stdio = &encoded["mcp_servers"][0];
+    assert_eq!(stdio["id"], "git");
+    assert_eq!(stdio["command"], "uvx");
+    assert_eq!(stdio["startup_timeout_sec"], 10);
+    assert_eq!(stdio["tool_timeout_sec"], 60);
+    assert_eq!(stdio["approval"], "prompt");
+    assert_eq!(stdio["required"], false);
+    assert!(stdio.get("url").is_none());
+    assert!(stdio.get("bearer_token_env_var").is_none());
+    assert!(stdio.get("enabled_tools").is_none());
+    assert!(stdio.get("disabled_tools").is_none());
+
+    let http = &encoded["mcp_servers"][1];
+    assert_eq!(http["id"], "docs");
+    assert_eq!(http["url"], "https://example.invalid/mcp");
+    assert_eq!(http["bearer_token_env_var"], "DOCS_MCP_TOKEN");
+    assert_eq!(http["approval"], "writes");
+    assert_eq!(http["required"], true);
+    // Empty stdio-only collections are omitted from a remote snapshot.
+    for key in ["command", "args", "env", "env_vars", "tools"] {
+        assert!(http.get(key).is_none(), "{key} must be omitted");
+    }
+
+    let read = serde_json::from_value::<SessionDefinition>(encoded).unwrap();
+    assert_eq!(read, candidate);
+}
+
+#[test]
+fn wm10_servers_omitted_from_a_record_read_as_empty() {
+    let encoded = serde_json::to_value(definition()).unwrap();
+    assert!(encoded.get("mcp_servers").is_none());
+    let read = serde_json::from_value::<SessionDefinition>(encoded).unwrap();
+    assert!(read.mcp_servers.is_empty());
+    assert!(
+        serde_json::to_value(&read)
+            .unwrap()
+            .get("mcp_servers")
+            .is_none()
+    );
+}
+
+#[test]
+fn wm11_server_id_length_and_character_rules_are_enforced() {
+    for id in [
+        "".to_owned(),
+        "Git".to_owned(),
+        "git_hub".to_owned(),
+        "git hub".to_owned(),
+        "git.server".to_owned(),
+        "a".repeat(16),
+        "a".repeat(17),
+    ] {
+        let mut candidate = stdio_server();
+        candidate.id = id;
+        let expected_valid = candidate.id.len() == 16;
+        assert_eq!(
+            candidate.validate().is_ok(),
+            expected_valid,
+            "id {:?}",
+            candidate.id
+        );
+    }
+}
+
+#[test]
+fn wm11_command_and_url_are_exclusive_and_type_specific_fields_are_rejected() {
+    let mut candidate = stdio_server();
+    candidate.url = Some("https://example.invalid/mcp".into());
+    assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+
+    let mut candidate = stdio_server();
+    candidate.command = None;
+    assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+
+    for command in ["", "uvx\0hidden"] {
+        let mut candidate = stdio_server();
+        candidate.command = Some(command.into());
+        assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+    }
+
+    let mut candidate = stdio_server();
+    candidate.bearer_token_env_var = Some("MCP_TOKEN".into());
+    assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+
+    for mutate in [
+        (|server: &mut super::McpServerConfig| server.args = vec!["x".into()])
+            as fn(&mut super::McpServerConfig),
+        |server: &mut super::McpServerConfig| {
+            server.env = std::collections::BTreeMap::from([("LOG".into(), "x".into())]);
+        },
+        |server: &mut super::McpServerConfig| server.env_vars = vec!["GIT_NAME".into()],
+    ] {
+        let mut candidate = http_server();
+        mutate(&mut candidate);
+        assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+    }
+}
+
+#[test]
+fn wm11_remote_urls_reuse_the_endpoint_rules() {
+    for url in [
+        "https://name:secret@example.invalid/mcp",
+        "https://name@example.invalid/mcp",
+        "https://example.invalid/mcp?token=secret",
+        "https://example.invalid/mcp#secret",
+        "file:///tmp/mcp",
+        "not a URL",
+        " https://example.invalid/mcp",
+    ] {
+        let mut candidate = http_server();
+        candidate.url = Some(url.into());
+        let error = candidate.validate().unwrap_err();
+        assert_eq!(error, DefinitionError::InvalidMcpConfig, "url {url:?}");
+        assert!(!error.to_string().contains("secret"));
+    }
+    for url in ["http://127.0.0.1:1/mcp", "https://example.invalid/mcp"] {
+        let mut candidate = http_server();
+        candidate.url = Some(url.into());
+        assert!(candidate.validate().is_ok(), "{url}");
+    }
+}
+
+#[test]
+fn wm11_timeout_environment_and_filter_fields_are_bounded() {
+    for (startup, tool) in [(0, 60), (61, 60), (10, 0), (10, 3601)] {
+        let mut candidate = stdio_server();
+        candidate.startup_timeout_sec = startup;
+        candidate.tool_timeout_sec = tool;
+        assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+    }
+    for name in ["", "1KEY", "API-KEY", "A=B", "key with spaces"] {
+        let mut candidate = stdio_server();
+        candidate.env_vars = vec![name.into()];
+        assert_eq!(
+            candidate.validate(),
+            Err(DefinitionError::InvalidMcpConfig),
+            "env var {name:?}"
+        );
+        let mut candidate = stdio_server();
+        candidate.env = std::collections::BTreeMap::from([(name.into(), "value".into())]);
+        assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+        let mut candidate = http_server();
+        candidate.bearer_token_env_var = Some(name.into());
+        assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+    }
+    let mut candidate = stdio_server();
+    candidate.env_vars = vec!["GIT_NAME".into(), "GIT_NAME".into()];
+    assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+
+    let mut candidate = stdio_server();
+    candidate.enabled_tools = Some(vec!["status".into()]);
+    candidate.disabled_tools = Some(vec!["diff".into()]);
+    assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+    for filter in [
+        vec![],
+        vec!["".into()],
+        vec!["status".into(), "status".into()],
+    ] {
+        let mut candidate = stdio_server();
+        candidate.enabled_tools = Some(filter.clone());
+        assert_eq!(
+            candidate.validate(),
+            Err(DefinitionError::InvalidMcpConfig),
+            "enabled {filter:?}"
+        );
+        let mut candidate = stdio_server();
+        candidate.disabled_tools = Some(filter);
+        assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+    }
+}
+
+#[test]
+fn wm11_tool_overrides_must_agree_with_the_selected_filter() {
+    use super::{McpApproval, McpToolSetting};
+    use std::collections::BTreeMap;
+
+    let mut candidate = stdio_server();
+    candidate.tools = BTreeMap::from([(
+        "".into(),
+        McpToolSetting {
+            approval: McpApproval::Auto,
+        },
+    )]);
+    assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+
+    let mut candidate = stdio_server();
+    candidate.enabled_tools = Some(vec!["status".into()]);
+    candidate.tools = BTreeMap::from([(
+        "diff".into(),
+        McpToolSetting {
+            approval: McpApproval::Auto,
+        },
+    )]);
+    assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+
+    let mut candidate = stdio_server();
+    candidate.disabled_tools = Some(vec!["diff".into()]);
+    candidate.tools = BTreeMap::from([(
+        "diff".into(),
+        McpToolSetting {
+            approval: McpApproval::Auto,
+        },
+    )]);
+    assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+
+    candidate.disabled_tools = Some(vec!["other".into()]);
+    assert!(candidate.validate().is_ok());
+    let encoded = serde_json::to_value(&candidate).unwrap();
+    assert_eq!(encoded["tools"]["diff"]["approval"], "auto");
+}
+
+#[test]
+fn wm11_duplicate_ids_and_the_server_count_limit_are_rejected() {
+    let mut candidate = definition();
+    candidate.mcp_servers = vec![stdio_server(), stdio_server()];
+    assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+
+    let mut candidate = definition();
+    candidate.mcp_servers = (0..9)
+        .map(|index| {
+            let mut server = http_server();
+            server.id = format!("server-{index}");
+            server
+        })
+        .collect();
+    assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
+    candidate.mcp_servers.truncate(8);
+    assert!(candidate.validate().is_ok());
+}
+
+#[test]
+fn wm11_mcp_errors_never_echo_environment_values() {
+    let marker = "mcp-secret-value-marker";
+    let mut candidate = definition();
+    let mut server = stdio_server();
+    server.env = std::collections::BTreeMap::from([(marker.into(), marker.into())]);
+    server.tool_timeout_sec = 0;
+    candidate.mcp_servers = vec![server];
+    let error = candidate.validate().unwrap_err();
+    assert_eq!(error, DefinitionError::InvalidMcpConfig);
+    assert!(!error.to_string().contains(marker));
 }

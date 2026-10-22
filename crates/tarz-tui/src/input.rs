@@ -1,7 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui_textarea::{TextArea, WrapMode};
+use std::sync::Arc;
 use tarz_core::{
-    config::{Config, ConfigSource, DefinitionOverrides, parse_tools},
+    config::{Config, DefinitionOverrides, parse_mcp, parse_tools},
     definition::{
         CredentialRef, Provider, SessionDefinition, WorkspaceToolLimits, WriteToolLimits,
     },
@@ -54,8 +55,12 @@ pub(crate) struct Form {
     pub render_options: serde_json::Map<String, serde_json::Value>,
     pub tool_limits: WorkspaceToolLimits,
     pub write_limits: Option<WriteToolLimits>,
+    /// Startup configuration used to resolve the selected MCP server ids.
+    pub config: Arc<Config>,
+    /// Named preset the form was opened from, so resolution keeps using it.
+    pub profile: Option<String>,
 }
-pub(crate) const FIELD_NAMES: [&str; 8] = [
+pub(crate) const FIELD_NAMES: [&str; 9] = [
     "Provider",
     "Model",
     "Endpoint (optional, full URL)",
@@ -64,6 +69,7 @@ pub(crate) const FIELD_NAMES: [&str; 8] = [
     "Workspace root (optional; does not enable tools)",
     "Tools (comma-separated list_directory,read_file,search_text,write_file,edit_file)",
     "Permission mode (read-only | ask | accept-edits | full-access)",
+    "MCP servers (comma-separated ids from shared config)",
 ];
 
 impl Default for Form {
@@ -78,6 +84,7 @@ impl Default for Form {
                 "",
                 "",
                 "ask",
+                "",
             ]
             .into_iter()
             .map(|s| TextArea::from([s]))
@@ -90,13 +97,24 @@ impl Default for Form {
             render_options: Default::default(),
             tool_limits: WorkspaceToolLimits::default(),
             write_limits: None,
+            config: Arc::new(Config::default()),
+            profile: None,
         }
     }
 }
 impl Form {
-    pub fn new(preset: Option<&SessionDefinition>) -> Self {
+    pub fn new(
+        config: Arc<Config>,
+        profile: Option<String>,
+        preset: Option<&SessionDefinition>,
+    ) -> Self {
+        let mut form = Self {
+            config,
+            profile,
+            ..Self::default()
+        };
         let Some(preset) = preset else {
-            return Self::default();
+            return form;
         };
         let provider = match preset.provider {
             Provider::OpenAiChat => "openai-chat",
@@ -123,29 +141,32 @@ impl Form {
                 .collect::<Vec<_>>()
                 .join(","),
             mode_str.to_owned(),
+            preset
+                .mcp_servers
+                .iter()
+                .map(|server| server.id.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
         ];
-        Self {
-            fields: values
-                .into_iter()
-                .map(|value| TextArea::from([value]))
-                .collect(),
-            selected: 1,
-            error: String::new(),
-            tool_limits: preset.tool_limits.clone(),
-            write_limits: preset.write_limits,
-            generation: (
-                preset.max_tokens,
-                preset.reasoning_effort.clone(),
-                preset.extra_body.clone(),
-            ),
-            max_model_attempts: preset.max_model_attempts,
-            render_options: preset.render_options.clone(),
-            limits: (
-                preset.retained_work_capacity,
-                preset.max_model_rounds,
-                preset.max_tool_calls,
-            ),
-        }
+        form.fields = values
+            .into_iter()
+            .map(|value| TextArea::from([value]))
+            .collect();
+        form.tool_limits = preset.tool_limits.clone();
+        form.write_limits = preset.write_limits;
+        form.generation = (
+            preset.max_tokens,
+            preset.reasoning_effort.clone(),
+            preset.extra_body.clone(),
+        );
+        form.max_model_attempts = preset.max_model_attempts;
+        form.render_options = preset.render_options.clone();
+        form.limits = (
+            preset.retained_work_capacity,
+            preset.max_model_rounds,
+            preset.max_tool_calls,
+        );
+        form
     }
     pub fn definition(&self) -> Result<SessionDefinition, String> {
         let values: Vec<_> = self.fields.iter().map(|f| f.lines().join("")).collect();
@@ -166,10 +187,10 @@ impl Form {
             .map_err(|_| "Permission mode: read-only | ask | accept-edits | full-access")?;
         // Resolve explicit form values through the same core path as CLI input.
         // Profile limits were frozen when the selected startup preset was loaded.
-        Config::load(ConfigSource::Disabled)
-            .map_err(|e| e.to_string())?
+        let mut definition = self
+            .config
             .definition(
-                None,
+                self.profile.as_deref(),
                 DefinitionOverrides {
                     provider: Some(provider),
                     model: Some(values[1].clone()),
@@ -189,9 +210,20 @@ impl Form {
                     tool_limits: Some(self.tool_limits.clone()),
                     write_limits: self.write_limits,
                     permission_mode: Some(permission_mode),
+                    mcp: Some(parse_mcp(&values[8]).map_err(|e| e.to_string())?),
                 },
             )
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        // Endpoint and workspace root are visible fields. An empty value is an
+        // explicit clear, not an absent override that falls back to the profile.
+        // A nonempty workspace root was already made absolute and validated by
+        // the resolver, so only the empty case is applied here.
+        definition.endpoint = (!values[2].is_empty()).then(|| values[2].clone());
+        if values[5].is_empty() {
+            definition.workspace_root = None;
+        }
+        definition.validate().map_err(|e| e.to_string())?;
+        Ok(definition)
     }
     pub fn key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {

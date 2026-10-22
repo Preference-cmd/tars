@@ -45,6 +45,7 @@ async fn incomplete(app: &mut crate::app::App, provider: Provider, endpoint: &st
         tool_limits: Default::default(),
         write_limits: None,
         permission_mode: None,
+        mcp_servers: Vec::new(),
     };
     let context = Context::from_blocks(vec![
         tarz_core::application::text_input("old input"),
@@ -352,6 +353,7 @@ async fn repair_ui_shows_write_warning_for_unpaired_write_file() {
         tool_limits: Default::default(),
         write_limits: None,
         permission_mode: None,
+        mcp_servers: Vec::new(),
     };
     let context = Context::from_blocks(vec![
         tarz_core::application::text_input("prior input"),

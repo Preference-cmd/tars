@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ffi::OsString};
 use tarz_core::{
-    config::{Config, ConfigSource, DefinitionOverrides, parse_tools},
+    config::{Config, ConfigSource, DefinitionOverrides, parse_mcp, parse_tools},
     definition::{Provider, SessionDefinition},
 };
 
@@ -53,6 +53,9 @@ pub(super) fn definition(
         workspace_root: values.get("--workspace").map(|path| (*path).into()),
         tools: string(values, "--tools")?
             .map(|value| parse_tools(&value).map_err(|e| e.to_string()))
+            .transpose()?,
+        mcp: string(values, "--mcp")?
+            .map(|value| parse_mcp(&value).map_err(|e| e.to_string()))
             .transpose()?,
         tool_limits: None,
         write_limits: None,

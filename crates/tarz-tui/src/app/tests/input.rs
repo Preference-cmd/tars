@@ -140,8 +140,12 @@ fn workspace_form_uses_shared_resolver_and_preserves_profile_limits() {
         crate::options::parse(["--config".into(), path.to_string_lossy().into_owned()].into_iter())
             .unwrap()
             .unwrap();
-    let mut form = input::Form::new(options.preset.as_ref());
-    assert_eq!(form.fields.len(), 8);
+    let mut form = input::Form::new(
+        options.config.clone(),
+        options.profile.clone(),
+        options.preset.as_ref(),
+    );
+    assert_eq!(form.fields.len(), 9);
     let frozen = form.definition().unwrap();
     assert_eq!(
         frozen.workspace_root,
@@ -153,4 +157,119 @@ fn workspace_form_uses_shared_resolver_and_preserves_profile_limits() {
     assert!(form.definition().unwrap().tools.is_empty());
     form.fields[6] = ratatui_textarea::TextArea::from(["shell"]);
     assert!(form.definition().is_err());
+}
+
+#[test]
+fn clearing_visible_endpoint_and_workspace_fields_overrides_the_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("workspace")).unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "version = 1\nstore = 'data'\ndefault_profile = 'local'\n\
+         [profiles.local]\nprovider = 'openai-chat'\nmodel = 'clear-model'\n\
+         endpoint = 'http://127.0.0.1:9/v1/chat/completions'\n\
+         workspace_root = 'workspace'\ntools = ['read_file']\n",
+    )
+    .unwrap();
+    let endpoint = "http://127.0.0.1:9/v1/chat/completions";
+    let workspace = dir.path().join("workspace").canonicalize().unwrap();
+    // Both resolution paths are covered: the default profile with no explicit
+    // name, and the same profile selected by name.
+    for profile in [None, Some("local")] {
+        let mut args = vec!["--config".to_owned(), path.to_string_lossy().into_owned()];
+        if let Some(name) = profile {
+            args.extend(["--profile".to_owned(), name.to_owned()]);
+        }
+        let options = crate::options::parse(args.into_iter()).unwrap().unwrap();
+        let mut app = crate::app::App::new(options);
+        app.event(key(KeyCode::F(2)));
+        let form = app.form.as_mut().unwrap();
+        assert_eq!(form.fields[2].lines().join(""), endpoint);
+        assert_eq!(
+            form.fields[5].lines().join(""),
+            workspace.display().to_string()
+        );
+        assert_eq!(form.fields[6].lines().join(""), "read_file");
+
+        // Clearing the endpoint must not restore the profile's endpoint.
+        form.fields[2] = ratatui_textarea::TextArea::from([""]);
+        let without_endpoint = form.definition().unwrap();
+        assert_eq!(without_endpoint.endpoint, None);
+        assert_eq!(without_endpoint.workspace_root, Some(workspace.clone()));
+        assert_eq!(without_endpoint.tools.len(), 1);
+
+        // Clearing the workspace while tools stay selected is refused.
+        form.fields[5] = ratatui_textarea::TextArea::from([""]);
+        let error = form.definition().unwrap_err();
+        assert!(
+            error.contains("workspace root is required when tools are enabled"),
+            "{error}"
+        );
+
+        // Clearing both fields and the tool selection yields an explicit no-root,
+        // no-endpoint definition instead of the profile's values.
+        form.fields[6] = ratatui_textarea::TextArea::from([""]);
+        let cleared = form.definition().unwrap();
+        assert_eq!(cleared.endpoint, None);
+        assert_eq!(cleared.workspace_root, None);
+        assert!(cleared.tools.is_empty());
+    }
+}
+
+#[test]
+fn wm11_tui_form_resolves_mcp_ids_through_shared_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        r#"version = 1
+store = 'data'
+default_profile = 'local'
+[mcp_servers.git]
+command = 'uvx'
+args = ['mcp-server-git']
+[mcp_servers.docs]
+url = 'https://example.invalid/mcp'
+bearer_token_env_var = 'DOCS_MCP_TOKEN'
+[profiles.local]
+provider = 'openai-chat'
+model = 'mcp-form-model'
+mcp = ['git']
+"#,
+    )
+    .unwrap();
+    let options =
+        crate::options::parse(["--config".into(), path.to_string_lossy().into_owned()].into_iter())
+            .unwrap()
+            .unwrap();
+    let mut form = input::Form::new(
+        options.config.clone(),
+        options.profile.clone(),
+        options.preset.as_ref(),
+    );
+    assert_eq!(form.fields.len(), 9);
+    assert!(input::FIELD_NAMES[8].contains("MCP"));
+    assert_eq!(form.fields[8].lines().join(""), "git");
+    assert_eq!(form.definition().unwrap().mcp_servers.len(), 1);
+    assert_eq!(form.definition().unwrap().mcp_servers[0].id, "git");
+
+    form.fields[8] = ratatui_textarea::TextArea::from(["git,docs"]);
+    let selected = form.definition().unwrap();
+    assert_eq!(selected.mcp_servers.len(), 2);
+    assert_eq!(selected.mcp_servers[1].id, "docs");
+
+    form.fields[8] = ratatui_textarea::TextArea::from([""]);
+    assert!(form.definition().unwrap().mcp_servers.is_empty());
+
+    form.fields[8] = ratatui_textarea::TextArea::from(["absent"]);
+    assert!(form.definition().unwrap_err().contains("absent"));
+    form.fields[8] = ratatui_textarea::TextArea::from(["Git"]);
+    assert!(form.definition().is_err());
+
+    // Without a preset the same configuration still resolves an entered id.
+    let mut fresh = input::Form::new(options.config.clone(), options.profile.clone(), None);
+    fresh.fields[1] = ratatui_textarea::TextArea::from(["fixture-model"]);
+    fresh.fields[8] = ratatui_textarea::TextArea::from(["git"]);
+    assert_eq!(fresh.definition().unwrap().mcp_servers[0].id, "git");
 }

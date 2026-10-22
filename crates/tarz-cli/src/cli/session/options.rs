@@ -112,6 +112,7 @@ impl SessionCommand {
                 | "--profile"
                 | "--workspace"
                 | "--tools"
+                | "--mcp"
                     if command == "create" =>
                 {
                     insert(&mut values, flag, &mut args)?;
@@ -229,7 +230,9 @@ fn insert<'a>(
     args: &mut std::slice::Iter<'a, OsString>,
 ) -> Result<(), &'static str> {
     let value = args.next().ok_or("option needs a value")?;
-    if (value.is_empty() && flag != "--tools") || values.insert(flag, value).is_some() {
+    if (value.is_empty() && !matches!(flag, "--tools" | "--mcp"))
+        || values.insert(flag, value).is_some()
+    {
         return Err("empty or duplicate option");
     }
     Ok(())

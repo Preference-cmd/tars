@@ -30,6 +30,7 @@ Run options:
   --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
   --workspace    Root directory for workspace tools; relative to current directory
   --tools        Comma-separated list_directory,read_file,search_text,write_file,edit_file (default empty)
+  --mcp          Comma-separated ids from shared [mcp_servers.*] (default: profile; empty disables)
   --permission-mode  read-only | ask | accept-edits | full-access (default: profile or ask)
                  Initial permission mode for transient work. In ask mode, asks for
                  confirmation when stdin and stderr are interactive terminals and input is
