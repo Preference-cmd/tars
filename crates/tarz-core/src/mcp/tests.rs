@@ -48,8 +48,7 @@ fn server(id: &str, role: &str) -> McpServerConfig {
         args: Vec::new(),
         url: None,
         env: BTreeMap::from([(ROLE.to_owned(), role.to_owned())]),
-        env_vars: Vec::new(),
-        bearer_token_env_var: None,
+        headers: BTreeMap::new(),
         startup_timeout_sec: 10,
         tool_timeout_sec: 10,
         enabled_tools: None,
@@ -455,7 +454,9 @@ async fn a_stdio_server_sees_only_the_allowed_environment_and_starts_in_the_work
     config
         .env
         .insert("TARZ_FIXTURE_LITERAL".into(), "literal-value".into());
-    config.env_vars = vec![forwarded.into(), "TARZ_MCP_TEST_VARIABLE_NEVER_SET".into()];
+    config
+        .env
+        .insert(forwarded.into(), format!("${{{forwarded}}}"));
     let runtime = start(&definition(
         "http://127.0.0.1:9/v1/chat/completions",
         root.path(),
@@ -715,7 +716,10 @@ async fn a_missing_bearer_token_variable_fails_without_its_value() {
     remote.command = None;
     remote.env.clear();
     remote.url = Some("http://127.0.0.1:9/mcp".into());
-    remote.bearer_token_env_var = Some("TARZ_MCP_TEST_TOKEN_NEVER_SET".into());
+    remote.headers.insert(
+        "Authorization".into(),
+        "Bearer ${TARZ_MCP_TEST_TOKEN_NEVER_SET}".into(),
+    );
     let runtime = start(&definition(
         "http://127.0.0.1:9/v1/chat/completions",
         root.path(),
@@ -726,7 +730,8 @@ async fn a_missing_bearer_token_variable_fails_without_its_value() {
     assert!(!status[0].ready);
     let reason = status[0].reason.as_deref().unwrap_or_default();
     assert!(
-        reason.contains("TARZ_MCP_TEST_TOKEN_NEVER_SET") && reason.contains("missing"),
+        reason.contains("TARZ_MCP_TEST_TOKEN_NEVER_SET")
+            && (reason.contains("not set") || reason.contains("missing")),
         "reason: {reason}"
     );
     assert!(runtime.sources().is_empty());
@@ -937,4 +942,223 @@ async fn a_server_that_stops_listing_does_not_hold_up_the_turn() {
     host.close(&session.target(), ClosePolicy::DiscardLocal)
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stdio_server_env_expands_variables_and_defaults() {
+    let forwarded = "CARGO_PKG_NAME";
+    let forwarded_value = std::env::var(forwarded).expect("cargo sets CARGO_PKG_NAME");
+    let root = tempfile::tempdir().unwrap();
+    let mut config = server("fx", "serve");
+    config
+        .env
+        .insert("TARZ_FIXTURE_LITERAL".into(), "literal-value".into());
+    config
+        .env
+        .insert("FORWARDED_VAR".into(), format!("${{{forwarded}}}"));
+    config.env.insert(
+        "DEFAULTED_VAR".into(),
+        "${TARZ_MCP_TEST_UNSET_VAR:-fallback_value}".into(),
+    );
+    let runtime = start(&definition(
+        "http://127.0.0.1:9/v1/chat/completions",
+        root.path(),
+        vec![config],
+    ))
+    .await;
+    let source = only_source(&runtime);
+    let _ = names(&source).await;
+    let payload = source
+        .invoke(&call("mcp_fx_env", json!({})), &control(), None)
+        .await
+        .expect("env tool");
+    let environment: BTreeMap<String, String> = serde_json::from_str(&text(&payload)).unwrap();
+    assert_eq!(environment["FORWARDED_VAR"], forwarded_value);
+    assert_eq!(environment["DEFAULTED_VAR"], "fallback_value");
+    assert_eq!(environment["TARZ_FIXTURE_LITERAL"], "literal-value");
+    runtime.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_env_variable_fails_startup_and_required_server_prevents_session_open() {
+    let root = tempfile::tempdir().unwrap();
+    let mut config = server("fx", "serve");
+    config.env.insert(
+        "MISSING_VAR".into(),
+        "${TARZ_MCP_TEST_VAR_THAT_IS_NOT_SET}".into(),
+    );
+    config.required = true;
+
+    let store_dir = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store_dir.path().to_path_buf()));
+    let def = definition(
+        "http://127.0.0.1:9/v1/chat/completions",
+        root.path(),
+        vec![config],
+    );
+    let Err(err) = host
+        .create(PreparedCreate::transient(def, Context::default()))
+        .await
+    else {
+        panic!("must fail");
+    };
+    let msg = err.to_string();
+    assert!(msg.contains("TARZ_MCP_TEST_VAR_THAT_IS_NOT_SET"));
+    assert!(msg.contains("not set"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_server_headers_are_expanded_and_sent_over_network() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let token_var = "CARGO_PKG_NAME";
+    let token_val = std::env::var(token_var).expect("CARGO_PKG_NAME is set by cargo");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = vec![0u8; 4096];
+            let n = socket.read(&mut buf).await.unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = tx.send(req);
+            let response = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+
+    let root = tempfile::tempdir().unwrap();
+    let mut remote = server("http-srv", "serve");
+    remote.command = None;
+    remote.env.clear();
+    remote.url = Some(format!("http://{addr}/mcp"));
+    remote
+        .headers
+        .insert("Authorization".into(), format!("Bearer ${{{token_var}}}"));
+    remote
+        .headers
+        .insert("X-Custom-Header".into(), "CustomVal".into());
+    remote.startup_timeout_sec = 2;
+
+    let runtime = start(&definition(
+        "http://127.0.0.1:9/v1/chat/completions",
+        root.path(),
+        vec![remote],
+    ))
+    .await;
+
+    let received_request = rx.await.unwrap();
+    let lower_req = received_request.to_ascii_lowercase();
+    assert!(lower_req.contains(&format!("authorization: bearer {token_val}").to_ascii_lowercase()));
+    assert!(lower_req.contains("x-custom-header: customval"));
+
+    let status = runtime.status();
+    assert!(!status[0].ready);
+    let reason = status[0].reason.as_deref().unwrap_or_default();
+    assert!(!reason.contains(&token_val));
+
+    runtime.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_server_failure_reason_redacts_expanded_url_variables() {
+    let port = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let mut remote = server("http-srv", "serve");
+    remote.command = None;
+    remote.env.clear();
+    remote.url = Some(format!(
+        "http://127.0.0.1:{port}/secret/${{TARZ_TEST_UNSET_TOKEN:-prominent_secret_token_12345}}"
+    ));
+    remote.startup_timeout_sec = 2;
+
+    let runtime = start(&definition(
+        "http://127.0.0.1:9/v1/chat/completions",
+        root.path(),
+        vec![remote],
+    ))
+    .await;
+
+    let status = runtime.status();
+    assert!(!status[0].ready);
+    let reason = status[0].reason.as_deref().unwrap_or_default();
+    assert!(
+        !reason.contains("prominent_secret_token_12345"),
+        "reason echoed secret: {reason}"
+    );
+    assert!(
+        reason.contains("${TARZ_TEST_UNSET_TOKEN}"),
+        "reason lacked placeholder: {reason}"
+    );
+
+    runtime.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_server_expanded_invalid_url_fails_startup_with_static_reason() {
+    let root = tempfile::tempdir().unwrap();
+    let mut remote = server("http-srv", "serve");
+    remote.command = None;
+    remote.env.clear();
+    remote.url =
+        Some("${TARZ_TEST_UNSET_ENDPOINT:-ftp://invalid-scheme-marker.invalid/mcp}".to_string());
+    remote.startup_timeout_sec = 2;
+
+    let runtime = start(&definition(
+        "http://127.0.0.1:9/v1/chat/completions",
+        root.path(),
+        vec![remote],
+    ))
+    .await;
+
+    let status = runtime.status();
+    assert!(!status[0].ready);
+    let reason = status[0].reason.as_deref().unwrap_or_default();
+    assert_eq!(reason, "expanded URL is not a valid HTTP endpoint");
+    assert!(!reason.contains("invalid-scheme-marker"));
+
+    runtime.close().await;
+}
+
+// Connection errors quote URLs percent-encoded, which redaction by the raw
+// value would miss, so such values are refused before connecting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_url_variables_that_would_be_percent_encoded_are_refused() {
+    for value in [
+        "café_secret_marker",
+        "has space_secret_marker",
+        "quote\"_secret_marker",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let mut remote = server("http-srv", "serve");
+        remote.command = None;
+        remote.env.clear();
+        remote.url = Some(format!(
+            "http://127.0.0.1:9/${{TARZ_TEST_UNSET_PATH:-{value}}}/mcp"
+        ));
+        remote.startup_timeout_sec = 2;
+
+        let runtime = start(&definition(
+            "http://127.0.0.1:9/v1/chat/completions",
+            root.path(),
+            vec![remote],
+        ))
+        .await;
+
+        let status = runtime.status();
+        assert!(!status[0].ready);
+        let reason = status[0].reason.as_deref().unwrap_or_default();
+        assert_eq!(
+            reason,
+            "a variable in the URL expands to characters that are not allowed there"
+        );
+        assert!(!reason.contains("secret_marker"), "{reason}");
+
+        runtime.close().await;
+    }
 }

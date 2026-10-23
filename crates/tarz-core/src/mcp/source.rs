@@ -4,7 +4,7 @@ use super::status::{
     MAX_SKIPPED_TOOLS, McpServerStatus, McpSkippedTool, bounded_name, bounded_reason,
 };
 use super::stderr::StderrCapture;
-use crate::definition::{McpServerConfig, WorkspaceTool};
+use crate::definition::{McpServerConfig, WorkspaceTool, redact_substitutions};
 use causa::extension::McpToolSource;
 use causa::kernel::{
     ArtifactStore, CallControl, DynamicToolSource, SourceError, ToolCallContext, ToolDefinition,
@@ -50,6 +50,7 @@ pub(crate) struct McpServerSource {
     version: AtomicU64,
     /// The stderr pipe of a stdio server; it ends when the child exits.
     stderr: Option<Arc<StderrCapture>>,
+    substitutions: Vec<(String, String)>,
 }
 
 impl McpServerSource {
@@ -57,6 +58,7 @@ impl McpServerSource {
         config: McpServerConfig,
         inner: McpToolSource,
         stderr: Option<Arc<StderrCapture>>,
+        substitutions: Vec<(String, String)>,
     ) -> Self {
         Self {
             prefix: format!("mcp_{}_", config.id),
@@ -71,6 +73,7 @@ impl McpServerSource {
                 skipped: Vec::new(),
             }),
             stderr,
+            substitutions,
         }
     }
 
@@ -104,7 +107,8 @@ impl McpServerSource {
         let descriptions = match listed {
             Ok(descriptions) => descriptions,
             Err(error) => {
-                let reason = bounded_reason(&error);
+                let redacted = redact_substitutions(&error, &self.substitutions);
+                let reason = bounded_reason(&redacted);
                 let mut state = self.state.lock().expect("MCP source state lock");
                 state.ready = false;
                 state.reason = Some(reason.clone());
@@ -202,6 +206,21 @@ impl McpServerSource {
         }
         None
     }
+
+    fn redact_tool_error(&self, error: ToolExecutionError) -> ToolExecutionError {
+        match error {
+            ToolExecutionError::Protocol(text) => {
+                ToolExecutionError::Protocol(redact_substitutions(&text, &self.substitutions))
+            }
+            ToolExecutionError::Unavailable(text) => {
+                ToolExecutionError::Unavailable(redact_substitutions(&text, &self.substitutions))
+            }
+            ToolExecutionError::UnknownTool(text) => {
+                ToolExecutionError::UnknownTool(redact_substitutions(&text, &self.substitutions))
+            }
+            other => other,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -263,7 +282,7 @@ impl DynamicToolSource for McpServerSource {
         let mut payload = source
             .invoke(call, &control, store)
             .await
-            .map_err(limit_error)?;
+            .map_err(|error| self.redact_tool_error(limit_error(error)))?;
         limit_result(&mut payload);
         Ok(payload)
     }

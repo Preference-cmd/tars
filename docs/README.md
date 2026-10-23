@@ -2,7 +2,7 @@
 
 Tarz 的目的是验证并改进 Causa，应用是验证的载体，见 [README 的“目的”](../README.md#目的)。本页只记录当前实现。
 
-2026-10-05：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tarz-tui` 已接通会话、输入、临时流式正文预览、结果、取消及保存恢复；工作区只读工具与可靠状态已接通；CLI 和 TUI 可以写入文件：`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；`tarz-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。MCP 的共享配置、预设/CLI/TUI 选择、定义快照和内置 MCP 客户端的工具调用已接通，MCP 调用目前只在 `full-access` 模式下执行，确认与外部服务的完整说明待补；GUI、命令执行、父子 Agent、安装和发布也仍在后续范围。
+2026-10-05：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tarz-tui` 已接通会话、输入、临时流式正文预览、结果、取消及保存恢复；工作区只读工具与可靠状态已接通；CLI 和 TUI 可以写入文件：`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；`tarz-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。MCP 通过独立的 `mcp.json` 配置（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和内置 MCP 客户端的工具调用已接通，MCP 调用目前只在 `full-access` 模式下执行，确认与外部服务的完整说明待补；GUI、命令执行、父子 Agent、安装和发布也仍在后续范围。
 
 ## 代码结构
 

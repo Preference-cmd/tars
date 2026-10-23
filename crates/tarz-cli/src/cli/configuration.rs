@@ -24,7 +24,11 @@ pub(super) fn load(values: &Values<'_>, disabled: bool) -> Result<Config, String
         (None, true) => ConfigSource::Disabled,
         (None, false) => ConfigSource::Discover,
     };
-    Config::load(source).map_err(|e| e.to_string())
+    let config = Config::load(source).map_err(|e| e.to_string())?;
+    for warning in config.warnings() {
+        eprintln!("{warning}");
+    }
+    Ok(config)
 }
 
 pub(super) fn definition(

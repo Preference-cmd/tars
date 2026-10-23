@@ -32,7 +32,7 @@ Create options:
   --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
   --workspace         Root directory for selected workspace tools
   --tools             Comma-separated list_directory,read_file,search_text,write_file,edit_file (default empty)
-  --mcp               Comma-separated MCP server ids from shared [mcp_servers.*] (default: profile; empty disables)
+  --mcp               Comma-separated MCP server ids from mcp.json (default: profile; empty disables)
   --permission-mode   read-only | ask | accept-edits | full-access (default: profile or ask)
                       Initial permission mode saved in the definition. In ask mode, asks
                       when stdin and stderr are terminals and input is not from --stdin;

@@ -472,28 +472,6 @@ store = "store"
 recovery_dir = "."
 default_profile = "local"
 
-[mcp_servers.git]
-command = "uvx"
-args = ["mcp-server-git", "--repository", "."]
-env = {{ LOG_LEVEL = "warn" }}
-env_vars = ["GIT_AUTHOR_NAME"]
-startup_timeout_sec = 12
-tool_timeout_sec = 120
-enabled_tools = ["git_status", "git_diff"]
-approval = "writes"
-required = true
-
-[mcp_servers.git.tools.git_status]
-approval = "auto"
-
-[mcp_servers.docs]
-url = "https://example.invalid/mcp"
-bearer_token_env_var = "DOCS_MCP_TOKEN"
-disabled_tools = ["danger"]
-
-[mcp_servers.docs.tools.search]
-approval = "auto"
-
 [profiles.local]
 provider = "openai-chat"
 model = "mcp-model"
@@ -504,6 +482,31 @@ mcp = ["git"]
 "#,
         workspace.display()
     )
+}
+
+fn mcp_json() -> &'static str {
+    r#"{
+  "mcpServers": {
+    "git": {
+      "command": "uvx",
+      "args": ["mcp-server-git", "--repository", "."],
+      "env": { "LOG_LEVEL": "warn", "GIT_AUTHOR_NAME": "${GIT_AUTHOR_NAME}" },
+      "startupTimeoutSec": 12,
+      "toolTimeoutSec": 120,
+      "enabledTools": ["git_status", "git_diff"],
+      "approval": "writes",
+      "required": true,
+      "tools": { "git_status": { "approval": "approve" } }
+    },
+    "docs": {
+      "type": "http",
+      "url": "https://example.invalid/mcp",
+      "headers": { "Authorization": "Bearer ${DOCS_MCP_TOKEN}" },
+      "disabledTools": ["danger"],
+      "tools": { "search": { "approval": "approve" } }
+    }
+  }
+}"#
 }
 
 fn session_record(dir: &Path, id: &str) -> (std::path::PathBuf, Value) {
@@ -522,6 +525,7 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
     std::fs::create_dir(&workspace).unwrap();
     let config_path = dir.path().join("config.toml");
     std::fs::write(&config_path, mcp_config(&workspace)).unwrap();
+    std::fs::write(dir.path().join("mcp.json"), mcp_json()).unwrap();
     let secret = "mcp-secret-value-6f1c";
     let token_env = "DOCS_MCP_TOKEN";
     let create = |extra: &[&str]| {
@@ -548,8 +552,10 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
         git["args"],
         serde_json::json!(["mcp-server-git", "--repository", "."])
     );
-    assert_eq!(git["env"], serde_json::json!({"LOG_LEVEL": "warn"}));
-    assert_eq!(git["env_vars"], serde_json::json!(["GIT_AUTHOR_NAME"]));
+    assert_eq!(
+        git["env"],
+        serde_json::json!({"LOG_LEVEL": "warn", "GIT_AUTHOR_NAME": "${GIT_AUTHOR_NAME}"})
+    );
     assert_eq!(git["startup_timeout_sec"], 12);
     assert_eq!(git["tool_timeout_sec"], 120);
     assert_eq!(
@@ -557,9 +563,11 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
         serde_json::json!(["git_status", "git_diff"])
     );
     assert_eq!(git["approval"], "writes");
-    assert_eq!(git["tools"]["git_status"]["approval"], "auto");
+    assert_eq!(git["tools"]["git_status"]["approval"], "approve");
     assert_eq!(git["required"], true);
     assert!(git.get("url").is_none());
+    assert!(git.get("headers").is_none());
+    assert!(git.get("env_vars").is_none());
     assert!(git.get("bearer_token_env_var").is_none());
     let preset_bytes = std::fs::read_to_string(&preset_record).unwrap();
     assert!(!preset_bytes.contains(secret));
@@ -576,14 +584,18 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
     assert_eq!(servers[0]["id"], "git");
     assert_eq!(servers[1]["id"], "docs");
     assert_eq!(servers[1]["url"], "https://example.invalid/mcp");
-    assert_eq!(servers[1]["bearer_token_env_var"], token_env);
+    assert_eq!(
+        servers[1]["headers"],
+        serde_json::json!({ "Authorization": "Bearer ${DOCS_MCP_TOKEN}" })
+    );
     assert_eq!(servers[1]["startup_timeout_sec"], 10);
     assert_eq!(servers[1]["tool_timeout_sec"], 60);
     assert_eq!(servers[1]["approval"], "prompt");
     assert_eq!(servers[1]["required"], false);
     assert_eq!(servers[1]["disabled_tools"], serde_json::json!(["danger"]));
-    assert_eq!(servers[1]["tools"]["search"]["approval"], "auto");
+    assert_eq!(servers[1]["tools"]["search"]["approval"], "approve");
     assert!(servers[1].get("enabled_tools").is_none());
+    assert!(servers[1].get("bearer_token_env_var").is_none());
     let explicit_bytes = std::fs::read_to_string(&explicit_record).unwrap();
     assert!(explicit_bytes.contains(token_env));
     assert!(!explicit_bytes.contains(secret));
@@ -636,13 +648,19 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
     assert_eq!(reopened.definition.mcp_servers[1].id, "docs");
     assert_eq!(
         reopened.definition.mcp_servers[1]
-            .bearer_token_env_var
-            .as_deref(),
-        Some(token_env)
+            .headers
+            .get("Authorization")
+            .map(String::as_str),
+        Some("Bearer ${DOCS_MCP_TOKEN}")
     );
 
     // An explicit empty selection clears the preset's server.
     let cleared = create(&["--mcp", ""]);
+
+    // Delete mcp.json to verify reopening and listing continue to succeed from saved definitions
+    std::fs::remove_file(dir.path().join("mcp.json")).unwrap();
+    let entries_after_delete = host.list().await.unwrap();
+    assert_eq!(entries_after_delete.len(), 3);
     let cleared_id = cleared["conversation_id"].as_str().unwrap();
     let (cleared_record, cleared_json) = session_record(dir.path(), cleared_id);
     assert!(cleared_json["definition"].get("mcp_servers").is_none());
@@ -734,6 +752,7 @@ fn wm11_cli_rejects_unknown_mcp_ids_and_keeps_secrets_out_of_errors() {
     std::fs::create_dir(&workspace).unwrap();
     let config_path = dir.path().join("config.toml");
     std::fs::write(&config_path, mcp_config(&workspace)).unwrap();
+    std::fs::write(dir.path().join("mcp.json"), mcp_json()).unwrap();
     let secret = "mcp-secret-error-value";
 
     let run_unknown = cli(dir.path())
@@ -764,11 +783,11 @@ fn wm11_cli_rejects_unknown_mcp_ids_and_keeps_secrets_out_of_errors() {
     }
 
     // A malformed, unselected server fails at load without echoing values.
-    let broken = format!(
-        "{}\n[mcp_servers.broken]\ncommand = \"uvx\"\nenv = {{ \"BAD-NAME\" = \"secret-marker\" }}\n",
-        mcp_config(&workspace)
-    );
-    std::fs::write(&config_path, broken).unwrap();
+    std::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{"mcpServers": {"broken": {"command": "uvx", "env": {"BAD-NAME": "secret-marker"}}}}"#,
+    )
+    .unwrap();
     let output = cli(dir.path())
         .args(["session", "list", "--config"])
         .arg(&config_path)
@@ -777,6 +796,24 @@ fn wm11_cli_rejects_unknown_mcp_ids_and_keeps_secrets_out_of_errors() {
     assert_eq!(output.status.code(), Some(2));
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(!error.contains("secret-marker"), "{error}");
+
+    // config.toml containing [mcp_servers] fails with hint
+    std::fs::write(
+        &config_path,
+        format!(
+            "{}\n[mcp_servers.broken]\ncommand = \"uvx\"\n",
+            mcp_config(&workspace)
+        ),
+    )
+    .unwrap();
+    let output = cli(dir.path())
+        .args(["session", "list", "--config"])
+        .arg(&config_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("mcp.json"), "{error}");
 
     // --mcp needs a value and is not accepted when reopening a session.
     let output = cli(dir.path())
@@ -816,7 +853,7 @@ fn wm11_mcp_selection_is_documented_in_cli_help() {
         assert!(output.status.success(), "{arguments:?}");
         let help = String::from_utf8_lossy(&output.stdout);
         assert!(
-            help.contains("--mcp") && help.contains("mcp_servers"),
+            help.contains("--mcp") && help.contains("mcp.json"),
             "{arguments:?}"
         );
         assert!(
@@ -824,4 +861,230 @@ fn wm11_mcp_selection_is_documented_in_cli_help() {
             "{arguments:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn wm10_stage_g_snapshot_conversion_to_current_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let sessions = store.join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let id = "018f0c4e-0000-7000-8000-000000000009";
+    let commit = "018f0c4e-0000-7000-8000-00000000000a";
+    let record_path = sessions.join(format!("{id}.json"));
+    let raw = format!(
+        r#"{{"format":"tarz-session-v2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"mcp_servers":[{{"id":"git","command":"uvx","env":{{"LOG_LEVEL":"warn"}},"env_vars":["GIT_AUTHOR_NAME"],"startup_timeout_sec":12,"tool_timeout_sec":120,"approval":"auto","tools":{{"git_status":{{"approval":"auto"}}}},"required":false}},{{"id":"docs","url":"https://example.invalid/mcp","bearer_token_env_var":"DOCS_MCP_TOKEN","startup_timeout_sec":10,"tool_timeout_sec":60,"approval":"prompt","required":false}}],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+    );
+    std::fs::write(&record_path, raw.as_bytes()).unwrap();
+
+    let host = tarz_core::application::SessionHost::new(Some(store));
+    let entries = host.list().await.unwrap();
+    assert_eq!(entries.len(), 1);
+    let def = &entries[0].record.as_ref().unwrap().definition;
+    assert_eq!(def.mcp_servers.len(), 2);
+    let git = &def.mcp_servers[0];
+    assert_eq!(git.env["GIT_AUTHOR_NAME"], "${GIT_AUTHOR_NAME}");
+    assert_eq!(git.approval, tarz_core::definition::McpApproval::Approve);
+    assert_eq!(
+        git.tools["git_status"].approval,
+        tarz_core::definition::McpApproval::Approve
+    );
+
+    let docs = &def.mcp_servers[1];
+    assert_eq!(docs.headers["Authorization"], "Bearer ${DOCS_MCP_TOKEN}");
+    assert_eq!(docs.approval, tarz_core::definition::McpApproval::Prompt);
+
+    // Serialization of the converted record uses new field names
+    let serialized = serde_json::to_value(def).unwrap();
+    let s_git = &serialized["mcp_servers"][0];
+    assert!(s_git.get("env_vars").is_none());
+    assert_eq!(s_git["approval"], "approve");
+    assert_eq!(s_git["tools"]["git_status"]["approval"], "approve");
+    let s_docs = &serialized["mcp_servers"][1];
+    assert!(s_docs.get("bearer_token_env_var").is_none());
+    assert_eq!(
+        s_docs["headers"]["Authorization"],
+        "Bearer ${DOCS_MCP_TOKEN}"
+    );
+}
+
+#[test]
+fn wm11_cli_prints_ignored_keys_warning_to_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, mcp_config(&workspace)).unwrap();
+    std::fs::write(
+        dir.path().join("mcp.json"),
+        r#"{"mcpServers": {"git": {"command": "uvx", "disabled": true, "autoApprove": ["status"]}}}"#,
+    )
+    .unwrap();
+
+    let output = cli(dir.path())
+        .args(["session", "list", "--config"])
+        .arg(&config_path)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("git") && stderr.contains("disabled"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("git") && stderr.contains("autoApprove"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn wm11_cli_mcp_config_location_rules() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+
+    let custom_json =
+        r#"{"mcpServers": {"git": {"command": "uvx"}, "custom": {"command": "uvx"}}}"#;
+
+    // Explicit TARZ_MCP_CONFIG file path is loaded.
+    let mcp_custom_path = dir.path().join("custom_mcp.json");
+    std::fs::write(&mcp_custom_path, custom_json).unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, mcp_config(&workspace)).unwrap();
+
+    let out1 = cli(dir.path())
+        .env("TARZ_MCP_CONFIG", &mcp_custom_path)
+        .args(["session", "create", "--config"])
+        .arg(&config_path)
+        .args(["--mcp", "custom", "--json"])
+        .output()
+        .unwrap();
+    assert!(out1.status.success(), "case 1: {out1:?}");
+    let val1: Value = serde_json::from_slice(&out1.stdout).unwrap();
+    assert_eq!(val1["status"], "created");
+
+    // Explicit TARZ_MCP_CONFIG pointing to non-existent file fails.
+    let out2 = cli(dir.path())
+        .env("TARZ_MCP_CONFIG", dir.path().join("non_existent_mcp.json"))
+        .args(["session", "create", "--config"])
+        .arg(&config_path)
+        .args(["--mcp", "custom"])
+        .output()
+        .unwrap();
+    assert_eq!(out2.status.code(), Some(2), "case 2: {out2:?}");
+
+    // Sibling mcp.json in the same directory as TARZ_CONFIG is loaded.
+    let dir3 = tempfile::tempdir().unwrap();
+    let ws3 = dir3.path().join("workspace");
+    std::fs::create_dir(&ws3).unwrap();
+    let cfg3 = dir3.path().join("config.toml");
+    std::fs::write(&cfg3, mcp_config(&ws3)).unwrap();
+    std::fs::write(dir3.path().join("mcp.json"), custom_json).unwrap();
+
+    let out3 = cli(dir.path())
+        .env("TARZ_CONFIG", &cfg3)
+        .env_remove("TARZ_MCP_CONFIG")
+        .args(["session", "create", "--mcp", "custom", "--json"])
+        .output()
+        .unwrap();
+    assert!(out3.status.success(), "case 3: {out3:?}");
+
+    // Sibling mcp.json in the same directory as --config is loaded.
+    let dir4 = tempfile::tempdir().unwrap();
+    let ws4 = dir4.path().join("workspace");
+    std::fs::create_dir(&ws4).unwrap();
+    let cfg4 = dir4.path().join("config.toml");
+    std::fs::write(&cfg4, mcp_config(&ws4)).unwrap();
+    std::fs::write(dir4.path().join("mcp.json"), custom_json).unwrap();
+
+    let out4 = cli(dir.path())
+        .env_remove("TARZ_CONFIG")
+        .env_remove("TARZ_MCP_CONFIG")
+        .args(["session", "create", "--config"])
+        .arg(&cfg4)
+        .args(["--mcp", "custom", "--json"])
+        .output()
+        .unwrap();
+    assert!(out4.status.success(), "case 4: {out4:?}");
+
+    // Disabled configuration never reads mcp.json even when TARZ_MCP_CONFIG is set.
+    let out5 = cli(dir.path())
+        .env("TARZ_MCP_CONFIG", &mcp_custom_path)
+        .args(["session", "create", "--no-config", "--mcp", "custom"])
+        .output()
+        .unwrap();
+    assert_eq!(out5.status.code(), Some(2), "case 5: {out5:?}");
+
+    // When no default config path exists (no XDG_CONFIG_HOME or HOME),
+    // cwd mcp.json is NOT loaded (regression test).
+    let dir6 = tempfile::tempdir().unwrap();
+    std::fs::write(dir6.path().join("mcp.json"), custom_json).unwrap();
+    let out6 = cli(dir.path())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env_remove("TARZ_CONFIG")
+        .env_remove("TARZ_MCP_CONFIG")
+        .current_dir(dir6.path())
+        .args(["session", "create", "--mcp", "custom"])
+        .output()
+        .unwrap();
+    assert_eq!(out6.status.code(), Some(2), "case 6: {out6:?}");
+}
+
+#[test]
+fn wm11_cli_negative_config_does_not_spawn_child_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, mcp_config(&workspace)).unwrap();
+
+    let marker_create = dir.path().join("create_spawned.marker");
+    let marker_run = dir.path().join("run_spawned.marker");
+    let secret = "test_forbidden_secret_value_999";
+
+    let mcp_content_create = format!(
+        r#"{{"mcpServers": {{"evil": {{"command": "/bin/sh", "args": ["-c", "touch {}"], "headers": {{"Authorization": "{}"}}}}}}}}"#,
+        marker_create.display(),
+        secret
+    );
+    std::fs::write(dir.path().join("mcp.json"), mcp_content_create).unwrap();
+
+    let out_create = cli(dir.path())
+        .args(["session", "create", "--config"])
+        .arg(&config_path)
+        .args(["--mcp", "evil"])
+        .output()
+        .unwrap();
+    assert_eq!(out_create.status.code(), Some(2));
+    assert!(
+        !marker_create.exists(),
+        "process was spawned during session create!"
+    );
+    let stderr_create = String::from_utf8_lossy(&out_create.stderr);
+    assert!(
+        !stderr_create.contains(secret),
+        "stderr leaked secret: {stderr_create}"
+    );
+
+    let mcp_content_run = format!(
+        r#"{{"mcpServers": {{"evil": {{"command": "/bin/sh", "args": ["-c", "touch {}"], "headers": {{"Authorization": "{}"}}}}}}}}"#,
+        marker_run.display(),
+        secret
+    );
+    std::fs::write(dir.path().join("mcp.json"), mcp_content_run).unwrap();
+
+    let out_run = cli(dir.path())
+        .args(["run", "--config"])
+        .arg(&config_path)
+        .args(["--mcp", "evil", "--input", "hello"])
+        .output()
+        .unwrap();
+    assert_eq!(out_run.status.code(), Some(2));
+    assert!(!marker_run.exists(), "process was spawned during run!");
+    let stderr_run = String::from_utf8_lossy(&out_run.stderr);
+    assert!(
+        !stderr_run.contains(secret),
+        "stderr leaked secret: {stderr_run}"
+    );
 }

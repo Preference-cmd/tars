@@ -6,6 +6,7 @@
 //! of environment variables and are resolved only by session assembly.
 
 mod file;
+mod mcp;
 mod model;
 
 pub use file::{Config, ConfigError, ConfigSource};

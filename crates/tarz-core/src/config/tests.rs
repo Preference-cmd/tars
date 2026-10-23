@@ -70,8 +70,7 @@ fn unknown_plaintext_key_invalid_values_and_missing_files_are_rejected_without_s
     ] {
         std::fs::write(&path, text).unwrap();
         let error = Config::load(ConfigSource::File(path.clone()))
-            .err()
-            .expect("must reject")
+            .expect_err("must reject")
             .to_string();
         assert!(!error.contains("secret-do-not-print"));
     }
@@ -319,9 +318,7 @@ fn a_profile_with_an_unknown_render_option_is_refused_at_load_without_its_value(
     let text =
         format!("{CONFIG}[profiles.local.render_options]\nmax_tokens_field = \"secret_marker\"\n");
     std::fs::write(&path, text).unwrap();
-    let error = Config::load(ConfigSource::File(path))
-        .err()
-        .expect("refused");
+    let error = Config::load(ConfigSource::File(path)).expect_err("refused");
     assert!(!error.to_string().contains("secret_marker"));
     assert!(error.to_string().contains("render_options"));
 }
@@ -401,9 +398,7 @@ fn config_unknown_permission_mode_is_rejected_at_load() {
 "
     );
     std::fs::write(&path, text).unwrap();
-    let error = Config::load(ConfigSource::File(path))
-        .err()
-        .expect("must fail");
+    let error = Config::load(ConfigSource::File(path)).expect_err("must fail");
     assert!(matches!(error, super::ConfigError::Syntax { .. }));
 }
 
@@ -419,9 +414,8 @@ max_write_bytes = 99999999
 "
     );
     std::fs::write(&path, text_high).unwrap();
-    let err_high = Config::load(ConfigSource::File(path.clone()))
-        .err()
-        .expect("must reject high limit");
+    let err_high =
+        Config::load(ConfigSource::File(path.clone())).expect_err("must reject high limit");
     assert!(matches!(
         err_high,
         super::ConfigError::Definition(DefinitionError::InvalidToolLimits)
@@ -434,9 +428,7 @@ max_write_bytes = 0
 "
     );
     std::fs::write(&path, text_zero).unwrap();
-    let err_zero = Config::load(ConfigSource::File(path))
-        .err()
-        .expect("must reject zero limit");
+    let err_zero = Config::load(ConfigSource::File(path)).expect_err("must reject zero limit");
     assert!(matches!(
         err_zero,
         super::ConfigError::Definition(DefinitionError::InvalidToolLimits)
@@ -496,26 +488,7 @@ async fn modifying_config_file_does_not_affect_reopened_session() {
 
 const MCP_CONFIG: &str = r#"
 version = 1
-store = "data"
 default_profile = "local"
-
-[mcp_servers.git]
-command = "uvx"
-args = ["mcp-server-git", "--repository", "."]
-env = { LOG_LEVEL = "warn" }
-env_vars = ["GIT_AUTHOR_NAME"]
-startup_timeout_sec = 12
-tool_timeout_sec = 120
-enabled_tools = ["git_status", "git_diff"]
-approval = "writes"
-required = true
-
-[mcp_servers.git.tools.git_status]
-approval = "auto"
-
-[mcp_servers.docs]
-url = "https://example.invalid/mcp"
-bearer_token_env_var = "DOCS_MCP_TOKEN"
 
 [profiles.local]
 provider = "openai-chat"
@@ -524,10 +497,34 @@ api_key_env = "FIXTURE_TOKEN"
 mcp = ["git"]
 "#;
 
+const MCP_JSON: &str = r#"{
+  "mcpServers": {
+    "git": {
+      "command": "uvx",
+      "args": ["mcp-server-git", "--repository", "."],
+      "env": { "LOG_LEVEL": "warn", "GIT_AUTHOR_NAME": "${GIT_AUTHOR_NAME}" },
+      "startupTimeoutSec": 12,
+      "toolTimeoutSec": 120,
+      "enabledTools": ["git_status", "git_diff"],
+      "approval": "writes",
+      "required": true,
+      "tools": { "git_status": { "approval": "approve" } }
+    },
+    "docs": {
+      "type": "http",
+      "url": "https://example.invalid/mcp",
+      "headers": { "Authorization": "Bearer ${DOCS_MCP_TOKEN}" }
+    }
+  }
+}
+"#;
+
 fn mcp_config(dir: &std::path::Path) -> Config {
-    let path = dir.join("config.toml");
-    std::fs::write(&path, MCP_CONFIG).unwrap();
-    Config::load(ConfigSource::File(path)).unwrap()
+    let toml_path = dir.join("config.toml");
+    let json_path = dir.join("mcp.json");
+    std::fs::write(&toml_path, MCP_CONFIG).unwrap();
+    std::fs::write(&json_path, MCP_JSON).unwrap();
+    Config::load(ConfigSource::File(toml_path)).unwrap()
 }
 
 #[test]
@@ -540,7 +537,7 @@ fn wm11_valid_mcp_servers_load_with_defaults_and_preset_selection() {
     assert_eq!(git.command.as_deref(), Some("uvx"));
     assert_eq!(git.args, ["mcp-server-git", "--repository", "."]);
     assert_eq!(git.env["LOG_LEVEL"], "warn");
-    assert_eq!(git.env_vars, ["GIT_AUTHOR_NAME"]);
+    assert_eq!(git.env["GIT_AUTHOR_NAME"], "${GIT_AUTHOR_NAME}");
     assert_eq!(git.startup_timeout_sec, 12);
     assert_eq!(git.tool_timeout_sec, 120);
     assert_eq!(
@@ -551,12 +548,12 @@ fn wm11_valid_mcp_servers_load_with_defaults_and_preset_selection() {
     assert!(git.required);
     assert_eq!(
         git.tools["git_status"].approval,
-        crate::definition::McpApproval::Auto
+        crate::definition::McpApproval::Approve
     );
 
     let docs = &servers["docs"];
     assert_eq!(docs.url.as_deref(), Some("https://example.invalid/mcp"));
-    assert_eq!(docs.bearer_token_env_var.as_deref(), Some("DOCS_MCP_TOKEN"));
+    assert_eq!(docs.headers["Authorization"], "Bearer ${DOCS_MCP_TOKEN}");
     // Omitted sparse fields take the documented snapshot defaults.
     assert_eq!(docs.startup_timeout_sec, 10);
     assert_eq!(docs.tool_timeout_sec, 60);
@@ -595,7 +592,6 @@ fn wm11_valid_mcp_servers_load_with_defaults_and_preset_selection() {
         )
         .unwrap();
     assert!(disabled.mcp_servers.is_empty());
-    // An empty snapshot stays out of the record.
     assert!(
         serde_json::to_value(&disabled)
             .unwrap()
@@ -607,24 +603,31 @@ fn wm11_valid_mcp_servers_load_with_defaults_and_preset_selection() {
 #[test]
 fn wm11_tool_override_without_approval_inherits_the_server_setting() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
+    let toml_path = dir.path().join("config.toml");
+    let json_path = dir.path().join("mcp.json");
+    std::fs::write(&toml_path, "version = 1\n").unwrap();
     std::fs::write(
-        &path,
-        r#"version = 1
-[mcp_servers.git]
-command = "uvx"
-approval = "writes"
-enabled_tools = ["git_status", "git_diff"]
-[mcp_servers.git.tools.git_status]
-[mcp_servers.git.tools.git_diff]
-approval = "auto"
-[mcp_servers.docs]
-url = "https://example.invalid/mcp"
-[mcp_servers.docs.tools.search]
-"#,
+        &json_path,
+        r#"{
+  "mcpServers": {
+    "git": {
+      "command": "uvx",
+      "approval": "writes",
+      "enabledTools": ["git_status", "git_diff"],
+      "tools": {
+        "git_status": {},
+        "git_diff": { "approval": "approve" }
+      }
+    },
+    "docs": {
+      "url": "https://example.invalid/mcp",
+      "tools": { "search": {} }
+    }
+  }
+}"#,
     )
     .unwrap();
-    let config = Config::load(ConfigSource::File(path)).unwrap();
+    let config = Config::load(ConfigSource::File(toml_path)).unwrap();
     let git = &config.mcp_servers()["git"];
     assert_eq!(
         git.tools["git_status"].approval,
@@ -632,9 +635,9 @@ url = "https://example.invalid/mcp"
     );
     assert_eq!(
         git.tools["git_diff"].approval,
-        crate::definition::McpApproval::Auto
+        crate::definition::McpApproval::Approve
     );
-    // Without a server-level setting the inherited value is the documented default.
+    // Without a server-level setting the inherited value is the documented default Prompt.
     assert_eq!(
         config.mcp_servers()["docs"].tools["search"].approval,
         crate::definition::McpApproval::Prompt
@@ -642,58 +645,215 @@ url = "https://example.invalid/mcp"
 }
 
 #[test]
+fn wm11_claude_code_style_snippets_load_successfully() {
+    let dir = tempfile::tempdir().unwrap();
+    let toml_path = dir.path().join("config.toml");
+    let json_path = dir.path().join("mcp.json");
+    std::fs::write(&toml_path, "version = 1\n").unwrap();
+    std::fs::write(
+        &json_path,
+        r#"{
+  "mcpServers": {
+    "implicit-stdio": {
+      "command": "node",
+      "args": ["server.js", "--dir", "${WORK_DIR:-.}"]
+    },
+    "explicit-stdio": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "env": { "HOST": "${HOST:-127.0.0.1}" }
+    },
+    "implicit-http": {
+      "url": "https://api.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${API_TOKEN}" }
+    },
+    "explicit-http": {
+      "type": "http",
+      "url": "https://api.example.com/mcp",
+      "headers": { "X-API-Key": "${API_KEY}" }
+    },
+    "streamable-http": {
+      "type": "streamable-http",
+      "url": "https://api.example.com/streamable",
+      "headers": { "Authorization": "Bearer ${STREAM_TOKEN}" }
+    }
+  }
+}"#,
+    )
+    .unwrap();
+    let config = Config::load(ConfigSource::File(toml_path)).unwrap();
+    assert_eq!(config.mcp_servers().len(), 5);
+    assert_eq!(
+        config.mcp_servers()["implicit-stdio"].args,
+        ["server.js", "--dir", "${WORK_DIR:-.}"]
+    );
+    assert_eq!(
+        config.mcp_servers()["explicit-stdio"].env["HOST"],
+        "${HOST:-127.0.0.1}"
+    );
+    assert_eq!(
+        config.mcp_servers()["explicit-http"].headers["X-API-Key"],
+        "${API_KEY}"
+    );
+}
+
+#[test]
+fn wm11_ignored_foreign_keys_produce_warnings_and_do_not_relax_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let toml_path = dir.path().join("config.toml");
+    let json_path = dir.path().join("mcp.json");
+    std::fs::write(&toml_path, "version = 1\n").unwrap();
+    std::fs::write(
+        &json_path,
+        r#"{
+  "mcpServers": {
+    "git": {
+      "command": "uvx",
+      "disabled": true,
+      "autoApprove": ["git_status"],
+      "alwaysAllow": ["git_diff"],
+      "trust": "all",
+      "description": "Git server"
+    }
+  }
+}"#,
+    )
+    .unwrap();
+    let config = Config::load(ConfigSource::File(toml_path)).unwrap();
+    let warnings = config.warnings();
+    assert_eq!(warnings.len(), 5);
+    for key in [
+        "disabled",
+        "autoApprove",
+        "alwaysAllow",
+        "trust",
+        "description",
+    ] {
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("git") && w.contains(key)),
+            "warning for {key} missing: {warnings:?}"
+        );
+    }
+    let git = &config.mcp_servers()["git"];
+    assert_eq!(git.approval, crate::definition::McpApproval::Prompt);
+    assert!(git.tools.is_empty());
+}
+
+#[test]
+fn wm11_invalid_mcp_json_cases_are_rejected_without_echoing_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let toml_path = dir.path().join("config.toml");
+    let json_path = dir.path().join("mcp.json");
+    std::fs::write(&toml_path, "version = 1\n").unwrap();
+
+    let secret = "secret_do_not_leak_9876";
+    let cases = [
+        // Unknown keys
+        (r#"{"mcpServers": {"git": {"command": "uvx", "cwd": "/tmp"}}}"#, "cwd"),
+        (r#"{"mcpServers": {"git": {"command": "uvx", "timeout": 10}}}"#, "startupTimeoutSec"),
+        (r#"{"mcpServers": {"git": {"command": "uvx", "unknown_key": "x"}}}"#, "unknown key"),
+        (r#"{"mcpServers": {}, "extra_root": true}"#, "extra_root"),
+        // Invalid id
+        (r#"{"mcpServers": {"Git": {"command": "uvx"}}}"#, "id"),
+        (r#"{"mcpServers": {"git_server": {"command": "uvx"}}}"#, "id"),
+        // Mutually exclusive command / url
+        (r#"{"mcpServers": {"git": {"command": "uvx", "url": "https://example.invalid"}}}"#, "mutually exclusive"),
+        (r#"{"mcpServers": {"git": {}}}"#, "exactly one"),
+        // type errors
+        (r#"{"mcpServers": {"git": {"type": "sse", "url": "https://example.invalid"}}}"#, "sse"),
+        (r#"{"mcpServers": {"git": {"type": "http", "command": "uvx"}}}"#, "incompatible"),
+        (r#"{"mcpServers": {"git": {"type": "stdio", "url": "https://example.invalid"}}}"#, "incompatible"),
+        // Type specific field violations
+        (r#"{"mcpServers": {"git": {"command": "uvx", "headers": {"X": "Y"}}}}"#, "not allowed for stdio"),
+        (r#"{"mcpServers": {"git": {"url": "https://example.invalid", "args": ["a"]}}}"#, "not allowed for HTTP"),
+        (r#"{"mcpServers": {"git": {"url": "https://example.invalid", "env": {"A": "B"}}}}"#, "not allowed for HTTP"),
+        // enabledTools and disabledTools together
+        (r#"{"mcpServers": {"git": {"command": "uvx", "enabledTools": ["a"], "disabledTools": ["b"]}}}"#, "mutually exclusive"),
+        // Transport headers
+        (r#"{"mcpServers": {"docs": {"url": "https://example.invalid", "headers": {"Accept": "text/html"}}}}"#, "transport"),
+        (r#"{"mcpServers": {"docs": {"url": "https://example.invalid", "headers": {"Content-Type": "text/html"}}}}"#, "transport"),
+        (r#"{"mcpServers": {"docs": {"url": "https://example.invalid", "headers": {"Last-Event-Id": "1"}}}}"#, "transport"),
+        (r#"{"mcpServers": {"docs": {"url": "https://example.invalid", "headers": {"Mcp-Session-Id": "abc"}}}}"#, "transport"),
+        (r#"{"mcpServers": {"docs": {"url": "https://example.invalid", "headers": {"mcp-protocol-version": "1.0"}}}}"#, "transport"),
+        // Duplicate headers case difference
+        (r#"{"mcpServers": {"docs": {"url": "https://example.invalid", "headers": {"X-Header": "a", "x-header": "b"}}}}"#, "duplicate header"),
+        // Literal secrets in Authorization
+        (format!(r#"{{"mcpServers": {{"docs": {{"url": "https://example.invalid", "headers": {{"Authorization": "{secret}"}}}}}}}}"#).leak(), "Authorization"),
+        (format!(r#"{{"mcpServers": {{"docs": {{"url": "https://example.invalid", "headers": {{"Authorization": "Bearer ${{TOKEN:-{secret}}}"}}}}}}}}"#).leak(), "Authorization"),
+        // Literal secrets in X-API-Key
+        (format!(r#"{{"mcpServers": {{"docs": {{"url": "https://example.invalid", "headers": {{"X-API-Key": "{secret}"}}}}}}}}"#).leak(), "X-API-Key"),
+        (format!(r#"{{"mcpServers": {{"docs": {{"url": "https://example.invalid", "headers": {{"X-API-Key": "${{API_KEY:-{secret}}}"}}}}}}}}"#).leak(), "X-API-Key"),
+        // Literal secrets in GITHUB_TOKEN env
+        (format!(r#"{{"mcpServers": {{"git": {{"command": "uvx", "env": {{"GITHUB_TOKEN": "{secret}"}}}}}}}}"#).leak(), "GITHUB_TOKEN"),
+        (format!(r#"{{"mcpServers": {{"git": {{"command": "uvx", "env": {{"GITHUB_TOKEN": "${{TOKEN:-{secret}}}"}}}}}}}}"#).leak(), "GITHUB_TOKEN"),
+        // approval: "auto"
+        (r#"{"mcpServers": {"git": {"command": "uvx", "approval": "auto"}}}"#, "approve"),
+        (r#"{"mcpServers": {"git": {"command": "uvx", "tools": {"st": {"approval": "auto"}}}}}"#, "approve"),
+        // command does not expand variables
+        (r#"{"mcpServers": {"git": {"command": "uvx ${CMD}"}}}"#, "command does not expand"),
+        // syntax error in template
+        (r#"{"mcpServers": {"git": {"command": "uvx", "args": ["${UNCLOSED"]}}}"#, "variable syntax"),
+    ];
+
+    for (json_content, expected_needle) in cases {
+        std::fs::write(&json_path, json_content).unwrap();
+        let error = Config::load(ConfigSource::File(toml_path.clone()))
+            .expect_err("must fail")
+            .to_string();
+        assert!(
+            error
+                .to_ascii_lowercase()
+                .contains(&expected_needle.to_ascii_lowercase()),
+            "expected needle {expected_needle:?} in error: {error}"
+        );
+        assert!(!error.contains(secret), "secret leaked in error: {error}");
+    }
+}
+
+#[test]
+fn wm11_config_toml_with_mcp_servers_table_fails_with_explicit_guidance() {
+    let dir = tempfile::tempdir().unwrap();
+    let toml_path = dir.path().join("config.toml");
+    std::fs::write(
+        &toml_path,
+        "version = 1\n[mcp_servers.git]\ncommand = \"uvx\"\n",
+    )
+    .unwrap();
+    let error = Config::load(ConfigSource::File(toml_path)).unwrap_err();
+    assert!(matches!(error, super::ConfigError::McpConfiguredInToml));
+    assert_eq!(error.to_string(), "MCP servers are configured in mcp.json");
+}
+
+#[test]
 fn wm11_unknown_duplicate_and_invalid_mcp_selections_are_rejected() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
+    let toml_path = dir.path().join("config.toml");
+    let json_path = dir.path().join("mcp.json");
+    std::fs::write(&json_path, MCP_JSON).unwrap();
+
     std::fs::write(
-        &path,
+        &toml_path,
         MCP_CONFIG.replace("mcp = [\"git\"]", "mcp = [\"absent\"]"),
     )
     .unwrap();
-    let error = Config::load(ConfigSource::File(path.clone()))
-        .err()
-        .expect("must reject");
+    let error = Config::load(ConfigSource::File(toml_path.clone())).expect_err("must reject");
     assert!(matches!(
         error,
         super::ConfigError::UnknownMcpServer(ref id) if id == "absent"
     ));
+
     std::fs::write(
-        &path,
+        &toml_path,
         MCP_CONFIG.replace("mcp = [\"git\"]", "mcp = [\"git\", \"git\"]"),
     )
     .unwrap();
-    let error = Config::load(ConfigSource::File(path.clone()))
-        .err()
-        .expect("must reject");
+    let error = Config::load(ConfigSource::File(toml_path.clone())).expect_err("must reject");
     assert!(matches!(
         error,
         super::ConfigError::InvalidMcpServer(ref id) if id == "git"
-    ));
-    std::fs::write(&path, MCP_CONFIG.replace("mcp = [\"git\"]", "mcp = [\"\"]")).unwrap();
-    assert!(Config::load(ConfigSource::File(path.clone())).is_err());
-
-    // Explicit selection is checked against the same defined map.
-    std::fs::write(&path, MCP_CONFIG).unwrap();
-    let config = Config::load(ConfigSource::File(path)).unwrap();
-    assert!(matches!(
-        config.definition(
-            None,
-            DefinitionOverrides {
-                mcp: Some(vec!["absent".into()]),
-                ..Default::default()
-            },
-        ),
-        Err(super::ConfigError::UnknownMcpServer(id)) if id == "absent"
-    ));
-    assert!(matches!(
-        config.definition(
-            None,
-            DefinitionOverrides {
-                mcp: Some(vec!["git".into(), "git".into()]),
-                ..Default::default()
-            },
-        ),
-        Err(super::ConfigError::InvalidMcpServer(id)) if id == "git"
     ));
 }
 
@@ -726,50 +886,30 @@ fn wm11_parse_mcp_boundaries_are_explicit() {
 }
 
 #[test]
-fn wm11_invalid_unselected_server_is_rejected_at_load_without_echoing_values() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    for fragment in [
-        "[mcp_servers.broken]\ncommand = \"uvx\"\nurl = \"https://example.invalid/mcp\"\n",
-        "[mcp_servers.git]\nunknown = \"secret-do-not-print\"\n",
-        "[mcp_servers.git]\ncommand = \"uvx\"\nenv = { \"BAD-NAME\" = \"secret-do-not-print\" }\n",
-        "[mcp_servers.git]\ncommand = \"uvx\"\ntool_timeout_sec = 0\nenv = { LOG_LEVEL = \"secret-do-not-print\" }\n",
-        "[mcp_servers.git]\nurl = \"file:///tmp/mcp\"\n",
-        "[mcp_servers.Git]\ncommand = \"uvx\"\n",
-        "[mcp_servers.git]\ncommand = \"uvx\"\nstartup_timeout_sec = \"ten\"\n",
-        "[mcp_servers.git]\ncommand = \"uvx\"\n[mcp_servers.git.tools.status]\nunknown = \"x\"\n",
-        "[mcp_servers.git]\ncommand = \"uvx\"\nenabled_tools = [\"a\"]\ndisabled_tools = [\"b\"]\n",
-    ] {
-        let text = format!(
-            "version = 1\n{fragment}[profiles.local]\nprovider = \"openai-chat\"\nmodel = \"m\"\n"
-        );
-        std::fs::write(&path, text).unwrap();
-        let error = Config::load(ConfigSource::File(path.clone()))
-            .err()
-            .expect("unselected server must still be validated")
-            .to_string();
-        assert!(!error.contains("secret-do-not-print"), "{error}");
-    }
-}
-
-#[test]
 fn wm11_more_than_eight_selected_servers_fail_definition_validation() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    let mut text = String::from("version = 1\n");
+    let toml_path = dir.path().join("config.toml");
+    let json_path = dir.path().join("mcp.json");
+
+    let mut servers_json = String::from("{\n  \"mcpServers\": {\n");
     for index in 0..9 {
-        text.push_str(&format!(
-            "[mcp_servers.server-{index}]\nurl = \"https://example.invalid/mcp\"\n"
+        servers_json.push_str(&format!(
+            "    \"server-{index}\": {{ \"url\": \"https://example.invalid/mcp\" }}{}\n",
+            if index == 8 { "" } else { "," }
         ));
     }
+    servers_json.push_str("  }\n}\n");
+    std::fs::write(&json_path, servers_json).unwrap();
+
     let ids: Vec<String> = (0..9).map(|index| format!("\"server-{index}\"")).collect();
-    text.push_str(&format!(
-        "[profiles.local]\nprovider = \"openai-chat\"\nmodel = \"m\"\nmcp = [{}]\n",
+    let toml_text = format!(
+        "version = 1\n[profiles.local]\nprovider = \"openai-chat\"\nmodel = \"m\"\nmcp = [{}]\n",
         ids.join(", ")
-    ));
-    std::fs::write(&path, text).unwrap();
+    );
+    std::fs::write(&toml_path, toml_text).unwrap();
+
     assert!(matches!(
-        Config::load(ConfigSource::File(path)),
+        Config::load(ConfigSource::File(toml_path)),
         Err(super::ConfigError::Definition(
             DefinitionError::InvalidMcpConfig
         ))
@@ -795,31 +935,28 @@ fn wm11_selection_without_any_configured_servers_is_unknown() {
 }
 
 #[test]
-fn wm11_duplicate_mcp_tables_are_a_toml_syntax_error() {
+fn wm11_mcp_config_location_rules() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    std::fs::write(
-        &path,
-        "version = 1\n[mcp_servers.git]\ncommand = \"uvx\"\n[mcp_servers.git]\ncommand = \"other\"\n",
-    )
-    .unwrap();
-    assert!(matches!(
-        Config::load(ConfigSource::File(path)),
-        Err(super::ConfigError::Syntax { .. })
-    ));
-}
+    let toml_path = dir.path().join("config.toml");
+    let json_path = dir.path().join("mcp.json");
+    std::fs::write(&toml_path, "version = 1\n").unwrap();
+    std::fs::write(&json_path, r#"{"mcpServers": {"git": {"command": "uvx"}}}"#).unwrap();
 
-#[test]
-fn wm11_mcp_selection_must_be_a_list() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    std::fs::write(
-        &path,
-        "version = 1\n[mcp_servers.git]\ncommand = \"uvx\"\n[profiles.local]\nprovider = \"openai-chat\"\nmodel = \"m\"\nmcp = \"git\"\n",
-    )
-    .unwrap();
-    assert!(matches!(
-        Config::load(ConfigSource::File(path)),
-        Err(super::ConfigError::Syntax { .. })
-    ));
+    // Sibling mcp.json in the same directory as an explicit config file is loaded.
+    let config = Config::load(ConfigSource::File(toml_path.clone())).unwrap();
+    assert_eq!(config.mcp_servers().len(), 1);
+    assert_eq!(config.mcp_source(), Some(json_path.as_path()));
+
+    // Missing mcp.json in the same directory yields empty servers without error.
+    let dir2 = tempfile::tempdir().unwrap();
+    let toml2 = dir2.path().join("config.toml");
+    std::fs::write(&toml2, "version = 1\n").unwrap();
+    let config2 = Config::load(ConfigSource::File(toml2)).unwrap();
+    assert!(config2.mcp_servers().is_empty());
+    assert_eq!(config2.mcp_source(), None);
+
+    // Disabled config source never reads mcp.json even if present in the directory.
+    let disabled = Config::load(ConfigSource::Disabled).unwrap();
+    assert!(disabled.mcp_servers().is_empty());
+    assert_eq!(disabled.mcp_source(), None);
 }

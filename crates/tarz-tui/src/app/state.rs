@@ -115,11 +115,15 @@ pub(crate) struct App {
 impl App {
     pub fn new(options: Options) -> Self {
         let host = SessionHost::new(Some(options.store.clone()));
-        let notice = options
-            .config_path
-            .as_ref()
-            .map(|path| format!("Config: {} · F2 new / F3 open", path.display()))
-            .unwrap_or_else(|| "F2 creates a session. F3 opens the selection.".into());
+        let notice = if let Some(warning) = options.config.warnings().first() {
+            warning.chars().take(120).collect()
+        } else {
+            options
+                .config_path
+                .as_ref()
+                .map(|path| format!("Config: {} · F2 new / F3 open", path.display()))
+                .unwrap_or_else(|| "F2 creates a session. F3 opens the selection.".into())
+        };
         Self {
             host,
             options,

@@ -383,9 +383,13 @@ fn mcp_servers_that_fail_to_start_are_reported_on_stderr_but_not_in_json() {
     let config = directory.path().join("config.toml");
     std::fs::write(
         &config,
-        "version = 1\nstore = 'store'\nrecovery_dir = '.'\n\
-         [mcp_servers.absent]\ncommand = '/nonexistent/tarz-mcp-absent'\n\
-         [mcp_servers.needed]\ncommand = '/nonexistent/tarz-mcp-needed'\nrequired = true\n",
+        "version = 1\nstore = 'store'\nrecovery_dir = '.'\n",
+    )
+    .unwrap();
+    let mcp = directory.path().join("mcp.json");
+    std::fs::write(
+        &mcp,
+        r#"{"mcpServers": {"absent": {"command": "/nonexistent/tarz-mcp-absent"}, "needed": {"command": "/nonexistent/tarz-mcp-needed", "required": true}}}"#,
     )
     .unwrap();
     let (endpoint, _requests) = server(200, chat(), Duration::ZERO);

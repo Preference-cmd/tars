@@ -53,7 +53,7 @@ pub struct DefinitionOverrides {
     pub mcp: Option<Vec<String>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Profile {
     provider: Provider,
@@ -78,7 +78,7 @@ pub(super) struct Profile {
 }
 
 // Sparse startup defaults are deliberately separate from the complete persisted limits.
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileToolLimits {
     max_concurrent_operations: Option<usize>,
@@ -117,7 +117,7 @@ impl ProfileToolLimits {
         }
     }
 }
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileWriteLimits {
     max_edit_file_bytes: Option<usize>,

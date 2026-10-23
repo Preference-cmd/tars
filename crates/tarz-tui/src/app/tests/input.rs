@@ -220,18 +220,13 @@ fn clearing_visible_endpoint_and_workspace_fields_overrides_the_profile() {
 #[test]
 fn wm11_tui_form_resolves_mcp_ids_through_shared_config() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
+    let toml_path = dir.path().join("config.toml");
+    let json_path = dir.path().join("mcp.json");
     std::fs::write(
-        &path,
+        &toml_path,
         r#"version = 1
 store = 'data'
 default_profile = 'local'
-[mcp_servers.git]
-command = 'uvx'
-args = ['mcp-server-git']
-[mcp_servers.docs]
-url = 'https://example.invalid/mcp'
-bearer_token_env_var = 'DOCS_MCP_TOKEN'
 [profiles.local]
 provider = 'openai-chat'
 model = 'mcp-form-model'
@@ -239,17 +234,38 @@ mcp = ['git']
 "#,
     )
     .unwrap();
-    let options =
-        crate::options::parse(["--config".into(), path.to_string_lossy().into_owned()].into_iter())
-            .unwrap()
-            .unwrap();
+    std::fs::write(
+        &json_path,
+        r#"{
+  "mcpServers": {
+    "git": {
+      "command": "uvx",
+      "args": ["mcp-server-git"]
+    },
+    "docs": {
+      "type": "http",
+      "url": "https://example.invalid/mcp",
+      "headers": { "Authorization": "Bearer ${DOCS_MCP_TOKEN}" }
+    }
+  }
+}"#,
+    )
+    .unwrap();
+    let options = crate::options::parse(
+        ["--config".into(), toml_path.to_string_lossy().into_owned()].into_iter(),
+    )
+    .unwrap()
+    .unwrap();
     let mut form = input::Form::new(
         options.config.clone(),
         options.profile.clone(),
         options.preset.as_ref(),
     );
     assert_eq!(form.fields.len(), 9);
-    assert!(input::FIELD_NAMES[8].contains("MCP"));
+    assert_eq!(
+        input::FIELD_NAMES[8],
+        "MCP servers (comma-separated ids from mcp.json)"
+    );
     assert_eq!(form.fields[8].lines().join(""), "git");
     assert_eq!(form.definition().unwrap().mcp_servers.len(), 1);
     assert_eq!(form.definition().unwrap().mcp_servers[0].id, "git");
@@ -272,4 +288,31 @@ mcp = ['git']
     fresh.fields[1] = ratatui_textarea::TextArea::from(["fixture-model"]);
     fresh.fields[8] = ratatui_textarea::TextArea::from(["git"]);
     assert_eq!(fresh.definition().unwrap().mcp_servers[0].id, "git");
+}
+
+#[test]
+fn wm11_tui_app_notice_displays_mcp_config_warnings() {
+    let dir = tempfile::tempdir().unwrap();
+    let toml_path = dir.path().join("config.toml");
+    let json_path = dir.path().join("mcp.json");
+    std::fs::write(&toml_path, "version = 1\nstore = 'data'\n").unwrap();
+    std::fs::write(
+        &json_path,
+        r#"{
+  "mcpServers": {
+    "git": {
+      "command": "uvx",
+      "disabled": true
+    }
+  }
+}"#,
+    )
+    .unwrap();
+    let options = crate::options::parse(
+        ["--config".into(), toml_path.to_string_lossy().into_owned()].into_iter(),
+    )
+    .unwrap()
+    .unwrap();
+    let app = crate::app::App::new(options);
+    assert!(app.notice.contains("git") && app.notice.contains("disabled"));
 }

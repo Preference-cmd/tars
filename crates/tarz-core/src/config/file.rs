@@ -1,7 +1,5 @@
 use super::model::{self, DefinitionOverrides, Profile};
-use crate::definition::{
-    DefinitionError, McpApproval, McpServerConfig, McpToolSetting, SessionDefinition,
-};
+use crate::definition::{DefinitionError, McpServerConfig, SessionDefinition};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -28,138 +26,159 @@ struct FileConfig {
     default_profile: Option<String>,
     #[serde(default)]
     profiles: BTreeMap<String, Profile>,
-    /// Sparse server definitions; defaults are filled during validation.
     #[serde(default)]
-    mcp_servers: BTreeMap<String, RawMcpServer>,
-}
-
-// Configuration stays sparse while the frozen snapshot is always complete.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawMcpServer {
-    command: Option<String>,
-    args: Option<Vec<String>>,
-    url: Option<String>,
-    env: Option<BTreeMap<String, String>>,
-    env_vars: Option<Vec<String>>,
-    bearer_token_env_var: Option<String>,
-    startup_timeout_sec: Option<u64>,
-    tool_timeout_sec: Option<u64>,
-    enabled_tools: Option<Vec<String>>,
-    disabled_tools: Option<Vec<String>>,
-    approval: Option<McpApproval>,
-    tools: Option<BTreeMap<String, RawMcpToolSetting>>,
-    required: Option<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawMcpToolSetting {
-    approval: Option<McpApproval>,
-}
-
-impl RawMcpServer {
-    fn into_config(self, id: &str) -> Result<McpServerConfig, ConfigError> {
-        // A tool table that omits `approval` inherits the server setting rather
-        // than silently resetting it to the default.
-        let approval = self.approval.unwrap_or_default();
-        let config = McpServerConfig {
-            id: id.to_owned(),
-            command: self.command,
-            args: self.args.unwrap_or_default(),
-            url: self.url,
-            env: self.env.unwrap_or_default(),
-            env_vars: self.env_vars.unwrap_or_default(),
-            bearer_token_env_var: self.bearer_token_env_var,
-            startup_timeout_sec: self.startup_timeout_sec.unwrap_or(10),
-            tool_timeout_sec: self.tool_timeout_sec.unwrap_or(60),
-            enabled_tools: self.enabled_tools,
-            disabled_tools: self.disabled_tools,
-            approval,
-            tools: self
-                .tools
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(name, setting)| {
-                    (
-                        name,
-                        McpToolSetting {
-                            approval: setting.approval.unwrap_or(approval),
-                        },
-                    )
-                })
-                .collect(),
-            required: self.required.unwrap_or(false),
-        };
-        config
-            .validate()
-            .map_err(|_| ConfigError::InvalidMcpServer(id.to_owned()))?;
-        Ok(config)
-    }
+    mcp_servers: Option<toml::Value>,
 }
 
 /// Validated, immutable defaults shared by all application entry points.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Config {
     source: Option<PathBuf>,
+    mcp_source: Option<PathBuf>,
     store: Option<PathBuf>,
     recovery_dir: Option<PathBuf>,
     default_profile: Option<String>,
     profiles: BTreeMap<String, Profile>,
     mcp_servers: BTreeMap<String, McpServerConfig>,
+    warnings: Vec<String>,
 }
+
 impl Config {
-    /// Load and validate up to 1 MiB of TOML. A missing discovered default file
-    /// yields empty defaults; explicit paths and TARZ_CONFIG are mandatory.
+    /// Load and validate startup configuration. TOML supplies profile defaults;
+    /// MCP servers are loaded from mcp.json.
     pub fn load(source: ConfigSource) -> Result<Self, ConfigError> {
-        let (path, required) = match source {
+        let (toml_path, toml_required) = match source {
             ConfigSource::Disabled => return Ok(Self::default()),
-            ConfigSource::File(path) => (path, true),
+            ConfigSource::File(path) => (Some(path), true),
             ConfigSource::Discover => {
                 if let Some(path) = std::env::var_os("TARZ_CONFIG") {
-                    (PathBuf::from(path), true)
+                    (Some(PathBuf::from(path)), true)
                 } else if let Some(path) = default_path() {
-                    (path, false)
+                    (Some(path), false)
                 } else {
-                    return Ok(Self::default());
+                    (None, false)
                 }
             }
         };
-        let path = if path.is_absolute() {
-            path
+
+        let toml_path = match toml_path {
+            Some(path) => {
+                let resolved = if path.is_absolute() {
+                    path
+                } else {
+                    std::env::current_dir()
+                        .map_err(|error| ConfigError::Io {
+                            path: path.clone(),
+                            kind: error.kind(),
+                        })?
+                        .join(path)
+                };
+                Some(resolved)
+            }
+            None => None,
+        };
+
+        // Load TOML configuration file when a configuration path is available.
+        let (mut config, toml_base_dir) = if let Some(ref path) = toml_path {
+            match std::fs::File::open(path) {
+                Ok(file) => {
+                    let mut text = String::new();
+                    file.take(1024 * 1024 + 1)
+                        .read_to_string(&mut text)
+                        .map_err(|error| ConfigError::Io {
+                            path: path.clone(),
+                            kind: error.kind(),
+                        })?;
+                    if text.len() > 1024 * 1024 {
+                        return Err(ConfigError::TooLarge);
+                    }
+                    let parsed = Self::parse_toml(&text, path)?;
+                    let base = path.parent().unwrap_or(Path::new(".")).to_owned();
+                    (parsed, Some(base))
+                }
+                Err(error) if !toml_required && error.kind() == io::ErrorKind::NotFound => {
+                    let base = path.parent().unwrap_or(Path::new(".")).to_owned();
+                    (Self::default(), Some(base))
+                }
+                Err(error) => {
+                    return Err(ConfigError::Io {
+                        path: path.clone(),
+                        kind: error.kind(),
+                    });
+                }
+            }
         } else {
-            std::env::current_dir()
-                .map_err(|error| ConfigError::Io {
-                    path: path.clone(),
-                    kind: error.kind(),
-                })?
-                .join(path)
+            (Self::default(), None)
         };
-        let file = match std::fs::File::open(&path) {
-            Ok(file) => file,
-            Err(error) if !required && error.kind() == io::ErrorKind::NotFound => {
-                return Ok(Self::default());
-            }
-            Err(error) => {
-                return Err(ConfigError::Io {
-                    path,
-                    kind: error.kind(),
-                });
-            }
+
+        // When TARZ_MCP_CONFIG is unset, mcp.json is located next to the TOML
+        // configuration file; when no TOML path exists (e.g. absent home directory),
+        // no default MCP configuration is searched in the working directory.
+        let (mcp_path, mcp_required) = if let Some(path) = std::env::var_os("TARZ_MCP_CONFIG") {
+            let path = PathBuf::from(path);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                std::env::current_dir()
+                    .map_err(|error| ConfigError::Io {
+                        path: path.clone(),
+                        kind: error.kind(),
+                    })?
+                    .join(path)
+            };
+            (Some(path), true)
+        } else if let Some(base_dir) = toml_base_dir {
+            (Some(base_dir.join("mcp.json")), false)
+        } else {
+            (None, false)
         };
-        let mut text = String::new();
-        file.take(1024 * 1024 + 1)
-            .read_to_string(&mut text)
-            .map_err(|error| ConfigError::Io {
-                path: path.clone(),
-                kind: error.kind(),
-            })?;
-        if text.len() > 1024 * 1024 {
-            return Err(ConfigError::TooLarge);
+
+        if let Some(mcp_path) = mcp_path {
+            match std::fs::File::open(&mcp_path) {
+                Ok(file) => {
+                    let mut text = String::new();
+                    file.take(1024 * 1024 + 1)
+                        .read_to_string(&mut text)
+                        .map_err(|error| ConfigError::Io {
+                            path: mcp_path.clone(),
+                            kind: error.kind(),
+                        })?;
+                    if text.len() > 1024 * 1024 {
+                        return Err(ConfigError::TooLarge);
+                    }
+                    let (servers, warnings) = super::mcp::parse_mcp_json(&text)?;
+                    config.mcp_servers = servers;
+                    config.warnings = warnings;
+                    config.mcp_source = Some(mcp_path);
+                }
+                Err(error) if !mcp_required && error.kind() == io::ErrorKind::NotFound => {
+                    // Absence of a default mcp.json leaves the MCP catalog empty.
+                }
+                Err(error) => {
+                    return Err(ConfigError::Io {
+                        path: mcp_path,
+                        kind: error.kind(),
+                    });
+                }
+            }
         }
-        Self::parse(&text, &path)
+
+        // Resolve profile MCP selections against the loaded MCP server catalog.
+        for (name, profile) in &config.profiles {
+            if name.trim().is_empty() {
+                return Err(ConfigError::EmptyProfile);
+            }
+            model::resolve(
+                Some(profile),
+                DefinitionOverrides::default(),
+                &config.mcp_servers,
+            )?;
+        }
+        config.selected(None)?;
+        Ok(config)
     }
-    fn parse(text: &str, source: &Path) -> Result<Self, ConfigError> {
+
+    fn parse_toml(text: &str, source: &Path) -> Result<Self, ConfigError> {
         let raw: FileConfig = toml::from_str(text).map_err(|error: toml::de::Error| {
             let offset = error.span().map_or(0, |span| span.start).min(text.len());
             let prefix = &text[..text.floor_char_boundary(offset)];
@@ -168,6 +187,9 @@ impl Config {
                 column: prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1,
             }
         })?;
+        if raw.mcp_servers.is_some() {
+            return Err(ConfigError::McpConfiguredInToml);
+        }
         if raw.version != 1 {
             return Err(ConfigError::Version(raw.version));
         }
@@ -193,32 +215,18 @@ impl Config {
                 .map(|path| model::absolute_root(path, Some(base)))
                 .transpose()?;
         }
-        let mut mcp_servers = BTreeMap::new();
-        for (id, server) in raw.mcp_servers {
-            let server = server.into_config(&id)?;
-            mcp_servers.insert(id, server);
-        }
-        let config = Self {
+        Ok(Self {
             source: Some(source.to_owned()),
+            mcp_source: None,
             store: resolve(raw.store)?,
             recovery_dir: resolve(raw.recovery_dir)?,
             default_profile: raw.default_profile,
             profiles,
-            mcp_servers,
-        };
-        for (name, profile) in &config.profiles {
-            if name.trim().is_empty() {
-                return Err(ConfigError::EmptyProfile);
-            }
-            model::resolve(
-                Some(profile),
-                DefinitionOverrides::default(),
-                &config.mcp_servers,
-            )?;
-        }
-        config.selected(None)?;
-        Ok(config)
+            mcp_servers: BTreeMap::new(),
+            warnings: Vec::new(),
+        })
     }
+
     fn selected(&self, name: Option<&str>) -> Result<Option<&Profile>, ConfigError> {
         name.or(self.default_profile.as_deref())
             .map(|name| {
@@ -228,6 +236,7 @@ impl Config {
             })
             .transpose()
     }
+
     /// Read a selected preset, or None when no default/explicit profile exists.
     pub fn preset(&self, name: Option<&str>) -> Result<Option<SessionDefinition>, ConfigError> {
         self.selected(name)?
@@ -240,6 +249,7 @@ impl Config {
             })
             .transpose()
     }
+
     /// Resolve explicit per-field choices over the selected preset and documented
     /// defaults. This constructs a new definition and never alters an open session.
     pub fn definition(
@@ -249,18 +259,32 @@ impl Config {
     ) -> Result<SessionDefinition, ConfigError> {
         model::resolve(self.selected(name)?, overrides, &self.mcp_servers)
     }
+
     /// File actually read, or None when defaults are empty/disabled.
     pub fn source(&self) -> Option<&Path> {
         self.source.as_deref()
     }
+
+    /// mcp.json file actually read, or None when none was read.
+    pub fn mcp_source(&self) -> Option<&Path> {
+        self.mcp_source.as_deref()
+    }
+
+    /// Warnings generated when loading configuration (e.g. ignored foreign keys).
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
     /// Configured store directory, resolved relative to the TOML file.
     pub fn store_dir(&self) -> Option<&Path> {
         self.store.as_deref()
     }
+
     /// Configured recovery directory, resolved relative to the TOML file.
     pub fn recovery_dir(&self) -> Option<&Path> {
         self.recovery_dir.as_deref()
     }
+
     /// Every configured MCP server by id, selected or not. Selection happens
     /// only when constructing a new session definition.
     pub fn mcp_servers(&self) -> &BTreeMap<String, McpServerConfig> {
@@ -299,6 +323,20 @@ pub enum ConfigError {
         /// One-based column.
         column: usize,
     },
+    /// Invalid mcp.json syntax.
+    #[error("invalid mcp.json syntax at line {line}, column {column}")]
+    McpSyntax {
+        /// One-based line.
+        line: usize,
+        /// One-based column.
+        column: usize,
+    },
+    /// An invalid mcp.json shape or rule violation.
+    #[error("{0}")]
+    InvalidMcpFile(String),
+    /// MCP servers cannot be configured in config.toml.
+    #[error("MCP servers are configured in mcp.json")]
+    McpConfiguredInToml,
     /// The file format is not supported.
     #[error("unsupported configuration version {0}; expected 1")]
     Version(u32),

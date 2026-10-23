@@ -69,7 +69,7 @@ pub(crate) const FIELD_NAMES: [&str; 9] = [
     "Workspace root (optional; does not enable tools)",
     "Tools (comma-separated list_directory,read_file,search_text,write_file,edit_file)",
     "Permission mode (read-only | ask | accept-edits | full-access)",
-    "MCP servers (comma-separated ids from shared config)",
+    "MCP servers (comma-separated ids from mcp.json)",
 ];
 
 impl Default for Form {

@@ -227,7 +227,7 @@ pub(crate) enum RenderOptions {
 }
 
 // Shared syntax for a stored credential reference and an MCP environment name.
-pub(super) fn valid_environment_name(name: &str) -> bool {
+pub(crate) fn valid_environment_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     bytes
         .next()
@@ -236,7 +236,7 @@ pub(super) fn valid_environment_name(name: &str) -> bool {
 }
 
 // Endpoint syntax shared by the model endpoint and remote MCP servers.
-pub(super) fn valid_http_endpoint(endpoint: &str) -> bool {
+pub(crate) fn valid_http_endpoint(endpoint: &str) -> bool {
     url::Url::parse(endpoint).is_ok_and(|url| {
         matches!(url.scheme(), "http" | "https")
             && url.host_str().is_some()
