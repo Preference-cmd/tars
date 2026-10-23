@@ -2,8 +2,11 @@
 
 use super::McpRuntime;
 use super::source::{MAX_RESULT_BYTES, limit_result};
-use crate::application::tests::workspace_http::{Fixture, Reply};
-use crate::application::{ClosePolicy, ManagedSession, PreparedCreate, SessionHost, text_input};
+use crate::application::tests::workspace_http::{Fixture, Reply, ScriptedToolCall};
+use crate::application::{
+    ApplicationError, ClosePolicy, ManagedSession, PreparedCreate, RepairError, RepairMode,
+    RepairWarningKind, SessionHost, text_input,
+};
 use crate::definition::{
     CredentialRef, McpApproval, McpServerConfig, McpToolSetting, Provider, SessionDefinition,
     WorkspaceTool, WorkspaceToolLimits,
@@ -11,12 +14,13 @@ use crate::definition::{
 use crate::permission::{
     ApprovalDecision, ApprovalSubject, PermissionDecisionKind, PermissionMode, ToolPermissionClass,
 };
-use crate::session::{SubmitRequest, WorkObservation, WorkState};
+use crate::session::{SubmitRequest, WorkObservation, WorkResult, WorkState};
 use causa::kernel::{
     BlockContent, BlockId, CallControl, CancellationToken, Context, DynamicToolSource,
     ToolCallContext, ToolCallPayload, ToolExecutionError, ToolOutput, ToolResultPayload,
     ToolResultStatus, Truncation,
 };
+use causa::runtime::{TurnInterruption, TurnResult};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -2414,4 +2418,259 @@ async fn http_url_variables_that_would_be_percent_encoded_are_refused() {
 
         runtime.close().await;
     }
+}
+
+/// Standard persistent assembly with the stdio fixture. Submits one work whose
+/// scripted batch contains `replies` and cancels it once the MCP `hang` call
+/// has reached the server: the batch ends interrupted with the external call
+/// unresolved and its declaration unpaired in the materials.
+async fn cancel_after_hang_reaches_the_server(
+    root: &Path,
+    tools: Vec<WorkspaceTool>,
+    replies: Vec<Reply>,
+) -> (
+    SessionHost,
+    ManagedSession,
+    crate::session::WorkRef,
+    Fixture,
+) {
+    let log_file = root.join("call_log.txt");
+    let mut fx = server("fx", "serve");
+    fx.env.insert(
+        "TARZ_MCP_FIXTURE_CALL_LOG".into(),
+        log_file.display().to_string(),
+    );
+
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let mut def = definition(&fixture.endpoint, root, vec![fx]);
+    let has_builtin = !tools.is_empty();
+    def.tools = tools;
+    let host = SessionHost::new(Some(root.join("store")));
+    let session = host
+        .create(PreparedCreate::persistent(def, Context::default()))
+        .await
+        .expect("session opens");
+
+    let mut progress = session.subscribe_progress();
+    let work = session
+        .submit(SubmitRequest {
+            request_key: "interrupted mcp call".into(),
+            blocks: vec![text_input("call the server")],
+        })
+        .expect("submit")
+        .work;
+    // Built-in tools of the same batch must be recorded as completed before
+    // the cancellation, so wait for their return event first.
+    if has_builtin {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match progress.recv().await {
+                    Ok(event) => {
+                        if let crate::session::ProgressUpdate::Tool(tool) = &event.update
+                            && tool.tool_name == "read_file"
+                            && tool.phase == crate::session::ToolPhase::Returned
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        panic!("progress channel closed before read_file returned")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("read_file returned timeout");
+    }
+    wait_until("the hang call reaches the server", || {
+        std::fs::read_to_string(&log_file).is_ok_and(|log| log.contains("hang"))
+    })
+    .await;
+    session.cancel(&work).expect("cancel");
+    let observation = session
+        .wait(&work, Duration::from_secs(10))
+        .await
+        .expect("work finishes");
+    assert!(matches!(
+        observation.state,
+        WorkState::Finished(ref result)
+            if matches!(**result, WorkResult::Run(TurnResult::Interrupted {
+                cause: TurnInterruption::Cancelled { .. }
+            }))
+    ));
+    session.wait_saved().await.expect("interrupted work saved");
+    (host, session, work, fixture)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm09_mcp_call_cancelled_mid_execution_rejects_adoption_and_warns_external_side_effects() {
+    let root = tempfile::tempdir().unwrap();
+    let (host, session, work, fixture) = cancel_after_hang_reaches_the_server(
+        root.path(),
+        Vec::new(),
+        vec![Reply::Call("mcp_fx_hang".into(), json!({})), Reply::Answer],
+    )
+    .await;
+
+    // The preview keeps the batch observable but marks adoption unavailable,
+    // and the unknown outcome carries an external-side-effect warning.
+    let inspection = session.inspect_repair(Some(&work)).unwrap();
+    let original = inspection.original.as_ref().unwrap();
+    let adoption_error = original.adoption_error.as_ref().expect("adoption refused");
+    assert!(matches!(adoption_error, RepairError::NonBuiltinCalls));
+    assert!(
+        adoption_error
+            .to_string()
+            .contains("external side effects may already have happened"),
+        "{adoption_error}"
+    );
+    assert_eq!(original.completed_count, 1);
+    assert_eq!(original.pending_count, 0);
+    assert_eq!(original.write_warnings_count, 1);
+    assert_eq!(original.external_warnings_count, 1);
+    let preview = &original.results[0];
+    assert_eq!(preview.status, ToolResultStatus::UnknownOutcome);
+    let warning = preview.write_warning.as_ref().expect("external warning");
+    assert_eq!(warning.kind, RepairWarningKind::External);
+    assert_eq!(warning.tool_name, "mcp_fx_hang");
+    assert_eq!(warning.path, "");
+
+    // Planning refuses the same scope with the same error; removal stays.
+    assert!(matches!(
+        session.plan_repair(RepairMode::AdoptOriginal(work.clone())),
+        Err(ApplicationError::Repair(RepairError::NonBuiltinCalls))
+    ));
+    let plan = session.plan_repair(RepairMode::RemoveUnpaired).unwrap();
+    let summary = plan.summary();
+    assert_eq!(summary.removed_count, 1);
+    assert_eq!(summary.write_warnings_count, 1);
+    assert_eq!(summary.external_warnings_count, 1);
+    assert_eq!(summary.write_warnings[0].kind, RepairWarningKind::External);
+    assert_eq!(summary.write_warnings[0].tool_name, "mcp_fx_hang");
+
+    session.apply_repair(&plan).unwrap();
+    session.wait_saved().await.unwrap();
+
+    // The next turn renders without the removed declaration and completes.
+    let next = session
+        .submit(SubmitRequest {
+            request_key: "after repair".into(),
+            blocks: vec![text_input("continue")],
+        })
+        .expect("submit")
+        .work;
+    let observation = session
+        .wait(&next, Duration::from_secs(10))
+        .await
+        .expect("work finishes");
+    assert!(matches!(observation.state, WorkState::Finished(_)));
+    session.wait_saved().await.unwrap();
+    let requests = fixture.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    let messages = requests[1]["messages"].as_array().expect("messages");
+    assert!(
+        messages
+            .iter()
+            .all(|m| m.get("tool_calls").is_none() && m.get("tool_call_id").is_none()),
+        "the removed declaration must not reach the model: {messages:?}"
+    );
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm09_builtin_read_and_mcp_call_cancelled_cannot_be_partially_adopted() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("notes.txt"), "readable content\n").unwrap();
+    let (host, session, work, fixture) = cancel_after_hang_reaches_the_server(
+        root.path(),
+        vec![WorkspaceTool::ReadFile],
+        vec![
+            Reply::Calls(vec![
+                ScriptedToolCall {
+                    name: "read_file".into(),
+                    arguments: json!({"path": "notes.txt"}),
+                },
+                ScriptedToolCall {
+                    name: "mcp_fx_hang".into(),
+                    arguments: json!({}),
+                },
+            ]),
+            Reply::Answer,
+        ],
+    )
+    .await;
+
+    let inspection = session.inspect_repair(Some(&work)).unwrap();
+    let original = inspection.original.as_ref().unwrap();
+    assert!(matches!(
+        original.adoption_error,
+        Some(RepairError::NonBuiltinCalls)
+    ));
+    assert_eq!(original.completed_count, 2);
+    assert_eq!(original.write_warnings_count, 1);
+    assert_eq!(original.external_warnings_count, 1);
+    let read = original
+        .results
+        .iter()
+        .find(|result| result.write_warning.is_none())
+        .expect("read preview");
+    assert_eq!(read.status, ToolResultStatus::Succeeded);
+    let hang = original
+        .results
+        .iter()
+        .find(|result| result.write_warning.is_some())
+        .expect("external preview");
+    assert_eq!(hang.status, ToolResultStatus::UnknownOutcome);
+    let warning = hang.write_warning.as_ref().unwrap();
+    assert_eq!(warning.kind, RepairWarningKind::External);
+    assert_eq!(warning.tool_name, "mcp_fx_hang");
+
+    // The completed read result cannot be adopted on its own: a batch with any
+    // non-builtin call is removal-only.
+    assert!(matches!(
+        session.plan_repair(RepairMode::AdoptOriginal(work.clone())),
+        Err(ApplicationError::Repair(RepairError::NonBuiltinCalls))
+    ));
+    let plan = session.plan_repair(RepairMode::RemoveUnpaired).unwrap();
+    let summary = plan.summary();
+    assert_eq!(summary.removed_count, 2);
+    // The built-in read carries no warning; only the external call does.
+    assert_eq!(summary.write_warnings_count, 1);
+    assert_eq!(summary.external_warnings_count, 1);
+    assert_eq!(summary.write_warnings[0].tool_name, "mcp_fx_hang");
+    assert_eq!(summary.write_warnings[0].kind, RepairWarningKind::External);
+
+    session.apply_repair(&plan).unwrap();
+    session.wait_saved().await.unwrap();
+
+    let next = session
+        .submit(SubmitRequest {
+            request_key: "after repair".into(),
+            blocks: vec![text_input("continue")],
+        })
+        .expect("submit")
+        .work;
+    let observation = session
+        .wait(&next, Duration::from_secs(10))
+        .await
+        .expect("work finishes");
+    assert!(matches!(observation.state, WorkState::Finished(_)));
+    session.wait_saved().await.unwrap();
+    let requests = fixture.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    let messages = requests[1]["messages"].as_array().expect("messages");
+    assert!(
+        messages
+            .iter()
+            .all(|m| m.get("tool_calls").is_none() && m.get("tool_call_id").is_none()),
+        "no removed exchange may reach the model: {messages:?}"
+    );
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
 }

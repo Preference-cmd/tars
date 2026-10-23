@@ -25,15 +25,28 @@ pub enum RepairIssueKind {
     ProtocolStructure,
 }
 
-/// Notification of a write or edit tool call that may have modified a file before interruption.
+/// Which side a possible pre-interruption effect is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairWarningKind {
+    /// A built-in write or edit call may have modified a workspace file.
+    FileWrite,
+    /// An MCP or other non-builtin call may have had effects on its own server,
+    /// outside the workspace and outside the application's control.
+    External,
+}
+
+/// Notification of a tool call that may have had a side effect before interruption.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RepairWriteWarning {
     /// Identity of the tool call declaration block.
     pub call_block_id: BlockId,
-    /// Name of the tool ("write_file" or "edit_file").
+    /// Name of the tool ("write_file", "edit_file", or an MCP/non-builtin name).
     pub tool_name: String,
     /// Target path from the call arguments, bounded to 512 UTF-8 bytes (empty if missing or invalid).
     pub path: String,
+    /// Which side the possible effect is on: the workspace file or the tool's own server.
+    pub kind: RepairWarningKind,
 }
 
 /// One bounded diagnostic, with identities rather than copies of user content.
@@ -87,7 +100,8 @@ pub struct OriginalResultPreview {
     pub status: ToolResultStatus,
     /// At most 1024 UTF-8 bytes of the original JSON result (including notes).
     pub excerpt: String,
-    /// Warning if this write or edit call may have modified a file before interruption.
+    /// Warning if this call may have had a side effect before interruption
+    /// (a built-in write or edit for the file, or an external tool for its server).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_warning: Option<RepairWriteWarning>,
 }
@@ -107,8 +121,12 @@ pub struct OriginalBatchPreview {
     pub results: Vec<OriginalResultPreview>,
     /// Reason adoption is unavailable; absence still requires plan validation.
     pub adoption_error: Option<RepairError>,
-    /// Total number of completed original results that have write warnings.
+    /// Total number of completed original results that have warnings, of both kinds.
     pub write_warnings_count: usize,
+    /// Total number of those warnings that concern external (non-builtin) calls.
+    /// Never greater than `write_warnings_count`; consumers may derive the
+    /// built-in write count by subtraction.
+    pub external_warnings_count: usize,
 }
 
 /// Inspection of actual current materials, optionally with one retained work.
@@ -148,9 +166,14 @@ pub struct RepairSummary {
     pub adopted: Vec<BlockId>,
     /// Identity of the new application explanation, placed after the exchange.
     pub explanation_id: BlockId,
-    /// Number of write or edit declarations that may have modified files before interruption.
+    /// Number of declarations that may have had a side effect before interruption:
+    /// built-in write or edit calls for files, and external calls for their servers.
     pub write_warnings_count: usize,
-    /// First 128 write warnings in deterministic scan order.
+    /// Total number of those warnings that concern external (non-builtin) calls.
+    /// Never greater than `write_warnings_count`; consumers may derive the
+    /// built-in write count by subtraction.
+    pub external_warnings_count: usize,
+    /// First 128 warnings in deterministic scan order.
     pub write_warnings: Vec<RepairWriteWarning>,
 }
 
@@ -200,6 +223,12 @@ pub enum RepairError {
         "original-result adoption requires the standard built-in tool assembly and controlled cancellation or deadline"
     )]
     UnsupportedSource,
+    /// The original batch contains MCP or other non-builtin calls, whose
+    /// server-side cancellation is outside the application's control.
+    #[error(
+        "a batch containing MCP or other non-builtin calls can only have its unpaired declarations removed; external side effects may already have happened"
+    )]
+    NonBuiltinCalls,
     /// The original batch no longer exactly matches the unresolved tail exchange.
     #[error("original batch does not match a single unresolved tail exchange")]
     InvalidOriginal,

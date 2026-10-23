@@ -6,9 +6,44 @@ use super::{
 use causa::{kernel::BlockId, runtime::new_block_id};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use tarz_core::{
-    application::{RepairInspection, RepairMode, RepairPlan, SaveStatus},
+    application::{RepairInspection, RepairMode, RepairPlan, RepairWarningKind, SaveStatus},
     session::WorkRef,
 };
+
+/// One bounded hint line for a possible pre-interruption side effect.
+fn warning_hint(warning: &tarz_core::application::RepairWriteWarning) -> String {
+    match warning.kind {
+        RepairWarningKind::External => format!(
+            "  {} may have caused external side effects; check the server state before continuing",
+            warning.tool_name
+        ),
+        RepairWarningKind::FileWrite if warning.path.is_empty() => format!(
+            "  {} may have changed the file; read it again before continuing",
+            warning.tool_name
+        ),
+        RepairWarningKind::FileWrite => format!(
+            "  {} {} may have changed the file; read it again before continuing",
+            warning.tool_name, warning.path
+        ),
+    }
+}
+
+/// Aggregate lines per warning kind; `suffix` closes each line ("." or ":").
+fn warning_total_lines(total: usize, external: usize, suffix: &str) -> Vec<String> {
+    let writes = total - external;
+    let mut lines = Vec::new();
+    if writes > 0 {
+        lines.push(format!(
+            "{writes} write call(s) may have changed files before interruption; read them again before continuing{suffix}"
+        ));
+    }
+    if external > 0 {
+        lines.push(format!(
+            "{external} external call(s) may have caused external side effects; check the server state before continuing{suffix}"
+        ));
+    }
+    lines
+}
 
 pub(crate) struct RepairPanel {
     key: Key,
@@ -154,25 +189,14 @@ impl App {
                                 result.excerpt
                             ));
                             if let Some(warning) = &result.write_warning {
-                                if warning.path.is_empty() {
-                                    lines.push(format!(
-                                        "  {} may have changed the file; read it again before continuing",
-                                        warning.tool_name
-                                    ));
-                                } else {
-                                    lines.push(format!(
-                                        "  {} {} may have changed the file; read it again before continuing",
-                                        warning.tool_name, warning.path
-                                    ));
-                                }
+                                lines.push(warning_hint(warning));
                             }
                         }
-                        if original.write_warnings_count > 0 {
-                            lines.push(format!(
-                                "{} write call(s) may have changed files before interruption; read them again before continuing.",
-                                original.write_warnings_count
-                            ));
-                        }
+                        lines.extend(warning_total_lines(
+                            original.write_warnings_count,
+                            original.external_warnings_count,
+                            ".",
+                        ));
                     }
                 }
                 lines.extend([
@@ -269,29 +293,20 @@ impl App {
                         .iter()
                         .map(|id| format!("Adopt original result {}", id.0)),
                 );
-                if summary.write_warnings_count > 0 {
-                    panel.lines.push(format!(
-                        "{} write call(s) may have changed files before interruption; read them again before continuing:",
-                        summary.write_warnings_count
-                    ));
-                    for warning in &summary.write_warnings {
-                        if warning.path.is_empty() {
-                            panel.lines.push(format!(
-                                "  {} may have changed the file; read it again before continuing",
-                                warning.tool_name
-                            ));
-                        } else {
-                            panel.lines.push(format!(
-                                "  {} {} may have changed the file; read it again before continuing",
-                                warning.tool_name, warning.path
-                            ));
-                        }
-                    }
-                    if summary.write_warnings_count > summary.write_warnings.len() {
-                        panel
-                            .lines
-                            .push("Write warning display limited to 128 items.".into());
-                    }
+                for line in warning_total_lines(
+                    summary.write_warnings_count,
+                    summary.external_warnings_count,
+                    ":",
+                ) {
+                    panel.lines.push(line);
+                }
+                for warning in &summary.write_warnings {
+                    panel.lines.push(warning_hint(warning));
+                }
+                if summary.write_warnings_count > summary.write_warnings.len() {
+                    panel
+                        .lines
+                        .push("Warning display limited to 128 items.".into());
                 }
                 if summary.removed_count > summary.removed.len()
                     || summary.adopted_count > summary.adopted.len()

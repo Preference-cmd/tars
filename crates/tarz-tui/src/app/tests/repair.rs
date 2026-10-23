@@ -400,3 +400,82 @@ async fn repair_ui_shows_write_warning_for_unpaired_write_file() {
         "text was: {text}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_ui_shows_external_side_effect_warning_for_unpaired_mcp_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = wire::Fixture::new("openai-chat", vec![wire::Reply::Answer], None);
+    fixture.release();
+    let mut app = app(dir.path());
+
+    let definition = SessionDefinition {
+        provider: Provider::OpenAiChat,
+        model: "fixture".into(),
+        endpoint: Some(fixture.endpoint.clone()),
+        credential: CredentialRef::Environment("PATH".into()),
+        work_timeout_secs: Some(30),
+        retained_work_capacity: 16,
+        max_model_rounds: 4,
+        max_tool_calls: 4,
+        max_tokens: None,
+        reasoning_effort: None,
+        extra_body: Default::default(),
+        max_model_attempts: None,
+        render_options: Default::default(),
+        workspace_root: None,
+        tools: vec![],
+        tool_limits: Default::default(),
+        write_limits: None,
+        permission_mode: None,
+        mcp_servers: Vec::new(),
+    };
+    let context = Context::from_blocks(vec![
+        tarz_core::application::text_input("prior input"),
+        ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "mcp_fx_echo",
+                serde_json::json!({"text": "hello"}),
+            )),
+            BlockMeta::default().with_provider_call_id("unpaired-mcp-call"),
+        ),
+    ])
+    .unwrap();
+    let session = app
+        .host
+        .create(PreparedCreate::persistent(definition, context))
+        .await
+        .unwrap();
+    let mut entry = Entry::new(
+        session.target().conversation_id().as_str().into(),
+        "fixture".into(),
+    );
+    entry.session = Some(session.clone());
+    entry.execution = "Interrupted MCP execution".into();
+    app.entries.push(entry);
+    until(&mut app, |app| {
+        app.entries[0].material_version.is_some() && app.entries[0].rows.is_some()
+    })
+    .await;
+
+    inspect(&mut app).await;
+    plan(&mut app).await;
+    let text = screen(&app);
+    assert!(
+        text.contains(
+            "mcp_fx_echo may have caused external side effects; check the server state before continuing"
+        ),
+        "text was: {text}"
+    );
+    assert!(
+        text.contains(
+            "1 external call(s) may have caused external side effects; check the server state before continuing"
+        ),
+        "text was: {text}"
+    );
+
+    app.host
+        .close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}

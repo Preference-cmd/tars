@@ -1,4 +1,4 @@
-use super::inspect::{candidate_check, diagnose, scan};
+use super::inspect::{candidate_check, diagnose, is_builtin_tool, scan, warning_kind};
 use super::types::*;
 use crate::application::{ApplicationError, ManagedSession, MaterialVersion};
 use crate::definition::SessionDefinition;
@@ -26,10 +26,18 @@ pub(super) fn source_check(
     {
         return Err(RepairError::UnsupportedSource);
     }
-    batch
-        .ok_or(RepairError::OriginalUnavailable)?
-        .validate()
-        .map_err(|_| RepairError::InvalidOriginal)
+    let batch = batch.ok_or(RepairError::OriginalUnavailable)?;
+    // MCP and other external calls resolve on their own server, whose side of
+    // a cancellation is not controlled here, so their results are never adopted.
+    if batch
+        .results()
+        .iter()
+        .chain(batch.calls())
+        .any(|entry| !is_builtin_tool(&entry.call().input.tool_name))
+    {
+        return Err(RepairError::NonBuiltinCalls);
+    }
+    batch.validate().map_err(|_| RepairError::InvalidOriginal)
 }
 
 // This strict subset covers the standard runner's atomic result append. It
@@ -70,12 +78,9 @@ fn validate_original(
         let call = entry.call();
         if declarations.get(&call.call_block_id).copied() != Some(&call.input)
             || !call.result_notes.is_empty()
-            // Future capabilities (including MCP) require a separately reviewed policy;
-            // extending WorkspaceTool alone cannot grant result adoption.
-            || !matches!(
-                call.input.tool_name.as_str(),
-                "list_directory" | "read_file" | "search_text" | "write_file" | "edit_file"
-            )
+            // The allow-list in `is_builtin_tool` is the reviewed adoption
+            // scope; extending WorkspaceTool alone cannot grant result adoption.
+            || !is_builtin_tool(&call.input.tool_name)
             || !definition.tools.iter().any(|tool| tool.name() == call.input.tool_name)
         {
             return Err(RepairError::InvalidOriginal);
@@ -154,44 +159,48 @@ impl ManagedSession {
             .collect();
         let mut write_warnings = Vec::new();
         let mut write_warnings_count = 0;
+        let mut external_warnings_count = 0;
+        // A removed or adopted-unknown declaration is flagged when its tool can
+        // have had a side effect before the interruption: built-in writes for
+        // the workspace file, any non-builtin name for its own server.
+        let mut flag = |id: &BlockId, kind: RepairWarningKind| {
+            let call = &declarations[id];
+            write_warnings_count += 1;
+            if kind == RepairWarningKind::External {
+                external_warnings_count += 1;
+            }
+            if write_warnings.len() < DISPLAY_LIMIT {
+                write_warnings.push(RepairWriteWarning {
+                    call_block_id: *id,
+                    tool_name: call.tool_name.clone(),
+                    path: super::inspect::extract_call_path(&call.arguments),
+                    kind,
+                });
+            }
+        };
         match &mode {
             RepairMode::RemoveUnpaired => {
                 for id in &scan.unpaired {
-                    if let Some(call) = declarations.get(id)
-                        && super::inspect::is_write_tool(&call.tool_name)
+                    if let Some(kind) = declarations
+                        .get(id)
+                        .and_then(|call| warning_kind(&call.tool_name))
                     {
-                        write_warnings_count += 1;
-                        if write_warnings.len() < DISPLAY_LIMIT {
-                            write_warnings.push(RepairWriteWarning {
-                                call_block_id: *id,
-                                tool_name: call.tool_name.clone(),
-                                path: super::inspect::extract_call_path(&call.arguments),
-                            });
-                        }
+                        flag(id, kind);
                     }
                 }
             }
             RepairMode::AdoptOriginal(_) => {
                 for id in &scan.unpaired {
-                    let is_unknown_write = match results.get(id).map(|b| b.content()) {
-                        Some(BlockContent::ToolResult(p)) => {
-                            p.status == ToolResultStatus::UnknownOutcome
-                                && declarations
-                                    .get(id)
-                                    .is_some_and(|c| super::inspect::is_write_tool(&c.tool_name))
-                        }
-                        _ => false,
-                    };
-                    if is_unknown_write {
-                        let call = &declarations[id];
-                        write_warnings_count += 1;
-                        if write_warnings.len() < DISPLAY_LIMIT {
-                            write_warnings.push(RepairWriteWarning {
-                                call_block_id: *id,
-                                tool_name: call.tool_name.clone(),
-                                path: super::inspect::extract_call_path(&call.arguments),
-                            });
-                        }
+                    let is_unknown = matches!(
+                        results.get(id).map(|b| b.content()),
+                        Some(BlockContent::ToolResult(p)) if p.status == ToolResultStatus::UnknownOutcome
+                    );
+                    if is_unknown
+                        && let Some(kind) = declarations
+                            .get(id)
+                            .and_then(|call| warning_kind(&call.tool_name))
+                    {
+                        flag(id, kind);
                     }
                 }
             }
@@ -245,6 +254,7 @@ impl ManagedSession {
             adopted: adopted.into_iter().take(DISPLAY_LIMIT).collect(),
             explanation_id,
             write_warnings_count,
+            external_warnings_count,
             write_warnings,
         };
         Ok(RepairPlan {

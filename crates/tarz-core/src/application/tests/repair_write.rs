@@ -2,7 +2,7 @@
 
 use super::support::*;
 use super::workspace_http as wire;
-use crate::application::{PreparedCreate, RepairMode, SessionHost};
+use crate::application::{PreparedCreate, RepairMode, RepairWarningKind, SessionHost};
 use crate::definition::{CredentialRef, Provider, WorkspaceTool};
 use crate::permission::{ApprovalDecision, PermissionMode};
 use crate::session::{SubmitRequest, WorkState};
@@ -513,6 +513,8 @@ async fn wm08_remove_unpaired_shows_write_warning_for_interrupted_write() {
     assert_eq!(summary.write_warnings_count, 1);
     assert_eq!(summary.write_warnings[0].tool_name, "write_file");
     assert_eq!(summary.write_warnings[0].path, "file.txt");
+    assert_eq!(summary.write_warnings[0].kind, RepairWarningKind::FileWrite);
+    assert_eq!(summary.external_warnings_count, 0);
 
     session.apply_repair(&plan).unwrap();
     session.wait_saved().await.unwrap();
@@ -819,6 +821,8 @@ async fn wm09_read_and_write_cancelled_before_rename_adopts_both_warns_write_onl
     assert_eq!(summary.write_warnings.len(), 1);
     assert_eq!(summary.write_warnings[0].tool_name, "write_file");
     assert_eq!(summary.write_warnings[0].path, "target.txt");
+    assert_eq!(summary.write_warnings[0].kind, RepairWarningKind::FileWrite);
+    assert_eq!(summary.external_warnings_count, 0);
 
     session.apply_repair(&plan).unwrap();
     session.wait_saved().await.unwrap();

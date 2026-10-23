@@ -133,14 +133,29 @@ pub(super) async fn run(
         if let Some(count) = value["plan"]["write_warnings_count"].as_u64()
             && count > 0
         {
-            text.push_str(&format!(
-                "{count} write call(s) may have changed files before interruption; read them again before continuing.\n"
-            ));
+            let external = value["plan"]["external_warnings_count"]
+                .as_u64()
+                .unwrap_or(0);
+            let writes = count - external;
+            if writes > 0 {
+                text.push_str(&format!(
+                    "{writes} write call(s) may have changed files before interruption; read them again before continuing.\n"
+                ));
+            }
+            if external > 0 {
+                text.push_str(&format!(
+                    "{external} external call(s) may have caused external side effects; check the server state before continuing.\n"
+                ));
+            }
             if let Some(warnings) = value["plan"]["write_warnings"].as_array() {
                 for warning in warnings {
                     let tool = warning["tool_name"].as_str().unwrap_or("write");
                     let path = warning["path"].as_str().unwrap_or("");
-                    if path.is_empty() {
+                    if warning["kind"] == "external" {
+                        text.push_str(&format!(
+                            "  {tool} may have caused external side effects; check the server state before continuing\n"
+                        ));
+                    } else if path.is_empty() {
                         text.push_str(&format!(
                             "  {tool} may have changed the file; read it again before continuing\n"
                         ));
@@ -149,7 +164,7 @@ pub(super) async fn run(
                     }
                 }
                 if count > warnings.len() as u64 {
-                    text.push_str("  Write warning display limited to 128 items.\n");
+                    text.push_str("  Warning display limited to 128 items.\n");
                 }
             }
         }

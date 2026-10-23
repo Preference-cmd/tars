@@ -3,7 +3,8 @@ use crate::application::{ApplicationError, ManagedSession};
 use crate::definition::{Provider, SessionDefinition};
 use crate::session::WorkRef;
 use causa::kernel::{
-    BlockContent, BlockId, CacheDirective, ContentPart, Context, ModelRef, ToolResultStatus,
+    BlockContent, BlockId, CacheDirective, ContentPart, Context, ModelRef,
+    ToolResultStatus::UnknownOutcome,
 };
 use causa::protocol::translation::{
     anthropic::render_anthropic_messages,
@@ -232,19 +233,25 @@ impl ManagedSession {
             .map(|work| {
                 owner.inspect_uncommitted(work, |standard, result, batch| {
                     let adoption_error = super::plan::source_check(standard, result, batch).err();
-                    let write_warnings_count = batch
-                        .map(|b| {
-                            b.results()
-                                .iter()
-                                .filter(|entry| {
-                                    is_write_tool(&entry.call().input.tool_name)
-                                        && entry.result().is_some_and(|(_, r)| {
-                                            r.status == ToolResultStatus::UnknownOutcome
-                                        })
-                                })
-                                .count()
-                        })
-                        .unwrap_or(0);
+                    let warned = |entry: &causa::kernel::ToolCallEntry| {
+                        let (_, result) = entry.result()?;
+                        warning_kind(&entry.call().input.tool_name)
+                            .filter(|_| result.status == UnknownOutcome)
+                            .map(|kind| RepairWriteWarning {
+                                call_block_id: result.call_block_id,
+                                tool_name: entry.call().input.tool_name.clone(),
+                                path: extract_call_path(&entry.call().input.arguments),
+                                kind,
+                            })
+                    };
+                    let warnings: Vec<_> = batch
+                        .map(|b| b.results().iter().filter_map(warned).collect())
+                        .unwrap_or_default();
+                    let write_warnings_count = warnings.len();
+                    let external_warnings_count = warnings
+                        .iter()
+                        .filter(|warning| warning.kind == RepairWarningKind::External)
+                        .count();
                     OriginalBatchPreview {
                         work: work.clone(),
                         available: batch.is_some(),
@@ -256,20 +263,7 @@ impl ManagedSession {
                             .take(DISPLAY_LIMIT)
                             .filter_map(|entry| {
                                 entry.result().map(|(id, result)| {
-                                    let write_warning =
-                                        if is_write_tool(&entry.call().input.tool_name)
-                                            && result.status == ToolResultStatus::UnknownOutcome
-                                        {
-                                            Some(RepairWriteWarning {
-                                                call_block_id: result.call_block_id,
-                                                tool_name: entry.call().input.tool_name.clone(),
-                                                path: extract_call_path(
-                                                    &entry.call().input.arguments,
-                                                ),
-                                            })
-                                        } else {
-                                            None
-                                        };
+                                    let write_warning = warned(entry);
                                     OriginalResultPreview {
                                         result_id: *id,
                                         call_block_id: result.call_block_id,
@@ -282,6 +276,7 @@ impl ManagedSession {
                             .collect(),
                         adoption_error,
                         write_warnings_count,
+                        external_warnings_count,
                     }
                 })
             })
@@ -332,6 +327,34 @@ fn json_excerpt(value: &impl serde::Serialize, limit: usize) -> String {
 
 pub(super) fn is_write_tool(tool_name: &str) -> bool {
     matches!(tool_name, "write_file" | "edit_file")
+}
+
+// The explicit adoption allow-list for original results. New capabilities
+// (including MCP) need a separately reviewed policy; adding a workspace tool
+// variant must not widen it implicitly.
+pub(super) const BUILTIN_TOOL_NAMES: [&str; 5] = [
+    "list_directory",
+    "read_file",
+    "search_text",
+    "write_file",
+    "edit_file",
+];
+
+pub(super) fn is_builtin_tool(tool_name: &str) -> bool {
+    BUILTIN_TOOL_NAMES.contains(&tool_name)
+}
+
+/// Which warning a tool call can carry: built-in writes may have changed a
+/// file; every other non-builtin name may have had effects on its own server.
+/// Built-in read-only tools carry no warning.
+pub(super) fn warning_kind(tool_name: &str) -> Option<RepairWarningKind> {
+    if is_write_tool(tool_name) {
+        Some(RepairWarningKind::FileWrite)
+    } else if !is_builtin_tool(tool_name) {
+        Some(RepairWarningKind::External)
+    } else {
+        None
+    }
 }
 
 pub(super) fn extract_call_path(arguments: &serde_json::Value) -> String {
