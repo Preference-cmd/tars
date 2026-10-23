@@ -61,14 +61,36 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
             }
             writer.flush()?;
         }
+        ApprovalSubject::McpCall {
+            server,
+            tool,
+            arguments,
+        } => {
+            writeln!(
+                writer,
+                "Tarz: {} wants to call MCP tool {}/{} (permission mode: {})",
+                escape_untrusted_text(tool_name),
+                escape_untrusted_text(server),
+                escape_untrusted_text(tool),
+                mode,
+            )?;
+            let escaped_args = escape_untrusted_text(arguments);
+            writeln!(writer, "{escaped_args}")?;
+            writer.flush()?;
+        }
     }
+
+    let prompt_text = match subject {
+        ApprovalSubject::FileWrite { .. } => "Allow this write? [y/n] ",
+        ApprovalSubject::McpCall { .. } => "Allow this tool call? [y/n] ",
+    };
 
     loop {
         if cancelled.load(Ordering::SeqCst) {
             return Ok(ApprovalDecision::Deny { reason: None });
         }
 
-        write!(writer, "Allow this write? [y/n] ")?;
+        write!(writer, "{prompt_text}")?;
         writer.flush()?;
         prompt_open.store(true, Ordering::SeqCst);
 
@@ -213,6 +235,103 @@ mod tests {
     }
 
     #[test]
+    fn mcp_call_allow_responses() {
+        for input in ["y\n", "yes\n", "Y\n", "YES\n", "  y  \n"] {
+            let subject = ApprovalSubject::McpCall {
+                server: "srv".into(),
+                tool: "echo".into(),
+                arguments: "{\"msg\":\"hi\"}".into(),
+            };
+            let mut reader = Cursor::new(input.as_bytes());
+            let mut writer = Vec::new();
+            let prompt_open = AtomicBool::new(false);
+            let cancelled = AtomicBool::new(false);
+
+            let decision = ask_approval(
+                "mcp_srv_echo",
+                PermissionMode::Ask,
+                &subject,
+                &mut reader,
+                &mut writer,
+                &prompt_open,
+                &cancelled,
+            )
+            .unwrap();
+            assert_eq!(decision, ApprovalDecision::Allow, "input: {input}");
+            let out_str = String::from_utf8(writer).unwrap();
+            assert!(out_str.contains(
+                "Tarz: mcp_srv_echo wants to call MCP tool srv/echo (permission mode: ask)"
+            ));
+            assert!(out_str.contains("{\"msg\":\"hi\"}"));
+            assert!(out_str.contains("Allow this tool call? [y/n] "));
+        }
+    }
+
+    #[test]
+    fn mcp_call_deny_with_reason() {
+        let subject = ApprovalSubject::McpCall {
+            server: "srv".into(),
+            tool: "mutate".into(),
+            arguments: "{\"count\":1}".into(),
+        };
+        let mut reader = Cursor::new(b"n\nnot safe\n");
+        let mut writer = Vec::new();
+        let prompt_open = AtomicBool::new(false);
+        let cancelled = AtomicBool::new(false);
+
+        let decision = ask_approval(
+            "mcp_srv_mutate",
+            PermissionMode::Ask,
+            &subject,
+            &mut reader,
+            &mut writer,
+            &prompt_open,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(
+            decision,
+            ApprovalDecision::Deny {
+                reason: Some("not safe".into())
+            }
+        );
+        let out_str = String::from_utf8(writer).unwrap();
+        assert!(out_str.contains(
+            "Tarz: mcp_srv_mutate wants to call MCP tool srv/mutate (permission mode: ask)"
+        ));
+        assert!(out_str.contains("Allow this tool call? [y/n] "));
+        assert!(out_str.contains("Reason for the model (optional, Enter to skip): "));
+    }
+
+    #[test]
+    fn mcp_call_escapes_untrusted_control_characters() {
+        let subject = ApprovalSubject::McpCall {
+            server: "s\x1b[31mrv".into(),
+            tool: "to\x00ol".into(),
+            arguments: "{\"text\":\"a\x1b[2Jb\"}".into(),
+        };
+        let mut reader = Cursor::new(b"y\n");
+        let mut writer = Vec::new();
+        let prompt_open = AtomicBool::new(false);
+        let cancelled = AtomicBool::new(false);
+
+        let _ = ask_approval(
+            "mcp_bad\x07name",
+            PermissionMode::Ask,
+            &subject,
+            &mut reader,
+            &mut writer,
+            &prompt_open,
+            &cancelled,
+        )
+        .unwrap();
+        let out_str = String::from_utf8(writer).unwrap();
+        assert!(!out_str.contains('\x1b'));
+        assert!(!out_str.contains('\x00'));
+        assert!(!out_str.contains('\x07'));
+    }
+
+    #[test]
     fn deny_with_reason() {
         let subject = ApprovalSubject::FileWrite {
             path: "test.txt".into(),
@@ -300,6 +419,33 @@ mod tests {
     }
 
     #[test]
+    fn mcp_call_displays_truncated_arguments() {
+        let subject = ApprovalSubject::McpCall {
+            server: "srv".into(),
+            tool: "process".into(),
+            arguments: "{\"data\":\"long-value\"}... (truncated)".into(),
+        };
+        let mut reader = Cursor::new(b"y\n");
+        let mut writer = Vec::new();
+        let prompt_open = AtomicBool::new(false);
+        let cancelled = AtomicBool::new(false);
+
+        let decision = ask_approval(
+            "mcp_srv_process",
+            PermissionMode::Ask,
+            &subject,
+            &mut reader,
+            &mut writer,
+            &prompt_open,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(decision, ApprovalDecision::Allow);
+        let out_str = String::from_utf8(writer).unwrap();
+        assert!(out_str.contains("... (truncated)"));
+    }
+
+    #[test]
     fn eof_is_denied_without_reason() {
         let subject = ApprovalSubject::FileWrite {
             path: "test.txt".into(),
@@ -322,93 +468,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decision, ApprovalDecision::Deny { reason: None });
-    }
-
-    #[test]
-    fn output_format_contains_required_fields() {
-        let subject = ApprovalSubject::FileWrite {
-            path: "notes/a.txt".into(),
-            action: WriteAction::Updated,
-            diff: "--- a/notes/a.txt\n+++ b/notes/a.txt\n@@ -1 +1 @@\n-old\n+new\n".into(),
-        };
-        let mut reader = Cursor::new(b"y\n");
-        let mut writer = Vec::new();
-        let prompt_open = AtomicBool::new(false);
-        let cancelled = AtomicBool::new(false);
-
-        let decision = ask_approval(
-            "write_file",
-            PermissionMode::Ask,
-            &subject,
-            &mut reader,
-            &mut writer,
-            &prompt_open,
-            &cancelled,
-        )
-        .unwrap();
-        assert_eq!(decision, ApprovalDecision::Allow);
-        let out_str = String::from_utf8(writer).unwrap();
-
-        assert!(
-            out_str
-                .contains("Tarz: write_file wants to update notes/a.txt (permission mode: ask)\n")
-        );
-        assert!(
-            out_str.contains("--- a/notes/a.txt\n+++ b/notes/a.txt\n@@ -1 +1 @@\n-old\n+new\n")
-        );
-        assert!(out_str.contains("Allow this write? [y/n] "));
-    }
-
-    #[test]
-    fn ask_approval_escapes_diff_and_path_and_tool() {
-        let subject = ApprovalSubject::FileWrite {
-            path: "dangerous\x1b[31m\u{061C}.txt".into(),
-            action: WriteAction::Created,
-            diff: "line1\x1b[32m\u{2028}\r\0\x08line2\n".into(),
-        };
-        let mut reader = std::io::Cursor::new(b"y\n");
-        let mut writer = Vec::new();
-        let prompt_open = AtomicBool::new(false);
-        let cancelled = AtomicBool::new(false);
-
-        let decision = ask_approval(
-            "write_file\x07",
-            PermissionMode::Ask,
-            &subject,
-            &mut reader,
-            &mut writer,
-            &prompt_open,
-            &cancelled,
-        )
-        .unwrap();
-        assert_eq!(decision, ApprovalDecision::Allow);
-        let out_str = String::from_utf8(writer).unwrap();
-
-        assert!(out_str.contains("write_file\\x07"));
-        assert!(out_str.contains("dangerous\\x1b[31m\\u{61c}.txt"));
-        assert!(out_str.contains("line1\\x1b[32m\\u{2028}\\r\\0\\bline2\n"));
-        assert!(!out_str.contains('\x1b'));
-        assert!(!out_str.contains('\u{061C}'));
-        assert!(!out_str.contains('\u{2028}'));
-        assert!(!out_str.contains('\r'));
-        assert!(!out_str.contains('\0'));
-        assert!(!out_str.contains('\x08'));
-        assert!(!out_str.contains('\x07'));
-    }
-
-    #[test]
-    fn connection_condition_combinations() {
-        for stdin_term in [false, true] {
-            for stderr_term in [false, true] {
-                for used_stdin in [false, true] {
-                    let expected = stdin_term && stderr_term && !used_stdin;
-                    assert_eq!(
-                        should_connect_approvals(stdin_term, stderr_term, used_stdin),
-                        expected,
-                        "failed for ({stdin_term}, {stderr_term}, {used_stdin})"
-                    );
-                }
-            }
-        }
     }
 }

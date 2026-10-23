@@ -155,11 +155,9 @@ impl App {
                             Some(trimmed.to_string())
                         };
                         if let Some(req) = entry.approval_queue.pop_front() {
-                            let _ = req
-                                .reply
-                                .send(tarz_core::permission::ApprovalDecision::Deny {
-                                    reason: reason_opt,
-                                });
+                            req.respond(tarz_core::permission::ApprovalDecision::Deny {
+                                reason: reason_opt,
+                            });
                         }
                     }
                     KeyCode::Esc => {
@@ -192,9 +190,7 @@ impl App {
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
                     if let Some(req) = entry.approval_queue.pop_front() {
-                        let _ = req
-                            .reply
-                            .send(tarz_core::permission::ApprovalDecision::Allow);
+                        req.respond(tarz_core::permission::ApprovalDecision::Allow);
                     }
                 }
                 KeyCode::Char('n' | 'N')

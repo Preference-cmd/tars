@@ -5,9 +5,12 @@ use super::source::{MAX_RESULT_BYTES, limit_result};
 use crate::application::tests::workspace_http::{Fixture, Reply};
 use crate::application::{ClosePolicy, ManagedSession, PreparedCreate, SessionHost, text_input};
 use crate::definition::{
-    CredentialRef, McpApproval, McpServerConfig, Provider, SessionDefinition, WorkspaceToolLimits,
+    CredentialRef, McpApproval, McpServerConfig, McpToolSetting, Provider, SessionDefinition,
+    WorkspaceTool, WorkspaceToolLimits,
 };
-use crate::permission::{PermissionDecisionKind, PermissionMode};
+use crate::permission::{
+    ApprovalDecision, ApprovalSubject, PermissionDecisionKind, PermissionMode, ToolPermissionClass,
+};
 use crate::session::{SubmitRequest, WorkObservation, WorkState};
 use causa::kernel::{
     BlockContent, BlockId, CallControl, CancellationToken, Context, DynamicToolSource,
@@ -285,7 +288,11 @@ async fn uncallable_tool_names_are_skipped_and_reported() {
             "mcp_fx_cwd",
             "mcp_fx_big",
             "mcp_fx_hang",
-            "mcp_fx_big_error"
+            "mcp_fx_big_error",
+            "mcp_fx_lookup",
+            "mcp_fx_mutate",
+            "mcp_fx_wipe",
+            "mcp_fx_unlock",
         ]
     );
     let skipped: Vec<(String, String)> = runtime.status()[0]
@@ -668,45 +675,1291 @@ async fn a_tool_deadline_ends_the_call_with_an_unknown_outcome() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_calls_run_only_in_full_access_until_they_can_be_confirmed() {
-    for mode in [
-        PermissionMode::ReadOnly,
-        PermissionMode::Ask,
-        PermissionMode::AcceptEdits,
-    ] {
-        let error = format!("MCP tool calls run only in 'full-access' mode (current mode: {mode})");
+async fn wm13_prompt_denied_with_reason_and_turn_continues() {
+    let root = tempfile::tempdir().unwrap();
+    let log_file = root.path().join("call_log.txt");
+    let mut fx = server("fx", "serve");
+    fx.approval = McpApproval::Prompt;
+    fx.env.insert(
+        "TARZ_MCP_FIXTURE_CALL_LOG".into(),
+        log_file.display().to_string(),
+    );
+
+    let fixture = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_echo".into(), json!({"text": "hello"})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def = definition(&fixture.endpoint, root.path(), vec![fx]);
+    def.permission_mode = Some(PermissionMode::Ask);
+    let (host, session) = open(def).await;
+
+    let mut rx = session.connect_approvals();
+    let approval_task = tokio::spawn(async move {
+        let req = rx.recv().await.expect("mcp approval request");
+        let ApprovalSubject::McpCall {
+            server,
+            tool,
+            arguments,
+        } = &req.subject
+        else {
+            panic!("expected McpCall");
+        };
+        assert_eq!(server, "fx");
+        assert_eq!(tool, "echo");
+        assert!(arguments.contains("hello"));
+        req.reply
+            .send(ApprovalDecision::Deny {
+                reason: Some("security policy prevents call".into()),
+            })
+            .unwrap();
+    });
+
+    let observation = run(&session, "call prompt echo").await;
+    approval_task.await.unwrap();
+
+    let call = &observation.tools.calls[0];
+    assert_eq!(call.status, Some(ToolResultStatus::Rejected));
+    assert_eq!(
+        call.permission_decision.as_ref().unwrap().kind,
+        PermissionDecisionKind::AskedAndDenied
+    );
+
+    // Fixture was never called (log is empty)
+    assert_eq!(std::fs::read_to_string(&log_file).unwrap_or_default(), "");
+
+    // Model's next request contains refusal text with reason
+    let requests = fixture.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    let req2_str = requests[1].to_string();
+    assert!(
+        req2_str.contains("user declined this tool call: security policy prevents call"),
+        "expected declined text in model prompt: {req2_str}"
+    );
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm13_tool_level_approve_in_ask_and_read_only() {
+    let root = tempfile::tempdir().unwrap();
+    let log_file = root.path().join("call_log.txt");
+    let mut fx = server("fx", "serve");
+    fx.approval = McpApproval::Prompt;
+    fx.tools.insert(
+        "echo".into(),
+        McpToolSetting {
+            approval: McpApproval::Approve,
+        },
+    );
+    fx.env.insert(
+        "TARZ_MCP_FIXTURE_CALL_LOG".into(),
+        log_file.display().to_string(),
+    );
+
+    // Part 1: In Ask mode, runs directly without asking
+    let fixture1 = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_echo".into(), json!({"msg": "approved"})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def1 = definition(&fixture1.endpoint, root.path(), vec![fx.clone()]);
+    def1.permission_mode = Some(PermissionMode::Ask);
+    let (host1, session1) = open(def1).await;
+    let mut rx = session1.connect_approvals();
+
+    let obs1 = run(&session1, "call approved echo in ask").await;
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        obs1.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        obs1.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::DirectExecution
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log_file)
+            .unwrap_or_default()
+            .trim(),
+        "echo"
+    );
+    host1
+        .close(&session1.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+
+    // Part 2: In ReadOnly mode, rejected with mode name, call log count does not increase
+    std::fs::remove_file(&log_file).unwrap();
+    let fixture2 = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_echo".into(), json!({"msg": "approved"})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def2 = definition(&fixture2.endpoint, root.path(), vec![fx]);
+    def2.permission_mode = Some(PermissionMode::ReadOnly);
+    let (host2, session2) = open(def2).await;
+    let obs2 = run(&session2, "call approved echo in ro").await;
+    assert_eq!(obs2.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    assert_eq!(
+        obs2.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::ModeRefused
+    );
+    let result = tool_result(&session2, &obs2);
+    assert_eq!(
+        result.output.content,
+        json!({ "error": "the current permission mode 'read-only' does not allow this MCP tool call" })
+    );
+    assert_eq!(std::fs::read_to_string(&log_file).unwrap_or_default(), "");
+    host2
+        .close(&session2.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm13_writes_annotated_lookup_mutate_wipe() {
+    let root = tempfile::tempdir().unwrap();
+    let mut fx = server("fx", "serve");
+    fx.approval = McpApproval::Writes;
+
+    // ReadOnly mode:
+    // lookup executes; mutate & wipe rejected
+    let fixture_ro = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_lookup".into(), json!({})),
+            Reply::Call("mcp_fx_mutate".into(), json!({})),
+            Reply::Call("mcp_fx_wipe".into(), json!({})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def_ro = definition(&fixture_ro.endpoint, root.path(), vec![fx.clone()]);
+    def_ro.permission_mode = Some(PermissionMode::ReadOnly);
+    let (host_ro, session_ro) = open(def_ro).await;
+    let obs_ro = run(&session_ro, "test writes in ro").await;
+    assert_eq!(obs_ro.tools.calls.len(), 3);
+    assert_eq!(
+        obs_ro.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        obs_ro.tools.calls[1].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    assert_eq!(
+        obs_ro.tools.calls[2].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    host_ro
+        .close(&session_ro.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+
+    // Ask mode:
+    // lookup executes directly; mutate & wipe ask
+    let fixture_ask = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_lookup".into(), json!({})),
+            Reply::Call("mcp_fx_mutate".into(), json!({})),
+            Reply::Call("mcp_fx_wipe".into(), json!({})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def_ask = definition(&fixture_ask.endpoint, root.path(), vec![fx.clone()]);
+    def_ask.permission_mode = Some(PermissionMode::Ask);
+    let (host_ask, session_ask) = open(def_ask).await;
+    let mut rx = session_ask.connect_approvals();
+    let approval_task = tokio::spawn(async move {
+        let req1 = rx.recv().await.expect("req mutate");
+        let ApprovalSubject::McpCall { tool, .. } = &req1.subject else {
+            panic!()
+        };
+        assert_eq!(tool, "mutate");
+        req1.reply.send(ApprovalDecision::Allow).unwrap();
+
+        let req2 = rx.recv().await.expect("req wipe");
+        let ApprovalSubject::McpCall { tool, .. } = &req2.subject else {
+            panic!()
+        };
+        assert_eq!(tool, "wipe");
+        req2.reply.send(ApprovalDecision::Allow).unwrap();
+    });
+    let obs_ask = run(&session_ask, "test writes in ask").await;
+    approval_task.await.unwrap();
+    assert_eq!(obs_ask.tools.calls.len(), 3);
+    assert_eq!(
+        obs_ask.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        obs_ask.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::DirectExecution
+    );
+    assert_eq!(
+        obs_ask.tools.calls[1].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        obs_ask.tools.calls[1]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndAllowed
+    );
+    assert_eq!(
+        obs_ask.tools.calls[2].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        obs_ask.tools.calls[2]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndAllowed
+    );
+    host_ask
+        .close(&session_ask.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+
+    // AcceptEdits mode:
+    // lookup executes directly; mutate & wipe ask
+    let fixture_ae = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_lookup".into(), json!({})),
+            Reply::Call("mcp_fx_mutate".into(), json!({})),
+            Reply::Call("mcp_fx_wipe".into(), json!({})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def_ae = definition(&fixture_ae.endpoint, root.path(), vec![fx.clone()]);
+    def_ae.permission_mode = Some(PermissionMode::AcceptEdits);
+    let (host_ae, session_ae) = open(def_ae).await;
+    let mut rx = session_ae.connect_approvals();
+    let approval_task_ae = tokio::spawn(async move {
+        let req1 = rx.recv().await.expect("req mutate");
+        let ApprovalSubject::McpCall { tool, .. } = &req1.subject else {
+            panic!()
+        };
+        assert_eq!(tool, "mutate");
+        req1.reply.send(ApprovalDecision::Allow).unwrap();
+
+        let req2 = rx.recv().await.expect("req wipe");
+        let ApprovalSubject::McpCall { tool, .. } = &req2.subject else {
+            panic!()
+        };
+        assert_eq!(tool, "wipe");
+        req2.reply.send(ApprovalDecision::Allow).unwrap();
+    });
+    let obs_ae = run(&session_ae, "test writes in accept-edits").await;
+    approval_task_ae.await.unwrap();
+    assert_eq!(obs_ae.tools.calls.len(), 3);
+    assert_eq!(
+        obs_ae.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        obs_ae.tools.calls[1].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        obs_ae.tools.calls[2].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    host_ae
+        .close(&session_ae.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+
+    // FullAccess mode:
+    // all three execute directly
+    let fixture_fa = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_lookup".into(), json!({})),
+            Reply::Call("mcp_fx_mutate".into(), json!({})),
+            Reply::Call("mcp_fx_wipe".into(), json!({})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def_fa = definition(&fixture_fa.endpoint, root.path(), vec![fx]);
+    def_fa.permission_mode = Some(PermissionMode::FullAccess);
+    let (host_fa, session_fa) = open(def_fa).await;
+    let obs_fa = run(&session_fa, "test writes in full-access").await;
+    assert_eq!(obs_fa.tools.calls.len(), 3);
+    assert_eq!(
+        obs_fa.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        obs_fa.tools.calls[1].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        obs_fa.tools.calls[2].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    host_fa
+        .close(&session_fa.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm13_auto_approve_in_mcp_json_still_asks_when_default_prompt() {
+    let root = tempfile::tempdir().unwrap();
+    let toml_path = root.path().join("config.toml");
+    let json_path = root.path().join("mcp.json");
+    std::fs::write(
+        &toml_path,
+        "version = 1
+",
+    )
+    .unwrap();
+    let config_json = serde_json::json!({
+        "mcpServers": {
+            "fx": {
+                "command": fixture_program().display().to_string(),
+                "env": { ROLE: "serve" },
+                "autoApprove": ["mutate"]
+            }
+        }
+    });
+    std::fs::write(&json_path, serde_json::to_string(&config_json).unwrap()).unwrap();
+    let config = crate::config::Config::load(crate::config::ConfigSource::File(toml_path)).unwrap();
+    let servers: Vec<_> = config.mcp_servers().values().cloned().collect();
+    assert_eq!(servers[0].approval, McpApproval::Prompt);
+    assert!(!servers[0].tools.contains_key("mutate"));
+
+    let fixture = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_mutate".into(), json!({})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def = definition(&fixture.endpoint, root.path(), servers);
+    def.permission_mode = Some(PermissionMode::Ask);
+    let (host, session) = open(def).await;
+    let mut rx = session.connect_approvals();
+    let approval_task = tokio::spawn(async move {
+        let req = rx.recv().await.expect("mutate asks");
+        let ApprovalSubject::McpCall { tool, .. } = &req.subject else {
+            panic!()
+        };
+        assert_eq!(tool, "mutate");
+        req.reply.send(ApprovalDecision::Allow).unwrap();
+    });
+    let obs = run(&session, "call mutate").await;
+    approval_task.await.unwrap();
+    assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
+    assert_eq!(
+        obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndAllowed
+    );
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm13_legacy_saved_auto_approval_treated_as_approve() {
+    let root = tempfile::tempdir().unwrap();
+    let raw_config = serde_json::json!({
+        "id": "fx",
+        "command": fixture_program().display().to_string(),
+        "env": { ROLE: "serve" },
+        "startup_timeout_sec": 10,
+        "tool_timeout_sec": 10,
+        "required": false,
+        "approval": "auto"
+    });
+    let server: McpServerConfig =
+        serde_json::from_value(raw_config).expect("deserialize legacy auto");
+    assert_eq!(server.approval, McpApproval::Approve);
+
+    let fixture = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_echo".into(), json!({"test": "legacy-auto"})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def = definition(&fixture.endpoint, root.path(), vec![server]);
+    def.permission_mode = Some(PermissionMode::Ask);
+    let (host, session) = open(def).await;
+    let mut rx = session.connect_approvals();
+    let obs = run(&session, "call legacy auto").await;
+    assert!(rx.try_recv().is_err(), "must not ask approval for approve");
+    assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
+    assert_eq!(
+        obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::DirectExecution
+    );
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm13_list_changed_unlock_adds_late_tool() {
+    let root = tempfile::tempdir().unwrap();
+    let log_file = root.path().join("call_log.txt");
+    let mut fx = server("fx", "serve");
+    fx.approval = McpApproval::Prompt;
+    fx.env.insert(
+        "TARZ_MCP_FIXTURE_CALL_LOG".into(),
+        log_file.display().to_string(),
+    );
+
+    let fixture = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_unlock".into(), json!({})),
+            Reply::Answer,
+            Reply::Call("mcp_fx_late".into(), json!({})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def = definition(&fixture.endpoint, root.path(), vec![fx]);
+    def.permission_mode = Some(PermissionMode::Ask);
+    let (host, session) = open(def).await;
+    let mut rx = session.connect_approvals();
+
+    // Round 1
+    let approval_task1 = tokio::spawn(async move {
+        let req = rx.recv().await.expect("unlock request");
+        req.reply.send(ApprovalDecision::Allow).unwrap();
+        rx
+    });
+    let obs1 = run(&session, "unlock late tool").await;
+    let mut rx = approval_task1.await.unwrap();
+    assert_eq!(
+        obs1.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+
+    // Round 2
+    let approval_task2 = tokio::spawn(async move {
+        let req = rx.recv().await.expect("late tool request");
+        let ApprovalSubject::McpCall { tool, .. } = &req.subject else {
+            panic!()
+        };
+        assert_eq!(tool, "late");
+        req.reply.send(ApprovalDecision::Allow).unwrap();
+    });
+    let obs2 = run(&session, "call late tool").await;
+    approval_task2.await.unwrap();
+    assert_eq!(
+        obs2.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+
+    // Assert tool definitions in fixture requests:
+    // Exactly 4 model requests.
+    // requests[0] did NOT have mcp_fx_late; requests[2] DOES have mcp_fx_late.
+    // requests[1] is not asserted (通知先于结果到达，第二轮第一次请求之前一定已经重新列出).
+    {
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4, "must have recorded exactly 4 requests");
+        let round1_tools = requests[0]["tools"].as_array().expect("tools in round 1");
+        assert!(
+            !round1_tools
+                .iter()
+                .any(|t| t["function"]["name"] == "mcp_fx_late"),
+            "mcp_fx_late must not be in round 1 tool definitions"
+        );
+        // requests[1] 不做断言：通知先于结果到达，第二轮第一次请求之前一定已经重新列出。
+        let round2_tools = requests[2]["tools"].as_array().expect("tools in round 2");
+        assert!(
+            round2_tools
+                .iter()
+                .any(|t| t["function"]["name"] == "mcp_fx_late"),
+            "mcp_fx_late must be in round 2 tool definitions"
+        );
+    }
+
+    let call_log = std::fs::read_to_string(&log_file).unwrap_or_default();
+    assert!(
+        call_log.contains("late"),
+        "fixture log must contain late tool call"
+    );
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+
+    let _ = std::fs::remove_file(&log_file);
+
+    // Part 2: If late is disabled via disabled_tools, unlock first,
+    // verify late does NOT appear in round 2 tool definitions,
+    // and calling it yields Rejected with "tool mcp_fx_late is not available",
+    // no approval request on rx, and fixture call log does not contain late.
+    let fixture_dis = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_unlock".into(), json!({})),
+            Reply::Answer,
+            Reply::Call("mcp_fx_late".into(), json!({})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut fx_dis = server("fx", "serve");
+    fx_dis.approval = McpApproval::Prompt;
+    fx_dis.disabled_tools = Some(vec!["late".into()]);
+    fx_dis.env.insert(
+        "TARZ_MCP_FIXTURE_CALL_LOG".into(),
+        log_file.display().to_string(),
+    );
+    let mut def_dis = definition(&fixture_dis.endpoint, root.path(), vec![fx_dis]);
+    def_dis.permission_mode = Some(PermissionMode::Ask);
+    let (host_dis, session_dis) = open(def_dis).await;
+    let mut rx_dis = session_dis.connect_approvals();
+
+    // Round 1 in disabled: unlock
+    let approval_dis1 = tokio::spawn(async move {
+        let req = rx_dis.recv().await.expect("unlock request");
+        req.reply.send(ApprovalDecision::Allow).unwrap();
+        rx_dis
+    });
+    let obs_dis1 = run(&session_dis, "unlock in disabled mode").await;
+    let mut rx_dis = approval_dis1.await.unwrap();
+    assert_eq!(
+        obs_dis1.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+
+    // Round 2 in disabled: model attempts to call late tool
+    let obs_dis2 = run(&session_dis, "call disabled late").await;
+    assert_eq!(
+        obs_dis2.tools.calls[0].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    let res = tool_result(&session_dis, &obs_dis2);
+    assert_eq!(
+        res.output.content,
+        json!({ "error": "tool 'mcp_fx_late' is not available" })
+    );
+    assert_eq!(
+        obs_dis2.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::Unavailable
+    );
+
+    // Assert round 2 tool definitions did NOT include mcp_fx_late and exactly 4 requests
+    {
+        let requests_dis = fixture_dis.requests.lock().unwrap();
+        assert_eq!(
+            requests_dis.len(),
+            4,
+            "disabled fixture must record exactly 4 requests"
+        );
+        let dis_round2_tools = requests_dis[2]["tools"]
+            .as_array()
+            .expect("tools in round 2");
+        assert!(
+            !dis_round2_tools
+                .iter()
+                .any(|t| t["function"]["name"] == "mcp_fx_late"),
+            "disabled late tool must not appear in tool definitions"
+        );
+    }
+
+    // No approval request was sent
+    assert!(
+        rx_dis.try_recv().is_err(),
+        "no approval request should be sent for disabled tool"
+    );
+
+    // Call log contains unlock, but NOT late
+    let call_log = std::fs::read_to_string(&log_file).unwrap_or_default();
+    assert!(call_log.contains("unlock"));
+    assert!(
+        !call_log.contains("late"),
+        "fixture log must not contain late"
+    );
+
+    host_dis
+        .close(&session_dis.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm13_unavailable_or_unregistered_tools_are_rejected() {
+    for mode in [PermissionMode::Ask, PermissionMode::FullAccess] {
         let root = tempfile::tempdir().unwrap();
-        let fixture = Fixture::new(
-            "openai-chat",
-            vec![
-                Reply::Call("mcp_fx_echo".into(), json!({"note": "refused"})),
-                Reply::Answer,
-            ],
-            None,
+        let log_file = root.path().join("call_log.txt");
+        let mut fx = server("fx", "serve");
+        fx.approval = McpApproval::Prompt;
+        fx.disabled_tools = Some(vec!["echo".into()]);
+        fx.env.insert(
+            "TARZ_MCP_FIXTURE_CALL_LOG".into(),
+            log_file.display().to_string(),
         );
-        let mut definition =
-            definition(&fixture.endpoint, root.path(), vec![server("fx", "serve")]);
-        definition.permission_mode = Some(mode);
-        let (host, session) = open(definition).await;
-        let observation = run(&session, "call echo").await;
-        let progress = &observation.tools.calls[0];
-        assert_eq!(
-            progress.status,
-            Some(ToolResultStatus::Rejected),
-            "{mode:?}"
-        );
-        assert_eq!(
-            progress.permission_decision.as_ref().unwrap().kind,
-            PermissionDecisionKind::ModeRefused
-        );
-        let result = tool_result(&session, &observation);
-        assert_eq!(result.output.content, json!({ "error": error }));
-        let requests = fixture.requests.lock().unwrap().clone();
-        assert!(!requests[1].to_string().contains("echo-result:"));
+
+        let tool_names = [
+            "mcp_fx_nonexistent",
+            "mcp_fx_echo",
+            "unregistered_standalone_tool",
+        ];
+
+        let mut replies = Vec::new();
+        for name in &tool_names {
+            replies.push(Reply::Call((*name).into(), json!({ "arg": "value" })));
+            replies.push(Reply::Answer);
+        }
+
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let mut def = definition(&fixture.endpoint, root.path(), vec![fx]);
+        def.permission_mode = Some(mode);
+        let (host, session) = open(def).await;
+        let mut rx = session.connect_approvals();
+
+        for name in &tool_names {
+            let obs = run(&session, &format!("calling {name} in {mode:?}")).await;
+            assert_eq!(
+                obs.tools.calls[0].status,
+                Some(ToolResultStatus::Rejected),
+                "tool {name} in mode {mode:?} must be Rejected"
+            );
+            assert_eq!(
+                obs.tools.calls[0]
+                    .permission_decision
+                    .as_ref()
+                    .unwrap()
+                    .kind,
+                PermissionDecisionKind::Unavailable,
+                "tool {name} in mode {mode:?} must record Unavailable decision"
+            );
+            let res = tool_result(&session, &obs);
+            assert_eq!(
+                res.output.content,
+                json!({ "error": format!("tool '{name}' is not available") }),
+                "tool {name} in mode {mode:?} error message mismatch"
+            );
+            assert!(
+                rx.try_recv().is_err(),
+                "no approval request should be sent for {name} in mode {mode:?}"
+            );
+            let log = std::fs::read_to_string(&log_file).unwrap_or_default();
+            assert!(
+                !log.contains(name) && !log.contains("echo") && !log.contains("nonexistent"),
+                "fixture log must not contain {name}"
+            );
+        }
+
         host.close(&session.target(), ClosePolicy::DiscardLocal)
             .await
             .unwrap();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm13_mcp_call_cancelled_during_approval_wait() {
+    let root = tempfile::tempdir().unwrap();
+    let log_file = root.path().join("call_log.txt");
+
+    let mut fx = server("fx", "serve");
+    fx.approval = McpApproval::Prompt;
+    fx.env.insert(
+        "TARZ_MCP_FIXTURE_CALL_LOG".into(),
+        log_file.display().to_string(),
+    );
+
+    let replies = vec![
+        Reply::Call("mcp_fx_echo".into(), json!({ "message": "cancel_me" })),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let mut def = definition(&fixture.endpoint, root.path(), vec![fx]);
+    def.permission_mode = Some(PermissionMode::Ask);
+    let (host, session) = open(def).await;
+
+    let mut rx = session.connect_approvals();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let entered_clone = entered.clone();
+
+    let approval_task = tokio::spawn(async move {
+        let req = rx.recv().await.expect("approval request");
+        assert!(matches!(
+            req.subject,
+            ApprovalSubject::McpCall { ref tool, .. } if tool == "echo"
+        ));
+        entered_clone.notify_one();
+        // Wait without answering until cancelled
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+
+    let work = session
+        .submit(SubmitRequest {
+            request_key: "mcp_cancel".into(),
+            blocks: vec![text_input("echo and cancel")],
+        })
+        .expect("submit")
+        .work;
+
+    entered.notified().await;
+    session.cancel(&work).unwrap();
+
+    let obs = session
+        .wait(&work, Duration::from_secs(5))
+        .await
+        .expect("work finishes");
+    approval_task.abort();
+
+    use crate::session::ToolPhase;
+    use crate::session::WorkResult;
+    use causa::runtime::{TurnInterruption, TurnResult};
+    assert!(matches!(
+        obs.state,
+        WorkState::Finished(ref r) if matches!(**r, WorkResult::Run(TurnResult::Interrupted {
+            cause: TurnInterruption::Cancelled { .. }
+        }))
+    ));
+    assert_eq!(obs.tools.calls.len(), 1);
+    let call = &obs.tools.calls[0];
+    assert!(
+        call.phase == ToolPhase::NotStarted || call.operation_not_started,
+        "cancelled wait must record tool as not started"
+    );
+    let call_log = std::fs::read_to_string(&log_file).unwrap_or_default();
+    assert!(
+        !call_log.contains("echo"),
+        "fixture log must not contain cancelled tool call"
+    );
+    assert!(call.permission_decision.is_none());
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm17_four_modes_six_categories_session_integration() {
+    struct TestCase {
+        tool_name: &'static str,
+        payload: Value,
+        is_mcp: bool,
+        log_name: Option<&'static str>,
+    }
+
+    let cases = [
+        TestCase {
+            tool_name: "read_file",
+            payload: json!({ "path": "file.txt" }),
+            is_mcp: false,
+            log_name: None,
+        },
+        TestCase {
+            tool_name: "write_file",
+            payload: json!({ "path": "file.txt", "content": "updated" }),
+            is_mcp: false,
+            log_name: None,
+        },
+        TestCase {
+            tool_name: "mcp_p_echo",
+            payload: json!({ "msg": "test" }),
+            is_mcp: true,
+            log_name: Some("echo"),
+        },
+        TestCase {
+            tool_name: "mcp_w_lookup",
+            payload: json!({}),
+            is_mcp: true,
+            log_name: Some("lookup"),
+        },
+        TestCase {
+            tool_name: "mcp_w_mutate",
+            payload: json!({}),
+            is_mcp: true,
+            log_name: Some("mutate"),
+        },
+        TestCase {
+            tool_name: "mcp_a_echo",
+            payload: json!({ "msg": "test" }),
+            is_mcp: true,
+            log_name: Some("echo"),
+        },
+    ];
+
+    struct Expected {
+        asked: bool,
+        status: ToolResultStatus,
+        decision_kind: PermissionDecisionKind,
+        fixture_executed: bool,
+    }
+
+    let expectations: [[Expected; 6]; 4] = [
+        // ReadOnly
+        [
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: false,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Rejected,
+                decision_kind: PermissionDecisionKind::ModeRefused,
+                fixture_executed: false,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Rejected,
+                decision_kind: PermissionDecisionKind::ModeRefused,
+                fixture_executed: false,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: true,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Rejected,
+                decision_kind: PermissionDecisionKind::ModeRefused,
+                fixture_executed: false,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Rejected,
+                decision_kind: PermissionDecisionKind::ModeRefused,
+                fixture_executed: false,
+            },
+        ],
+        // AcceptEdits
+        [
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: false,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: false,
+            },
+            Expected {
+                asked: true,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::AskedAndAllowed,
+                fixture_executed: true,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: true,
+            },
+            Expected {
+                asked: true,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::AskedAndAllowed,
+                fixture_executed: true,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: true,
+            },
+        ],
+        // Ask
+        [
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: false,
+            },
+            Expected {
+                asked: true,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::AskedAndAllowed,
+                fixture_executed: false,
+            },
+            Expected {
+                asked: true,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::AskedAndAllowed,
+                fixture_executed: true,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: true,
+            },
+            Expected {
+                asked: true,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::AskedAndAllowed,
+                fixture_executed: true,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: true,
+            },
+        ],
+        // FullAccess
+        [
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: false,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: false,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: true,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: true,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: true,
+            },
+            Expected {
+                asked: false,
+                status: ToolResultStatus::Succeeded,
+                decision_kind: PermissionDecisionKind::DirectExecution,
+                fixture_executed: true,
+            },
+        ],
+    ];
+
+    let modes = [
+        PermissionMode::ReadOnly,
+        PermissionMode::AcceptEdits,
+        PermissionMode::Ask,
+        PermissionMode::FullAccess,
+    ];
+
+    for (mode_idx, &mode) in modes.iter().enumerate() {
+        let root = tempfile::tempdir().unwrap();
+        let log_file = root.path().join("call_log.txt");
+        std::fs::write(root.path().join("file.txt"), "initial text").unwrap();
+
+        let mut srv_p = server("p", "serve");
+        srv_p.approval = McpApproval::Prompt;
+        srv_p.env.insert(
+            "TARZ_MCP_FIXTURE_CALL_LOG".into(),
+            log_file.display().to_string(),
+        );
+
+        let mut srv_w = server("w", "serve");
+        srv_w.approval = McpApproval::Writes;
+        srv_w.env.insert(
+            "TARZ_MCP_FIXTURE_CALL_LOG".into(),
+            log_file.display().to_string(),
+        );
+
+        let mut srv_a = server("a", "serve");
+        srv_a.approval = McpApproval::Approve;
+        srv_a.env.insert(
+            "TARZ_MCP_FIXTURE_CALL_LOG".into(),
+            log_file.display().to_string(),
+        );
+
+        let mut replies = Vec::new();
+        for case in &cases {
+            replies.push(Reply::Call(case.tool_name.into(), case.payload.clone()));
+            replies.push(Reply::Answer);
+        }
+
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let mut def = definition(&fixture.endpoint, root.path(), vec![srv_p, srv_w, srv_a]);
+        def.tools = vec![WorkspaceTool::ReadFile, WorkspaceTool::WriteFile];
+        def.permission_mode = Some(mode);
+        let (host, session) = open(def).await;
+        let mut rx = session.connect_approvals();
+
+        let (asked_tx, mut asked_rx) = tokio::sync::mpsc::unbounded_channel();
+        let approver = tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let _ = asked_tx.send(req.tool_name.clone());
+                let _ = req.reply.send(ApprovalDecision::Allow);
+            }
+        });
+
+        for (case_idx, case) in cases.iter().enumerate() {
+            let _ = std::fs::write(&log_file, "");
+            let exp = &expectations[mode_idx][case_idx];
+
+            let obs = run(&session, &format!("turn {case_idx} for {mode:?}")).await;
+
+            if exp.asked {
+                let asked_name = asked_rx.try_recv().unwrap_or_else(|_| {
+                    panic!(
+                        "mode {:?}, case {}: expected approval request for {}",
+                        mode, case_idx, case.tool_name
+                    )
+                });
+                assert_eq!(asked_name, case.tool_name);
+                assert!(
+                    asked_rx.try_recv().is_err(),
+                    "mode {:?}, case {}: only 1 approval expected",
+                    mode,
+                    case_idx
+                );
+            } else {
+                assert!(
+                    asked_rx.try_recv().is_err(),
+                    "mode {:?}, case {}: expected NO approval request for {}",
+                    mode,
+                    case_idx,
+                    case.tool_name
+                );
+            }
+
+            assert_eq!(
+                obs.tools.calls[0].status,
+                Some(exp.status.clone()),
+                "mode {:?}, case {} ({}) status mismatch",
+                mode,
+                case_idx,
+                case.tool_name
+            );
+
+            let decision = obs.tools.calls[0]
+                .permission_decision
+                .as_ref()
+                .expect("every call in this table records a decision");
+            assert_eq!(
+                decision.kind, exp.decision_kind,
+                "mode {:?}, case {} ({}) decision kind mismatch",
+                mode, case_idx, case.tool_name
+            );
+            // The mode is fixed at open, so every decision sees it at revision 0.
+            assert_eq!(decision.mode, mode, "mode {mode:?}, case {case_idx}");
+            assert_eq!(decision.revision, 0, "mode {mode:?}, case {case_idx}");
+
+            if case.is_mcp {
+                let log = std::fs::read_to_string(&log_file).unwrap_or_default();
+                let expected_name = case.log_name.unwrap();
+                if exp.fixture_executed {
+                    assert!(
+                        log.contains(expected_name),
+                        "mode {:?}, case {} ({}) should have been logged in fixture, got: {}",
+                        mode,
+                        case_idx,
+                        case.tool_name,
+                        log
+                    );
+                } else {
+                    assert!(
+                        !log.contains(expected_name),
+                        "mode {:?}, case {} ({}) should NOT have been logged in fixture, got: {}",
+                        mode,
+                        case_idx,
+                        case.tool_name,
+                        log
+                    );
+                }
+            }
+        }
+
+        approver.abort();
+        host.close(&session.target(), ClosePolicy::DiscardLocal)
+            .await
+            .unwrap();
+    }
+}
+
+#[test]
+fn wm13_no_mcp_prefix_in_permission_logic() {
+    let table = std::sync::Arc::new(crate::permission::McpPermissionTable::default());
+    let hub = crate::permission::PermissionHub::with_mcp_table(
+        crate::permission::PermissionMode::Ask,
+        table.clone(),
+    );
+    let view = hub.view();
+    assert_eq!(
+        view.classify_tool("read_file"),
+        Some(ToolPermissionClass::KnownReadOnly)
+    );
+    assert_eq!(
+        view.classify_tool("write_file"),
+        Some(ToolPermissionClass::BuiltinWrite)
+    );
+    assert_eq!(view.classify_tool("mcp_server_fake"), None);
+
+    table.update_server_tools(
+        "custom",
+        vec![(
+            "my_special_tool".into(),
+            crate::permission::McpToolInfo {
+                server_id: "custom".into(),
+                raw_tool_name: "special".into(),
+                category: ToolPermissionClass::McpPrompt,
+            },
+        )],
+    );
+    assert_eq!(
+        view.classify_tool("my_special_tool"),
+        Some(ToolPermissionClass::McpPrompt)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm17_accept_edits_does_not_affect_mcp_prompt_but_full_access_does() {
+    let root = tempfile::tempdir().unwrap();
+    let mut fx = server("fx", "serve");
+    fx.approval = McpApproval::Prompt;
+
+    let fixture = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("mcp_fx_echo".into(), json!({"t": 1})),
+            Reply::Call("mcp_fx_echo".into(), json!({"t": 2})),
+            Reply::Call("mcp_fx_echo".into(), json!({"t": 3})),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def = definition(&fixture.endpoint, root.path(), vec![fx]);
+    def.permission_mode = Some(PermissionMode::Ask);
+    let (host, session) = open(def).await;
+
+    let mut rx = session.connect_approvals();
+    let session_clone = session.clone();
+
+    let approval_task = tokio::spawn(async move {
+        // Request 1: arrives under Ask
+        let req1 = rx.recv().await.expect("req1");
+        let ApprovalSubject::McpCall { tool, .. } = &req1.subject else {
+            panic!()
+        };
+        assert_eq!(tool, "echo");
+        // Switch to AcceptEdits mid-batch
+        session_clone
+            .set_permission_mode(PermissionMode::AcceptEdits)
+            .unwrap();
+        req1.reply.send(ApprovalDecision::Allow).unwrap();
+
+        // Request 2: should STILL arrive because McpPrompt requires Ask under AcceptEdits!
+        let req2 = rx
+            .recv()
+            .await
+            .expect("req2 must still ask under accept-edits");
+        let ApprovalSubject::McpCall { tool, .. } = &req2.subject else {
+            panic!()
+        };
+        assert_eq!(tool, "echo");
+        // Now switch to FullAccess
+        session_clone
+            .set_permission_mode(PermissionMode::FullAccess)
+            .unwrap();
+        req2.reply.send(ApprovalDecision::Allow).unwrap();
+
+        // Request 3: must NOT arrive because FullAccess executes directly!
+        let next = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(next.is_err(), "call 3 must not ask under FullAccess");
+    });
+
+    let obs = run(&session, "mcp mode switches mid-batch").await;
+    approval_task.await.unwrap();
+
+    assert_eq!(obs.tools.calls.len(), 3);
+    assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
+    assert_eq!(
+        obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndAllowed
+    );
+    assert_eq!(obs.tools.calls[1].status, Some(ToolResultStatus::Succeeded));
+    assert_eq!(
+        obs.tools.calls[1]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndAllowed
+    );
+    assert_eq!(obs.tools.calls[2].status, Some(ToolResultStatus::Succeeded));
+    assert_eq!(
+        obs.tools.calls[2]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::DirectExecution
+    );
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

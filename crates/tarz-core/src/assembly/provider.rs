@@ -69,7 +69,14 @@ pub(crate) fn assemble(
         (Some(builtin), Some(mcp)) => Some(builtin.max(mcp)),
         (builtin, mcp) => builtin.or(mcp),
     };
-    let permissions = Arc::new(crate::permission::PermissionHub::new(current_mode));
+    let mcp_table = mcp
+        .as_ref()
+        .map(|m| m.permission_table())
+        .unwrap_or_else(|| Arc::new(crate::permission::McpPermissionTable::new()));
+    let permissions = Arc::new(crate::permission::PermissionHub::with_mcp_table(
+        current_mode,
+        mcp_table,
+    ));
     let view = permissions.view();
     let approvals = permissions.approvals();
     let session_permissions = permissions.clone();
@@ -80,6 +87,12 @@ pub(crate) fn assemble(
     ));
     #[cfg(test)]
     let test_processors_capture = test_processors.clone();
+    #[cfg(test)]
+    let test_intermediate = Arc::new(std::sync::Mutex::new(
+        Vec::<Arc<dyn ToolBatchProcessor>>::new(),
+    ));
+    #[cfg(test)]
+    let test_intermediate_capture = test_intermediate.clone();
     #[cfg(test)]
     let tools_for_session = workspace_tools.clone();
 
@@ -99,6 +112,19 @@ pub(crate) fn assemble(
                 tools.bind_with_prepared(&selected, reporter.clone(), prepared_writes.clone())
             });
             let mut before: Vec<Arc<dyn ToolBatchProcessor>> = Vec::new();
+            if workspace_tools.is_some() || mcp_for_work.is_some() {
+                before.push(Arc::new(crate::permission::ModeGateProcessor::new(
+                    reporter.clone(),
+                    approvals.clone(),
+                )));
+            }
+            #[cfg(test)]
+            {
+                let extras = test_intermediate_capture
+                    .lock()
+                    .expect("test intermediate processors lock");
+                before.extend(extras.iter().cloned());
+            }
             if let Some(wt) = &workspace_tools {
                 before.push(Arc::new(crate::permission::PrecheckProcessor::new(
                     wt.clone(),
@@ -158,6 +184,7 @@ pub(crate) fn assemble(
     let session = {
         let mut session = session;
         session.test_before_processors = test_processors;
+        session.test_intermediate_processors = test_intermediate;
         session.workspace_tools = tools_for_session;
         session
     };

@@ -8,7 +8,9 @@ use ratatui_textarea::TextArea;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tarz_core::application::{ManagedSession, MaterialVersion, PreparedCreate, SessionHost};
-use tarz_core::permission::{ApprovalReceiver, ApprovalRequest};
+use tarz_core::permission::{
+    ApprovalDecision, ApprovalReceiver, ApprovalRequest, ApprovalSubject, PermissionMode,
+};
 use tarz_core::session::WorkRef;
 use tokio::task::JoinSet;
 
@@ -20,6 +22,50 @@ pub(super) struct Key {
     pub id: String,
     pub generation: u64,
 }
+
+/// Pending approval request held by the TUI for reviewer confirmation.
+pub(crate) struct PendingApproval {
+    pub(crate) tool_name: String,
+    pub(crate) mode: PermissionMode,
+    pub(crate) subject: ApprovalSubject,
+    reply: Box<dyn FnOnce(ApprovalDecision) + Send>,
+}
+
+impl PendingApproval {
+    pub(crate) fn from_request(request: ApprovalRequest) -> Self {
+        Self {
+            tool_name: request.tool_name,
+            mode: request.mode,
+            subject: request.subject,
+            reply: Box::new(move |decision| {
+                let _ = request.reply.send(decision);
+            }),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mock<F>(
+        tool_name: String,
+        mode: PermissionMode,
+        subject: ApprovalSubject,
+        on_reply: F,
+    ) -> Self
+    where
+        F: FnOnce(ApprovalDecision) + Send + 'static,
+    {
+        Self {
+            tool_name,
+            mode,
+            subject,
+            reply: Box::new(on_reply),
+        }
+    }
+
+    pub(crate) fn respond(self, decision: ApprovalDecision) {
+        (self.reply)(decision);
+    }
+}
+
 pub(crate) struct Entry {
     pub(super) key: Key,
     pub title: String,
@@ -45,7 +91,7 @@ pub(crate) struct Entry {
     pub(super) refreshing: bool,
     pub(super) wrapping: bool,
     pub(crate) approvals_rx: Option<ApprovalReceiver>,
-    pub(crate) approval_queue: VecDeque<ApprovalRequest>,
+    pub(crate) approval_queue: VecDeque<PendingApproval>,
     pub(crate) approval_reason: Option<String>,
     pub(crate) approval_scroll: usize,
 }

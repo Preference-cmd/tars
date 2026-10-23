@@ -19,6 +19,9 @@ pub struct Session {
     #[cfg(test)]
     pub(crate) test_before_processors:
         Arc<std::sync::Mutex<Vec<Arc<dyn causa::kernel::ToolBatchProcessor>>>>,
+    #[cfg(test)]
+    pub(crate) test_intermediate_processors:
+        Arc<std::sync::Mutex<Vec<Arc<dyn causa::kernel::ToolBatchProcessor>>>>,
 }
 
 impl Session {
@@ -95,6 +98,18 @@ impl Session {
             .expect("test processors lock")
             .push(processor);
     }
+
+    /// Append an extra before processor between the mode gate and precheck/permission processors during test runs.
+    #[cfg(test)]
+    pub(crate) fn add_test_intermediate_processor(
+        &self,
+        processor: Arc<dyn causa::kernel::ToolBatchProcessor>,
+    ) {
+        self.test_intermediate_processors
+            .lock()
+            .expect("test intermediate processors lock")
+            .push(processor);
+    }
     /// Construct without assembly, worker creation, input edits or history recovery.
     pub fn new<F, Fut>(
         conversation_id: ConversationId,
@@ -138,6 +153,8 @@ impl Session {
             workspace_tools: None,
             #[cfg(test)]
             test_before_processors: Arc::new(std::sync::Mutex::new(Vec::new())),
+            #[cfg(test)]
+            test_intermediate_processors: Arc::new(std::sync::Mutex::new(Vec::new())),
             shared: Arc::new(Shared {
                 conversation_id,
                 state: Mutex::new(State {

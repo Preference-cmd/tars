@@ -317,19 +317,30 @@ pub(super) fn approval(frame: &mut Frame<'_>, _app: &App, entry: &crate::app::En
     let Some(req) = entry.approval_queue.front() else {
         return;
     };
-    let tarz_core::permission::ApprovalSubject::FileWrite { path, action, diff } = &req.subject;
-    let action_str = match action {
-        tarz_core::permission::WriteAction::Created => "create",
-        tarz_core::permission::WriteAction::Updated => "update",
+    let title_line = match &req.subject {
+        tarz_core::permission::ApprovalSubject::FileWrite { path, action, .. } => {
+            let action_str = match action {
+                tarz_core::permission::WriteAction::Created => "create",
+                tarz_core::permission::WriteAction::Updated => "update",
+            };
+            format!(
+                "{} wants to {} {} (permission mode: {})",
+                tarz_core::permission::escape_untrusted_text(&req.tool_name),
+                action_str,
+                tarz_core::permission::escape_untrusted_text(path),
+                req.mode,
+            )
+        }
+        tarz_core::permission::ApprovalSubject::McpCall { server, tool, .. } => {
+            format!(
+                "{} wants to call MCP tool {}/{} (permission mode: {})",
+                tarz_core::permission::escape_untrusted_text(&req.tool_name),
+                tarz_core::permission::escape_untrusted_text(server),
+                tarz_core::permission::escape_untrusted_text(tool),
+                req.mode,
+            )
+        }
     };
-
-    let title_line = format!(
-        "{} wants to {} {} (permission mode: {})",
-        tarz_core::permission::escape_untrusted_text(&req.tool_name),
-        action_str,
-        tarz_core::permission::escape_untrusted_text(path),
-        req.mode,
-    );
 
     let current_mode = entry
         .session
@@ -348,17 +359,22 @@ pub(super) fn approval(frame: &mut Frame<'_>, _app: &App, entry: &crate::app::En
         ));
     }
     if entry.approval_queue.len() > 1 {
-        header_lines.push(Line::styled(
-            format!(
-                "({} more pending write confirmation(s) in queue)",
-                entry.approval_queue.len() - 1
-            ),
-            Style::default().fg(MUTED),
-        ));
+        let msg = match &req.subject {
+            tarz_core::permission::ApprovalSubject::FileWrite { .. } => {
+                format!(
+                    "({} more pending write confirmation(s) in queue)",
+                    entry.approval_queue.len() - 1
+                )
+            }
+            tarz_core::permission::ApprovalSubject::McpCall { .. } => {
+                format!(
+                    "({} more pending confirmation(s) in queue)",
+                    entry.approval_queue.len() - 1
+                )
+            }
+        };
+        header_lines.push(Line::styled(msg, Style::default().fg(MUTED)));
     }
-
-    let escaped_diff = tarz_core::permission::escape_untrusted_text(diff);
-    let diff_lines: Vec<&str> = escaped_diff.lines().collect();
 
     let header_len = header_lines.len() as u16;
     let reason_height = if entry.approval_reason.is_some() {
@@ -376,29 +392,46 @@ pub(super) fn approval(frame: &mut Frame<'_>, _app: &App, entry: &crate::app::En
 
     frame.render_widget(Paragraph::new(header_lines), regions[0]);
 
-    let diff_height = usize::from(regions[1].height.saturating_sub(2));
-    let visible_diff: Vec<Line> = diff_lines
-        .iter()
-        .skip(entry.approval_scroll)
-        .take(diff_height)
-        .map(|&line| {
-            let style = if line.starts_with('+') && !line.starts_with("+++") {
-                Style::default().fg(Color::Green)
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                Style::default().fg(Color::Red)
-            } else if line.starts_with("@@") {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default()
-            };
-            Line::styled(line, style)
-        })
-        .collect();
-
-    let diff_block = Block::default()
+    let body_height = usize::from(regions[1].height.saturating_sub(2));
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(MUTED));
-    frame.render_widget(Paragraph::new(visible_diff).block(diff_block), regions[1]);
+
+    match &req.subject {
+        tarz_core::permission::ApprovalSubject::FileWrite { diff, .. } => {
+            let escaped_diff = tarz_core::permission::escape_untrusted_text(diff);
+            let diff_lines: Vec<&str> = escaped_diff.lines().collect();
+            let visible_diff: Vec<Line> = diff_lines
+                .iter()
+                .skip(entry.approval_scroll)
+                .take(body_height)
+                .map(|&line| {
+                    let style = if line.starts_with('+') && !line.starts_with("+++") {
+                        Style::default().fg(Color::Green)
+                    } else if line.starts_with('-') && !line.starts_with("---") {
+                        Style::default().fg(Color::Red)
+                    } else if line.starts_with("@@") {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default()
+                    };
+                    Line::styled(line, style)
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(visible_diff).block(diff_block()), regions[1]);
+        }
+        tarz_core::permission::ApprovalSubject::McpCall { arguments, .. } => {
+            let escaped_args = tarz_core::permission::escape_untrusted_text(arguments);
+            let arg_lines: Vec<&str> = escaped_args.lines().collect();
+            let visible_args: Vec<Line> = arg_lines
+                .iter()
+                .skip(entry.approval_scroll)
+                .take(body_height)
+                .map(|&line| Line::from(line))
+                .collect();
+            frame.render_widget(Paragraph::new(visible_args).block(block), regions[1]);
+        }
+    }
 
     if let Some(reason) = &entry.approval_reason {
         frame.render_widget(
@@ -421,4 +454,10 @@ pub(super) fn approval(frame: &mut Frame<'_>, _app: &App, entry: &crate::app::En
         Paragraph::new(hint).style(Style::default().fg(MUTED)),
         regions[3],
     );
+}
+
+fn diff_block() -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(MUTED))
 }

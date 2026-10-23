@@ -113,6 +113,18 @@ impl ManagedSession {
             owner.add_test_before_processor(processor);
         }
     }
+
+    /// Append an extra before processor between the mode gate and precheck/permission processors during test runs.
+    #[cfg(test)]
+    pub(crate) fn add_test_intermediate_processor(
+        &self,
+        processor: Arc<dyn causa::kernel::ToolBatchProcessor>,
+    ) {
+        let state = self.entry.lock();
+        if let Some(owner) = &state.owner {
+            owner.add_test_intermediate_processor(processor);
+        }
+    }
     /// Subscribe to this instance's bounded, temporary model observations.
     /// Subscribe before submit; late subscriptions have no history. Capacity is
     /// 128 observations, each text fragment at most 16 KiB. `Lagged` does not

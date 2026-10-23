@@ -2,6 +2,7 @@
 
 use super::approval::{
     ApprovalDecision, ApprovalReply, ApprovalRequest, ApprovalSubject, ApprovalsHub,
+    format_mcp_arguments,
 };
 use super::mode::PermissionMode;
 use super::precheck::resolve_call;
@@ -11,28 +12,59 @@ use crate::session::WorkRef;
 use async_trait::async_trait;
 use causa::kernel::{
     CallControl, InvocationId, ProcessorContext, ProcessorError, ToolBatch, ToolBatchProcessor,
-    ToolHints, ToolResultStatus,
+    ToolResultStatus,
 };
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
 /// Categorization of a tool call for permission mode checking.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolPermissionClass {
-    /// Read-only operation.
-    ReadOnly,
-    /// Operation with write side effects.
-    Write,
+    /// Read-only built-in tool or an MCP tool under writes declaring read_only without destructive.
+    KnownReadOnly,
+    /// Built-in workspace write tools: `write_file`, `edit_file`.
+    BuiltinWrite,
+    /// MCP tool requiring confirmation: prompt approval, or writes approval without read-only or with destructive.
+    McpPrompt,
+    /// MCP tool configured with approve approval.
+    McpApprove,
 }
 
-impl ToolPermissionClass {
-    /// Classifies a tool based solely on its declared hints.
-    pub fn classify(hints: Option<&ToolHints>) -> Self {
-        if hints.and_then(|h| h.read_only) == Some(true) {
-            Self::ReadOnly
-        } else {
-            Self::Write
-        }
+/// Verdict returned when evaluating a tool category under an active permission mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PermissionVerdict {
+    /// Execute directly without asking.
+    Execute,
+    /// Ask for confirmation before execution.
+    Ask,
+    /// Reject the call without asking.
+    Reject,
+}
+
+/// Evaluates a tool category against the active permission mode according to the policy table.
+pub(crate) fn decide(mode: PermissionMode, category: ToolPermissionClass) -> PermissionVerdict {
+    match mode {
+        PermissionMode::ReadOnly => match category {
+            ToolPermissionClass::KnownReadOnly => PermissionVerdict::Execute,
+            ToolPermissionClass::BuiltinWrite
+            | ToolPermissionClass::McpPrompt
+            | ToolPermissionClass::McpApprove => PermissionVerdict::Reject,
+        },
+        PermissionMode::Ask => match category {
+            ToolPermissionClass::KnownReadOnly | ToolPermissionClass::McpApprove => {
+                PermissionVerdict::Execute
+            }
+            ToolPermissionClass::BuiltinWrite | ToolPermissionClass::McpPrompt => {
+                PermissionVerdict::Ask
+            }
+        },
+        PermissionMode::AcceptEdits => match category {
+            ToolPermissionClass::KnownReadOnly
+            | ToolPermissionClass::BuiltinWrite
+            | ToolPermissionClass::McpApprove => PermissionVerdict::Execute,
+            ToolPermissionClass::McpPrompt => PermissionVerdict::Ask,
+        },
+        PermissionMode::FullAccess => PermissionVerdict::Execute,
     }
 }
 
@@ -62,6 +94,8 @@ pub enum PermissionDecisionKind {
     Unprepared,
     /// Call rejected because no confirmation route was available.
     NoConfirmationRoute,
+    /// Call rejected because the tool is unknown or unavailable.
+    Unavailable,
 }
 
 /// Processor evaluating tool calls against active permission mode and requesting approvals.
@@ -108,6 +142,10 @@ impl ToolBatchProcessor for PermissionProcessor {
             round_id: ctx.round_id,
         };
 
+        let view = ctx
+            .data::<PermissionView>()
+            .ok_or_else(|| ProcessorError::Failed("permission view not found in context".into()))?;
+
         for &call_block_id in ctx.declaration_order {
             if ctx.control.check().is_err() {
                 return Ok(());
@@ -123,50 +161,32 @@ impl ToolBatchProcessor for PermissionProcessor {
             let call = entry.call().clone();
             let tool_name = call.input.tool_name.clone();
 
-            let view = ctx.data::<PermissionView>().ok_or_else(|| {
-                ProcessorError::Failed("permission view not found in context".into())
-            })?;
             let (mode, revision) = view.get();
 
-            // An MCP call reaches a third party with the user's authority. No
-            // confirmation subject describes such a call yet, so only full
-            // access runs it; every other mode refuses it. Every MCP tool name
-            // carries this prefix, and other unknown names keep the built-in
-            // classification below.
-            if tool_name.starts_with("mcp_") {
-                let refused = mode != PermissionMode::FullAccess;
+            let Some(category) = view.classify_tool(&tool_name) else {
                 self.reporter.record_permission_decision(
                     &call,
                     &invocation_id,
                     PermissionDecision {
                         mode,
                         revision,
-                        kind: if refused {
-                            PermissionDecisionKind::ModeRefused
-                        } else {
-                            PermissionDecisionKind::DirectExecution
-                        },
+                        kind: PermissionDecisionKind::Unavailable,
                     },
                 );
-                if refused {
-                    resolve_call(
-                        batch,
-                        call_block_id,
-                        ToolResultStatus::Rejected,
-                        serde_json::json!({
-                            "error": format!(
-                                "MCP tool calls run only in 'full-access' mode (current mode: {mode})"
-                            )
-                        }),
-                    )?;
-                }
+                resolve_call(
+                    batch,
+                    call_block_id,
+                    ToolResultStatus::Rejected,
+                    serde_json::json!({
+                        "error": format!("tool '{tool_name}' is not available")
+                    }),
+                )?;
                 continue;
-            }
+            };
 
-            let tool_class = ToolPermissionClass::classify(ctx.hints(&tool_name));
-
-            match tool_class {
-                ToolPermissionClass::ReadOnly => {
+            let verdict = decide(mode, category);
+            match verdict {
+                PermissionVerdict::Execute => {
                     self.reporter.record_permission_decision(
                         &call,
                         &invocation_id,
@@ -177,173 +197,45 @@ impl ToolBatchProcessor for PermissionProcessor {
                         },
                     );
                 }
-                ToolPermissionClass::Write => match mode {
-                    PermissionMode::ReadOnly => {
-                        self.reporter.record_permission_decision(
-                            &call,
-                            &invocation_id,
-                            PermissionDecision {
-                                mode,
-                                revision,
-                                kind: PermissionDecisionKind::ModeRefused,
-                            },
-                        );
-                        resolve_call(
-                            batch,
-                            call_block_id,
-                            ToolResultStatus::Rejected,
-                            serde_json::json!({
-                                "error": "the current permission mode 'read-only' does not allow this write".to_string()
-                            }),
-                        )?;
-                    }
-                    PermissionMode::AcceptEdits | PermissionMode::FullAccess => {
-                        self.reporter.record_permission_decision(
-                            &call,
-                            &invocation_id,
-                            PermissionDecision {
-                                mode,
-                                revision,
-                                kind: PermissionDecisionKind::DirectExecution,
-                            },
-                        );
-                    }
-                    PermissionMode::Ask => {
-                        let prepared = {
-                            let guard = self.prepared.lock().unwrap();
-                            guard.get(&call_block_id).cloned()
-                        };
-                        let Some(prepared) = prepared else {
-                            self.reporter.record_permission_decision(
-                                &call,
-                                &invocation_id,
-                                PermissionDecision {
-                                    mode,
-                                    revision,
-                                    kind: PermissionDecisionKind::Unprepared,
-                                },
-                            );
-                            resolve_call(
-                                batch,
-                                call_block_id,
-                                ToolResultStatus::Rejected,
-                                serde_json::json!({
-                                    "error": "write operation was not prepared by precheck"
-                                }),
-                            )?;
-                            continue;
-                        };
-
-                        let Some(sender) = self.hub.get_sender() else {
-                            self.reporter.record_permission_decision(
-                                &call,
-                                &invocation_id,
-                                PermissionDecision {
-                                    mode,
-                                    revision,
-                                    kind: PermissionDecisionKind::NoConfirmationRoute,
-                                },
-                            );
-                            resolve_call(
-                                batch,
-                                call_block_id,
-                                ToolResultStatus::Rejected,
-                                serde_json::json!({
-                                    "error": "no confirmation route available"
-                                }),
-                            )?;
-                            continue;
-                        };
-
-                        let (reply_tx, reply_rx) = oneshot::channel();
-                        let request = ApprovalRequest {
-                            work: self.work.clone(),
-                            call_block_id,
-                            tool_name: tool_name.clone(),
+                PermissionVerdict::Reject => {
+                    self.reporter.record_permission_decision(
+                        &call,
+                        &invocation_id,
+                        PermissionDecision {
                             mode,
                             revision,
-                            subject: ApprovalSubject::FileWrite {
-                                path: prepared.path.clone(),
-                                action: prepared.action,
-                                diff: prepared.diff.clone(),
-                            },
-                            reply: ApprovalReply::new(reply_tx),
-                        };
-
-                        let send_res = tokio::select! {
-                            biased;
-                            _ = wait_for_control_stop(ctx.control) => return Ok(()),
-                            res = sender.send(request) => res,
-                        };
-
-                        if send_res.is_err() {
-                            self.reporter.record_permission_decision(
-                                &call,
-                                &invocation_id,
-                                PermissionDecision {
-                                    mode,
-                                    revision,
-                                    kind: PermissionDecisionKind::NoConfirmationRoute,
-                                },
-                            );
-                            resolve_call(
-                                batch,
-                                call_block_id,
-                                ToolResultStatus::Rejected,
-                                serde_json::json!({
-                                    "error": "no confirmation route available"
-                                }),
-                            )?;
-                            continue;
-                        }
-
-                        let reply_res = tokio::select! {
-                            biased;
-                            _ = wait_for_control_stop(ctx.control) => return Ok(()),
-                            res = reply_rx => res,
-                        };
-
-                        match reply_res {
-                            Ok(ApprovalDecision::Allow) => {
+                            kind: PermissionDecisionKind::ModeRefused,
+                        },
+                    );
+                    let msg = if category == ToolPermissionClass::BuiltinWrite {
+                        format!("the current permission mode '{mode}' does not allow this write")
+                    } else {
+                        format!(
+                            "the current permission mode '{mode}' does not allow this MCP tool call"
+                        )
+                    };
+                    resolve_call(
+                        batch,
+                        call_block_id,
+                        ToolResultStatus::Rejected,
+                        serde_json::json!({ "error": msg }),
+                    )?;
+                }
+                PermissionVerdict::Ask => {
+                    let (subject, is_mcp) = match category {
+                        ToolPermissionClass::BuiltinWrite => {
+                            let prepared = {
+                                let guard = self.prepared.lock().unwrap();
+                                guard.get(&call_block_id).cloned()
+                            };
+                            let Some(prepared) = prepared else {
                                 self.reporter.record_permission_decision(
                                     &call,
                                     &invocation_id,
                                     PermissionDecision {
                                         mode,
                                         revision,
-                                        kind: PermissionDecisionKind::AskedAndAllowed,
-                                    },
-                                );
-                            }
-                            Ok(ApprovalDecision::Deny { reason }) => {
-                                self.reporter.record_permission_decision(
-                                    &call,
-                                    &invocation_id,
-                                    PermissionDecision {
-                                        mode,
-                                        revision,
-                                        kind: PermissionDecisionKind::AskedAndDenied,
-                                    },
-                                );
-                                let msg = match reason {
-                                    Some(r) => format!("user declined this write: {r}"),
-                                    None => "user declined this write".to_string(),
-                                };
-                                resolve_call(
-                                    batch,
-                                    call_block_id,
-                                    ToolResultStatus::Rejected,
-                                    serde_json::json!({ "error": msg }),
-                                )?;
-                            }
-                            Err(_) => {
-                                self.reporter.record_permission_decision(
-                                    &call,
-                                    &invocation_id,
-                                    PermissionDecision {
-                                        mode,
-                                        revision,
-                                        kind: PermissionDecisionKind::NoConfirmationRoute,
+                                        kind: PermissionDecisionKind::Unprepared,
                                     },
                                 );
                                 resolve_call(
@@ -351,13 +243,160 @@ impl ToolBatchProcessor for PermissionProcessor {
                                     call_block_id,
                                     ToolResultStatus::Rejected,
                                     serde_json::json!({
-                                        "error": "no confirmation route available"
+                                        "error": "write operation was not prepared by precheck"
                                     }),
                                 )?;
-                            }
+                                continue;
+                            };
+                            (
+                                ApprovalSubject::FileWrite {
+                                    path: prepared.path.clone(),
+                                    action: prepared.action,
+                                    diff: prepared.diff.clone(),
+                                },
+                                false,
+                            )
+                        }
+                        ToolPermissionClass::McpPrompt
+                        | ToolPermissionClass::KnownReadOnly
+                        | ToolPermissionClass::McpApprove => {
+                            let (server, tool) = view.mcp_tool_info(&tool_name).map_or_else(
+                                || ("unknown".to_owned(), tool_name.clone()),
+                                |info| (info.server_id, info.raw_tool_name),
+                            );
+                            let arguments = format_mcp_arguments(&call.input.arguments);
+                            (
+                                ApprovalSubject::McpCall {
+                                    server,
+                                    tool,
+                                    arguments,
+                                },
+                                true,
+                            )
+                        }
+                    };
+
+                    let Some(sender) = self.hub.get_sender().filter(|sender| !sender.is_closed())
+                    else {
+                        self.reporter.record_permission_decision(
+                            &call,
+                            &invocation_id,
+                            PermissionDecision {
+                                mode,
+                                revision,
+                                kind: PermissionDecisionKind::NoConfirmationRoute,
+                            },
+                        );
+                        resolve_call(
+                            batch,
+                            call_block_id,
+                            ToolResultStatus::Rejected,
+                            serde_json::json!({ "error": "no confirmation route available" }),
+                        )?;
+                        continue;
+                    };
+
+                    let (reply_tx, reply_rx) = oneshot::channel();
+                    let request = ApprovalRequest {
+                        work: self.work.clone(),
+                        call_block_id,
+                        tool_name: tool_name.clone(),
+                        mode,
+                        revision,
+                        subject,
+                        reply: ApprovalReply::new(reply_tx),
+                    };
+
+                    let send_res = tokio::select! {
+                        biased;
+                        _ = wait_for_control_stop(ctx.control) => return Ok(()),
+                        res = sender.send(request) => res,
+                    };
+
+                    if send_res.is_err() {
+                        self.reporter.record_permission_decision(
+                            &call,
+                            &invocation_id,
+                            PermissionDecision {
+                                mode,
+                                revision,
+                                kind: PermissionDecisionKind::NoConfirmationRoute,
+                            },
+                        );
+                        resolve_call(
+                            batch,
+                            call_block_id,
+                            ToolResultStatus::Rejected,
+                            serde_json::json!({ "error": "no confirmation route available" }),
+                        )?;
+                        continue;
+                    }
+
+                    let reply_res = tokio::select! {
+                        biased;
+                        _ = wait_for_control_stop(ctx.control) => return Ok(()),
+                        res = reply_rx => res,
+                    };
+
+                    match reply_res {
+                        Ok(ApprovalDecision::Allow) => {
+                            self.reporter.record_permission_decision(
+                                &call,
+                                &invocation_id,
+                                PermissionDecision {
+                                    mode,
+                                    revision,
+                                    kind: PermissionDecisionKind::AskedAndAllowed,
+                                },
+                            );
+                        }
+                        Ok(ApprovalDecision::Deny { reason }) => {
+                            self.reporter.record_permission_decision(
+                                &call,
+                                &invocation_id,
+                                PermissionDecision {
+                                    mode,
+                                    revision,
+                                    kind: PermissionDecisionKind::AskedAndDenied,
+                                },
+                            );
+                            let msg = if is_mcp {
+                                match reason {
+                                    Some(r) => format!("user declined this tool call: {r}"),
+                                    None => "user declined this tool call".to_string(),
+                                }
+                            } else {
+                                match reason {
+                                    Some(r) => format!("user declined this write: {r}"),
+                                    None => "user declined this write".to_string(),
+                                }
+                            };
+                            resolve_call(
+                                batch,
+                                call_block_id,
+                                ToolResultStatus::Rejected,
+                                serde_json::json!({ "error": msg }),
+                            )?;
+                        }
+                        Err(_) => {
+                            self.reporter.record_permission_decision(
+                                &call,
+                                &invocation_id,
+                                PermissionDecision {
+                                    mode,
+                                    revision,
+                                    kind: PermissionDecisionKind::NoConfirmationRoute,
+                                },
+                            );
+                            resolve_call(
+                                batch,
+                                call_block_id,
+                                ToolResultStatus::Rejected,
+                                serde_json::json!({ "error": "no confirmation route available" }),
+                            )?;
                         }
                     }
-                },
+                }
             }
         }
 

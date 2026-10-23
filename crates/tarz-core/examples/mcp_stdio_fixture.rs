@@ -17,23 +17,27 @@
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
-    PaginatedRequestParams, ServerConfig, Tool,
+    PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool, ToolAnnotations,
 };
 use rmcp::service::{RequestContext, RoleServer, ServiceExt};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 const ROLE: &str = "TARZ_MCP_FIXTURE_ROLE";
 const PID_FILE: &str = "TARZ_MCP_FIXTURE_PID_FILE";
 const EXIT_MARKER: &str = "TARZ_MCP_FIXTURE_EXIT_MARKER";
 const RELIST: &str = "TARZ_MCP_FIXTURE_RELIST";
+const CALL_LOG: &str = "TARZ_MCP_FIXTURE_CALL_LOG";
 /// Reason `fail` writes to stderr.
 const FAILURE: &str = "fixture: missing configuration";
 /// How long `hang` waits before answering; the tests' deadlines are shorter.
 const HANG: Duration = Duration::from_secs(10);
 /// A name Causa namespaces into more than 64 bytes.
 const LONG_NAME: &str = "a_tool_name_that_is_far_too_long_to_fit_any_provider_limit_xyz";
+
+static UNLOCKED: AtomicBool = AtomicBool::new(false);
+static LISTINGS: AtomicUsize = AtomicUsize::new(0);
 
 fn main() {
     if let Some(path) = std::env::var_os(PID_FILE) {
@@ -71,9 +75,6 @@ fn serve() {
     }
 }
 
-/// Tool listings answered so far.
-static LISTINGS: AtomicUsize = AtomicUsize::new(0);
-
 struct Fixture;
 
 fn tool(name: &str, description: &str) -> Tool {
@@ -107,7 +108,7 @@ impl ServerHandler for Fixture {
         {
             std::future::pending::<()>().await;
         }
-        Ok(ListToolsResult::with_all_items(vec![
+        let mut tools = vec![
             tool("echo", "Echoes its arguments."),
             tool("env", "Lists the server's environment."),
             tool("cwd", "Names the server's working directory."),
@@ -116,14 +117,34 @@ impl ServerHandler for Fixture {
             tool("big_error", "Fails with about `bytes` bytes of error text."),
             tool("bad.name", "A name providers cannot call."),
             tool(LONG_NAME, "A name too long for providers."),
-        ]))
+            tool("lookup", "Looks up data.")
+                .with_annotations(ToolAnnotations::new().read_only(true)),
+            tool("mutate", "Mutates data."),
+            tool("wipe", "Wipes data.")
+                .with_annotations(ToolAnnotations::new().read_only(true).destructive(true)),
+            tool("unlock", "Unlocks the late tool."),
+        ];
+        if UNLOCKED.load(Ordering::SeqCst) {
+            tools.push(tool("late", "Late tool added after unlock."));
+        }
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, rmcp::ErrorData> {
+        if let Some(mut file) = std::env::var(CALL_LOG).ok().and_then(|p| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .ok()
+        }) {
+            use std::io::Write;
+            let _ = writeln!(file, "{}", request.name);
+        }
         let arguments = request
             .arguments
             .map(serde_json::Value::Object)
@@ -158,6 +179,15 @@ impl ServerHandler for Fixture {
                 tokio::time::sleep(HANG).await;
                 "late".to_owned()
             }
+            "lookup" => "lookup-result".to_owned(),
+            "mutate" => "mutate-result".to_owned(),
+            "wipe" => "wipe-result".to_owned(),
+            "unlock" => {
+                UNLOCKED.store(true, Ordering::SeqCst);
+                let _ = context.peer.notify_tool_list_changed().await;
+                "unlocked".to_owned()
+            }
+            "late" => "late-result".to_owned(),
             other => {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "unknown tool: {other}"
@@ -169,6 +199,11 @@ impl ServerHandler for Fixture {
     }
 
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::default()
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
     }
 }

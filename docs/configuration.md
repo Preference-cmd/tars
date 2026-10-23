@@ -57,7 +57,21 @@ tarz-tui --config ./config.toml --profile work
 
 TUI 新建表单从所选预设填充，修改只影响本次新会话，预设中未显示的容量/调用限制、生成设置和 `render_options` 原样保留。首版配置由用户编辑文件，TUI 不自动保存或覆盖全局配置。后续 GUI 应复用相同加载与解析模块。
 
-MCP 服务器通过与配置文件同目录的 `mcp.json`（或 `TARZ_MCP_CONFIG` 环境变量）定义，支持 `${VAR}` 展开与字面密钥检查；预设用 `mcp = [...]` 选择已定义的 id；CLI `run` 和 `session create` 的 `--mcp ID,ID` 覆盖预设，空串表示不启用，TUI 新建表单有对应字段。所选服务器的配置快照随新会话定义保存，重开使用快照；会话打开时按快照连接（`session create` 与 `session repair` 不启动服务器），MCP 调用目前只在 `full-access` 模式下执行。
+MCP 服务器通过与配置文件同目录的 `mcp.json`（或 `TARZ_MCP_CONFIG` 环境变量）定义，支持 `${VAR}` 展开与字面密钥检查；预设用 `mcp = [...]` 选择已定义的 id；CLI `run` 和 `session create` 的 `--mcp ID,ID` 覆盖预设，空串表示不启用，TUI 新建表单有对应字段。所选服务器的配置快照随新会话定义保存，重开使用快照；会话打开时按快照连接（`session create` 与 `session repair` 不启动服务器），MCP 调用是否放行由两样东西共同决定：服务器或单个工具的 `approval`，以及当前权限模式。
+
+`approval` 有三种取值：
+
+- `prompt`：询问。
+- `writes`：工具声明只读且没有声明破坏性时不询问，其余询问。
+- `approve`：不询问。
+
+各权限模式下：
+
+- `read-only`：只执行只读工具（含 `writes` 下声明只读的 MCP 工具），其余拒绝。
+- `ask` 和 `accept-edits`：执行 `approve` 和只读的 MCP 工具，其余 MCP 调用都要确认。`accept-edits` 只是不再询问内置写入。
+- `full-access`：全部执行。
+
+不在工具清单里的名字一律拒绝。
 
 ## 工作区与只读工具
 

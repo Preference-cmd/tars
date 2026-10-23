@@ -4,7 +4,8 @@ use super::status::{
     MAX_SKIPPED_TOOLS, McpServerStatus, McpSkippedTool, bounded_name, bounded_reason,
 };
 use super::stderr::StderrCapture;
-use crate::definition::{McpServerConfig, WorkspaceTool, redact_substitutions};
+use crate::definition::{McpApproval, McpServerConfig, WorkspaceTool, redact_substitutions};
+use crate::permission::{McpPermissionTable, McpToolInfo, ToolPermissionClass};
 use causa::extension::McpToolSource;
 use causa::kernel::{
     ArtifactStore, CallControl, DynamicToolSource, SourceError, ToolCallContext, ToolDefinition,
@@ -51,6 +52,7 @@ pub(crate) struct McpServerSource {
     /// The stderr pipe of a stdio server; it ends when the child exits.
     stderr: Option<Arc<StderrCapture>>,
     substitutions: Vec<(String, String)>,
+    permission_table: Arc<McpPermissionTable>,
 }
 
 impl McpServerSource {
@@ -59,6 +61,7 @@ impl McpServerSource {
         inner: McpToolSource,
         stderr: Option<Arc<StderrCapture>>,
         substitutions: Vec<(String, String)>,
+        permission_table: Arc<McpPermissionTable>,
     ) -> Self {
         Self {
             prefix: format!("mcp_{}_", config.id),
@@ -74,6 +77,7 @@ impl McpServerSource {
             }),
             stderr,
             substitutions,
+            permission_table,
         }
     }
 
@@ -107,6 +111,7 @@ impl McpServerSource {
         let descriptions = match listed {
             Ok(descriptions) => descriptions,
             Err(error) => {
+                self.permission_table.remove_server(&self.id);
                 let redacted = redact_substitutions(&error, &self.substitutions);
                 let reason = bounded_reason(&redacted);
                 let mut state = self.state.lock().expect("MCP source state lock");
@@ -117,6 +122,43 @@ impl McpServerSource {
             }
         };
         let (filtered, allowed, skipped) = self.filter(descriptions);
+        let mut server_tools = Vec::new();
+        for description in &filtered {
+            let name = &description.definition.name;
+            let Some(raw) = name.strip_prefix(&self.prefix) else {
+                continue;
+            };
+            let approval = self
+                .config
+                .tools
+                .get(raw)
+                .map(|t| t.approval)
+                .unwrap_or(self.config.approval);
+            let category = match approval {
+                McpApproval::Approve => ToolPermissionClass::McpApprove,
+                McpApproval::Prompt => ToolPermissionClass::McpPrompt,
+                McpApproval::Writes => {
+                    if description.hints.read_only == Some(true)
+                        && description.hints.destructive != Some(true)
+                    {
+                        ToolPermissionClass::KnownReadOnly
+                    } else {
+                        ToolPermissionClass::McpPrompt
+                    }
+                }
+            };
+            server_tools.push((
+                name.clone(),
+                McpToolInfo {
+                    server_id: self.id.clone(),
+                    raw_tool_name: raw.to_string(),
+                    category,
+                },
+            ));
+        }
+        self.permission_table
+            .update_server_tools(&self.id, server_tools);
+        self.version.store(source.version(), Ordering::SeqCst);
         let mut state = self.state.lock().expect("MCP source state lock");
         state.ready = true;
         state.reason = None;
@@ -129,6 +171,7 @@ impl McpServerSource {
     /// child to exit. Repeated calls are no-ops; failures are ignored because
     /// the transport closes when the adapter drops either way.
     pub(crate) async fn shutdown(&self) {
+        self.permission_table.remove_server(&self.id);
         let closed = self.inner.write().await.take();
         if let Some(source) = closed {
             let started = Instant::now();
@@ -358,7 +401,7 @@ fn serialized_len(payload: &ToolResultPayload) -> usize {
 /// Length of one character inside a JSON string as `serde_json` writes it.
 fn escaped_len(character: char) -> usize {
     match character {
-        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        '\"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
         character if (character as u32) < 0x20 => 6,
         character => character.len_utf8(),
     }

@@ -377,6 +377,7 @@ async fn wm05_two_writes_different_files_and_duplicate_file_in_batch() {
                 tarz_core::permission::ApprovalSubject::FileWrite { path, .. } => {
                     path == "file2.txt"
                 }
+                _ => false,
             })
     })
     .await;
@@ -1126,4 +1127,116 @@ fn wm17_new_session_form_permission_mode_and_write_limits() {
     form4.fields[7] = TextArea::from([""]);
     let err = form4.definition().unwrap_err();
     assert!(err.contains("accept-edits"));
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn wm13_mcp_approval_panel_display_and_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let fixture = wire::Fixture::with_responses("openai-chat", vec![]);
+    let mut app = app(dir.path());
+    create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+
+    // 1. Enqueue McpCall approval request
+    let (tx1, mut rx1) = tokio::sync::oneshot::channel();
+    app.entries[0]
+        .approval_queue
+        .push_back(crate::app::state::PendingApproval::mock(
+            "mcp_demo_run".into(),
+            PermissionMode::Ask,
+            tarz_core::permission::ApprovalSubject::McpCall {
+                server: "demo_server".into(),
+                tool: "run_action".into(),
+                arguments: "{\"param\": \"val\u{1b}[31m\"}".into(),
+            },
+            move |d| {
+                let _ = tx1.send(d);
+            },
+        ));
+
+    let view = screen(&app);
+    assert!(view.contains(
+        "mcp_demo_run wants to call MCP tool demo_server/run_action (permission mode: ask)"
+    ));
+    assert!(view.contains(r#"val\x1b[31m"#));
+    assert!(!view.contains('\x1b'));
+    assert!(view.contains("Enter / y allow"));
+
+    // Press y to allow
+    app.event(key(KeyCode::Char('y')));
+    assert_eq!(
+        rx1.try_recv().unwrap(),
+        tarz_core::permission::ApprovalDecision::Allow
+    );
+    assert!(app.entries[0].approval_queue.is_empty());
+
+    // 2. Enqueue second McpCall approval request
+    let (tx2, mut rx2) = tokio::sync::oneshot::channel();
+    app.entries[0]
+        .approval_queue
+        .push_back(crate::app::state::PendingApproval::mock(
+            "mcp_demo_danger".into(),
+            PermissionMode::Ask,
+            tarz_core::permission::ApprovalSubject::McpCall {
+                server: "danger_server".into(),
+                tool: "delete_db".into(),
+                arguments: "{}".into(),
+            },
+            move |d| {
+                let _ = tx2.send(d);
+            },
+        ));
+
+    // Press n to enter reason prompt, then type reason and press Enter to deny
+    app.event(key(KeyCode::Char('n')));
+    for c in "unsafe tool".chars() {
+        app.event(key(KeyCode::Char(c)));
+    }
+    app.event(key(KeyCode::Enter));
+
+    let decision = rx2.try_recv().unwrap();
+    assert_eq!(
+        decision,
+        tarz_core::permission::ApprovalDecision::Deny {
+            reason: Some("unsafe tool".into()),
+        }
+    );
+    assert!(app.entries[0].approval_queue.is_empty());
+
+    // 3. Enqueue third McpCall approval request and test Esc key cancellation
+    let (tx3, mut rx3) = tokio::sync::oneshot::channel();
+    app.entries[0]
+        .approval_queue
+        .push_back(crate::app::state::PendingApproval::mock(
+            "mcp_demo_cancel".into(),
+            PermissionMode::Ask,
+            tarz_core::permission::ApprovalSubject::McpCall {
+                server: "cancel_server".into(),
+                tool: "cancel_action".into(),
+                arguments: "{}".into(),
+            },
+            move |d| {
+                let _ = tx3.send(d);
+            },
+        ));
+    assert_eq!(app.entries[0].approval_queue.len(), 1);
+
+    // Press Esc to cancel turn
+    app.event(key(KeyCode::Esc));
+
+    // Approval queue must be cleared on Esc and responder channel was dropped without allow/deny
+    assert!(app.entries[0].approval_queue.is_empty());
+    assert!(app.entries[0].approval_reason.is_none());
+    assert!(rx3.try_recv().is_err());
+    // Without in-flight work (entry.work is None in this mock UI test), self.cancel()
+    // safely no-ops, queue is cleared, and approval panel closes returning to editor.
+    let view = screen(&app);
+    assert!(
+        !view.contains("wants to call MCP tool"),
+        "approval modal must close after Esc"
+    );
 }

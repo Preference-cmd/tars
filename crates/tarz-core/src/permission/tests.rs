@@ -253,13 +253,17 @@ async fn wm05_core_allow_deny_and_batch_ordering() {
     let approval_task1 = tokio::spawn(async move {
         // Request 1: file1
         let req1 = rx.recv().await.expect("req1");
-        let ApprovalSubject::FileWrite { path, .. } = &req1.subject;
+        let ApprovalSubject::FileWrite { path, .. } = &req1.subject else {
+            panic!("expected FileWrite")
+        };
         assert_eq!(path, "file1.txt");
         req1.reply.send(ApprovalDecision::Allow).unwrap();
 
         // Request 2: file2
         let req2 = rx.recv().await.expect("req2");
-        let ApprovalSubject::FileWrite { path, .. } = &req2.subject;
+        let ApprovalSubject::FileWrite { path, .. } = &req2.subject else {
+            panic!("expected FileWrite")
+        };
         assert_eq!(path, "file2.txt");
         req2.reply
             .send(ApprovalDecision::Deny {
@@ -305,7 +309,9 @@ async fn wm05_core_allow_deny_and_batch_ordering() {
     // Turn 2: two writes to SAME file
     let approval_task2 = tokio::spawn(async move {
         let req = rx.recv().await.expect("req for same.txt");
-        let ApprovalSubject::FileWrite { path, .. } = &req.subject;
+        let ApprovalSubject::FileWrite { path, .. } = &req.subject else {
+            panic!("expected FileWrite")
+        };
         assert_eq!(path, "same.txt");
         req.reply.send(ApprovalDecision::Allow).unwrap();
         // There must NOT be a second request for same.txt
@@ -387,7 +393,9 @@ async fn wm04_file_modified_between_approval_and_allow() {
 
     let approval_task = tokio::spawn(async move {
         let req = rx.recv().await.expect("approval request");
-        let ApprovalSubject::FileWrite { path, .. } = &req.subject;
+        let ApprovalSubject::FileWrite { path, .. } = &req.subject else {
+            panic!("expected FileWrite")
+        };
         assert_eq!(path, "target.txt");
         // External third-party modification occurs before Allow
         std::fs::write(root_path.join("target.txt"), "external third party edit\n").unwrap();
@@ -712,7 +720,9 @@ async fn runtime_mode_switch_wm17() {
 
     let switch_task = tokio::spawn(async move {
         let req = rx.recv().await.expect("req for file1.txt");
-        let ApprovalSubject::FileWrite { path, .. } = &req.subject;
+        let ApprovalSubject::FileWrite { path, .. } = &req.subject else {
+            panic!("expected FileWrite")
+        };
         assert_eq!(path, "file1.txt");
         // Switch to AcceptEdits mid-batch before replying
         let (mode, rev) = session_clone
@@ -760,7 +770,9 @@ async fn runtime_mode_switch_wm17() {
 
     let ask_again_task = tokio::spawn(async move {
         let req = rx.recv().await.expect("req for file3.txt");
-        let ApprovalSubject::FileWrite { path, .. } = &req.subject;
+        let ApprovalSubject::FileWrite { path, .. } = &req.subject else {
+            panic!("expected FileWrite")
+        };
         assert_eq!(path, "file3.txt");
         req.reply.send(ApprovalDecision::Allow).unwrap();
     });
@@ -1845,4 +1857,212 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
         std::fs::read_to_string(ws_dir.join("a/b/c.txt")).unwrap(),
         "nested content\n"
     );
+}
+
+#[test]
+fn wm17_decide_16_cells_exhaustive() {
+    use crate::permission::{PermissionMode, PermissionVerdict, ToolPermissionClass, decide};
+
+    // ReadOnly
+    assert_eq!(
+        decide(PermissionMode::ReadOnly, ToolPermissionClass::KnownReadOnly),
+        PermissionVerdict::Execute
+    );
+    assert_eq!(
+        decide(PermissionMode::ReadOnly, ToolPermissionClass::BuiltinWrite),
+        PermissionVerdict::Reject
+    );
+    assert_eq!(
+        decide(PermissionMode::ReadOnly, ToolPermissionClass::McpPrompt),
+        PermissionVerdict::Reject
+    );
+    assert_eq!(
+        decide(PermissionMode::ReadOnly, ToolPermissionClass::McpApprove),
+        PermissionVerdict::Reject
+    );
+
+    // Ask
+    assert_eq!(
+        decide(PermissionMode::Ask, ToolPermissionClass::KnownReadOnly),
+        PermissionVerdict::Execute
+    );
+    assert_eq!(
+        decide(PermissionMode::Ask, ToolPermissionClass::BuiltinWrite),
+        PermissionVerdict::Ask
+    );
+    assert_eq!(
+        decide(PermissionMode::Ask, ToolPermissionClass::McpPrompt),
+        PermissionVerdict::Ask
+    );
+    assert_eq!(
+        decide(PermissionMode::Ask, ToolPermissionClass::McpApprove),
+        PermissionVerdict::Execute
+    );
+
+    // AcceptEdits
+    assert_eq!(
+        decide(
+            PermissionMode::AcceptEdits,
+            ToolPermissionClass::KnownReadOnly
+        ),
+        PermissionVerdict::Execute
+    );
+    assert_eq!(
+        decide(
+            PermissionMode::AcceptEdits,
+            ToolPermissionClass::BuiltinWrite
+        ),
+        PermissionVerdict::Execute
+    );
+    assert_eq!(
+        decide(PermissionMode::AcceptEdits, ToolPermissionClass::McpPrompt),
+        PermissionVerdict::Ask
+    );
+    assert_eq!(
+        decide(PermissionMode::AcceptEdits, ToolPermissionClass::McpApprove),
+        PermissionVerdict::Execute
+    );
+
+    // FullAccess
+    assert_eq!(
+        decide(
+            PermissionMode::FullAccess,
+            ToolPermissionClass::KnownReadOnly
+        ),
+        PermissionVerdict::Execute
+    );
+    assert_eq!(
+        decide(
+            PermissionMode::FullAccess,
+            ToolPermissionClass::BuiltinWrite
+        ),
+        PermissionVerdict::Execute
+    );
+    assert_eq!(
+        decide(PermissionMode::FullAccess, ToolPermissionClass::McpPrompt),
+        PermissionVerdict::Execute
+    );
+    assert_eq!(
+        decide(PermissionMode::FullAccess, ToolPermissionClass::McpApprove),
+        PermissionVerdict::Execute
+    );
+}
+
+#[tokio::test]
+async fn wm17_mode_refusal_before_precheck() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![call_edit("never_read.txt", "a", "b"), Reply::Answer];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let mut def = base_definition(&fixture.endpoint, root.path());
+    def.permission_mode = Some(PermissionMode::ReadOnly);
+    let session = host
+        .create(PreparedCreate::transient(def, Context::default()))
+        .await
+        .unwrap();
+
+    let work = submit(&session, "try edit without read in read-only");
+    let obs = finish(&session, &work).await;
+
+    assert_eq!(obs.tools.calls.len(), 1);
+    assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    assert_eq!(
+        obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::ModeRefused
+    );
+    let err = tool_result_error(&session, obs.tools.calls[0].call_block_id);
+    assert_eq!(
+        err,
+        "the current permission mode 'read-only' does not allow this write"
+    );
+    assert!(!err.contains("read before edit"));
+}
+
+#[tokio::test]
+async fn wm17_no_confirmation_route_before_precheck() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![call_edit("never_read.txt", "a", "b"), Reply::Answer];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let mut def = base_definition(&fixture.endpoint, root.path());
+    def.permission_mode = Some(PermissionMode::Ask);
+    let session = host
+        .create(PreparedCreate::transient(def, Context::default()))
+        .await
+        .unwrap();
+    // Do NOT connect approvals!
+
+    let work = submit(&session, "try edit in ask without route");
+    let obs = finish(&session, &work).await;
+
+    assert_eq!(obs.tools.calls.len(), 1);
+    assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    assert_eq!(
+        obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::NoConfirmationRoute
+    );
+    let err = tool_result_error(&session, obs.tools.calls[0].call_block_id);
+    assert_eq!(err, "no confirmation route available");
+    assert!(!err.contains("read before edit"));
+}
+
+#[tokio::test]
+async fn wm17_mode_switch_between_gate_and_confirmation() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![call_write("between.txt", "test"), Reply::Answer];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let mut def = base_definition(&fixture.endpoint, root.path());
+    def.permission_mode = Some(PermissionMode::Ask);
+    let session = host
+        .create(PreparedCreate::transient(def, Context::default()))
+        .await
+        .unwrap();
+
+    struct SwitchModeProcessor {
+        session: ManagedSession,
+    }
+    #[async_trait::async_trait]
+    impl causa::kernel::ToolBatchProcessor for SwitchModeProcessor {
+        async fn process(
+            &self,
+            _batch: &mut causa::kernel::ToolBatch,
+            _context: &causa::kernel::ProcessorContext<'_>,
+        ) -> Result<(), causa::kernel::ProcessorError> {
+            self.session
+                .set_permission_mode(PermissionMode::ReadOnly)
+                .unwrap();
+            Ok(())
+        }
+    }
+
+    let _rx = session.connect_approvals();
+
+    session.add_test_intermediate_processor(Arc::new(SwitchModeProcessor {
+        session: session.clone(),
+    }));
+
+    let work = submit(&session, "write that gets mode switched mid-chain");
+    let obs = finish(&session, &work).await;
+
+    assert_eq!(obs.tools.calls.len(), 1);
+    assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    let decision = obs.tools.calls[0].permission_decision.as_ref().unwrap();
+    assert_eq!(decision.kind, PermissionDecisionKind::ModeRefused);
+    assert_eq!(decision.mode, PermissionMode::ReadOnly);
+    assert_eq!(decision.revision, 1);
+    let err = tool_result_error(&session, obs.tools.calls[0].call_block_id);
+    assert_eq!(
+        err,
+        "the current permission mode 'read-only' does not allow this write"
+    );
+    assert!(!root.path().join("between.txt").exists());
 }

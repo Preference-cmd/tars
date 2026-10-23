@@ -7,6 +7,7 @@ use crate::definition::{
     McpServerConfig, SessionDefinition, expand_template_recording, redact_substitutions,
     valid_http_endpoint,
 };
+use crate::permission::McpPermissionTable;
 use causa::extension::McpToolSource;
 use causa::kernel::DynamicToolSource;
 use std::path::Path;
@@ -46,6 +47,7 @@ pub(crate) struct McpRuntime {
     servers: Vec<ServerSlot>,
     max_tool_timeout: Option<Duration>,
     closed: AtomicBool,
+    permission_table: Arc<McpPermissionTable>,
 }
 
 impl McpRuntime {
@@ -60,6 +62,7 @@ impl McpRuntime {
         if definition.mcp_servers.is_empty() {
             return Ok(None);
         }
+        let permission_table = Arc::new(McpPermissionTable::new());
         let mut servers: Vec<ServerSlot> = Vec::with_capacity(definition.mcp_servers.len());
         let mut max_tool_timeout: Option<Duration> = None;
         for config in &definition.mcp_servers {
@@ -86,6 +89,7 @@ impl McpRuntime {
                                         writer,
                                         sink,
                                         substitutions.clone(),
+                                        permission_table.clone(),
                                     ),
                                 )
                                 .await
@@ -103,7 +107,11 @@ impl McpRuntime {
                     Err(error) => Err(format!("could not create a stderr pipe: {error}")),
                 }
             } else {
-                match tokio::time::timeout(startup, connect_http(config, &mut substitutions)).await
+                match tokio::time::timeout(
+                    startup,
+                    connect_http(config, &mut substitutions, permission_table.clone()),
+                )
+                .await
                 {
                     Ok(result) => result,
                     Err(_) => Err(format!(
@@ -145,6 +153,7 @@ impl McpRuntime {
             servers,
             max_tool_timeout,
             closed: AtomicBool::new(false),
+            permission_table,
         })))
     }
 
@@ -157,6 +166,11 @@ impl McpRuntime {
                 ServerSlot::Failed(_) => None,
             })
             .collect()
+    }
+
+    /// Read-only handle to the shared MCP permission table.
+    pub(crate) fn permission_table(&self) -> Arc<McpPermissionTable> {
+        self.permission_table.clone()
     }
 
     /// Largest per-call deadline among the servers that started.
@@ -204,11 +218,18 @@ async fn connect_stdio(
     writer: std::io::PipeWriter,
     stderr: Arc<StderrCapture>,
     substitutions: Vec<(String, String)>,
+    permission_table: Arc<McpPermissionTable>,
 ) -> Result<McpServerSource, String> {
     let inner = McpToolSource::connect_stdio_with_stderr(&config.id, command, writer)
         .await
         .map_err(|error| error.to_string())?;
-    let source = McpServerSource::new(config.clone(), inner, Some(stderr), substitutions);
+    let source = McpServerSource::new(
+        config.clone(),
+        inner,
+        Some(stderr),
+        substitutions,
+        permission_table,
+    );
     source.refresh().await?;
     Ok(source)
 }
@@ -216,6 +237,7 @@ async fn connect_stdio(
 async fn connect_http(
     config: &McpServerConfig,
     substitutions: &mut Vec<(String, String)>,
+    permission_table: Arc<McpPermissionTable>,
 ) -> Result<McpServerSource, String> {
     let url_template = config
         .url
@@ -245,7 +267,13 @@ async fn connect_http(
     let inner = McpToolSource::connect_http_with_headers(&config.id, url, headers)
         .await
         .map_err(|error| error.to_string())?;
-    let source = McpServerSource::new(config.clone(), inner, None, substitutions.clone());
+    let source = McpServerSource::new(
+        config.clone(),
+        inner,
+        None,
+        substitutions.clone(),
+        permission_table,
+    );
     source.refresh().await?;
     Ok(source)
 }

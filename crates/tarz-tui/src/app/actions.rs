@@ -239,7 +239,9 @@ impl App {
         for entry in &mut self.entries {
             if let Some(rx) = &mut entry.approvals_rx {
                 while let Ok(request) = rx.try_recv() {
-                    entry.approval_queue.push_back(request);
+                    entry
+                        .approval_queue
+                        .push_back(super::state::PendingApproval::from_request(request));
                     self.dirty = true;
                 }
             }
