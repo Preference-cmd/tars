@@ -325,10 +325,6 @@ fn json_excerpt(value: &impl serde::Serialize, limit: usize) -> String {
     bounded(&String::from_utf8_lossy(&output.bytes), limit)
 }
 
-pub(super) fn is_write_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "write_file" | "edit_file")
-}
-
 // The explicit adoption allow-list for original results. New capabilities
 // (including MCP) need a separately reviewed policy; adding a workspace tool
 // variant must not widen it implicitly.
@@ -348,12 +344,12 @@ pub(super) fn is_builtin_tool(tool_name: &str) -> bool {
 /// file; every other non-builtin name may have had effects on its own server.
 /// Built-in read-only tools carry no warning.
 pub(super) fn warning_kind(tool_name: &str) -> Option<RepairWarningKind> {
-    if is_write_tool(tool_name) {
-        Some(RepairWarningKind::FileWrite)
-    } else if !is_builtin_tool(tool_name) {
-        Some(RepairWarningKind::External)
-    } else {
-        None
+    match tool_name {
+        // The write names must stay a subset of `BUILTIN_TOOL_NAMES`; a
+        // built-in write missing from that list would surface as external.
+        "write_file" | "edit_file" => Some(RepairWarningKind::FileWrite),
+        name if BUILTIN_TOOL_NAMES.contains(&name) => None,
+        _ => Some(RepairWarningKind::External),
     }
 }
 

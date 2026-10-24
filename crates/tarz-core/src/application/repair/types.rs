@@ -48,6 +48,26 @@ pub struct RepairWriteWarning {
     /// Which side the possible effect is on: the workspace file or the tool's own server.
     pub kind: RepairWarningKind,
 }
+impl RepairWriteWarning {
+    /// The advisory sentence for this warning, without layout decoration;
+    /// surfaces add their own indentation and line punctuation.
+    pub fn advice(&self) -> String {
+        match self.kind {
+            RepairWarningKind::FileWrite if self.path.is_empty() => format!(
+                "{} may have changed the file; read it again before continuing",
+                self.tool_name
+            ),
+            RepairWarningKind::FileWrite => format!(
+                "{} {} may have changed the file; read it again before continuing",
+                self.tool_name, self.path
+            ),
+            RepairWarningKind::External => format!(
+                "{} may have caused external side effects; check the server state before continuing",
+                self.tool_name
+            ),
+        }
+    }
+}
 
 /// One bounded diagnostic, with identities rather than copies of user content.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

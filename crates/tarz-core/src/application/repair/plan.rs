@@ -1,4 +1,6 @@
-use super::inspect::{candidate_check, diagnose, is_builtin_tool, scan, warning_kind};
+use super::inspect::{
+    candidate_check, diagnose, extract_call_path, is_builtin_tool, scan, warning_kind,
+};
 use super::types::*;
 use crate::application::{ApplicationError, ManagedSession, MaterialVersion};
 use crate::definition::SessionDefinition;
@@ -157,54 +159,41 @@ impl ManagedSession {
                 }
             })
             .collect();
-        let mut write_warnings = Vec::new();
-        let mut write_warnings_count = 0;
-        let mut external_warnings_count = 0;
         // A removed or adopted-unknown declaration is flagged when its tool can
         // have had a side effect before the interruption: built-in writes for
-        // the workspace file, any non-builtin name for its own server.
-        let mut flag = |id: &BlockId, kind: RepairWarningKind| {
-            let call = &declarations[id];
-            write_warnings_count += 1;
-            if kind == RepairWarningKind::External {
-                external_warnings_count += 1;
-            }
-            if write_warnings.len() < DISPLAY_LIMIT {
-                write_warnings.push(RepairWriteWarning {
+        // the workspace file, any non-builtin name for its own server. Removal
+        // flags every removed declaration; adoption only unknown outcomes.
+        let require_unknown = matches!(&mode, RepairMode::AdoptOriginal(_));
+        let warnings: Vec<RepairWriteWarning> = scan
+            .unpaired
+            .iter()
+            .filter_map(|id| {
+                if require_unknown
+                    && !matches!(
+                        results.get(id).map(|b| b.content()),
+                        Some(BlockContent::ToolResult(p))
+                            if p.status == ToolResultStatus::UnknownOutcome
+                    )
+                {
+                    return None;
+                }
+                let call = declarations.get(id)?;
+                let kind = warning_kind(&call.tool_name)?;
+                Some(RepairWriteWarning {
                     call_block_id: *id,
                     tool_name: call.tool_name.clone(),
-                    path: super::inspect::extract_call_path(&call.arguments),
+                    path: extract_call_path(&call.arguments),
                     kind,
-                });
-            }
-        };
-        match &mode {
-            RepairMode::RemoveUnpaired => {
-                for id in &scan.unpaired {
-                    if let Some(kind) = declarations
-                        .get(id)
-                        .and_then(|call| warning_kind(&call.tool_name))
-                    {
-                        flag(id, kind);
-                    }
-                }
-            }
-            RepairMode::AdoptOriginal(_) => {
-                for id in &scan.unpaired {
-                    let is_unknown = matches!(
-                        results.get(id).map(|b| b.content()),
-                        Some(BlockContent::ToolResult(p)) if p.status == ToolResultStatus::UnknownOutcome
-                    );
-                    if is_unknown
-                        && let Some(kind) = declarations
-                            .get(id)
-                            .and_then(|call| warning_kind(&call.tool_name))
-                    {
-                        flag(id, kind);
-                    }
-                }
-            }
-        }
+                })
+            })
+            .collect();
+        let write_warnings_count = warnings.len();
+        let external_warnings_count = warnings
+            .iter()
+            .filter(|warning| warning.kind == RepairWarningKind::External)
+            .count();
+        let write_warnings: Vec<RepairWriteWarning> =
+            warnings.into_iter().take(DISPLAY_LIMIT).collect();
         // Sorting, explanation construction and protocol rendering need no
         // coordination lock. The eventual apply rechecks this exact baseline.
         drop(state);

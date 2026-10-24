@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
     process::ExitCode,
 };
-use tarz_core::application::{ClosePolicy, RepairError, RepairMode, SaveStatus};
+use tarz_core::application::{ClosePolicy, RepairError, RepairMode, RepairSummary, SaveStatus};
 
 pub(super) async fn run(
     store: PathBuf,
@@ -49,6 +49,7 @@ pub(super) async fn run(
     })();
     let mut code = 0;
     let mut policy = ClosePolicy::Save;
+    let mut summary: Option<RepairSummary> = None;
     match planned {
         Err(error) => {
             code = 1;
@@ -60,6 +61,7 @@ pub(super) async fn run(
         }
         Ok(Some(plan)) => {
             value["plan"] = json!(plan.summary());
+            summary = Some(plan.summary().clone());
             if apply {
                 match session.apply_repair(&plan) {
                     Err(error) => {
@@ -119,53 +121,34 @@ pub(super) async fn run(
             value["saved"],
             value["revision"]
         );
-        if let Some(count) = value["plan"]["removed_count"].as_u64() {
-            text.push_str(&format!("Remove {count} unpaired declarations from future requests. This does not establish non-execution.\n"));
-            if let Some(ids) = value["plan"]["removed"].as_array() {
-                for id in ids {
-                    text.push_str(&format!("  Declaration {id}\n"));
-                }
-                if count > ids.len() as u64 {
-                    text.push_str("  Identity display limited to 128 declarations.\n");
-                }
+        if let Some(summary) = &summary {
+            text.push_str(&format!(
+                "Remove {} unpaired declarations from future requests. This does not establish non-execution.\n",
+                summary.removed_count
+            ));
+            for id in &summary.removed {
+                text.push_str(&format!("  Declaration {}\n", id.0));
             }
-        }
-        if let Some(count) = value["plan"]["write_warnings_count"].as_u64()
-            && count > 0
-        {
-            let external = value["plan"]["external_warnings_count"]
-                .as_u64()
-                .unwrap_or(0);
-            let writes = count - external;
+            if summary.removed_count > summary.removed.len() {
+                text.push_str("  Identity display limited to 128 declarations.\n");
+            }
+            let writes = summary.write_warnings_count - summary.external_warnings_count;
             if writes > 0 {
                 text.push_str(&format!(
                     "{writes} write call(s) may have changed files before interruption; read them again before continuing.\n"
                 ));
             }
-            if external > 0 {
+            if summary.external_warnings_count > 0 {
                 text.push_str(&format!(
-                    "{external} external call(s) may have caused external side effects; check the server state before continuing.\n"
+                    "{} external call(s) may have caused external side effects; check the server state before continuing.\n",
+                    summary.external_warnings_count
                 ));
             }
-            if let Some(warnings) = value["plan"]["write_warnings"].as_array() {
-                for warning in warnings {
-                    let tool = warning["tool_name"].as_str().unwrap_or("write");
-                    let path = warning["path"].as_str().unwrap_or("");
-                    if warning["kind"] == "external" {
-                        text.push_str(&format!(
-                            "  {tool} may have caused external side effects; check the server state before continuing\n"
-                        ));
-                    } else if path.is_empty() {
-                        text.push_str(&format!(
-                            "  {tool} may have changed the file; read it again before continuing\n"
-                        ));
-                    } else {
-                        text.push_str(&format!("  {tool} {path} may have changed the file; read it again before continuing\n"));
-                    }
-                }
-                if count > warnings.len() as u64 {
-                    text.push_str("  Warning display limited to 128 items.\n");
-                }
+            for warning in &summary.write_warnings {
+                text.push_str(&format!("  {}\n", warning.advice()));
+            }
+            if summary.write_warnings_count > summary.write_warnings.len() {
+                text.push_str("  Warning display limited to 128 items.\n");
             }
         }
         if !apply && value["status"] == "preview" {

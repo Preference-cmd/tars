@@ -6,26 +6,13 @@ use super::{
 use causa::{kernel::BlockId, runtime::new_block_id};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use tarz_core::{
-    application::{RepairInspection, RepairMode, RepairPlan, RepairWarningKind, SaveStatus},
+    application::{RepairInspection, RepairMode, RepairPlan, RepairWriteWarning, SaveStatus},
     session::WorkRef,
 };
 
 /// One bounded hint line for a possible pre-interruption side effect.
-fn warning_hint(warning: &tarz_core::application::RepairWriteWarning) -> String {
-    match warning.kind {
-        RepairWarningKind::External => format!(
-            "  {} may have caused external side effects; check the server state before continuing",
-            warning.tool_name
-        ),
-        RepairWarningKind::FileWrite if warning.path.is_empty() => format!(
-            "  {} may have changed the file; read it again before continuing",
-            warning.tool_name
-        ),
-        RepairWarningKind::FileWrite => format!(
-            "  {} {} may have changed the file; read it again before continuing",
-            warning.tool_name, warning.path
-        ),
-    }
+fn warning_hint(warning: &RepairWriteWarning) -> String {
+    format!("  {}", warning.advice())
 }
 
 /// Aggregate lines per warning kind; `suffix` closes each line ("." or ":").
