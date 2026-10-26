@@ -45,8 +45,20 @@ pub(super) fn inset(area: Rect) -> Rect {
 }
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
-    if area.width < 30 || area.height < 12 {
-        frame.render_widget(Paragraph::new("Resize to 30 x 12. Ctrl-Q quits."), area);
+    let pending = app
+        .entries
+        .get(app.selected)
+        .is_some_and(|entry| !entry.approval_queue.is_empty());
+    let approval_visible =
+        pending && app.panel.is_none() && app.form.is_none() && app.confirmation.is_none();
+    let minimum_height = if approval_visible { 19 } else { 12 };
+    if app.too_small || area.width < 30 || area.height < minimum_height {
+        let message = if approval_visible {
+            "Resize to at least 30 x 19 to answer the pending confirmation. Esc cancels this turn. Ctrl-Q quits."
+        } else {
+            "Resize to 30 x 12. Ctrl-Q quits."
+        };
+        frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), area);
         return;
     }
     let body = inset(area);

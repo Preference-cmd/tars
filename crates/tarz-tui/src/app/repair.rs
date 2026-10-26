@@ -33,13 +33,31 @@ fn warning_total_lines(total: usize, external: usize, suffix: &str) -> Vec<Strin
 }
 
 pub(crate) struct RepairPanel {
-    key: Key,
-    request: BlockId,
+    pub(super) key: Key,
+    pub(super) request: BlockId,
     work: Option<WorkRef>,
     pub lines: Vec<String>,
     pub scroll: usize,
     pub plan: Option<RepairPlan>,
     pub busy: bool,
+}
+
+#[cfg(test)]
+impl RepairPanel {
+    pub(crate) fn for_test(lines: Vec<String>) -> Self {
+        Self {
+            key: Key {
+                id: "repair-test".into(),
+                generation: 0,
+            },
+            request: new_block_id(),
+            work: None,
+            lines,
+            scroll: 0,
+            plan: None,
+            busy: false,
+        }
+    }
 }
 
 impl App {
@@ -74,22 +92,26 @@ impl App {
             plan: None,
             busy: true,
         })));
-        self.jobs.spawn(async move {
-            let save_error = session
-                .wait_saved()
+        self.spawn_job(
+            Some(key.clone()),
+            super::jobs::JobKind::Repair(request),
+            async move {
+                let save_error = session
+                    .wait_saved()
+                    .await
+                    .err()
+                    .map(|error| error.to_string());
+                let result = super::jobs::blocking(move || {
+                    session
+                        .inspect_repair(work.as_ref())
+                        .map(|inspection| (inspection, save_error))
+                        .map_err(|error| error.to_string())
+                })
                 .await
-                .err()
-                .map(|error| error.to_string());
-            let result = tokio::task::spawn_blocking(move || {
-                session
-                    .inspect_repair(work.as_ref())
-                    .map(|inspection| (inspection, save_error))
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .unwrap_or_else(|error| Err(error.to_string()));
-            Message::RepairInspected(key, request, result)
-        });
+                .unwrap_or_else(|error| Err(error.to_string()));
+                Message::RepairInspected(key, request, result)
+            },
+        );
     }
 
     fn repair_panel(&mut self, key: &Key, request: BlockId) -> Option<&mut RepairPanel> {
@@ -224,14 +246,18 @@ impl App {
             vec!["Preparing a local candidate; original results remain unclaimed.".into()];
         let key = panel.key.clone();
         let request = panel.request;
-        self.jobs.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || {
-                session.plan_repair(mode).map_err(|error| error.to_string())
-            })
-            .await
-            .unwrap_or_else(|error| Err(error.to_string()));
-            Message::RepairPlanned(key, request, result)
-        });
+        self.spawn_job(
+            Some(key.clone()),
+            super::jobs::JobKind::Repair(request),
+            async move {
+                let result = super::jobs::blocking(move || {
+                    session.plan_repair(mode).map_err(|error| error.to_string())
+                })
+                .await
+                .unwrap_or_else(|error| Err(error.to_string()));
+                Message::RepairPlanned(key, request, result)
+            },
+        );
     }
 
     pub(super) fn repair_planned(
@@ -336,25 +362,29 @@ impl App {
         entry.repair_job = Some(panel.request);
         let key = panel.key.clone();
         let request = panel.request;
-        self.jobs.spawn(async move {
-            let applying = session.clone();
-            let applied = tokio::task::spawn_blocking(move || {
-                applying
-                    .apply_repair(&plan)
-                    .map_err(|error| error.to_string())
-            })
-            .await
-            .unwrap_or_else(|error| Err(error.to_string()));
-            let did_apply = applied.is_ok();
-            let result = match applied {
-                Ok(_) => session
-                    .wait_saved()
-                    .await
-                    .map_err(|error| error.to_string()),
-                Err(error) => Err(error),
-            };
-            Message::RepairApplied(key, request, did_apply, result)
-        });
+        self.spawn_job(
+            Some(key.clone()),
+            super::jobs::JobKind::Repair(request),
+            async move {
+                let applying = session.clone();
+                let applied = super::jobs::blocking(move || {
+                    applying
+                        .apply_repair(&plan)
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .unwrap_or_else(|error| Err(error.to_string()));
+                let did_apply = applied.is_ok();
+                let result = match applied {
+                    Ok(_) => session
+                        .wait_saved()
+                        .await
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                };
+                Message::RepairApplied(key, request, did_apply, result)
+            },
+        );
     }
 
     pub(super) fn repair_applied(
@@ -434,16 +464,21 @@ impl App {
             }
         }
         if let Some(Panel::Repair(panel)) = &mut self.panel {
-            let max = crate::transcript::detail_rows(&panel.lines, self.view_width)
-                .count()
-                .saturating_sub(1);
-            match key.code {
-                KeyCode::Down => panel.scroll = panel.scroll.saturating_add(1).min(max),
-                KeyCode::PageDown => panel.scroll = panel.scroll.saturating_add(5).min(max),
-                KeyCode::Up => panel.scroll = panel.scroll.saturating_sub(1),
-                KeyCode::PageUp => panel.scroll = panel.scroll.saturating_sub(5),
-                _ => {}
-            }
+            scroll_repair(panel, key.code, self.view_width);
         }
+    }
+}
+
+/// Scrolls the preview lines of the repair panel; other keys do nothing.
+fn scroll_repair(panel: &mut RepairPanel, code: KeyCode, view_width: u16) {
+    let max = crate::transcript::detail_rows(&panel.lines, view_width)
+        .count()
+        .saturating_sub(1);
+    match code {
+        KeyCode::Down => panel.scroll = panel.scroll.saturating_add(1).min(max),
+        KeyCode::PageDown => panel.scroll = panel.scroll.saturating_add(5).min(max),
+        KeyCode::Up => panel.scroll = panel.scroll.saturating_sub(1),
+        KeyCode::PageUp => panel.scroll = panel.scroll.saturating_sub(5),
+        _ => {}
     }
 }

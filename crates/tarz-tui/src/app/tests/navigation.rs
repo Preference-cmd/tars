@@ -153,3 +153,26 @@ fn long_draft_leaves_input_hint_and_status_visible_at_minimum_size() {
     assert!(text.contains("Enter send"), "{text}");
     assert!(text.contains("saved r2"), "{text}");
 }
+
+#[test]
+fn f4_switches_only_on_press() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    for id in ["first", "second", "third"] {
+        app.entries.push(Entry::new(id.into(), "model".into()));
+    }
+    for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+        app.event(Event::Key(KeyEvent::new_with_kind(
+            KeyCode::F(4),
+            KeyModifiers::NONE,
+            kind,
+        )));
+        assert_eq!(app.selected, 0, "{kind:?} must not switch sessions");
+    }
+    app.event(Event::Key(KeyEvent::new_with_kind(
+        KeyCode::F(4),
+        KeyModifiers::NONE,
+        KeyEventKind::Press,
+    )));
+    assert_eq!(app.selected, 1);
+}

@@ -1,11 +1,13 @@
 use super::support::{app, ctrl, key, until};
 use crate::{input::Form, render};
-use crossterm::event::KeyCode;
+use crossterm::event::{Event, KeyCode};
 use ratatui::{Terminal, backend::TestBackend};
 use ratatui_textarea::TextArea;
 use serde_json::{Value, json};
 use tarz_core::{
-    application::ClosePolicy, definition::WriteToolLimits, permission::PermissionMode,
+    application::{ClosePolicy, SaveStatus},
+    definition::WriteToolLimits,
+    permission::PermissionMode,
 };
 
 use super::tools::wire;
@@ -1068,6 +1070,13 @@ async fn wm17_permission_mode_persistence() {
             .0,
         PermissionMode::Ask
     );
+    assert!(
+        app3.entries[0]
+            .notice
+            .contains("permission mode reverted from full-access to ask"),
+        "{}",
+        app3.entries[0].notice
+    );
 }
 
 #[test]
@@ -1239,4 +1248,161 @@ async fn wm13_mcp_approval_panel_display_and_actions() {
         !view.contains("wants to call MCP tool"),
         "approval modal must close after Esc"
     );
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn queued_approvals_reset_scroll_and_rendering_clamps_to_the_last_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let batch = sse_batch_tools(&[
+        (
+            "write_file",
+            json!({"path": "scroll_one.txt", "content": "first replacement"}),
+            "c_scroll_1",
+        ),
+        (
+            "write_file",
+            json!({"path": "scroll_two.txt", "content": "a\nb\nTARGET-LAST-LINE\n"}),
+            "c_scroll_2",
+        ),
+    ]);
+    let fixture = wire::Fixture::with_responses(
+        "openai-chat",
+        vec![batch, wire::answer_with_text("openai-chat", "scroll done")],
+    );
+    let mut app = app(dir.path());
+    create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+    app.entries[0].editor.insert_str("two writes");
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |a| {
+        !a.entries[a.selected].approval_queue.is_empty()
+    })
+    .await;
+    app.entries[0].approval_scroll = 7;
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |a| {
+        a.entries[a.selected]
+            .approval_queue
+            .front()
+            .is_some_and(|request| match &request.subject {
+                tarz_core::permission::ApprovalSubject::FileWrite { path, .. } => {
+                    path == "scroll_two.txt"
+                }
+                _ => false,
+            })
+    })
+    .await;
+    assert_eq!(app.entries[0].approval_scroll, 0);
+
+    app.entries[0].approval_scroll = 10_000;
+    let view = screen(&app);
+    assert!(view.contains("TARGET-LAST-LINE"), "{view}");
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
+}
+
+fn screen_at(app: &crate::app::App, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| render::draw(frame, app)).unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn hidden_approval_panel_ignores_decisions_but_keeps_cancel_and_quit() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let responses = vec![
+        sse_single_tool(
+            "write_file",
+            json!({"path": "small_y.txt", "content": "allowed after resize\n"}),
+            "c_small_y",
+        ),
+        wire::answer_with_text("openai-chat", "first done"),
+        sse_single_tool(
+            "write_file",
+            json!({"path": "small_esc.txt", "content": "never written\n"}),
+            "c_small_esc",
+        ),
+    ];
+    let fixture = wire::Fixture::with_responses("openai-chat", responses);
+    let mut app = app(dir.path());
+    create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+
+    app.entries[0].editor.insert_str("first small write");
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |a| {
+        !a.entries[a.selected].approval_queue.is_empty()
+    })
+    .await;
+    app.event(Event::Resize(29, 11));
+    let hidden = screen_at(&app, 29, 11);
+    assert!(hidden.contains("Resize to at least 30 x 19"), "{hidden}");
+    app.event(key(KeyCode::Char('y')));
+    app.event(key(KeyCode::Enter));
+    assert!(!workspace.join("small_y.txt").exists());
+    assert!(!app.entries[0].approval_queue.is_empty());
+
+    // The nominal 30 x 12 minimum still cannot show the approval body.
+    app.event(Event::Resize(30, 12));
+    let boundary = screen_at(&app, 30, 12);
+    assert!(
+        boundary.contains("Resize to at least 30 x 19"),
+        "{boundary}"
+    );
+    app.event(key(KeyCode::Char('y')));
+    app.event(key(KeyCode::Enter));
+    assert!(!workspace.join("small_y.txt").exists());
+    assert!(!app.entries[0].approval_queue.is_empty());
+
+    app.event(Event::Resize(30, 18));
+    let too_short = screen_at(&app, 30, 18);
+    assert!(
+        too_short.contains("Resize to at least 30 x 19"),
+        "{too_short}"
+    );
+    app.event(key(KeyCode::Char('y')));
+    app.event(key(KeyCode::Enter));
+    assert!(!workspace.join("small_y.txt").exists());
+    assert!(!app.entries[0].approval_queue.is_empty());
+
+    app.event(Event::Resize(30, 19));
+    let shown = screen_at(&app, 30, 19);
+    assert!(!shown.contains("Resize to at least 30 x 19"), "{shown}");
+    app.event(key(KeyCode::Char('y')));
+    until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("small_y.txt")).unwrap(),
+        "allowed after resize\n"
+    );
+    until(&mut app, |a| {
+        a.entries[0]
+            .session
+            .as_ref()
+            .is_some_and(|session| matches!(session.status().save, SaveStatus::Saved { .. }))
+    })
+    .await;
+
+    app.entries[0].editor.insert_str("second small write");
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |a| {
+        !a.entries[a.selected].approval_queue.is_empty()
+    })
+    .await;
+    app.event(Event::Resize(29, 11));
+    app.event(key(KeyCode::Esc));
+    assert!(app.entries[0].approval_queue.is_empty());
+    until(&mut app, |a| a.entries[a.selected].execution == "Cancelled").await;
+    assert!(!workspace.join("small_esc.txt").exists());
 }

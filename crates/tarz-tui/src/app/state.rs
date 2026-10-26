@@ -85,6 +85,7 @@ pub(crate) struct Entry {
     pub scroll: Option<usize>,
     pub(super) material_version: Option<MaterialVersion>,
     pub(super) requested_material_version: Option<MaterialVersion>,
+    pub(super) material_retry_after: Option<tokio::time::Instant>,
     pub(super) repair_job: Option<causa::kernel::BlockId>,
     #[cfg(test)]
     pub(super) material_reads: usize,
@@ -116,6 +117,7 @@ impl Entry {
             scroll: None,
             material_version: None,
             requested_material_version: None,
+            material_retry_after: None,
             repair_job: None,
             #[cfg(test)]
             material_reads: 0,
@@ -154,6 +156,8 @@ pub(crate) struct App {
     pub(super) jobs: JoinSet<Message>,
     pub(super) listing: bool,
     pub(super) view_width: u16,
+    pub(super) view_height: u16,
+    pub(crate) too_small: bool,
     pub(super) dirty: bool,
     pub(super) done: bool,
     pub(super) progress_cursor: usize,
@@ -185,6 +189,8 @@ impl App {
             jobs: JoinSet::new(),
             listing: false,
             view_width: 80,
+            view_height: 24,
+            too_small: false,
             dirty: true,
             done: false,
             progress_cursor: 0,
@@ -192,6 +198,19 @@ impl App {
     }
     pub(super) fn entry_mut(&mut self, key: &Key) -> Option<&mut Entry> {
         self.entries.iter_mut().find(|entry| entry.key == *key)
+    }
+    /// A pending confirmation needs room for its title, body and hint; below
+    /// that size its decisions are not offered at all.
+    pub(super) fn refresh_size_flags(&mut self) {
+        let width = self.view_width.saturating_add(4);
+        let pending = self
+            .entries
+            .get(self.selected)
+            .is_some_and(|entry| !entry.approval_queue.is_empty());
+        let approval_visible =
+            pending && self.panel.is_none() && self.form.is_none() && self.confirmation.is_none();
+        let minimum_height = if approval_visible { 19 } else { 12 };
+        self.too_small = width < 30 || self.view_height < minimum_height;
     }
     pub(super) fn capacity(&mut self) -> bool {
         if self.jobs.len() >= MAX_JOBS {

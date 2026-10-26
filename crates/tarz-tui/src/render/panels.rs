@@ -93,7 +93,11 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
             let lines: Vec<_> = crate::transcript::detail_rows(&panel.lines, regions[1].width)
                 .skip(panel.scroll)
                 .take(usize::from(regions[1].height))
-                .map(Line::from)
+                .map(|line| {
+                    Line::from(
+                        tarz_core::permission::escape_untrusted_text(line).replace('\t', "    "),
+                    )
+                })
                 .collect();
             frame.render_widget(Paragraph::new(lines), regions[1]);
             let hint = if panel.busy {
@@ -401,9 +405,12 @@ pub(super) fn approval(frame: &mut Frame<'_>, _app: &App, entry: &crate::app::En
         tarz_core::permission::ApprovalSubject::FileWrite { diff, .. } => {
             let escaped_diff = tarz_core::permission::escape_untrusted_text(diff);
             let diff_lines: Vec<&str> = escaped_diff.lines().collect();
+            let scroll = entry
+                .approval_scroll
+                .min(diff_lines.len().saturating_sub(body_height));
             let visible_diff: Vec<Line> = diff_lines
                 .iter()
-                .skip(entry.approval_scroll)
+                .skip(scroll)
                 .take(body_height)
                 .map(|&line| {
                     let style = if line.starts_with('+') && !line.starts_with("+++") {
@@ -423,9 +430,12 @@ pub(super) fn approval(frame: &mut Frame<'_>, _app: &App, entry: &crate::app::En
         tarz_core::permission::ApprovalSubject::McpCall { arguments, .. } => {
             let escaped_args = tarz_core::permission::escape_untrusted_text(arguments);
             let arg_lines: Vec<&str> = escaped_args.lines().collect();
+            let scroll = entry
+                .approval_scroll
+                .min(arg_lines.len().saturating_sub(body_height));
             let visible_args: Vec<Line> = arg_lines
                 .iter()
-                .skip(entry.approval_scroll)
+                .skip(scroll)
                 .take(body_height)
                 .map(|&line| Line::from(line))
                 .collect();

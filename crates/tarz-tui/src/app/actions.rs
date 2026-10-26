@@ -12,14 +12,23 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 use tarz_core::application::{ClosePolicy, ManagedSession, PreparedCreate, SaveStatus};
 use tarz_core::session::{SubmitRequest, WorkState};
 
+pub(super) fn export_warning(importable: bool) -> &'static str {
+    if importable {
+        ""
+    } else {
+        " (exceeds the 64 MiB import limit; this version cannot import it directly)"
+    }
+}
+
 pub(super) fn export(
     session: &ManagedSession,
     directory: &std::path::Path,
-) -> Result<String, String> {
+) -> Result<(String, bool), String> {
     let snapshot = session.read_materials().map_err(|e| e.to_string())?;
     let path = directory.join(format!("tarz-recovery-{}.json", new_block_id().0));
-    tarz_core::material::save_new(&path, &snapshot.context).map_err(|e| e.to_string())?;
-    Ok(path.display().to_string())
+    let saved =
+        tarz_core::material::save_new(&path, &snapshot.context).map_err(|e| e.to_string())?;
+    Ok((path.display().to_string(), saved.importable))
 }
 
 impl App {
@@ -29,8 +38,9 @@ impl App {
         }
         self.listing = true;
         let host = self.host.clone();
-        self.jobs
-            .spawn(async move { Message::Listed(host.list().await) });
+        self.spawn_job(None, super::jobs::JobKind::List, async move {
+            Message::Listed(host.list().await)
+        });
     }
     pub(super) fn create(&mut self) {
         if !self.capacity() {
@@ -75,6 +85,7 @@ impl App {
         entry.approval_scroll = 0;
         entry.material_version = None;
         entry.requested_material_version = None;
+        entry.material_retry_after = None;
         entry.repair_job = None;
         entry.refreshing = false;
         entry.wrapping = false;
@@ -83,7 +94,7 @@ impl App {
         let key = entry.key.clone();
         let prepared = entry.prepared.clone();
         let host = self.host.clone();
-        self.jobs.spawn(async move {
+        self.spawn_job(Some(key.clone()), super::jobs::JobKind::Open, async move {
             let result = match prepared {
                 Some(prepared) => host.create(prepared).await,
                 None => host.open(key.id.clone().into()).await,
@@ -134,7 +145,7 @@ impl App {
                 entry.notice = "Input accepted; Ctrl-C cancels this work".into();
                 entry.scroll = None;
                 let key = entry.key.clone();
-                self.jobs.spawn(async move {
+                self.spawn_job(Some(key.clone()), super::jobs::JobKind::Work, async move {
                     let result = loop {
                         match session.wait(&receipt.work, Duration::from_secs(30)).await {
                             Ok(observation) => {
@@ -179,8 +190,9 @@ impl App {
         entry.approval_scroll = 0;
         let host = self.host.clone();
         let key = entry.key.clone();
-        self.jobs
-            .spawn(async move { Message::Closed(key, host.close(&status.target, policy).await) });
+        self.spawn_job(Some(key.clone()), super::jobs::JobKind::Close, async move {
+            Message::Closed(key, host.close(&status.target, policy).await)
+        });
     }
     pub(super) fn retry(&mut self) {
         if !self.capacity() {
@@ -204,8 +216,9 @@ impl App {
             }
             entry.busy = Some("retrying save");
             let key = entry.key.clone();
-            self.jobs
-                .spawn(async move { Message::Retried(key, session.retry_save().await) });
+            self.spawn_job(Some(key.clone()), super::jobs::JobKind::Retry, async move {
+                Message::Retried(key, session.retry_save().await)
+            });
         } else if entry.prepared.is_some() {
             self.open();
         }
@@ -227,22 +240,31 @@ impl App {
         entry.busy = Some("exporting");
         let key = entry.key.clone();
         let directory = self.options.recovery_dir.clone();
-        self.jobs.spawn(async move {
-            let result = tokio::task::spawn_blocking(move || export(&session, &directory))
-                .await
-                .unwrap_or_else(|e| Err(e.to_string()));
-            Message::Exported(key, result)
-        });
+        self.spawn_job(
+            Some(key.clone()),
+            super::jobs::JobKind::Export,
+            async move {
+                let result = super::jobs::blocking(move || export(&session, &directory))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                Message::Exported(key, result)
+            },
+        );
     }
     pub(super) fn poll(&mut self) {
         self.poll_progress();
         for entry in &mut self.entries {
             if let Some(rx) = &mut entry.approvals_rx {
+                let was_empty = entry.approval_queue.is_empty();
                 while let Ok(request) = rx.try_recv() {
                     entry
                         .approval_queue
                         .push_back(super::state::PendingApproval::from_request(request));
                     self.dirty = true;
+                }
+                if was_empty && !entry.approval_queue.is_empty() {
+                    entry.approval_reason = None;
+                    entry.approval_scroll = 0;
                 }
             }
             if let Some(status) = self.host.lookup(&entry.id().into()) {
@@ -265,6 +287,9 @@ impl App {
                 };
                 if let (Some(session), Some(version)) = (entry.session.clone(), version)
                     && entry.requested_material_version.as_ref() != Some(version)
+                    && entry
+                        .material_retry_after
+                        .is_none_or(|retry| tokio::time::Instant::now() >= retry)
                     && !entry.refreshing
                     && entry.busy != Some("closing")
                     && self.jobs.len() < super::state::MAX_JOBS
@@ -276,18 +301,24 @@ impl App {
                         entry.material_reads += 1;
                     }
                     let key = entry.key.clone();
-                    self.jobs.spawn(async move {
-                        let result = tokio::task::spawn_blocking(move || {
-                            let snapshot = session.read_materials().map_err(|e| e.to_string())?;
-                            Ok((
-                                snapshot.version,
-                                Arc::new(Transcript::from_context(&snapshot.context)),
-                            ))
-                        })
-                        .await
-                        .unwrap_or_else(|e| Err(e.to_string()));
-                        Message::Materials(key, result)
-                    });
+                    super::jobs::spawn_job(
+                        &mut self.jobs,
+                        Some(key.clone()),
+                        super::jobs::JobKind::Materials,
+                        async move {
+                            let result = super::jobs::blocking(move || {
+                                let snapshot =
+                                    session.read_materials().map_err(|e| e.to_string())?;
+                                Ok((
+                                    snapshot.version,
+                                    Arc::new(Transcript::from_context(&snapshot.context)),
+                                ))
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()));
+                            Message::Materials(key, result)
+                        },
+                    );
                 }
             }
         }
@@ -302,13 +333,18 @@ impl App {
             let key = entry.key.clone();
             let transcript = entry.transcript.clone();
             let width = self.view_width;
-            self.jobs.spawn(async move {
-                let rows = tokio::task::spawn_blocking(move || Rows::wrap(transcript, width))
-                    .await
-                    .expect("pure text layout");
-                Message::Wrapped(key, rows)
-            });
+            self.spawn_job(
+                Some(key.clone()),
+                super::jobs::JobKind::Wrapping,
+                async move {
+                    let rows = super::jobs::blocking(move || Rows::wrap(transcript, width))
+                        .await
+                        .expect("pure text layout");
+                    Message::Wrapped(key, rows)
+                },
+            );
         }
+        self.refresh_size_flags();
         if self.quitting {
             for index in 0..self.entries.len() {
                 self.close(index, ClosePolicy::Save);
@@ -336,9 +372,11 @@ impl App {
                     if let Some(session) = entry.session.clone() {
                         let dir: PathBuf = self.options.recovery_dir.clone();
                         reports.push(
-                            match tokio::task::spawn_blocking(move || export(&session, &dir)).await
-                            {
-                                Ok(Ok(path)) => format!("Recovery materials: {path}"),
+                            match super::jobs::blocking(move || export(&session, &dir)).await {
+                                Ok(Ok((path, importable))) => format!(
+                                    "Recovery materials: {path}{}",
+                                    export_warning(importable)
+                                ),
                                 other => format!("Recovery export failed: {other:?}"),
                             },
                         );
@@ -404,5 +442,16 @@ impl App {
             }
         };
         self.apply_permission_mode(next_mode);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn export_warning_names_the_import_boundary() {
+        assert_eq!(super::export_warning(true), "");
+        let warning = super::export_warning(false);
+        assert!(warning.contains("64 MiB"));
+        assert!(warning.contains("cannot import"));
     }
 }

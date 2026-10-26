@@ -169,7 +169,7 @@ fn opened_notice_names_unavailable_mcp_servers_on_one_bounded_line() {
     use tarz_core::{McpServerStatus, McpSkippedTool};
 
     assert_eq!(
-        opened_notice(&[]),
+        opened_notice(&[], false),
         "Opened; only materials are restored, not old work records"
     );
     let skipped = McpSkippedTool {
@@ -197,7 +197,7 @@ fn opened_notice_names_unavailable_mcp_servers_on_one_bounded_line() {
         },
     ];
     assert_eq!(
-        opened_notice(&status),
+        opened_notice(&status, false),
         "Opened; MCP server 'git' is unavailable: startup timed out after 1s \
          (+1 more unavailable); 2 MCP tools skipped"
     );
@@ -207,7 +207,189 @@ fn opened_notice_names_unavailable_mcp_servers_on_one_bounded_line() {
         reason: Some("漢".repeat(200)),
         skipped_tools: Vec::new(),
     }];
-    let notice = opened_notice(&long);
+    let notice = opened_notice(&long, false);
     assert!(notice.len() <= 256 && !notice.contains('\n'));
     assert!(notice.starts_with("Opened; MCP server 'docs' is unavailable: 漢"));
+    assert!(opened_notice(&[], true).contains("permission mode reverted from full-access to ask"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_a_running_session_resets_the_execution_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    let server = Server::new().await;
+    create(&mut app, &server.endpoint).await;
+    app.event(Event::Paste("close while running".into()));
+    app.event(ctrl('s'));
+    until(&mut app, |_| server.requests.lock().unwrap().len() == 1).await;
+    assert_eq!(app.entries[0].execution, "Running");
+    app.event(ctrl('w'));
+    server.release.add_permits(1);
+    until(&mut app, |a| a.entries[0].session.is_none()).await;
+    assert_eq!(app.entries[0].execution, "No work in this instance");
+    assert_eq!(app.entries[0].status, "Closed; F3 to reopen");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_material_read_retries_after_one_second_and_then_updates() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    let server = Server::new().await;
+    create(&mut app, &server.endpoint).await;
+    until(&mut app, |a| {
+        a.entries[0].material_reads >= 1 && !a.entries[0].refreshing
+    })
+    .await;
+    let key = app.entries[0].key.clone();
+    let baseline = app.entries[0].material_reads;
+    app.complete(Message::Materials(
+        key.clone(),
+        Err("injected read failure".into()),
+    ));
+    assert_eq!(app.entries[0].material_reads, baseline);
+
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_millis(950) {
+        app.poll();
+        assert_eq!(app.entries[0].material_reads, baseline);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    app.poll();
+    assert_eq!(app.entries[0].material_reads, baseline + 1);
+
+    app.jobs.abort_all();
+    while app.jobs.join_next().await.is_some() {}
+    let version = app.entries[0]
+        .requested_material_version
+        .clone()
+        .expect("retry recorded a version");
+    let transcript = crate::transcript::Transcript {
+        text: "retried conversation".into(),
+        ..Default::default()
+    };
+    app.complete(Message::Materials(
+        key,
+        Ok((version, std::sync::Arc::new(transcript))),
+    ));
+    assert!(
+        app.entries[0]
+            .transcript
+            .text
+            .contains("retried conversation")
+    );
+    assert!(app.entries[0].material_retry_after.is_none());
+    assert!(!app.entries[0].notice.contains("Material view unavailable"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adapter_panic_is_session_scoped_and_another_session_continues() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    let server = Server::new().await;
+    create(&mut app, &server.endpoint).await;
+    create(&mut app, &server.endpoint).await;
+    assert_eq!(app.entries.len(), 2);
+
+    let panicking = app.entries[0].key.clone();
+    app.spawn_job(Some(panicking), crate::app::jobs::JobKind::Work, async {
+        panic!("injected adapter panic");
+    });
+    until(&mut app, |a| {
+        a.entries[0]
+            .notice
+            .contains("Background task failed: injected adapter panic")
+    })
+    .await;
+    assert!(app.entries[0].session.is_some());
+
+    app.selected = 1;
+    app.entries[1].editor.insert_str("still works");
+    app.event(ctrl('s'));
+    until(&mut app, |_| server.requests.lock().unwrap().len() == 1).await;
+    server.release.add_permits(1);
+    until(&mut app, |a| {
+        a.entries[1].execution == "Completed" && !a.entries[1].transcript.text.is_empty()
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn panicked_jobs_clear_only_their_own_state() {
+    use crate::app::jobs::JobKind;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    let key = crate::app::state::Key {
+        id: "entry-id".into(),
+        generation: 0,
+    };
+    app.entries.push(crate::app::state::Entry::new(
+        key.id.clone(),
+        "model".into(),
+    ));
+    app.entries[0].busy = Some("closing");
+    app.listing = true;
+
+    app.spawn_job(Some(key.clone()), JobKind::Materials, async {
+        panic!("materials panic");
+    });
+    until(&mut app, |a| {
+        a.entries[0]
+            .notice
+            .contains("Background task failed: materials panic")
+    })
+    .await;
+    assert_eq!(app.entries[0].busy, Some("closing"));
+    assert!(app.entries[0].material_retry_after.is_some());
+
+    app.spawn_job(Some(key.clone()), JobKind::Work, async {
+        panic!("work panic");
+    });
+    until(&mut app, |a| {
+        a.entries[0]
+            .notice
+            .contains("Background task failed: work panic")
+    })
+    .await;
+    assert_eq!(app.entries[0].busy, Some("closing"));
+
+    app.quitting = true;
+    app.spawn_job(Some(key.clone()), JobKind::Close, async {
+        panic!("close panic");
+    });
+    until(&mut app, |a| {
+        !a.quitting && a.notice.contains("Exit paused")
+    })
+    .await;
+    assert_eq!(app.entries[0].busy, None);
+
+    app.spawn_job(None, JobKind::List, async {
+        panic!("list panic");
+    });
+    until(&mut app, |a| {
+        a.notice.contains("Background task failed: list panic")
+    })
+    .await;
+    assert!(!app.listing);
+}
+
+#[test]
+#[ignore = "requires a real PTY; run with --test-threads=1"]
+fn blocking_job_panic_keeps_raw_mode_until_normal_exit() {
+    let _screen = crate::terminal::Screen::enter().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut jobs = tokio::task::JoinSet::new();
+    let entered = runtime.enter();
+    crate::app::jobs::spawn_job(&mut jobs, None, crate::app::jobs::JobKind::Export, async {
+        let _ = crate::app::jobs::blocking(|| panic!("blocking job panic")).await;
+        panic!("job panic after a blocking failure");
+    });
+    drop(entered);
+    let message = runtime.block_on(jobs.join_next()).unwrap().unwrap();
+    assert!(matches!(message, Message::JobPanicked(..)));
+    assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
 }

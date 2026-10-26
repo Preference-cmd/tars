@@ -39,8 +39,23 @@ pub(super) enum Message {
     Materials(Key, Result<(MaterialVersion, Arc<Transcript>), String>),
     Wrapped(Key, Rows),
     Retried(Key, Result<SaveStatus, ApplicationError>),
-    Exported(Key, Result<String, String>),
+    Exported(Key, Result<(String, bool), String>),
     Closed(Key, Result<CloseOutcome, ApplicationError>),
+    JobPanicked(Option<Key>, JobKind, String),
+}
+
+/// What a UI adapter job owns, so a caught panic clears only that state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum JobKind {
+    List,
+    Open,
+    Work,
+    Close,
+    Retry,
+    Export,
+    Materials,
+    Wrapping,
+    Repair(causa::kernel::BlockId),
 }
 
 pub(super) fn save_label(save: &SaveStatus) -> String {
@@ -108,21 +123,28 @@ fn result_label(result: &WorkResult) -> &'static str {
 const MAX_OPENED_NOTICE_BYTES: usize = 256;
 
 /// The one-line notice after opening. It names the first MCP server that did
-/// not start and counts the rest and the skipped tools; the status text is
-/// already escaped, and the line is cut to [`MAX_OPENED_NOTICE_BYTES`].
-pub(super) fn opened_notice(status: &[tarz_core::McpServerStatus]) -> String {
-    let mut notice = String::from("Opened; only materials are restored, not old work records");
+/// not start and counts the rest and the skipped tools, and states a saved-mode
+/// downgrade; the status text is already escaped, and the line is cut to
+/// [`MAX_OPENED_NOTICE_BYTES`].
+pub(super) fn opened_notice(status: &[tarz_core::McpServerStatus], downgraded: bool) -> String {
+    let prefix = if downgraded {
+        "Opened; permission mode reverted from full-access to ask; "
+    } else {
+        "Opened; "
+    };
     let unavailable: Vec<_> = status.iter().filter(|server| !server.ready).collect();
     let skipped: usize = status.iter().map(|server| server.skipped_tools.len()).sum();
-    if let Some(first) = unavailable.first() {
-        notice = format!(
-            "Opened; MCP server '{}' is unavailable: {}",
+    let mut notice = if let Some(first) = unavailable.first() {
+        format!(
+            "{prefix}MCP server '{}' is unavailable: {}",
             first.id,
             first.reason.as_deref().unwrap_or("unknown reason")
-        );
-        if unavailable.len() > 1 {
-            notice.push_str(&format!(" (+{} more unavailable)", unavailable.len() - 1));
-        }
+        )
+    } else {
+        format!("{prefix}only materials are restored, not old work records")
+    };
+    if unavailable.len() > 1 {
+        notice.push_str(&format!(" (+{} more unavailable)", unavailable.len() - 1));
     }
     if skipped > 0 {
         notice.push_str(&format!("; {skipped} MCP tools skipped"));
@@ -219,7 +241,10 @@ impl App {
                             entry.approval_reason = None;
                             entry.approval_scroll = 0;
                             entry.title = session.definition().model;
-                            entry.notice = opened_notice(&session.mcp_status());
+                            entry.notice = opened_notice(
+                                &session.mcp_status(),
+                                session.open_report().permission_downgraded,
+                            );
                             entry.session = Some(session);
                             entry.prepared = None;
                         }
@@ -268,10 +293,21 @@ impl App {
                     match result {
                         Ok((version, transcript)) => {
                             entry.material_version = Some(version);
+                            entry.material_retry_after = None;
                             entry.transcript = transcript;
                             entry.rows = None;
+                            if entry.notice.starts_with("Material view unavailable") {
+                                entry.notice.clear();
+                            }
                         }
-                        Err(error) => entry.notice = format!("Material view unavailable: {error}"),
+                        Err(error) => {
+                            // A failed read is retried after a delay, not once per frame.
+                            entry.requested_material_version = None;
+                            entry.material_retry_after = Some(
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+                            );
+                            entry.notice = format!("Material view unavailable: {error}");
+                        }
                     }
                 }
             }
@@ -297,7 +333,10 @@ impl App {
                 if let Some(entry) = self.entry_mut(&key) {
                     entry.busy = None;
                     entry.notice = match result {
-                        Ok(path) => format!("Exported actual materials: {path}"),
+                        Ok((path, importable)) => format!(
+                            "Exported actual materials: {path}{}",
+                            super::actions::export_warning(importable)
+                        ),
                         Err(error) => format!("Export failed: {error}"),
                     };
                 }
@@ -314,6 +353,7 @@ impl App {
                             entry.session = None;
                             entry.prepared = None;
                             entry.work = None;
+                            entry.execution = "No work in this instance".into();
                             entry.clear_progress();
                             entry.tools = super::tool_progress::ToolView::default();
                             entry.editor = crate::input::editor();
@@ -346,6 +386,158 @@ impl App {
                     }
                 }
             }
+            Message::JobPanicked(key, kind, detail) => {
+                let detail = tarz_core::permission::escape_untrusted_text(&detail);
+                let message = format!("Background task failed: {detail}");
+                if kind == JobKind::List {
+                    self.listing = false;
+                    self.notice = message;
+                    return;
+                }
+                let Some(key) = key else {
+                    self.notice = message;
+                    return;
+                };
+                let mut panicked_repair = None;
+                let mut panicked_close = false;
+                if let Some(entry) = self.entry_mut(&key) {
+                    let clear_busy = |entry: &mut Entry, label: &str| {
+                        if entry.busy == Some(label) {
+                            entry.busy = None;
+                        }
+                    };
+                    match kind {
+                        JobKind::List => unreachable!("handled before the entry lookup"),
+                        JobKind::Materials => {
+                            entry.refreshing = false;
+                            entry.requested_material_version = None;
+                            entry.material_retry_after = Some(
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+                            );
+                            entry.notice = message.clone();
+                        }
+                        JobKind::Wrapping => {
+                            entry.wrapping = false;
+                            entry.notice = message.clone();
+                        }
+                        JobKind::Repair(request) => {
+                            clear_busy(entry, "repairing materials");
+                            if entry.repair_job == Some(request) {
+                                entry.repair_job = None;
+                            }
+                            panicked_repair = Some(request);
+                            entry.notice = message.clone();
+                        }
+                        JobKind::Open => {
+                            clear_busy(entry, "opening");
+                            entry.notice = message.clone();
+                        }
+                        JobKind::Close => {
+                            clear_busy(entry, "closing");
+                            panicked_close = true;
+                            entry.notice = message.clone();
+                        }
+                        JobKind::Retry => {
+                            clear_busy(entry, "retrying save");
+                            entry.notice = message.clone();
+                        }
+                        JobKind::Export => {
+                            clear_busy(entry, "exporting");
+                            entry.notice = message.clone();
+                        }
+                        JobKind::Work => {
+                            // The core work may still run; only the local
+                            // observation adapter is gone.
+                            entry.notice = message.clone();
+                        }
+                    }
+                }
+                if panicked_close && self.quitting {
+                    self.quitting = false;
+                    self.notice =
+                        "Exit paused: a session close failed. Resolve it before quitting.".into();
+                }
+                if let Some(request) = panicked_repair
+                    && let Some(super::Panel::Repair(panel)) = &mut self.panel
+                    && panel.key == key
+                    && panel.request == request
+                {
+                    panel.busy = false;
+                    panel.lines = vec![message];
+                }
+            }
         }
+    }
+
+    /// Run one UI adapter job and turn a panic into a session-scoped message.
+    /// The event loop keeps running so unrelated sessions stay usable.
+    pub(super) fn spawn_job<F>(&mut self, key: Option<Key>, kind: JobKind, job: F)
+    where
+        F: std::future::Future<Output = Message> + Send + 'static,
+    {
+        spawn_job(&mut self.jobs, key, kind, job);
+    }
+}
+
+/// Run blocking UI work with the same panic-hook suppression as a job poll.
+pub(super) async fn blocking<F, T>(work: F) -> Result<T, tokio::task::JoinError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let _guard = crate::terminal::SuppressTerminalRestore::enter();
+        work()
+    })
+    .await
+}
+
+/// Field-taking form for call sites already borrowing `entries`.
+pub(super) fn spawn_job<F>(
+    jobs: &mut tokio::task::JoinSet<Message>,
+    key: Option<Key>,
+    kind: JobKind,
+    job: F,
+) where
+    F: std::future::Future<Output = Message> + Send + 'static,
+{
+    jobs.spawn(async move {
+        use futures_util::FutureExt;
+        let job = SuppressRestore {
+            inner: Box::pin(job),
+        };
+        match std::panic::AssertUnwindSafe(job).catch_unwind().await {
+            Ok(message) => message,
+            Err(payload) => Message::JobPanicked(key, kind, panic_detail(payload)),
+        }
+    });
+}
+
+/// Keep the terminal panic hook from restoring raw mode when the panic is
+/// caught by the job wrapper. The flag is set around each poll because a
+/// future may move between runtime worker threads.
+struct SuppressRestore<F> {
+    inner: std::pin::Pin<Box<F>>,
+}
+
+impl<F: std::future::Future> std::future::Future for SuppressRestore<F> {
+    type Output = F::Output;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let _guard = crate::terminal::SuppressTerminalRestore::enter();
+        self.inner.as_mut().poll(context)
+    }
+}
+
+fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "UI adapter task panicked".into()
     }
 }

@@ -33,7 +33,8 @@ impl Preview {
     }
     pub fn append(&mut self, delta: &str, truncated: bool) {
         self.truncated |= truncated;
-        for c in delta.chars() {
+        let escaped = tarz_core::permission::escape_untrusted_text(delta);
+        for c in escaped.chars() {
             let content = if c == '\t' {
                 "    "
             } else if c.is_control() && c != '\n' {
@@ -157,5 +158,25 @@ impl Preview {
         self.ranges
             .get(index)
             .map_or("", |range| &self.text[range.clone()])
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::Preview;
+
+    #[test]
+    fn preview_escapes_controls_bidi_and_separators_but_keeps_unicode() {
+        let mut preview = Preview::default();
+        preview.append("中文 😀\nline\u{202e}\u{2066}\u{2028}\tend", false);
+        assert!(preview.text.contains("中文 😀"));
+        assert!(preview.text.contains('\n'));
+        assert!(preview.text.contains("\\u{202e}"));
+        assert!(preview.text.contains("\\u{2066}"));
+        assert!(preview.text.contains("\\u{2028}"));
+        assert!(!preview.text.contains('\u{202e}'));
+        assert!(!preview.text.contains('\u{2066}'));
+        assert!(!preview.text.contains('\u{2028}'));
+        assert!(preview.text.contains("    end"));
     }
 }

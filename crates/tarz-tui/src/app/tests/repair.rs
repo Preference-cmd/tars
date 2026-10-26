@@ -479,3 +479,23 @@ async fn repair_ui_shows_external_side_effect_warning_for_unpaired_mcp_call() {
         .await
         .unwrap();
 }
+
+#[test]
+fn repair_panel_renders_untrusted_paths_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    app.entries
+        .push(Entry::new("repair-entry".into(), "model".into()));
+    app.panel = Some(Panel::Repair(Box::new(
+        crate::app::repair::RepairPanel::for_test(vec![
+            "path dir/\u{202e}name\u{2066}\u{2028}.txt".into(),
+        ]),
+    )));
+    let view = screen(&app);
+    assert!(view.contains("\\u{202e}"), "{view}");
+    assert!(view.contains("\\u{2066}"), "{view}");
+    assert!(view.contains("\\u{2028}"), "{view}");
+    assert!(!view.contains('\u{202e}'));
+    assert!(!view.contains('\u{2066}'));
+    assert!(!view.contains('\u{2028}'));
+}

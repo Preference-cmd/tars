@@ -22,13 +22,20 @@ impl App {
                 result = self.jobs.join_next(), if !self.jobs.is_empty() => {
                     match result {
                         Some(Ok(message)) => self.complete(message),
-                        Some(Err(error)) => return Err(io::Error::other(format!("UI adapter task failed: {error}"))),
+                        Some(Err(error)) => {
+                            // A cancelled or ended adapter must not close other
+                            // sessions. Panics already arrive as JobPanicked.
+                            self.notice = format!("UI task ended: {error}");
+                            self.dirty = true;
+                        }
                         None => {},
                     }
                 },
                 _ = tick.tick() => {
                     let size = terminal.size()?;
                     self.view_width = render::transcript_width(size.width);
+                    self.view_height = size.height;
+                    self.refresh_size_flags();
                     self.viewport_height = render::conversation_height(size.height, size.width, self);
                     self.poll();
                     if self.done { return Ok(()); }
@@ -44,6 +51,8 @@ impl App {
         self.dirty = true;
         if let Event::Resize(width, height) = event {
             self.view_width = render::transcript_width(width);
+            self.view_height = height;
+            self.refresh_size_flags();
             self.viewport_height = render::conversation_height(height, width, self);
             if let Some(super::Panel::Info { lines, scroll, .. }) = &mut self.panel {
                 *scroll = (*scroll).min(
@@ -134,6 +143,16 @@ impl App {
             if key.kind != KeyEventKind::Press {
                 return;
             }
+            // The approval panel needs 30 x 19 to contain its body. Keep only
+            // the escape hatches that do not decide the pending request.
+            if self.too_small || self.view_height < 19 || self.view_width.saturating_add(4) < 30 {
+                if key.code == KeyCode::Esc || input::control(key, 'c') {
+                    clear_approvals(entry);
+                    self.cancel();
+                }
+                return;
+            }
+
             if input::control(key, 'w') {
                 self.request_close();
                 return;
@@ -158,6 +177,7 @@ impl App {
                             req.respond(tarz_core::permission::ApprovalDecision::Deny {
                                 reason: reason_opt,
                             });
+                            entry.approval_scroll = 0;
                         }
                     }
                     KeyCode::Esc => {
@@ -191,6 +211,7 @@ impl App {
                 {
                     if let Some(req) = entry.approval_queue.pop_front() {
                         req.respond(tarz_core::permission::ApprovalDecision::Allow);
+                        entry.approval_scroll = 0;
                     }
                 }
                 KeyCode::Char('n' | 'N')
@@ -204,24 +225,11 @@ impl App {
                     if key.modifiers.contains(KeyModifiers::CONTROL)
                         || key.code == KeyCode::Esc =>
                 {
-                    entry.approval_queue.clear();
-                    entry.approval_reason = None;
-                    entry.approval_scroll = 0;
+                    clear_approvals(entry);
                     self.cancel();
+                    return;
                 }
-                KeyCode::Up => {
-                    entry.approval_scroll = entry.approval_scroll.saturating_sub(1);
-                }
-                KeyCode::Down => {
-                    entry.approval_scroll = entry.approval_scroll.saturating_add(1);
-                }
-                KeyCode::PageUp => {
-                    entry.approval_scroll = entry.approval_scroll.saturating_sub(5);
-                }
-                KeyCode::PageDown => {
-                    entry.approval_scroll = entry.approval_scroll.saturating_add(5);
-                }
-                _ => {}
+                code => scroll_approval(entry, code),
             }
             return;
         }
@@ -291,9 +299,10 @@ impl App {
                     ))
                 }
                 KeyCode::F(3) if key.kind == KeyEventKind::Press => self.open(),
-                KeyCode::F(4) => {
+                KeyCode::F(4) if key.kind == KeyEventKind::Press => {
                     if !self.entries.is_empty() {
                         self.selected = (self.selected + 1) % self.entries.len();
+                        self.refresh_size_flags();
                     }
                 }
                 KeyCode::F(5) if key.kind == KeyEventKind::Press => self.list(),
@@ -322,4 +331,42 @@ impl App {
             }
         }
     }
+}
+
+/// Drops every pending request of the entry and its unfinished deny reason.
+fn clear_approvals(entry: &mut super::Entry) {
+    entry.approval_queue.clear();
+    entry.approval_reason = None;
+    entry.approval_scroll = 0;
+}
+
+/// Scrolls the diff or arguments of the front request; other keys do nothing.
+fn scroll_approval(entry: &mut super::Entry, code: KeyCode) {
+    let max = approval_max_scroll(entry);
+    entry.approval_scroll = match code {
+        KeyCode::Up => entry.approval_scroll.saturating_sub(1),
+        KeyCode::Down => entry.approval_scroll.saturating_add(1).min(max),
+        KeyCode::PageUp => entry.approval_scroll.saturating_sub(5),
+        KeyCode::PageDown => entry.approval_scroll.saturating_add(5).min(max),
+        _ => return,
+    };
+}
+
+fn approval_max_scroll(entry: &super::Entry) -> usize {
+    let Some(request) = entry.approval_queue.front() else {
+        return 0;
+    };
+    let lines = match &request.subject {
+        tarz_core::permission::ApprovalSubject::FileWrite { diff, .. } => {
+            tarz_core::permission::escape_untrusted_text(diff)
+                .lines()
+                .count()
+        }
+        tarz_core::permission::ApprovalSubject::McpCall { arguments, .. } => {
+            tarz_core::permission::escape_untrusted_text(arguments)
+                .lines()
+                .count()
+        }
+    };
+    lines.saturating_sub(1)
 }

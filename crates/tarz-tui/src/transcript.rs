@@ -73,20 +73,15 @@ impl Transcript {
             text.push_str("\n\n");
         }
         // Provider text is content, never a stream of terminal control commands.
-        text.retain(|c| !c.is_control() || matches!(c, '\n' | '\t'));
-        Self {
-            text: text.replace('\t', "    "),
-            tool_details,
-        }
+        // The same escaping as confirmation panels keeps bidi controls and line
+        // separators visible without changing ordinary text or newlines.
+        let text = tarz_core::permission::escape_untrusted_text(&text).replace('\t', "    ");
+        Self { text, tool_details }
     }
 }
 
 pub(crate) fn display(value: &str) -> String {
-    value
-        .chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect::<String>()
-        .replace('\t', "    ")
+    tarz_core::permission::escape_untrusted_text(value).replace('\t', "    ")
 }
 fn summary(value: &str) -> String {
     let clean = display(value).replace('\n', " ");
@@ -158,5 +153,32 @@ impl Rows {
             width,
             ranges,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Transcript;
+    use causa::kernel::{BlockContent, Context, ContextBlock, Role};
+
+    #[test]
+    fn untrusted_text_escapes_controls_bidi_and_separators_but_keeps_unicode() {
+        let raw = "中文 😀\nline\u{202e}\u{2066}\u{2028}\ttabbed";
+        let context = Context::from_blocks(vec![ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::Assistant, raw),
+            Default::default(),
+        )])
+        .unwrap();
+        let transcript = Transcript::from_context(&context);
+        assert!(transcript.text.contains("中文 😀"));
+        assert!(transcript.text.contains('\n'));
+        assert!(transcript.text.contains("\\u{202e}"));
+        assert!(transcript.text.contains("\\u{2066}"));
+        assert!(transcript.text.contains("\\u{2028}"));
+        assert!(!transcript.text.contains('\u{202e}'));
+        assert!(!transcript.text.contains('\u{2066}'));
+        assert!(!transcript.text.contains('\u{2028}'));
+        assert!(transcript.text.contains("    tabbed"));
     }
 }

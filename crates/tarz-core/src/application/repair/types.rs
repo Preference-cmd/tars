@@ -50,20 +50,20 @@ pub struct RepairWriteWarning {
 }
 impl RepairWriteWarning {
     /// The advisory sentence for this warning, without layout decoration;
-    /// surfaces add their own indentation and line punctuation.
+    /// surfaces add their own indentation and line punctuation. Names and paths
+    /// come from model-provided arguments and are escaped as display text.
     pub fn advice(&self) -> String {
+        let tool_name = crate::permission::escape_untrusted_text(&self.tool_name);
+        let path = crate::permission::escape_untrusted_text(&self.path);
         match self.kind {
-            RepairWarningKind::FileWrite if self.path.is_empty() => format!(
-                "{} may have changed the file; read it again before continuing",
-                self.tool_name
-            ),
+            RepairWarningKind::FileWrite if self.path.is_empty() => {
+                format!("{tool_name} may have changed the file; read it again before continuing")
+            }
             RepairWarningKind::FileWrite => format!(
-                "{} {} may have changed the file; read it again before continuing",
-                self.tool_name, self.path
+                "{tool_name} {path} may have changed the file; read it again before continuing"
             ),
             RepairWarningKind::External => format!(
-                "{} may have caused external side effects; check the server state before continuing",
-                self.tool_name
+                "{tool_name} may have caused external side effects; check the server state before continuing"
             ),
         }
     }
@@ -263,4 +263,27 @@ pub enum RepairError {
         /// Current confirmed revision under the instance's writer lock.
         actual: u64,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RepairWarningKind, RepairWriteWarning};
+    use causa::kernel::BlockId;
+
+    #[test]
+    fn warning_advice_escapes_model_supplied_tool_and_path() {
+        let warning = RepairWriteWarning {
+            call_block_id: BlockId::new(uuid::Uuid::now_v7()),
+            tool_name: "write\u{202e}tool".into(),
+            path: "dir/\u{2066}file\u{2028}.txt".into(),
+            kind: RepairWarningKind::FileWrite,
+        };
+        let advice = warning.advice();
+        assert!(advice.contains("\\u{202e}"));
+        assert!(advice.contains("\\u{2066}"));
+        assert!(advice.contains("\\u{2028}"));
+        assert!(!advice.contains('\u{202e}'));
+        assert!(!advice.contains('\u{2066}'));
+        assert!(!advice.contains('\u{2028}'));
+    }
 }

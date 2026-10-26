@@ -271,6 +271,7 @@ impl App {
                     } else {
                         self.panel = None;
                         self.selected = index;
+                        self.refresh_size_flags();
                         self.open();
                     }
                     return;
