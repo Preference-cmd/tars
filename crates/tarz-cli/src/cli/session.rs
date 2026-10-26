@@ -39,7 +39,7 @@ Create options:
                       otherwise rejects without blocking.
   --load              Initial Context material file; creates a new conversation
   --recovery-dir      Material recovery directory on initial save failure
-                      (default current directory)
+                      (default: configured recovery_dir, else current directory)
 
 Run options:
   --input             User text; mutually exclusive with --stdin
@@ -47,7 +47,8 @@ Run options:
   --permission-mode   read-only | ask | accept-edits | full-access
                       Change and save the current permission mode for this session.
                       Reopening reverts full-access to ask unless created as full-access.
-  --recovery-dir      Material recovery directory on save failure (default current directory)
+  --recovery-dir      Material recovery directory on save failure
+                      (default: configured recovery_dir, else current directory)
 
 Common options:
   --store             Local store directory (or configured store)
@@ -60,6 +61,7 @@ Repair options:
   --apply             Apply the current candidate, then wait for saving
   --expected-revision Saved revision reported by preview; required with --apply
   --recovery-dir      Material export directory if saving the repair fails
+                      (default: configured recovery_dir, else current directory)
 
 Repair never calls a model or executes tools. It opens the saved definition,
 so its configured credential environment and workspace must remain available.

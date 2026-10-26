@@ -1,6 +1,6 @@
 # TUI 原型
 
-`tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；已接通工作区工具（包括写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换）；MCP 通过 `mcp.json` 配置与表单选择、定义快照和运行期工具已接通，打开会话后状态行提示未启动的服务器和被跳过的工具，重开时若保存的 full-access 被降为 ask 也会提示，MCP 调用按权限模式支持执行、确认与拒绝；没有 GUI、命令执行或安装分发。本轮使用用户授权的同级 Causa 本地依赖，源码基线与构建要求见[当前实现](README.md)。
+`tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；已接通工作区工具（包括写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换）；MCP 通过 `mcp.json` 配置与表单选择、定义快照和运行期工具已接通，打开会话后状态行提示未启动的服务器和被跳过的工具，重开时若保存的 full-access 被降为 ask 也会提示，MCP 调用按权限模式支持执行、确认与拒绝；没有 GUI、命令执行或安装分发。构建与依赖基线见[当前实现](README.md)。
 
 ```sh
 cargo build -p tarz-tui --locked
@@ -9,14 +9,14 @@ cargo build -p tarz-tui --locked
 ./target/debug/tarz-tui --no-config --store ./tarz-data
 ```
 
-stdin 和 stdout 都必须是交互终端。至少 30×12；低于该尺寸时只显示缩放提示。有待确认请求时需要至少 30×19 才显示面板并接受允许/拒绝键；更小时 Esc 或 Ctrl-C 仍取消本轮。矮窗口表单一次显示当前字段，Tab 切换。新建会话需要 provider/model 和可解析的凭据环境变量，创建本身不调用模型。F3 重开已存会话时采用原固定定义，不套用新的全局模型预设。
+stdin 和 stdout 都必须是交互终端。至少 30×12；低于该尺寸时整屏只显示缩放提示。有待确认请求时需要至少 30×19 才显示面板并接受允许/拒绝键；更小时同样只显示缩放提示，Esc 或 Ctrl-C 仍取消本轮。矮窗口表单一次显示当前字段，Tab 切换。新建会话需要 provider/model 和可解析的凭据环境变量，创建本身不调用模型。F3 重开已存会话时采用原固定定义，不套用新的全局模型预设。
 
 | 操作 | 按键 |
 | --- | --- |
 | 命令菜单 | 空输入时键入 `/`，或任意草稿下 F1；输入筛选，↑↓ 选择，Enter 执行，Esc 返回 |
 | 新建/填写模型配置 | `/new` 或 F2；Tab/Shift-Tab 换字段，Ctrl-S 创建，Esc 返回 |
 | 许可模式切换 | `Shift-Tab`（在主视图与确认面板内循环切换 ask / accept-edits / read-only）；或 `/mode` / `/mode <name>` |
-| 写入确认 | 确认面板中 `Enter` / `y` 允许；`n` 拒绝并可输理由；`Esc` / `Ctrl-C` 取消本轮；`Shift-Tab` 切换模式；`↑` `↓` `PgUp` `PgDn` 滚动 diff（新请求从顶部开始，滚动不会越过内容末尾；待确认时窗口小于 30×19 面板不显示，允许/拒绝键不生效；面板出现、队列换到下一条请求、切到有待确认请求的会话或 resize 重新显示后 0.5 秒内只响应 Esc/Ctrl-C 和滚动键，其他键被忽略且不进入草稿，提示变暗） |
+| 写入确认 | 确认面板中 `Enter` / `y` 允许；`n` 拒绝并可输理由；`Esc` / `Ctrl-C` 取消本轮；`Shift-Tab` 切换模式；`↑` `↓` `PgUp` `PgDn` 滚动 diff（新请求从顶部开始，滚动不会越过内容末尾；待确认时窗口小于 30×19 只显示缩放提示，允许/拒绝键不生效；面板出现、队列换到下一条请求、切到有待确认请求的会话或 resize 重新显示后 0.5 秒内只响应 Esc/Ctrl-C 和滚动键，其他键被忽略且不进入草稿，提示变暗） |
 | 会话选择 | `/sessions`，按模型名或 ID 筛选，Enter 切换并打开 |
 | 帮助 / 完整状态与错误详情 | `/help` / `/status`；↑↓ 或 PageUp/PageDown 滚动 |
 | 完整工具调用/结果 | `/tools` 或 F6；↑↓ / PageUp/PageDown 滚动 |
