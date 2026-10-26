@@ -1152,3 +1152,121 @@ fn invalid_values_inside_a_config_profile_remain_configuration_errors() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("timeout"));
 }
+
+#[test]
+fn profile_definition_errors_exit_as_configuration_errors() {
+    // Config::load resolves every profile with the defaults before a command
+    // can supply an override, so each of these is refused while loading. Both
+    // a definition-free command (list) and a definition-building one (create)
+    // must report the promised configuration exit code and no argument hint.
+    let cases = [
+        ("model = '   '", "model identifier must not be blank"),
+        (
+            "model = 'm'\napi_key_env = '1BAD'",
+            "credential reference must name a valid environment variable",
+        ),
+        (
+            "model = 'm'\nendpoint = 'ftp://example.invalid/v1'",
+            "endpoint must be an absolute HTTP(S) URL",
+        ),
+        ("model = 'm'\nmax_tokens = 0", "max_tokens must be positive"),
+        (
+            "model = 'm'\nmax_model_attempts = 0",
+            "max_model_attempts must be positive",
+        ),
+        (
+            "model = 'm'\n[profiles.p.render_options]\nmax_tokens_field = 'secret_marker'",
+            "render_options has a key or value",
+        ),
+        (
+            "model = 'm'\nworkspace_root = '.'\ntools = ['read_file', 'read_file']",
+            "workspace tool selection contains a duplicate",
+        ),
+        (
+            "model = 'm'\n[profiles.p.tool_limits]\nmax_output_bytes = 0",
+            "workspace tool limits must be positive",
+        ),
+        ("model = 'm'\nmcp = ['absent']", "unknown MCP server"),
+    ];
+    for (profile, expected) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let text = format!(
+            "version = 1\nstore = 'data'\ndefault_profile = 'p'\n[profiles.p]\nprovider = 'openai-chat'\n{profile}\n"
+        );
+        std::fs::write(&path, text).unwrap();
+        for command in ["list", "create"] {
+            let output = cli(dir.path())
+                .args(["session", command, "--config"])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(1), "{profile}: {output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains(expected), "{profile}: {stderr}");
+            assert!(
+                !stderr.contains("Use tarz session --help"),
+                "a profile error is not an argument error: {stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_definition_errors_exit_as_argument_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, config()).unwrap();
+    let cases: &[(&[&str], &str)] = &[
+        (&["--max-tokens", "0"], "max_tokens must be positive"),
+        (
+            &["--max-model-attempts", "0"],
+            "max_model_attempts must be positive",
+        ),
+        (
+            &["--endpoint", "ftp://example.invalid/v1"],
+            "endpoint must be an absolute HTTP(S) URL",
+        ),
+        (
+            &["--api-key-env", "1BAD"],
+            "credential reference must name a valid environment variable",
+        ),
+        (&["--model", "   "], "model identifier must not be blank"),
+        (
+            &[
+                "--render-options",
+                r#"{"max_tokens_field":"secret_marker"}"#,
+            ],
+            "render_options has a key or value",
+        ),
+        (&["--mcp", "absent"], "unknown MCP server"),
+        (
+            &["--tools", "read_file"],
+            "workspace root is required when tools are enabled",
+        ),
+    ];
+    for (args, expected) in cases {
+        let output = cli(dir.path())
+            .args(["session", "create", "--config"])
+            .arg(&config_path)
+            .args(*args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("Use tarz session --help"),
+            "an explicit invalid value is an argument error: {stderr}"
+        );
+    }
+
+    // The run entry point shares the same classifier.
+    let output = cli(dir.path())
+        .args(["run", "--config"])
+        .arg(&config_path)
+        .args(["--max-tokens", "0", "--input", "hello"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+}

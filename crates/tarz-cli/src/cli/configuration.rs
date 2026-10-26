@@ -183,6 +183,11 @@ pub(super) fn definition(
 
 /// Config-file loading and profile resolution are configuration errors; an
 /// invalid value supplied on this command line remains an argument error.
+///
+/// `Config::load` resolves every profile against the defaults and returns any
+/// profile error before this point, so a `ConfigError::Definition` reaching
+/// here can only have been introduced by an explicit override. The help
+/// promise is therefore per field, not per error type.
 fn definition_error(error: tarz_core::config::ConfigError, values: &Values<'_>) -> CliError {
     use tarz_core::config::ConfigError;
     let explicit = match &error {
