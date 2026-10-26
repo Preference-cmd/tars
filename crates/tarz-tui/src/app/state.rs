@@ -1,3 +1,4 @@
+use super::Clock;
 use super::jobs::Message;
 use crate::{
     input::{self, Form},
@@ -7,6 +8,8 @@ use crate::{
 use ratatui_textarea::TextArea;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tarz_core::application::{ManagedSession, MaterialVersion, PreparedCreate, SessionHost};
 use tarz_core::permission::{
     ApprovalDecision, ApprovalReceiver, ApprovalRequest, ApprovalSubject, PermissionMode,
@@ -17,14 +20,70 @@ use tokio::task::JoinSet;
 // Limits UI-owned in-flight work/results; core separately limits active instances.
 pub(super) const MAX_JOBS: usize = 64;
 
+/// How long keys are ignored after sensitive confirmation content appears or
+/// changes without a key press, so keys typed for something else do not decide it.
+pub(crate) const CONFIRM_GUARD_WINDOW: Duration = Duration::from_millis(500);
+
+/// Monotonic guard window that drops accidental keys for a duration after
+/// sensitive confirmation content appears or changes on screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct GuardWindow {
+    until: Option<Instant>,
+}
+
+impl GuardWindow {
+    pub(crate) const fn new() -> Self {
+        Self { until: None }
+    }
+
+    /// Arms the guard window for `duration` starting from `now`.
+    pub(crate) fn arm(&mut self, now: Instant, duration: Duration) {
+        self.until = Some(now + duration);
+    }
+
+    /// Disarms the guard window immediately.
+    pub(crate) fn disarm(&mut self) {
+        self.until = None;
+    }
+
+    /// Returns true if the window is currently armed and `now` is before expiry.
+    pub(crate) fn is_guarded(&self, now: Instant) -> bool {
+        self.until.is_some_and(|until| now < until)
+    }
+
+    /// Checks if the window has expired at `now`. If expired, disarms it and
+    /// returns `true` (so the caller can mark the UI dirty for redraw).
+    pub(crate) fn check_expired(&mut self, now: Instant) -> bool {
+        if self.until.is_some_and(|until| now >= until) {
+            self.until = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+static NEXT_APPROVAL_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_approval_id() -> u64 {
+    NEXT_APPROVAL_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Key {
     pub id: String,
     pub generation: u64,
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct VisibleApproval {
+    pub session_id: String,
+    pub request_id: u64,
+}
+
 /// Pending approval request held by the TUI for reviewer confirmation.
 pub(crate) struct PendingApproval {
+    pub(crate) id: u64,
     pub(crate) tool_name: String,
     pub(crate) mode: PermissionMode,
     pub(crate) subject: ApprovalSubject,
@@ -34,6 +93,7 @@ pub(crate) struct PendingApproval {
 impl PendingApproval {
     pub(crate) fn from_request(request: ApprovalRequest) -> Self {
         Self {
+            id: next_approval_id(),
             tool_name: request.tool_name,
             mode: request.mode,
             subject: request.subject,
@@ -54,6 +114,7 @@ impl PendingApproval {
         F: FnOnce(ApprovalDecision) + Send + 'static,
     {
         Self {
+            id: next_approval_id(),
             tool_name,
             mode,
             subject,
@@ -161,6 +222,9 @@ pub(crate) struct App {
     pub(super) dirty: bool,
     pub(super) done: bool,
     pub(super) progress_cursor: usize,
+    pub(crate) clock: Clock,
+    pub(crate) last_visible_approval: Option<VisibleApproval>,
+    pub(crate) approval_guard: GuardWindow,
 }
 impl App {
     pub fn new(options: Options) -> Self {
@@ -194,6 +258,9 @@ impl App {
             dirty: true,
             done: false,
             progress_cursor: 0,
+            clock: Clock::real(),
+            last_visible_approval: None,
+            approval_guard: GuardWindow::new(),
         }
     }
     pub(super) fn entry_mut(&mut self, key: &Key) -> Option<&mut Entry> {
@@ -219,5 +286,82 @@ impl App {
         } else {
             true
         }
+    }
+    /// Current visible approval identity, if the approval panel is currently
+    /// drawn and not obscured by user-opened panels, forms, confirmations or a
+    /// too-small terminal.
+    pub(crate) fn current_visible_approval(&self) -> Option<VisibleApproval> {
+        if self.panel.is_some()
+            || self.form.is_some()
+            || self.confirmation.is_some()
+            || self.quitting
+        {
+            return None;
+        }
+        if self.too_small || self.view_height < 19 || self.view_width.saturating_add(4) < 30 {
+            return None;
+        }
+        let entry = self.entries.get(self.selected)?;
+        let front = entry.approval_queue.front()?;
+        Some(VisibleApproval {
+            session_id: entry.id().to_string(),
+            request_id: front.id,
+        })
+    }
+    /// Evaluates whether the visible approval changed and manages the 500 ms
+    /// guard window. Marks `dirty = true` when a window starts or expires so
+    /// the hint is redrawn appropriately.
+    pub(crate) fn update_approval_guard(&mut self) {
+        let current = self.current_visible_approval();
+        if current != self.last_visible_approval {
+            self.last_visible_approval = current;
+            if self.last_visible_approval.is_some() {
+                self.approval_guard
+                    .arm(self.clock.now(), CONFIRM_GUARD_WINDOW);
+                self.dirty = true;
+            } else {
+                self.approval_guard.disarm();
+            }
+        } else if self.approval_guard.check_expired(self.clock.now()) {
+            self.dirty = true;
+        }
+    }
+    /// Returns true if the visible approval panel is currently within the
+    /// accidental-key ignore window ([`CONFIRM_GUARD_WINDOW`]).
+    pub(crate) fn is_approval_guarded(&self) -> bool {
+        let current = self.current_visible_approval();
+        if current.is_none() {
+            return false;
+        }
+        if current != self.last_visible_approval {
+            return true;
+        }
+        self.approval_guard.is_guarded(self.clock.now())
+    }
+    /// Evaluates whether the repair guard window has expired. Marks
+    /// `dirty = true` when the window expires so the hint is redrawn.
+    pub(crate) fn update_repair_guard(&mut self) {
+        if let Some(super::Panel::Repair(panel)) = self.panel.as_mut()
+            && panel.guard.check_expired(self.clock.now())
+        {
+            self.dirty = true;
+        }
+    }
+    /// Returns true if the visible repair panel is currently within the
+    /// accidental-key ignore window ([`CONFIRM_GUARD_WINDOW`]).
+    pub(crate) fn is_repair_guarded(&self) -> bool {
+        match &self.panel {
+            Some(super::Panel::Repair(panel)) if panel.plan.is_some() => {
+                panel.guard.is_guarded(self.clock.now())
+            }
+            _ => false,
+        }
+    }
+    /// Advance the app clock by `duration` and update confirmation guards.
+    #[cfg(test)]
+    pub(crate) fn advance_clock(&mut self, duration: Duration) {
+        self.clock.advance(duration);
+        self.update_approval_guard();
+        self.update_repair_guard();
     }
 }

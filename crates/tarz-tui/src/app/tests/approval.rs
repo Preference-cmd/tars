@@ -1,7 +1,7 @@
-use super::support::{app, ctrl, key, until};
+use super::support::{advance_past_approval_window, app, ctrl, key, until};
 use crate::{input::Form, render};
 use crossterm::event::{Event, KeyCode};
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{Terminal, backend::TestBackend, style::Modifier};
 use ratatui_textarea::TextArea;
 use serde_json::{Value, json};
 use tarz_core::{
@@ -140,6 +140,7 @@ async fn wm05_allow_write_via_enter_and_y() {
     ));
 
     // Allow via Enter
+    advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Enter));
 
     // Wait for turn completion
@@ -178,6 +179,7 @@ async fn wm05_allow_write_via_y_key() {
         !a.entries[a.selected].approval_queue.is_empty()
     })
     .await;
+    advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Char('y')));
 
     until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
@@ -214,6 +216,7 @@ async fn wm05_deny_write_with_reason() {
     })
     .await;
 
+    advance_past_approval_window(&mut app);
     // Press 'n' to enter reason input
     app.event(key(KeyCode::Char('n')));
     let view = screen(&app);
@@ -268,6 +271,7 @@ async fn wm05_deny_write_without_reason() {
     })
     .await;
 
+    advance_past_approval_window(&mut app);
     // Press 'n', then Enter without typing anything
     app.event(key(KeyCode::Char('n')));
     app.event(key(KeyCode::Enter));
@@ -311,6 +315,7 @@ async fn wm05_deny_reason_esc_returns_to_question_then_allows() {
     })
     .await;
 
+    advance_past_approval_window(&mut app);
     // Press 'n'
     app.event(key(KeyCode::Char('n')));
     assert!(screen(&app).contains("Reason for the model"));
@@ -368,6 +373,7 @@ async fn wm05_two_writes_different_files_and_duplicate_file_in_batch() {
     })
     .await;
     assert!(screen(&app).contains("wants to create file1.txt"));
+    advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Enter));
 
     // Wait for second approval (file2.txt)
@@ -384,6 +390,7 @@ async fn wm05_two_writes_different_files_and_duplicate_file_in_batch() {
     })
     .await;
     assert!(screen(&app).contains("wants to create file2.txt"));
+    advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Enter));
 
     until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
@@ -430,6 +437,7 @@ async fn wm05_two_writes_different_files_and_duplicate_file_in_batch() {
     })
     .await;
     assert!(screen(&app2).contains("wants to create same.txt"));
+    advance_past_approval_window(&mut app2);
     app2.event(key(KeyCode::Enter));
 
     // Turn completes without asking a second time (second is rejected by precheck)
@@ -793,6 +801,7 @@ async fn wm17_mode_switch_inside_panel() {
     .await;
     assert!(screen(&app).contains("wants to create sw1.txt"));
 
+    advance_past_approval_window(&mut app);
     // Switch mode inside panel: Shift-Tab to accept-edits
     app.event(key(KeyCode::BackTab));
     let view = screen(&app);
@@ -850,6 +859,7 @@ async fn wm17_mode_switch_inside_panel() {
     })
     .await;
     assert!(screen(&app).contains("wants to create sw3.txt"));
+    advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Enter));
     until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
     assert_eq!(
@@ -918,6 +928,7 @@ async fn wm05_two_sessions_background_approval_hint_and_switching() {
     let view_b = screen(&app);
     assert!(view_b.contains("write_file wants to create b_file.txt"));
 
+    advance_past_approval_window(&mut app);
     // Answer on B
     app.event(key(KeyCode::Enter));
     until(&mut app, |a| a.entries[1].execution == "Completed").await;
@@ -1176,6 +1187,7 @@ async fn wm13_mcp_approval_panel_display_and_actions() {
     assert!(view.contains("Enter / y allow"));
 
     // Press y to allow
+    advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Char('y')));
     assert_eq!(
         rx1.try_recv().unwrap(),
@@ -1201,6 +1213,7 @@ async fn wm13_mcp_approval_panel_display_and_actions() {
         ));
 
     // Press n to enter reason prompt, then type reason and press Enter to deny
+    advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Char('n')));
     for c in "unsafe tool".chars() {
         app.event(key(KeyCode::Char(c)));
@@ -1282,6 +1295,7 @@ async fn queued_approvals_reset_scroll_and_rendering_clamps_to_the_last_line() {
     })
     .await;
     app.entries[0].approval_scroll = 7;
+    advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Enter));
     until(&mut app, |a| {
         a.entries[a.selected]
@@ -1300,6 +1314,7 @@ async fn queued_approvals_reset_scroll_and_rendering_clamps_to_the_last_line() {
     app.entries[0].approval_scroll = 10_000;
     let view = screen(&app);
     assert!(view.contains("TARGET-LAST-LINE"), "{view}");
+    advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Enter));
     until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
 }
@@ -1380,6 +1395,7 @@ async fn hidden_approval_panel_ignores_decisions_but_keeps_cancel_and_quit() {
     app.event(Event::Resize(30, 19));
     let shown = screen_at(&app, 30, 19);
     assert!(!shown.contains("Resize to at least 30 x 19"), "{shown}");
+    advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Char('y')));
     until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
     assert_eq!(
@@ -1405,4 +1421,441 @@ async fn hidden_approval_panel_ignores_decisions_but_keeps_cancel_and_quit() {
     assert!(app.entries[0].approval_queue.is_empty());
     until(&mut app, |a| a.entries[a.selected].execution == "Cancelled").await;
     assert!(!workspace.join("small_esc.txt").exists());
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn wm18_draft_in_input_box_approval_guard_ignores_keys_then_allows() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let fixture = wire::Fixture::with_responses("openai-chat", vec![]);
+    let mut app = app(dir.path());
+    create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+
+    // User is typing a draft in the input box
+    app.entries[0].editor.insert_str("next message draft");
+
+    // Approval arrives
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    app.entries[0]
+        .approval_queue
+        .push_back(crate::app::state::PendingApproval::mock(
+            "write_file".into(),
+            PermissionMode::Ask,
+            tarz_core::permission::ApprovalSubject::FileWrite {
+                path: "guarded.txt".into(),
+                action: tarz_core::permission::WriteAction::Created,
+                diff: "+content\n".into(),
+            },
+            move |d| {
+                let _ = tx.send(d);
+            },
+        ));
+
+    // Within 0.5 s, press y and Enter
+    app.event(key(KeyCode::Char('y')));
+    app.event(key(KeyCode::Enter));
+
+    // Nothing was allowed or sent to responder
+    assert!(rx.try_recv().is_err());
+    assert_eq!(app.entries[0].approval_queue.len(), 1);
+
+    // The draft remains exactly as it was, and the pressed keys did not enter it
+    assert_eq!(
+        app.entries[0].editor.lines().join("\n"),
+        "next message draft"
+    );
+
+    // Advance past the 0.5s window
+    advance_past_approval_window(&mut app);
+
+    // Now Enter allows
+    app.event(key(KeyCode::Enter));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        tarz_core::permission::ApprovalDecision::Allow
+    );
+    assert!(app.entries[0].approval_queue.is_empty());
+    // Draft is still intact
+    assert_eq!(
+        app.entries[0].editor.lines().join("\n"),
+        "next message draft"
+    );
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn wm18_two_queued_requests_second_has_own_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let fixture = wire::Fixture::with_responses("openai-chat", vec![]);
+    let mut app = app(dir.path());
+    create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+
+    let (tx1, mut rx1) = tokio::sync::oneshot::channel();
+    let (tx2, mut rx2) = tokio::sync::oneshot::channel();
+
+    app.entries[0]
+        .approval_queue
+        .push_back(crate::app::state::PendingApproval::mock(
+            "write_file".into(),
+            PermissionMode::Ask,
+            tarz_core::permission::ApprovalSubject::FileWrite {
+                path: "first.txt".into(),
+                action: tarz_core::permission::WriteAction::Created,
+                diff: "+1\n".into(),
+            },
+            move |d| {
+                let _ = tx1.send(d);
+            },
+        ));
+    app.entries[0]
+        .approval_queue
+        .push_back(crate::app::state::PendingApproval::mock(
+            "write_file".into(),
+            PermissionMode::Ask,
+            tarz_core::permission::ApprovalSubject::FileWrite {
+                path: "second.txt".into(),
+                action: tarz_core::permission::WriteAction::Created,
+                diff: "+2\n".into(),
+            },
+            move |d| {
+                let _ = tx2.send(d);
+            },
+        ));
+
+    // Advance past first window and allow first request
+    advance_past_approval_window(&mut app);
+    app.event(key(KeyCode::Enter));
+    assert_eq!(
+        rx1.try_recv().unwrap(),
+        tarz_core::permission::ApprovalDecision::Allow
+    );
+
+    // Second request is now visible and has its OWN 0.5 s window
+    assert!(app.is_approval_guarded());
+
+    // Pressing 'y' immediately is ignored
+    app.event(key(KeyCode::Char('y')));
+    assert!(rx2.try_recv().is_err());
+    assert_eq!(app.entries[0].approval_queue.len(), 1);
+
+    // Advance past second window
+    advance_past_approval_window(&mut app);
+    assert!(!app.is_approval_guarded());
+
+    // Now 'y' allows second request
+    app.event(key(KeyCode::Char('y')));
+    assert_eq!(
+        rx2.try_recv().unwrap(),
+        tarz_core::permission::ApprovalDecision::Allow
+    );
+    assert!(app.entries[0].approval_queue.is_empty());
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn wm18_guard_window_esc_cancels_and_scroll_keys_scroll() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let fixture = wire::Fixture::with_responses("openai-chat", vec![]);
+    let mut app = app(dir.path());
+    create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    app.entries[0]
+        .approval_queue
+        .push_back(crate::app::state::PendingApproval::mock(
+        "write_file".into(),
+        PermissionMode::Ask,
+        tarz_core::permission::ApprovalSubject::FileWrite {
+            path: "multiline.txt".into(),
+            action: tarz_core::permission::WriteAction::Created,
+            diff:
+                "+line1\n+line2\n+line3\n+line4\n+line5\n+line6\n+line7\n+line8\n+line9\n+line10\n"
+                    .into(),
+        },
+        move |d| {
+            let _ = tx.send(d);
+        },
+    ));
+
+    // Guard window is active
+    assert!(app.is_approval_guarded());
+    assert_eq!(app.entries[0].approval_scroll, 0);
+
+    // Down key scrolls the diff during guard window
+    app.event(key(KeyCode::Down));
+    assert_eq!(app.entries[0].approval_scroll, 1);
+
+    // PgDn key scrolls down by 5
+    app.event(key(KeyCode::PageDown));
+    assert_eq!(app.entries[0].approval_scroll, 6);
+
+    // Up key scrolls up
+    app.event(key(KeyCode::Up));
+    assert_eq!(app.entries[0].approval_scroll, 5);
+
+    // PgUp scrolls up by 5
+    app.event(key(KeyCode::PageUp));
+    assert_eq!(app.entries[0].approval_scroll, 0);
+
+    // Esc cancels during guard window
+    app.event(key(KeyCode::Esc));
+    assert!(app.entries[0].approval_queue.is_empty());
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn wm18_switching_to_session_with_pending_approval_starts_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let fixture = wire::Fixture::with_responses("openai-chat", vec![]);
+    let mut app = app(dir.path());
+    // Create session 0
+    create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+    // Create session 1
+    create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+
+    // Enqueue approval on session 1
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    app.entries[1]
+        .approval_queue
+        .push_back(crate::app::state::PendingApproval::mock(
+            "write_file".into(),
+            PermissionMode::Ask,
+            tarz_core::permission::ApprovalSubject::FileWrite {
+                path: "session1.txt".into(),
+                action: tarz_core::permission::WriteAction::Created,
+                diff: "+s1\n".into(),
+            },
+            move |d| {
+                let _ = tx.send(d);
+            },
+        ));
+
+    // Currently on session 0: no approval visible
+    app.selected = 0;
+    app.update_approval_guard();
+    assert!(!app.is_approval_guarded());
+
+    // Switch to session 1
+    app.selected = 1;
+    app.update_approval_guard();
+    assert!(app.is_approval_guarded());
+
+    // Pressing Enter immediately is ignored
+    app.event(key(KeyCode::Enter));
+    assert!(rx.try_recv().is_err());
+    assert_eq!(app.entries[1].approval_queue.len(), 1);
+
+    // Advance clock past 500 ms
+    advance_past_approval_window(&mut app);
+    assert!(!app.is_approval_guarded());
+
+    // Enter now allows
+    app.event(key(KeyCode::Enter));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        tarz_core::permission::ApprovalDecision::Allow
+    );
+    assert!(app.entries[1].approval_queue.is_empty());
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn wm18_hint_line_dimmed_during_window_and_normal_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let fixture = wire::Fixture::with_responses("openai-chat", vec![]);
+    let mut app = app(dir.path());
+    create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+
+    app.entries[0]
+        .approval_queue
+        .push_back(crate::app::state::PendingApproval::mock(
+            "write_file".into(),
+            PermissionMode::Ask,
+            tarz_core::permission::ApprovalSubject::FileWrite {
+                path: "hint_test.txt".into(),
+                action: tarz_core::permission::WriteAction::Created,
+                diff: "+hello\n".into(),
+            },
+            |_| {},
+        ));
+
+    // Draw buffer while guarded
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+
+    // Find the cell with 'E' from "Enter / y allow"
+    let buffer = terminal.backend().buffer();
+    let hint_text = "Enter / y allow";
+    let (hint_x, hint_y) = (0..buffer.area.height)
+        .find_map(|y| {
+            let row_str: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            row_str.find(hint_text).map(|x| (x as u16, y))
+        })
+        .expect("hint text must be present on screen");
+
+    let cell_during = &buffer[(hint_x, hint_y)];
+    assert!(
+        cell_during.modifier.contains(Modifier::DIM),
+        "hint cell modifier {:?} must contain DIM during guard window",
+        cell_during.modifier
+    );
+
+    // Advance clock past 500 ms and check dirty flag
+    advance_past_approval_window(&mut app);
+    assert!(app.dirty, "app must be marked dirty when window expires");
+
+    // Redraw after window expired
+    terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+    let buffer_after = terminal.backend().buffer();
+    let cell_after = &buffer_after[(hint_x, hint_y)];
+    assert!(
+        !cell_after.modifier.contains(Modifier::DIM),
+        "hint cell modifier {:?} must NOT contain DIM after guard window",
+        cell_after.modifier
+    );
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn wm18_panel_hidden_by_small_terminal_then_shown_starts_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let fixture = wire::Fixture::with_responses("openai-chat", vec![]);
+    let mut app = app(dir.path());
+    create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+
+    // Small terminal: 29 x 11 (panel will be hidden by size precheck)
+    app.event(Event::Resize(29, 11));
+
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    app.entries[0]
+        .approval_queue
+        .push_back(crate::app::state::PendingApproval::mock(
+            "write_file".into(),
+            PermissionMode::Ask,
+            tarz_core::permission::ApprovalSubject::FileWrite {
+                path: "resize_guard.txt".into(),
+                action: tarz_core::permission::WriteAction::Created,
+                diff: "+resized\n".into(),
+            },
+            move |d| {
+                let _ = tx.send(d);
+            },
+        ));
+
+    // When hidden, it's not visible
+    assert!(app.current_visible_approval().is_none());
+
+    // Resize to large enough terminal
+    app.event(Event::Resize(40, 25));
+
+    // Panel is now visible and guard window must start
+    assert!(app.is_approval_guarded());
+
+    // Pressing 'y' during window is ignored
+    app.event(key(KeyCode::Char('y')));
+    assert!(rx.try_recv().is_err());
+    assert_eq!(app.entries[0].approval_queue.len(), 1);
+
+    // Advance clock past 500 ms
+    advance_past_approval_window(&mut app);
+    assert!(!app.is_approval_guarded());
+
+    // Now 'y' allows
+    app.event(key(KeyCode::Char('y')));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        tarz_core::permission::ApprovalDecision::Allow
+    );
+    assert!(app.entries[0].approval_queue.is_empty());
+}
+
+#[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn wm18_user_opened_panels_respond_immediately_without_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+
+    let fixture = wire::Fixture::with_responses("openai-chat", vec![]);
+    let mut app = app(dir.path());
+    create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+
+    // 1. Commands panel ('/')
+    app.event(key(KeyCode::Char('/')));
+    assert!(matches!(
+        app.panel,
+        Some(crate::app::Panel::Commands { .. })
+    ));
+    assert!(!app.is_approval_guarded());
+    // Esc closes immediately
+    app.event(key(KeyCode::Esc));
+    assert!(app.panel.is_none());
+
+    // 2. Sessions panel ('/sessions')
+    app.event(key(KeyCode::Char('/')));
+    for c in "sessions".chars() {
+        app.event(key(KeyCode::Char(c)));
+    }
+    app.event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.panel,
+        Some(crate::app::Panel::Sessions { .. })
+    ));
+    assert!(!app.is_approval_guarded());
+    app.event(key(KeyCode::Esc));
+    assert!(app.panel.is_none());
+
+    // 3. Mode select panel ('/mode')
+    app.event(key(KeyCode::Char('/')));
+    for c in "mode".chars() {
+        app.event(key(KeyCode::Char(c)));
+    }
+    app.event(key(KeyCode::Enter));
+    assert!(matches!(
+        app.panel,
+        Some(crate::app::Panel::ModeSelect { .. })
+    ));
+    assert!(!app.is_approval_guarded());
+    // Immediately choose accept-edits (Down -> Enter)
+    app.event(key(KeyCode::Down));
+    app.event(key(KeyCode::Enter));
+    assert!(app.panel.is_none());
+    assert_eq!(
+        app.entries[0]
+            .session
+            .as_ref()
+            .unwrap()
+            .permission_mode()
+            .unwrap()
+            .0,
+        PermissionMode::AcceptEdits
+    );
 }

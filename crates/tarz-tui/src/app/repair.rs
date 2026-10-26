@@ -1,7 +1,7 @@
 use super::{
     App, Panel,
     jobs::{Message, save_label},
-    state::Key,
+    state::{CONFIRM_GUARD_WINDOW, GuardWindow, Key},
 };
 use causa::{kernel::BlockId, runtime::new_block_id};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
@@ -40,6 +40,7 @@ pub(crate) struct RepairPanel {
     pub scroll: usize,
     pub plan: Option<RepairPlan>,
     pub busy: bool,
+    pub(crate) guard: GuardWindow,
 }
 
 #[cfg(test)]
@@ -56,6 +57,7 @@ impl RepairPanel {
             scroll: 0,
             plan: None,
             busy: false,
+            guard: GuardWindow::new(),
         }
     }
 }
@@ -91,6 +93,7 @@ impl App {
             scroll: 0,
             plan: None,
             busy: true,
+            guard: GuardWindow::new(),
         })));
         self.spawn_job(
             Some(key.clone()),
@@ -141,6 +144,7 @@ impl App {
         let Some(panel) = self.repair_panel(&key, request) else {
             return;
         };
+        panel.guard.disarm();
         panel.busy = false;
         panel.lines = match result {
             Err(error) => vec![
@@ -238,6 +242,7 @@ impl App {
             return;
         };
         panel.plan = None;
+        panel.guard.disarm();
         panel.busy = true;
         panel.request = new_block_id();
         entry.repair_job = Some(panel.request);
@@ -267,18 +272,22 @@ impl App {
         result: Result<RepairPlan, String>,
     ) {
         self.repair_job_finished(&key, request);
+        let now = self.clock.now();
+        let is_ok = result.is_ok();
         let Some(panel) = self.repair_panel(&key, request) else {
             return;
         };
         panel.busy = false;
         match result {
             Err(error) => {
+                panel.guard.disarm();
                 panel.lines = vec![
                     format!("Cannot prepare this repair: {error}"),
                     "No materials were changed. F7 refreshes the actual state.".into(),
                 ]
             }
             Ok(plan) => {
+                panel.guard.arm(now, CONFIRM_GUARD_WINDOW);
                 let summary = plan.summary();
                 let mode = match plan.mode() {
                     RepairMode::RemoveUnpaired => "Remove unpaired declarations",
@@ -333,6 +342,9 @@ impl App {
                 panel.plan = Some(plan);
             }
         }
+        if is_ok {
+            self.dirty = true;
+        }
     }
 
     fn apply_repair(&mut self) {
@@ -354,6 +366,7 @@ impl App {
         let Some(plan) = panel.plan.take() else {
             return;
         };
+        panel.guard.disarm();
         panel.busy = true;
         panel.lines =
             vec!["Applying the preview and waiting for saving. Your draft is retained.".into()];
@@ -414,12 +427,24 @@ impl App {
             entry.notice = message.clone();
         }
         if let Some(panel) = self.repair_panel(&key, request) {
+            panel.guard.disarm();
             panel.busy = false;
             panel.lines = vec![message];
         }
     }
 
     pub(super) fn repair_key(&mut self, key: KeyEvent) {
+        if self.is_repair_guarded() {
+            if key.code == KeyCode::Esc {
+                self.panel = None;
+                return;
+            }
+            if let Some(Panel::Repair(panel)) = &mut self.panel {
+                scroll_repair(panel, key.code, self.view_width);
+            }
+            return;
+        }
+
         if key.code == KeyCode::Esc {
             self.panel = None;
             return;

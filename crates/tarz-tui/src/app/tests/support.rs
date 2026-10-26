@@ -1,5 +1,5 @@
 use super::super::App;
-use crate::{input::Form, options::Options};
+use crate::{app::Clock, input::Form, options::Options};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui_textarea::TextArea;
 use serde_json::Value;
@@ -14,14 +14,24 @@ use tokio::{
 };
 
 pub(super) fn app(dir: &std::path::Path) -> App {
-    App::new(Options {
+    let mut app = App::new(Options {
         store: dir.join("store"),
         recovery_dir: dir.to_path_buf(),
         config: Arc::new(tarz_core::config::Config::default()),
         profile: None,
         preset: None,
         config_path: None,
-    })
+    });
+    app.clock = Clock::manual(std::time::Instant::now());
+    app
+}
+pub(super) fn advance_past_approval_window(app: &mut App) {
+    app.update_approval_guard();
+    app.advance_clock(crate::app::state::CONFIRM_GUARD_WINDOW);
+}
+pub(super) fn advance_past_repair_window(app: &mut App) {
+    app.update_repair_guard();
+    app.advance_clock(crate::app::state::CONFIRM_GUARD_WINDOW);
 }
 pub(super) fn ctrl(letter: char) -> Event {
     Event::Key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::CONTROL))

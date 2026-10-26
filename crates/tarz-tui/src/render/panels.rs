@@ -107,10 +107,15 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
             } else {
                 "r preview removal · a preview original results · F7 refresh\nCtrl-R retry save · Esc keep materials · F4 next session"
             };
+            let hint_style = if app.is_repair_guarded() {
+                Style::default().fg(MUTED).add_modifier(Modifier::DIM)
+            } else {
+                Style::default().fg(MUTED).remove_modifier(Modifier::DIM)
+            };
             frame.render_widget(
                 Paragraph::new(hint)
                     .wrap(Wrap { trim: false })
-                    .style(Style::default().fg(MUTED)),
+                    .style(hint_style),
                 regions[2],
             );
             return;
@@ -316,7 +321,7 @@ pub(super) fn confirm(frame: &mut Frame<'_>, confirmation: &crate::app::Confirma
     );
 }
 
-pub(super) fn approval(frame: &mut Frame<'_>, _app: &App, entry: &crate::app::Entry, area: Rect) {
+pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Entry, area: Rect) {
     frame.render_widget(Clear, area);
     let Some(req) = entry.approval_queue.front() else {
         return;
@@ -460,10 +465,12 @@ pub(super) fn approval(frame: &mut Frame<'_>, _app: &App, entry: &crate::app::En
     } else {
         "Enter / y allow · n deny · Esc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
     };
-    frame.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(MUTED)),
-        regions[3],
-    );
+    let hint_style = if app.is_approval_guarded() {
+        Style::default().fg(MUTED).add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(MUTED).remove_modifier(Modifier::DIM)
+    };
+    frame.render_widget(Paragraph::new(hint).style(hint_style), regions[3]);
 }
 
 fn diff_block() -> Block<'static> {

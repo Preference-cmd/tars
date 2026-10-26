@@ -49,6 +49,9 @@ impl App {
     }
     pub(super) fn event(&mut self, event: Event) {
         self.dirty = true;
+        self.update_approval_guard();
+        self.update_repair_guard();
+        let is_guarded = self.is_approval_guarded();
         if let Event::Resize(width, height) = event {
             self.view_width = render::transcript_width(width);
             self.view_height = height;
@@ -68,6 +71,7 @@ impl App {
                         .saturating_sub(1),
                 );
             }
+            self.update_approval_guard();
             return;
         }
         if let Event::Paste(text) = &event {
@@ -87,7 +91,9 @@ impl App {
                 input::paste(&mut form.fields[form.selected], text, false);
             } else if let Some(entry) = self.entries.get_mut(self.selected) {
                 if let Some(reason) = &mut entry.approval_reason {
-                    reason.extend(text.chars().filter(|c| !c.is_control()));
+                    if !is_guarded {
+                        reason.extend(text.chars().filter(|c| !c.is_control()));
+                    }
                 } else if entry.approval_queue.is_empty() {
                     input::paste(&mut entry.editor, text, true);
                 }
@@ -114,6 +120,7 @@ impl App {
                 KeyCode::Char('n') | KeyCode::Esc => {}
                 _ => self.confirmation = Some(confirmation),
             }
+            self.update_approval_guard();
             return;
         }
         if self.quitting {
@@ -125,6 +132,7 @@ impl App {
         }
         if self.panel.is_some() {
             self.panel_key(key);
+            self.update_approval_guard();
             return;
         }
         if let Some(form) = &mut self.form {
@@ -135,6 +143,7 @@ impl App {
             } else {
                 form.key(key);
             }
+            self.update_approval_guard();
             return;
         }
         if let Some(entry) = self.entries.get_mut(self.selected)
@@ -149,6 +158,21 @@ impl App {
                 if key.code == KeyCode::Esc || input::control(key, 'c') {
                     clear_approvals(entry);
                     self.cancel();
+                    self.update_approval_guard();
+                }
+                return;
+            }
+
+            // Accidental-key guard: right after the request on screen appears or
+            // changes without a key press, keys typed for something else must not
+            // decide it. Only cancel and scroll act for 500 ms; the rest is dropped.
+            if is_guarded {
+                if key.code == KeyCode::Esc || input::control(key, 'c') {
+                    clear_approvals(entry);
+                    self.cancel();
+                    self.update_approval_guard();
+                } else {
+                    scroll_approval(entry, key.code);
                 }
                 return;
             }
@@ -179,6 +203,8 @@ impl App {
                             });
                             entry.approval_scroll = 0;
                         }
+                        self.update_approval_guard();
+                        return;
                     }
                     KeyCode::Esc => {
                         entry.approval_reason = None;
@@ -213,6 +239,8 @@ impl App {
                         req.respond(tarz_core::permission::ApprovalDecision::Allow);
                         entry.approval_scroll = 0;
                     }
+                    self.update_approval_guard();
+                    return;
                 }
                 KeyCode::Char('n' | 'N')
                     if !key
@@ -227,6 +255,7 @@ impl App {
                 {
                     clear_approvals(entry);
                     self.cancel();
+                    self.update_approval_guard();
                     return;
                 }
                 code => scroll_approval(entry, code),
@@ -303,6 +332,7 @@ impl App {
                     if !self.entries.is_empty() {
                         self.selected = (self.selected + 1) % self.entries.len();
                         self.refresh_size_flags();
+                        self.update_approval_guard();
                     }
                 }
                 KeyCode::F(5) if key.kind == KeyEventKind::Press => self.list(),

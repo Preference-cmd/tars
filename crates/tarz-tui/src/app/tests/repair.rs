@@ -1,4 +1,4 @@
-use super::support::{Server, app, create, ctrl, key, until};
+use super::support::{Server, advance_past_repair_window, app, create, ctrl, key, until};
 use crate::{
     app::{Panel, state::Entry},
     render,
@@ -144,6 +144,7 @@ async fn repair_ui_preview_discard_resize_switch_apply_save_and_explicit_send() 
         assert_eq!(session.read_materials().unwrap().version, before.version);
         app.entries
             .push(Entry::new("other-view".into(), "other".into()));
+        advance_past_repair_window(&mut app);
         app.event(key(KeyCode::F(4)));
         assert!(app.panel.is_none());
         assert_eq!(app.selected, 1);
@@ -156,6 +157,7 @@ async fn repair_ui_preview_discard_resize_switch_apply_save_and_explicit_send() 
         );
         inspect(&mut app).await;
         plan(&mut app).await;
+        advance_past_repair_window(&mut app);
         app.event(key(KeyCode::Enter));
         until(&mut app, |app| {
             app.entries[0].notice.starts_with("Repair applied;")
@@ -211,6 +213,7 @@ async fn repair_ui_stale_candidate_and_late_inspection_do_not_touch_drafts_or_ne
         .unwrap();
     session.wait_saved().await.unwrap();
     let before = session.read_materials().unwrap();
+    advance_past_repair_window(&mut app);
     app.event(key(KeyCode::Enter));
     until(&mut app, |app| {
         app.entries[0].notice.starts_with("Repair rejected")
@@ -288,6 +291,7 @@ async fn repair_ui_save_failure_keeps_applied_materials_and_draft_then_retries_s
             .unwrap();
         return;
     }
+    advance_past_repair_window(&mut app);
     app.event(key(KeyCode::Enter));
     until(&mut app, |app| {
         app.entries[0]
@@ -498,4 +502,267 @@ fn repair_panel_renders_untrusted_paths_escaped() {
     assert!(!view.contains('\u{202e}'));
     assert!(!view.contains('\u{2066}'));
     assert!(!view.contains('\u{2028}'));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm18_repair_plan_guard_window_drops_enter_then_applies_after_expiry() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    incomplete(&mut app, Provider::OpenAiChat, "http://127.0.0.1:1/unused").await;
+    let session = app.entries[0].session.as_ref().unwrap().clone();
+    let before = session.read_materials().unwrap();
+
+    app.event(Event::Paste("preserved draft content".into()));
+    inspect(&mut app).await;
+    plan(&mut app).await;
+
+    // Window must be active immediately after plan arrives
+    assert!(app.is_repair_guarded());
+    assert!(matches!(&app.panel, Some(Panel::Repair(p)) if p.plan.is_some()));
+
+    // Press Enter within the window: must NOT apply
+    app.event(key(KeyCode::Enter));
+
+    // Assert: plan still present, no apply started, materials unchanged, draft unchanged
+    assert!(
+        matches!(&app.panel, Some(Panel::Repair(p)) if p.plan.is_some()),
+        "plan must still be present"
+    );
+    assert_ne!(
+        app.entries[0].busy,
+        Some("repairing materials"),
+        "no apply job should have started"
+    );
+    assert_eq!(
+        session.read_materials().unwrap().version,
+        before.version,
+        "materials must remain unchanged"
+    );
+    assert_eq!(
+        app.entries[0].editor.lines(),
+        &["preserved draft content"],
+        "draft must remain unchanged"
+    );
+
+    // Advance clock past 500 ms window
+    advance_past_repair_window(&mut app);
+    assert!(!app.is_repair_guarded());
+
+    // Enter now applies
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |app| {
+        app.entries[0].notice.starts_with("Repair applied;")
+    })
+    .await;
+
+    assert_ne!(session.read_materials().unwrap().version, before.version);
+    assert_eq!(app.entries[0].editor.lines(), &["preserved draft content"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm18_repair_guard_window_ignores_actions_and_allows_esc_and_scroll() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    incomplete(&mut app, Provider::OpenAiChat, "http://127.0.0.1:1/unused").await;
+
+    inspect(&mut app).await;
+    plan(&mut app).await;
+
+    assert!(app.is_repair_guarded());
+
+    // Within window: r, a, F7, F4, Ctrl-R, Ctrl-E, letters must be dropped
+    let plan_explanation = match &app.panel {
+        Some(Panel::Repair(p)) => p.plan.as_ref().unwrap().summary().explanation_id,
+        _ => unreachable!(),
+    };
+
+    app.event(key(KeyCode::Char('r')));
+    assert!(
+        matches!(&app.panel, Some(Panel::Repair(p)) if p.plan.as_ref().unwrap().summary().explanation_id == plan_explanation),
+        "r within guard window must be dropped and not restart planning"
+    );
+
+    app.event(key(KeyCode::Char('a')));
+    assert!(
+        matches!(&app.panel, Some(Panel::Repair(p)) if p.plan.as_ref().unwrap().summary().explanation_id == plan_explanation),
+        "a within guard window must be dropped"
+    );
+
+    app.event(key(KeyCode::F(7)));
+    assert!(
+        matches!(&app.panel, Some(Panel::Repair(p)) if p.plan.is_some()),
+        "F7 within guard window must be dropped"
+    );
+
+    app.event(key(KeyCode::F(4)));
+    assert!(
+        app.panel.is_some(),
+        "F4 within guard window must be dropped"
+    );
+
+    app.event(ctrl('r'));
+    assert!(
+        app.panel.is_some(),
+        "Ctrl-R within guard window must be dropped"
+    );
+
+    app.event(ctrl('e'));
+    assert!(
+        app.panel.is_some(),
+        "Ctrl-E within guard window must be dropped"
+    );
+
+    app.event(key(KeyCode::Char('x')));
+    assert!(app.panel.is_some());
+
+    // Scroll keys scroll within window
+    let initial_scroll = match &app.panel {
+        Some(Panel::Repair(p)) => p.scroll,
+        _ => unreachable!(),
+    };
+    assert_eq!(initial_scroll, 0);
+
+    app.event(key(KeyCode::Down));
+    let scrolled_down = match &app.panel {
+        Some(Panel::Repair(p)) => p.scroll,
+        _ => unreachable!(),
+    };
+    assert!(
+        scrolled_down > 0,
+        "Down key must scroll within guard window"
+    );
+
+    app.event(key(KeyCode::PageDown));
+    let scrolled_pgdn = match &app.panel {
+        Some(Panel::Repair(p)) => p.scroll,
+        _ => unreachable!(),
+    };
+    assert!(
+        scrolled_pgdn > scrolled_down,
+        "PageDown key must scroll further"
+    );
+
+    app.event(key(KeyCode::Up));
+    let scrolled_up = match &app.panel {
+        Some(Panel::Repair(p)) => p.scroll,
+        _ => unreachable!(),
+    };
+    assert!(scrolled_up < scrolled_pgdn, "Up key must scroll up");
+
+    // Esc closes the panel within window
+    app.event(key(KeyCode::Esc));
+    assert!(
+        app.panel.is_none(),
+        "Esc must close panel during guard window"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm18_repair_hint_dimmed_during_window_and_normal_after() {
+    use ratatui::style::Modifier;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    incomplete(&mut app, Provider::OpenAiChat, "http://127.0.0.1:1/unused").await;
+
+    inspect(&mut app).await;
+    plan(&mut app).await;
+
+    assert!(app.is_repair_guarded());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let hint_text = "Enter apply this preview";
+    let (hint_x, hint_y) = (0..buffer.area.height)
+        .find_map(|y| {
+            let row_str: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            row_str.find(hint_text).map(|x| (x as u16, y))
+        })
+        .expect("repair hint text must be present on screen");
+
+    let cell_during = &buffer[(hint_x, hint_y)];
+    assert!(
+        cell_during.modifier.contains(Modifier::DIM),
+        "hint cell modifier {:?} must contain DIM during guard window",
+        cell_during.modifier
+    );
+
+    // Advance clock past 500 ms and check dirty flag
+    advance_past_repair_window(&mut app);
+    assert!(
+        app.dirty,
+        "app must be marked dirty when repair window expires"
+    );
+    assert!(!app.is_repair_guarded());
+
+    // Redraw after window expired
+    terminal.draw(|frame| render::draw(frame, &app)).unwrap();
+    let buffer_after = terminal.backend().buffer();
+    let cell_after = &buffer_after[(hint_x, hint_y)];
+    assert!(
+        !cell_after.modifier.contains(Modifier::DIM),
+        "hint cell modifier {:?} must NOT contain DIM after guard window",
+        cell_after.modifier
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wm18_repair_second_plan_starts_fresh_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    incomplete(&mut app, Provider::OpenAiChat, "http://127.0.0.1:1/unused").await;
+    let session = app.entries[0].session.as_ref().unwrap().clone();
+    let before = session.read_materials().unwrap();
+
+    inspect(&mut app).await;
+    plan(&mut app).await;
+
+    // First window active
+    assert!(app.is_repair_guarded());
+
+    // Advance clock past the first window
+    advance_past_repair_window(&mut app);
+    assert!(!app.is_repair_guarded());
+
+    // User presses r again to generate a new plan
+    app.event(key(KeyCode::Char('r')));
+    until(&mut app, |app| {
+        matches!(&app.panel, Some(Panel::Repair(panel)) if !panel.busy && panel.plan.is_some())
+    })
+    .await;
+
+    // Second plan must start a fresh window!
+    assert!(
+        app.is_repair_guarded(),
+        "second plan must start its own new guard window"
+    );
+
+    // Within second window, Enter does NOT apply
+    app.event(key(KeyCode::Enter));
+    assert!(
+        matches!(&app.panel, Some(Panel::Repair(p)) if p.plan.is_some()),
+        "plan must still be present within second window"
+    );
+    assert_ne!(
+        app.entries[0].busy,
+        Some("repairing materials"),
+        "no apply job should have started within second window"
+    );
+    assert_eq!(session.read_materials().unwrap().version, before.version);
+
+    // Advance past second window
+    advance_past_repair_window(&mut app);
+    assert!(!app.is_repair_guarded());
+
+    // Enter now applies
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |app| {
+        app.entries[0].notice.starts_with("Repair applied;")
+    })
+    .await;
+    assert_ne!(session.read_materials().unwrap().version, before.version);
 }

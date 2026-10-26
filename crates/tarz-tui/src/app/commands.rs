@@ -273,6 +273,7 @@ impl App {
                         self.selected = index;
                         self.refresh_size_flags();
                         self.open();
+                        self.update_approval_guard();
                     }
                     return;
                 }

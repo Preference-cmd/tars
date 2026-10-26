@@ -345,6 +345,8 @@ impl App {
             );
         }
         self.refresh_size_flags();
+        self.update_approval_guard();
+        self.update_repair_guard();
         if self.quitting {
             for index in 0..self.entries.len() {
                 self.close(index, ClosePolicy::Save);
