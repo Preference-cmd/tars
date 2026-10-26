@@ -19,15 +19,29 @@ max_tool_calls = 64
 # reasoning_effort = "medium"  # none | minimal | low | medium | high | xhigh
 # Model calls per round when the provider fails transiently or rate-limits. Default 1 (no retry).
 # max_model_attempts = 3
+# Initial permission mode for a new session: read-only | ask | accept-edits | full-access.
+# Reopening restores the saved current mode, except full-access, which returns to ask
+# unless full-access was the initial mode.
+# permission_mode = "ask"
 # Explicit opt-in: root alone does not enable tools.
 # workspace_root = "../my-project"
 # tools = ["list_directory", "read_file", "search_text"]
+# Add "write_file" and "edit_file" to enable workspace writes; ask mode confirms each write.
+# MCP servers are defined in mcp.json next to this file (or in TARZ_MCP_CONFIG).
+# Select them by id; omitted or empty selects none.
+# mcp = ["git"]
 
 # Optional lower limits (never raises the supported ceilings).
 # [profiles.default.tool_limits]
 # max_concurrent_operations = 2
 # call_timeout_secs = 5
 # max_output_bytes = 32768
+
+# Optional lower write limits (never raises the supported ceilings).
+# [profiles.default.write_limits]
+# max_edit_file_bytes = 1048576
+# max_write_bytes = 524288
+# max_edit_segments = 16
 
 # Render options for the protocol, checked against Causa's options type for it.
 # For openai-chat, a server that reads only max_tokens needs:

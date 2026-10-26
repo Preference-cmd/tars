@@ -11,14 +11,14 @@ Tarz 是 Causa 的验证项目：用一个真实的 Agent 应用检验 Causa 的
 边界：
 
 - Tarz 只经 Causa 的公开 facade 使用 crates.io 上已发布的版本，不复制或引入 Causa 源码，所以验证的就是外部用户实际拿到的东西。
-- 改进 Causa 时不把 Tarz 自己的策略放进去。例如许可模式归 Tarz，Causa 只携带工具声明的提示和每轮的宿主数据，许可的词汇和决定仍由 Tarz 定。
+- 改进 Causa 时不把 Tarz 自己的策略放进去。例如权限模式归 Tarz，Causa 只携带工具声明的提示和每轮的宿主数据，模式的词汇和决定仍由 Tarz 定。
 - Tarz 的测试通过，只说明这一处接线可行，不能代替 Causa 自己的测试。
 
 ## 当前状态
 
 当前已实现单会话工作闭环，并提供离线 CLI 演示：原子提交、同键重放、逐工作装配、取消与结果观察、材料编辑及保存/导入。演示使用脚本模型和真实本地工具，经过 Session 与 Causa runner 执行，不需要凭据或网络。
 
-`tarz run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tarz session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。`tarz-tui` 提供原生终端原型与临时流式正文预览，两端共用 TOML 配置，并可显式选择工作区和工作区工具。MCP 独立配置文件 `mcp.json`（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和运行期工具已接通（只接通工具，不含 resources/prompts/sampling），MCP 调用按 `mcp.json` 的 `approval` 设置和当前权限模式执行、确认（终端或 TUI 确认面板）或拒绝，真实服务验证待补；GUI、命令执行、父子 Agent 和安装渠道尚未实现；CLI 与 TUI 可以写入文件：`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；`tarz-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。当前开发版本为 `0.0.0`，尚无公开发布。
+`tarz run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tarz session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。`tarz-tui` 提供原生终端原型与临时流式正文预览，两端共用 TOML 配置，并可显式选择工作区和工作区工具。MCP 独立配置文件 `mcp.json`（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和运行期工具已接通（只接通工具，不含 resources/prompts/sampling），MCP 调用按 `mcp.json` 的 `approval` 设置和当前权限模式执行、确认（终端或 TUI 确认面板）或拒绝，真实第三方 MCP 服务验证待补；GUI、命令执行、父子 Agent 和安装渠道尚未实现；CLI 与 TUI 可以写入文件：`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；`tarz-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。当前开发版本为 `0.0.0`，尚无公开发布。
 
 ## 本地构建与运行
 
@@ -46,7 +46,7 @@ Windows 使用 `target\release\tarz.exe`。不带参数显示帮助；参数错�
 printf '继续分析材料' | ./target/release/tarz run --provider openai-responses --model "$MODEL_ID" --stdin --load materials.json --save materials.json --json
 ```
 
-`MODEL_ID` 由你设置为服务端可用模型。协议选项为 `openai-chat`、`openai-responses`、`anthropic`；`--endpoint` 覆盖完整 URL（包括路径），`--api-key-env` 指定其他凭据环境变量名。凭据不会由配置层写入材料或结果报告。默认工具目录为空；使用 `--workspace DIR --tools list_directory,read_file,search_text,write_file,edit_file` 启用工作区工具能力，仍仅输出最终结果。访问范围、限额和旧记录导出见[工作区工具](docs/workspace-tools.md)。
+`MODEL_ID` 由你设置为服务端可用模型。协议选项为 `openai-chat`、`openai-responses`、`anthropic`；`--endpoint` 覆盖完整 URL（包括路径），`--api-key-env` 指定其他凭据环境变量名。凭据不会由配置层写入材料或结果报告。默认工具目录为空；使用 `--workspace DIR --tools list_directory,read_file,search_text,write_file,edit_file` 启用工作区工具能力，仍仅输出最终结果。写入已有文件前必须先 `read_file`；`--permission-mode` 设置初始权限模式，`ask` 在非终端直接拒绝写入。访问范围、确认、限额和旧记录导出见[工作区工具](docs/workspace-tools.md)。
 
 输入必须二选一：`--input <text>` 或 `--stdin`（读到 EOF，UTF-8，不能全空白）。`--timeout-secs` 默认 120，范围 1–86400，从工作受理起覆盖装配和执行；不覆盖读取 stdin、加载或保存文件。
 
@@ -54,7 +54,7 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 退出码：0 完成；1 配置、执行或文件失败；2 参数错误；124 工作期限；130 取消。Ctrl-C 在执行期间请求取消并等待真实材料交还；`--save` 在成功、执行失败或受控中断后保存当前材料，没有该选项则不自动保存。它不保存未提交输出或未提交工具批次，也不恢复旧工作或请求键。默认材料接口拒绝外部媒体/资产引用。
 
-这些路径由本地 HTTP fixture 和实际进程测试验证，不需要线上凭据；另已完成用户配置服务的最小请求与三工具往返实测。线上样本不代替中断/竞态验证，公开安装尚未验收。
+这些路径由本地 HTTP fixture 和实际进程测试验证，不需要线上凭据；另已完成用户配置服务的最小请求、三工具往返和带确认写入的 BA09 三协议实测。线上样本不代替中断/竞态验证，公开安装尚未验收。
 
 ## 保存并重开会话
 
@@ -81,11 +81,11 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 根目录是 Cargo workspace；`crates/tarz-core/` 提供共享应用核心与配置，`crates/tarz-cli/` 提供 `tarz`，`crates/tarz-tui/` 提供 `tarz-tui` 原型。默认 `cargo run/build` 仍选择 CLI；TUI 使用 `cargo run -p tarz-tui -- --config /path/to/config.toml`，全部构建用 `cargo build --workspace --locked`。入口各自单向依赖核心，所有包 `publish = false`。Causa 以 crates.io 上发布的 `causa = "0.1"` 接入，启用 runtime 与 providers，具体版本由 Cargo.lock 固定；构建不再需要同级目录的 Causa checkout。独立分发另行处理。
 
-CLI/TUI 共用 [TOML 配置](docs/configuration.md)，支持全局默认路径、`TARZ_CONFIG`、`--config` 和命名模型预设；显式参数优先。可从 [config.example.toml](config.example.toml) 开始填写。已有会话重开不受全局模型预设变更影响。
+CLI/TUI 共用 [TOML 配置](docs/configuration.md)，支持全局默认路径、`TARZ_CONFIG`、`--config` 和命名模型预设；显式参数优先。可从 [config.example.toml](config.example.toml) 开始填写；MCP 服务器定义见 [mcp.example.json](mcp.example.json) 和[配置说明](docs/configuration.md#mcp-服务器)。已有会话重开不受全局模型预设变更影响。
 
 - [当前结构、接口边界与检查](docs/README.md)
 - [共享配置说明](docs/configuration.md)
-- [工作区只读工具与记录迁移](docs/workspace-tools.md)
+- [工作区工具：读写、确认与记录迁移](docs/workspace-tools.md)
 - [中断后的材料处理与继续](docs/session-continuation.md)
 - [TUI 运行、按键与验证边界](docs/tui.md)
 - [本地设计与实施入口](.agents/README.md)

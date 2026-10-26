@@ -2,7 +2,7 @@
 
 Tarz 的目的是验证并改进 Causa，应用是验证的载体，见 [README 的“目的”](../README.md#目的)。本页只记录当前实现。
 
-2026-10-05：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tarz-tui` 已接通会话、输入、临时流式正文预览、结果、取消及保存恢复；工作区只读工具与可靠状态已接通；CLI 和 TUI 可以写入文件：`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；`tarz-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。MCP 通过独立的 `mcp.json` 配置（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和内置 MCP 客户端的工具调用已接通，MCP 调用按 `mcp.json` 的 `approval` 设置和当前权限模式执行、确认（终端或 TUI 确认面板）或拒绝；GUI、命令执行、父子 Agent、安装和发布也仍在后续范围。
+2026-10-26：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tarz-tui` 已接通会话、输入、临时流式正文预览、结果、取消及保存恢复；工作区工具（三个只读工具与 `write_file`/`edit_file`）与可靠状态已接通；写入前先读后改，`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；四种权限模式可在运行中切换并随记录保存，`tarz-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。MCP 通过独立的 `mcp.json` 配置（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和内置 MCP 客户端的工具调用已接通，MCP 调用按 `mcp.json` 的 `approval` 设置和当前权限模式执行、确认（终端或 TUI 确认面板）或拒绝；GUI、命令执行、父子 Agent、安装和发布也仍在后续范围。
 
 ## 代码结构
 
@@ -22,7 +22,7 @@ Tarz 的目的是验证并改进 Causa，应用是验证的载体，见 [README 
 | `crates/tarz-tui/src/` | 单列对话、命令/会话选择、输入适配、流式预览与实际材料呈现 |
 | `crates/tarz-core/tests/`、`crates/tarz-cli/tests/` | 核心契约消费者、真实 CLI 与本地 HTTP 测试 |
 
-workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false`，binary 为 `tarz` 和 `tarz-tui`。CLI/TUI 各自单向依赖核心（另直接使用 Causa 的 `BlockId` 等事实词汇），核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。以公开 facade 消费 crates.io 上发布的 `causa 0.1`，具体版本由 Cargo.lock 固定，构建不需要同级 Causa checkout。没有源码 include 或复制。独立 CI/分发是后续交付步骤。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
+workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false`，binary 为 `tarz` 和 `tarz-tui`。CLI/TUI 只向下依赖核心和 Causa（另直接使用 `BlockId` 等事实词汇），核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。以公开 facade 消费 crates.io 上发布的 `causa 0.1`，具体版本由 Cargo.lock 固定，构建不需要同级 Causa checkout。没有源码 include 或复制。独立 CI/分发是后续交付步骤。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
 
 完整行为见 [Session 运行机制](session-lifecycle.md)，使用方法见 [README](../README.md)，逐项验收与本机证据见 [专项提案](../.agents/pipelines/archives/architecture/2026-10-03-session-structure-and-storage.md)和[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
 
@@ -34,7 +34,7 @@ workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false
 
 中断后继续通过 `inspect_repair/plan_repair/apply_repair` 显式处理材料。正式内置工具装配可采纳受控中断的原结果，重开无原批次时可移除未配对声明；新输入先经过配对准入，保存确认后才开始新工作。CLI `session repair` 与 TUI F7 共用此行为，完整条件、版本与保留边界见[中断后继续](session-continuation.md)。
 
-固定定义包含 provider、model、endpoint、凭据环境变量引用、工作期限、保留容量、模型/工具次数限制，以及工作区、工具选择和完整工具限额。打开时校验、解析一次并固定资源，创建和重开不调用模型。重开保留定义与 BlockId，但工作表、请求键、WorkRef、终态和未提交批次不恢复，不自动重跑旧工作。默认工具目录为空，可显式启用 list_directory/read_file/search_text。边界及记录迁移见[工作区工具](workspace-tools.md)，本轮证据见[实施记录](../.agents/reviews/2026-10-04-workspace-tools/README.md)。
+固定定义包含 provider、model、endpoint、凭据环境变量引用、工作期限、保留容量、模型/工具次数限制，以及工作区、工具选择、完整工具与写入限额、初始权限模式和 MCP 快照。打开时校验、解析一次并固定资源，创建和重开不调用模型。重开保留定义与 BlockId，但工作表、请求键、WorkRef、终态和未提交批次不恢复，不自动重跑旧工作。默认工具目录为空，可显式启用 list_directory/read_file/search_text/write_file/edit_file。边界及记录迁移见[工作区工具](workspace-tools.md)，本轮证据见[实施记录](../.agents/reviews/2026-10-04-workspace-tools/README.md)。
 
 低层 `session` 仍供核心与 fixture 消费者使用；产品 CLI 通过托管入口。其原去重、取消、typed 结果、批次和材料交还契约保留。
 
@@ -56,7 +56,7 @@ CLI 持久运行在成功、失败和受控中断后等待保存。保存等待�
 
 ## 后端与资源边界
 
-本机存储目录由 `--store DIR` 或共享 TOML 的 `store` 明确指定，没有自动生成的存储默认路径。记录位于 `DIR/sessions/<uuid>.json`，格式 `tarz-session-v2`。v1 不自动升级；`session export-materials` 可离线导出经校验的实际 Context，再显式采用新定义创建会话。固定定义、Context、ConversationId、revision 和 last_commit_id 同次写入；初始 revision 为 1。凭据配置只保存环境变量名。用户材料本身按原样保存。
+本机存储目录由 `--store DIR` 或共享 TOML 的 `store` 明确指定，没有自动生成的存储默认路径。记录位于 `DIR/sessions/<uuid>.json`，格式 `tarz-session-v2`；`workspace_root`、`tools`、`tool_limits` 必须存在，写入限额、初始/当前权限模式和 MCP 快照可省略，省略时按默认写入限额、`ask` 和没有服务器读取。v1 不自动升级；`session export-materials` 可离线导出经校验的实际 Context，再显式采用新定义创建会话。固定定义、Context、ConversationId、revision 和 last_commit_id 同次写入；初始 revision 为 1。凭据配置只保存环境变量名。用户材料本身按原样保存。
 
 稳定的 `<uuid>.lock` 文件与可替换记录分离，OS 排他锁从读取前持有至本地 worker/I/O 停止。占用、不支持或 I/O 错误均拒绝，不降级为无锁。提交校验基线与完整内容，经同目录临时文件、内容刷新和原子替换；确认不明时保持原操作。list 忽略锁和临时文件，逐记录报告损坏与活动状态；列表不是全目录原子快照。
 

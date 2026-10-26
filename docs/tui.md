@@ -9,13 +9,13 @@ cargo build -p tarz-tui --locked
 ./target/debug/tarz-tui --no-config --store ./tarz-data
 ```
 
-stdin 和 stdout 都必须是交互终端。至少 30×12；低于该尺寸时整屏只显示缩放提示。有待确认请求时需要至少 30×19 才显示面板并接受允许/拒绝键；更小时同样只显示缩放提示，Esc 或 Ctrl-C 仍取消本轮。矮窗口表单一次显示当前字段，Tab 切换。新建会话需要 provider/model 和可解析的凭据环境变量，创建本身不调用模型。F3 重开已存会话时采用原固定定义，不套用新的全局模型预设。
+stdin 和 stdout 都必须是交互终端。至少 30×12；低于该尺寸时整屏只显示缩放提示。有待确认请求时需要至少 30×19 才显示面板并接受允许/拒绝键；更小时同样只显示缩放提示，Esc 或 Ctrl-C 仍取消本轮。矮窗口表单一次显示当前字段，Tab 切换。新建会话需要 provider/model 和可解析的凭据环境变量，创建本身不调用模型；表单还包括 Workspace、Tools、初始权限模式和 MCP 服务器字段。F3 重开已存会话时采用原固定定义，不套用新的全局模型预设。
 
 | 操作 | 按键 |
 | --- | --- |
 | 命令菜单 | 空输入时键入 `/`，或任意草稿下 F1；输入筛选，↑↓ 选择，Enter 执行，Esc 返回 |
 | 新建/填写模型配置 | `/new` 或 F2；Tab/Shift-Tab 换字段，Ctrl-S 创建，Esc 返回 |
-| 许可模式切换 | `Shift-Tab`（在主视图与确认面板内循环切换 ask / accept-edits / read-only）；或 `/mode` / `/mode <name>` |
+| 权限模式切换 | `Shift-Tab`（在主视图与确认面板内循环切换 ask / accept-edits / read-only）；或 `/mode` / `/mode <name>` |
 | 写入确认 | 确认面板中 `Enter` / `y` 允许；`n` 拒绝并可输理由；`Esc` / `Ctrl-C` 取消本轮；`Shift-Tab` 切换模式；`↑` `↓` `PgUp` `PgDn` 滚动 diff（新请求从顶部开始，滚动不会越过内容末尾；待确认时窗口小于 30×19 只显示缩放提示，允许/拒绝键不生效；面板出现、队列换到下一条请求、切到有待确认请求的会话或 resize 重新显示后 0.5 秒内只响应 Esc/Ctrl-C 和滚动键，其他键被忽略且不进入草稿，提示变暗） |
 | 会话选择 | `/sessions`，按模型名或 ID 筛选，Enter 切换并打开 |
 | 帮助 / 完整状态与错误详情 | `/help` / `/status`；↑↓ 或 PageUp/PageDown 滚动 |
