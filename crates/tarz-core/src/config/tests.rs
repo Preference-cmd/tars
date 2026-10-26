@@ -960,3 +960,16 @@ fn wm11_mcp_config_location_rules() {
     assert!(disabled.mcp_servers().is_empty());
     assert_eq!(disabled.mcp_source(), None);
 }
+
+#[test]
+fn invalid_tool_names_are_derived_from_the_single_builtin_list() {
+    let error = super::parse_tools("list_directory,bogus")
+        .unwrap_err()
+        .to_string();
+    for tool in crate::definition::WorkspaceTool::ALL {
+        assert!(
+            error.contains(tool.name()),
+            "{tool:?} missing from: {error}"
+        );
+    }
+}

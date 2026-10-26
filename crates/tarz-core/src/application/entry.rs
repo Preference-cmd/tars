@@ -37,6 +37,7 @@ pub(super) struct State {
     pub closing: Option<ClosePolicy>,
     pub close_in_flight: bool,
     pub close_outcome: Option<CloseOutcome>,
+    pub open_report: OpenReport,
 }
 impl Entry {
     pub fn new(
@@ -80,6 +81,7 @@ impl Entry {
                 closing: None,
                 close_in_flight: false,
                 close_outcome: None,
+                open_report: OpenReport::default(),
             }),
             changed: Notify::new(),
             wake: Notify::new(),

@@ -71,7 +71,7 @@ printf '继续分析材料' | ./target/release/tarz run --provider openai-respon
 
 `--store` 由参数或共享配置指定。记录保存固定定义和最新 Context；重开保持 ConversationId 与 BlockId，但不恢复旧工作、请求键或未提交输出。环境变量凭据在每次打开时重新解析，记录只保存变量引用。定义默认 120 秒期限、256 项保留工作、10 次模型调用和 64 个工具声明；详见 `tarz session --help`。
 
-`session run` 在执行成功、失败或取消后等待自动保存。JSON 分开返回执行 `status/text/execution_error/error_kind/error_detail` 与 `saved/revision/save_error`，并包含 `recovery_file/recovery_error/close_error/close_outcome`。保存失败时导出当前材料到 `tarz-recovery-<uuid>.json` 后以 1 退出；默认导出至当前目录，可用 `--recovery-dir` 指定已存在的目录。导出失败单独报告，不能宣称材料已恢复。恢复文件可通过创建命令的 `--load` 导入为新会话。关闭会确认原待保存操作；`close_outcome` 明确区分已提交、未提交与仍无法确认。若关闭时确认先前结果不明的提交，`saved/revision` 更新为已确认事实，原 `save_error` 和错误退出仍保留。
+`session run` 在执行成功、失败或取消后等待自动保存。JSON 分开返回执行 `status/text/execution_error/error_kind/error_detail` 与 `saved/revision/save_error`，并包含 `recovery_file/recovery_importable/recovery_error/close_error/close_outcome` 与 `save_wait_abandoned`。保存失败时导出当前材料到 `tarz-recovery-<uuid>.json` 后以 1 退出；默认导出至当前目录，可用 `--recovery-dir` 指定已存在的目录。保存等待期间第一次 Ctrl-C 提示，第二次停止等待并按同一失败路径导出。导出失败单独报告，不能宣称材料已恢复。恢复文件可通过创建命令的 `--load` 导入为新会话；超过 64 MiB 时文件仍完整写出，但当前版本不能直接导入，结果会明确报告。关闭会确认原待保存操作；`close_outcome` 明确区分已提交、未提交与仍无法确认。若关闭时确认先前结果不明的提交，`saved/revision` 更新为已确认事实，原 `save_error` 和错误退出仍保留。
 
 存储采用本机稳定文件锁：另一进程占用同一会话时明确拒绝。坏记录在列表中单列并使命令失败，不自动覆盖。单条记录最多 64 MiB；该大小不是进程内存预算。当前范围不包含掉电持久性、网络共享盘或跨主机写入，详情见[当前边界](docs/README.md)。
 

@@ -16,15 +16,24 @@ pub(super) fn run(options: RunOptions) -> ExitCode {
         Ok(runtime) => runtime,
         Err(error) => return failure(error),
     };
-    runtime.block_on(execute(options))
+    let (code, abandoned) = runtime.block_on(execute(options));
+    if abandoned {
+        // A save wait abandoned on the second interrupt may still hold
+        // blocking I/O; do not make runtime teardown wait for it.
+        runtime.shutdown_background();
+    }
+    code
 }
 
-async fn execute(options: RunOptions) -> ExitCode {
+async fn execute(options: RunOptions) -> (ExitCode, bool) {
     let context = match &options.load {
         Some(path) => match tarz_core::material::load(path) {
             Ok(context) => context,
             Err(error) => {
-                return early_failure(options.json, &format!("material load failed: {error}"));
+                return (
+                    early_failure(options.json, &format!("material load failed: {error}")),
+                    false,
+                );
             }
         },
         None => Context::new(),
@@ -32,7 +41,7 @@ async fn execute(options: RunOptions) -> ExitCode {
     let used_stdin_input = options.input.is_none();
     let input = match managed_execution::input_text(options.input) {
         Ok(input) => input,
-        Err(error) => return early_failure(options.json, error),
+        Err(error) => return (early_failure(options.json, error), false),
     };
     let host = SessionHost::new(None);
     let session = match host
@@ -40,7 +49,7 @@ async fn execute(options: RunOptions) -> ExitCode {
         .await
     {
         Ok(session) => session,
-        Err(error) => return early_failure(options.json, &error.to_string()),
+        Err(error) => return (early_failure(options.json, &error.to_string()), false),
     };
     managed_execution::report_mcp_status(&session);
     let connect_approvals = super::approval::should_connect_stdio(used_stdin_input);
@@ -50,11 +59,16 @@ async fn execute(options: RunOptions) -> ExitCode {
             let _ = host
                 .close(&session.target(), ClosePolicy::DiscardLocal)
                 .await;
-            return early_failure(options.json, &error);
+            return (early_failure(options.json, &error), false);
         }
     };
     let (status, text, mut error, mut code) = classify(&report.result);
     let model_error = model_failure(&report.result);
+    let save_wait_abandoned = matches!(report.save, managed_execution::SaveWait::Abandoned);
+    if save_wait_abandoned {
+        error = Some("stopped waiting for saving after a second interrupt");
+        code = 1;
+    }
     let mut saved = false;
     if let Some(path) = options.save {
         match session.read_materials() {
@@ -103,9 +117,9 @@ async fn execute(options: RunOptions) -> ExitCode {
     }
     report_detail(model_error.as_ref());
     if output(&rendered) != ExitCode::SUCCESS {
-        return ExitCode::FAILURE;
+        return (ExitCode::FAILURE, save_wait_abandoned);
     }
-    ExitCode::from(code)
+    (ExitCode::from(code), save_wait_abandoned)
 }
 
 pub(super) fn classify(result: &WorkResult) -> (&'static str, String, Option<&'static str>, u8) {

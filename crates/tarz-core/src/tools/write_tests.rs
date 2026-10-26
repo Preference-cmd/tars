@@ -1048,3 +1048,62 @@ async fn execute_without_precheck_returns_rejected() {
         "write operation was not prepared by precheck"
     );
 }
+
+#[tokio::test]
+async fn confirmation_reread_stops_at_the_edit_limit_after_external_growth() {
+    let write_limits = WriteToolLimits {
+        max_edit_file_bytes: 16,
+        max_write_bytes: 1024,
+        max_edit_segments: 32,
+    };
+    let (dir, shared) = tools(WorkspaceToolLimits::default(), write_limits);
+    let path = dir.path().join("bounded.txt");
+    std::fs::write(&path, "0123456789").unwrap();
+
+    let read = invoke(
+        &shared,
+        WorkspaceTool::ReadFile,
+        json!({"path": "bounded.txt"}),
+    )
+    .await;
+    assert_eq!(read.status, ToolResultStatus::Succeeded);
+
+    let call = call(
+        "write_file",
+        json!({"path": "bounded.txt", "content": "replacement"}),
+    );
+    let reporter = reporter(std::slice::from_ref(&call));
+    let prepared_writes = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let tool = shared
+        .bind_with_prepared(
+            &[WorkspaceTool::WriteFile],
+            reporter.clone(),
+            prepared_writes.clone(),
+        )
+        .pop()
+        .unwrap();
+    let control = control();
+    let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
+    let turn_id = TurnId::new("bounded-precheck");
+    let declaration_order = [call.call_block_id];
+    let ctx =
+        causa::kernel::ProcessorContext::new(&turn_id, RoundId(0), &declaration_order, &control);
+    let precheck = crate::permission::PrecheckProcessor::new(
+        shared.clone(),
+        reporter.clone(),
+        prepared_writes,
+    );
+    let _ = precheck.process(&mut batch, &ctx).await;
+    assert!(batch.results().is_empty(), "precheck accepted the write");
+
+    // Grow the file after the successful precheck. The confirmation reread may
+    // consume one byte past the configured limit, never the grown file.
+    let grown = "x".repeat(1024);
+    std::fs::write(&path, &grown).unwrap();
+    let result = tool.execute(&call, &control, None).await;
+    assert_eq!(result.status, ToolResultStatus::Failed);
+    let error = result.output.content["error"].as_str().unwrap();
+    assert!(error.contains("file changed after confirmation"), "{error}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), grown);
+    assert!(!has_temporary_files(dir.path()));
+}

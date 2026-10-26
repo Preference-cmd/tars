@@ -368,10 +368,8 @@ pub enum ConfigError {
         kind: io::ErrorKind,
     },
     /// Tool names must be known, unique capabilities.
-    #[error(
-        "tools must be a comma-separated selection of list_directory, read_file, search_text without duplicates"
-    )]
-    InvalidTools,
+    #[error("tools must be a comma-separated selection of {0} without duplicates")]
+    InvalidTools(String),
     /// A configured MCP server is malformed or a selection repeats an id.
     /// The message contains only the id, never environment values.
     #[error("MCP server {0:?} has an invalid definition or is selected more than once")]

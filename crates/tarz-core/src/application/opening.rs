@@ -28,7 +28,7 @@ pub(super) async fn initialize(
     } else {
         None
     };
-    let (definition, context, revision, current_mode) = match &prepared {
+    let (definition, context, revision, current_mode, open_report) = match &prepared {
         Some(prepared) => {
             if record.is_some() {
                 return Err(ApplicationError::CreationConflict);
@@ -39,15 +39,22 @@ pub(super) async fn initialize(
                 definition.permission_mode = None;
             }
             let initial = definition.initial_permission_mode();
-            (definition, prepared.context.clone(), None, initial)
+            (
+                definition,
+                prepared.context.clone(),
+                None,
+                initial,
+                OpenReport::default(),
+            )
         }
         None => {
             let record = record.ok_or(ApplicationError::NotFound)?;
             let initial_mode = record.definition.initial_permission_mode();
             let mut mode = record.permission_mode.unwrap_or(initial_mode);
-            if mode == crate::permission::PermissionMode::FullAccess
-                && initial_mode != crate::permission::PermissionMode::FullAccess
-            {
+            let permission_downgraded = record.permission_mode
+                == Some(crate::permission::PermissionMode::FullAccess)
+                && initial_mode != crate::permission::PermissionMode::FullAccess;
+            if permission_downgraded {
                 mode = crate::permission::PermissionMode::Ask;
             }
             (
@@ -55,6 +62,9 @@ pub(super) async fn initialize(
                 record.context,
                 Some(record.revision),
                 mode,
+                OpenReport {
+                    permission_downgraded,
+                },
             )
         }
     };
@@ -115,6 +125,7 @@ pub(super) async fn initialize(
     state.definition = Some(definition);
     state.revision = revision;
     state.pending = pending;
+    state.open_report = open_report;
     if state.closing.is_some() {
         state
             .handle

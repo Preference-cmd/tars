@@ -662,6 +662,7 @@ pub(crate) fn precheck_edit(
 pub(crate) fn execute_prepared_write(
     workspace: &Workspace,
     prepared: &PreparedWrite,
+    write_limits: &WriteToolLimits,
     observations: &Mutex<HashMap<String, FileVersion>>,
     control: &OperationControl,
     #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
@@ -671,7 +672,7 @@ pub(crate) fn execute_prepared_write(
     let parent_dir = workspace.ensure_parent_directory(&prepared.parent_components)?;
 
     if let Some(expected_version) = prepared.expected_version {
-        let mut target_file = match workspace.child_file(&parent_dir, &prepared.file_name) {
+        let target_file = match workspace.child_file(&parent_dir, &prepared.file_name) {
             Ok(file) => file,
             Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Err(OperationError::Failed(
@@ -682,9 +683,17 @@ pub(crate) fn execute_prepared_write(
         };
         let stat = rustix::fs::fstat(&target_file).map_err(crate::workspace::map_errno)?;
         let mut original_bytes = Vec::new();
+        // The confirmation check must not read a file that grew arbitrarily
+        // after the precheck; one byte past the limit is enough to fail.
         target_file
+            .take(write_limits.max_edit_file_bytes as u64 + 1)
             .read_to_end(&mut original_bytes)
             .map_err(WorkspaceError::Io)?;
+        if original_bytes.len() > write_limits.max_edit_file_bytes {
+            return Err(OperationError::Failed(
+                "file changed after confirmation".into(),
+            ));
+        }
         let current_version = FileVersion::from_stat_and_content(&stat, &original_bytes);
         if current_version != expected_version {
             return Err(OperationError::Failed(
@@ -787,6 +796,7 @@ pub(crate) fn precheck_edit(
 pub(crate) fn execute_prepared_write(
     _workspace: &Workspace,
     _prepared: &PreparedWrite,
+    _write_limits: &WriteToolLimits,
     _observations: &Mutex<HashMap<String, FileVersion>>,
     _control: &OperationControl,
     #[cfg(test)] _write_gate: &Mutex<Option<Arc<TestGate>>>,
@@ -808,6 +818,7 @@ fn write_operation(
     execute_prepared_write(
         workspace,
         &prepared,
+        write_limits,
         observations,
         control,
         #[cfg(test)]
@@ -829,6 +840,7 @@ fn edit_operation(
     execute_prepared_write(
         workspace,
         &prepared,
+        write_limits,
         observations,
         control,
         #[cfg(test)]

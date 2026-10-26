@@ -6,6 +6,19 @@ use std::path::Path;
 
 use super::{MaterialReference, references};
 
+/// Largest material file this version reads or imports.
+pub const MAX_IMPORT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Outcome of writing a new material file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SavedMaterial {
+    /// Exact file size in bytes.
+    pub bytes: u64,
+    /// Whether this version can read the file back through its import limit.
+    /// A recovery file remains valid data when this is `false`.
+    pub importable: bool,
+}
+
 /// A file, Context validation or external-reference failure.
 #[derive(Debug, thiserror::Error)]
 pub enum MaterialError {
@@ -47,7 +60,7 @@ pub enum MaterialError {
 /// Parent directories must already exist. Call outside Session's lock.
 pub fn save(path: impl AsRef<Path>, context: &Context) -> Result<(), MaterialError> {
     references::validate(context, None)?;
-    write(path.as_ref(), context, true)
+    write(path.as_ref(), context, true).map(|_| ())
 }
 
 /// Export a new material file without overwriting an existing destination.
@@ -55,9 +68,34 @@ pub fn save(path: impl AsRef<Path>, context: &Context) -> Result<(), MaterialErr
 /// Uses the same reference validation and content synchronization as [`save`].
 /// Useful for recovery exports whose unique path must never replace older data.
 /// The parent directory must already exist; no asset or work-history recovery is implied.
-pub fn save_new(path: impl AsRef<Path>, context: &Context) -> Result<(), MaterialError> {
+///
+/// The returned size tells the caller whether this version can import the file:
+/// output above [`MAX_IMPORT_BYTES`] is still written completely, because a
+/// recovery export must not discard materials, but cannot be read back here.
+pub fn save_new(path: impl AsRef<Path>, context: &Context) -> Result<SavedMaterial, MaterialError> {
+    save_new_bounded(path.as_ref(), context, MAX_IMPORT_BYTES)
+}
+
+fn save_new_bounded(
+    path: &Path,
+    context: &Context,
+    import_limit: usize,
+) -> Result<SavedMaterial, MaterialError> {
     references::validate(context, None)?;
-    write(path.as_ref(), context, false)
+    let bytes = write(path, context, false)?;
+    Ok(SavedMaterial {
+        bytes,
+        importable: bytes <= import_limit as u64,
+    })
+}
+
+#[cfg(test)]
+pub(super) fn save_new_with_limit(
+    path: impl AsRef<Path>,
+    context: &Context,
+    import_limit: usize,
+) -> Result<SavedMaterial, MaterialError> {
+    save_new_bounded(path.as_ref(), context, import_limit)
 }
 
 /// Save after verifying each external reference through application code.
@@ -72,7 +110,7 @@ pub fn save_with_references(
     mut validate: impl FnMut(MaterialReference<'_>) -> io::Result<()>,
 ) -> Result<(), MaterialError> {
     references::validate(context, Some(&mut validate))?;
-    write(path.as_ref(), context, true)
+    write(path.as_ref(), context, true).map(|_| ())
 }
 
 /// Load Context without external references, checking local block uniqueness.
@@ -145,12 +183,11 @@ impl SessionMaterials {
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, MaterialError> {
-    const MAX: usize = 64 * 1024 * 1024;
     let mut bytes = Vec::new();
     File::open(path)?
-        .take(MAX as u64 + 1)
+        .take(MAX_IMPORT_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX {
+    if bytes.len() > MAX_IMPORT_BYTES {
         return Err(MaterialError::TooLarge);
     }
     Ok(bytes)
@@ -171,7 +208,7 @@ fn read(path: &Path) -> Result<Context, MaterialError> {
     }
 }
 
-fn write(path: &Path, context: &Context, replace: bool) -> Result<(), MaterialError> {
+fn write(path: &Path, context: &Context, replace: bool) -> Result<u64, MaterialError> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -180,13 +217,14 @@ fn write(path: &Path, context: &Context, replace: bool) -> Result<(), MaterialEr
     serde_json::to_writer_pretty(&mut pending, context)?;
     pending.write_all(b"\n")?;
     pending.as_file().sync_all()?;
+    let bytes = pending.as_file().metadata()?.len();
     if replace {
         pending.persist(path)
     } else {
         pending.persist_noclobber(path)
     }
     .map_err(|error| MaterialError::Io(error.error))?;
-    Ok(())
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -248,5 +286,58 @@ mod session_material_tests {
         invalid["context"] = serde_json::json!({"blocks":[block.clone(),block]});
         std::fs::write(&source, serde_json::to_vec(&invalid).unwrap()).unwrap();
         assert!(load_session_materials(source).is_err());
+    }
+}
+
+#[cfg(test)]
+mod size_report_tests {
+    use super::*;
+    use causa::kernel::{BlockContent, BlockMeta, ContextBlock, Role};
+
+    fn text_block(text: &str) -> ContextBlock {
+        ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::Assistant, text),
+            BlockMeta::default(),
+        )
+    }
+
+    #[test]
+    fn new_material_reports_exact_size_and_importability_at_the_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = Context::from_blocks(vec![text_block("material")]).unwrap();
+
+        let path = directory.path().join("normal.json");
+        let saved = save_new(&path, &context).unwrap();
+        assert_eq!(saved.bytes, std::fs::metadata(&path).unwrap().len());
+        assert!(saved.importable);
+        assert_eq!(load(&path).unwrap().blocks(), context.blocks());
+
+        let exact = directory.path().join("exact.json");
+        let saved_at_limit = save_new_with_limit(&exact, &context, saved.bytes as usize).unwrap();
+        assert_eq!(saved_at_limit.bytes, saved.bytes);
+        assert!(saved_at_limit.importable);
+        assert_eq!(load(&exact).unwrap().blocks(), context.blocks());
+
+        // A lower report limit exercises the same boundary as the production
+        // 64 MiB constant without allocating and writing a 64 MiB fixture.
+        let broad = directory.path().join("broad.json");
+        let saved = save_new_with_limit(&broad, &context, 8).unwrap();
+        assert!(saved.bytes > 8);
+        assert!(!saved.importable);
+        assert_eq!(load(&broad).unwrap().blocks(), context.blocks());
+    }
+
+    #[test]
+    fn oversized_recovery_is_written_completely_and_reported_unimportable() {
+        let directory = tempfile::tempdir().unwrap();
+        let context =
+            Context::from_blocks(vec![text_block(&"x".repeat(MAX_IMPORT_BYTES))]).unwrap();
+        let path = directory.path().join("oversized-recovery.json");
+        let saved = save_new(&path, &context).unwrap();
+        assert!(saved.bytes > MAX_IMPORT_BYTES as u64);
+        assert!(!saved.importable);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), saved.bytes);
+        assert!(matches!(load(&path), Err(MaterialError::TooLarge)));
     }
 }

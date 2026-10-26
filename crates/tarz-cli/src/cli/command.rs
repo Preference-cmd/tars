@@ -79,18 +79,25 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
         [one, rest @ ..] if one == "session" => match super::session::SessionCommand::parse(rest) {
             Ok(command) => super::session::run(command),
             Err(error) => {
-                let _ = writeln!(
-                    io::stderr().lock(),
-                    "Tarz: {error}. Use tarz session --help."
-                );
-                ExitCode::from(2)
+                let hint = if error.is_argument() {
+                    ". Use tarz session --help."
+                } else {
+                    ""
+                };
+                let _ = writeln!(io::stderr().lock(), "Tarz: {}{hint}", error.message());
+                error.exit_code()
             }
         },
         [one, rest @ ..] if one == "run" => match super::options::RunOptions::parse(rest) {
             Ok(options) => super::execute::run(options),
             Err(error) => {
-                let _ = writeln!(io::stderr().lock(), "Tarz: {error}. Use tarz run --help.");
-                ExitCode::from(2)
+                let hint = if error.is_argument() {
+                    ". Use tarz run --help."
+                } else {
+                    ""
+                };
+                let _ = writeln!(io::stderr().lock(), "Tarz: {}{hint}", error.message());
+                error.exit_code()
             }
         },
         [one] if one == "demo" => demo(None),

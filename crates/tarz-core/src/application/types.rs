@@ -147,6 +147,14 @@ pub enum SaveStatus {
     },
 }
 
+/// Facts learned while an instance was opened, for optional caller reporting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OpenReport {
+    /// A saved `full-access` mode was replaced by `ask` because the frozen
+    /// definition was not created with `full-access`.
+    pub permission_downgraded: bool,
+}
+
 /// Read-only lookup and managed status; does not grant mutable owner access.
 #[derive(Clone, Debug)]
 pub struct SessionStatus {

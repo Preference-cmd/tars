@@ -1,4 +1,4 @@
-use crate::cli::configuration;
+use crate::cli::configuration::{self, CliError};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -14,6 +14,7 @@ pub(crate) enum SessionCommand {
         // Boxed: the definition is far larger than the other variants.
         definition: Box<SessionDefinition>,
         load: Option<PathBuf>,
+        recovery_dir: PathBuf,
         json: bool,
     },
     Run {
@@ -39,7 +40,7 @@ pub(crate) enum SessionCommand {
 }
 
 impl SessionCommand {
-    pub(crate) fn parse(args: &[OsString]) -> Result<Self, String> {
+    pub(crate) fn parse(args: &[OsString]) -> Result<Self, CliError> {
         let (command, mut args) = args.split_first().ok_or("session command is required")?;
         let command = command.to_str().ok_or("session command must be UTF-8")?;
         if command == "export-materials" {
@@ -126,20 +127,20 @@ impl SessionCommand {
                 "--expected-revision" if command == "repair" => {
                     insert(&mut values, flag, &mut args)?;
                 }
-                "--recovery-dir" if matches!(command, "run" | "repair") => {
+                "--recovery-dir" if matches!(command, "create" | "run" | "repair") => {
                     insert(&mut values, flag, &mut args)?;
                 }
                 _ => return Err("unknown, duplicate, or inapplicable session option".into()),
             }
         }
-        let string = |key| -> Result<Option<String>, &'static str> {
+        let string = |key| -> Result<Option<String>, CliError> {
             values
                 .get(key)
                 .map(|value| {
                     value
                         .to_str()
                         .map(str::to_owned)
-                        .ok_or("text option must be UTF-8")
+                        .ok_or_else(|| CliError::argument("text option must be UTF-8"))
                 })
                 .transpose()
         };
@@ -188,6 +189,11 @@ impl SessionCommand {
                     store,
                     definition: Box::new(definition),
                     load: values.get("--load").map(PathBuf::from),
+                    recovery_dir: values
+                        .get("--recovery-dir")
+                        .map(PathBuf::from)
+                        .or_else(|| config.recovery_dir().map(PathBuf::from))
+                        .unwrap_or_else(|| PathBuf::from(".")),
                     json,
                 })
             }
@@ -228,12 +234,14 @@ fn insert<'a>(
     values: &mut HashMap<&'a str, &'a OsString>,
     flag: &'a str,
     args: &mut std::slice::Iter<'a, OsString>,
-) -> Result<(), &'static str> {
-    let value = args.next().ok_or("option needs a value")?;
+) -> Result<(), CliError> {
+    let value = args
+        .next()
+        .ok_or_else(|| CliError::argument("option needs a value"))?;
     if (value.is_empty() && !matches!(flag, "--tools" | "--mcp"))
         || values.insert(flag, value).is_some()
     {
-        return Err("empty or duplicate option");
+        return Err(CliError::argument("empty or duplicate option"));
     }
     Ok(())
 }

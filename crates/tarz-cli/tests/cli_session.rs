@@ -495,3 +495,296 @@ fn completed_work_save_failure_exports_actual_recovery_and_reports_export_failur
         }
     }
 }
+
+#[test]
+fn reopening_a_saved_full_access_mode_reports_the_downgrade() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = folder.path().join("store");
+    let fixture = Fixture::new(1);
+    let id = create(&store, &fixture.endpoint, "10");
+    fixture.answer("full access answer");
+    let run = finished(spawn(
+        run(&store, &id, "set full access")
+            .arg("--permission-mode")
+            .arg("full-access"),
+    ));
+    assert!(run.status.success(), "{run:?}");
+    let saved = record(&store, &id);
+    assert_eq!(saved["permission_mode"], "full-access");
+
+    let repaired = repair(&store, &id);
+    assert!(repaired.status.success(), "{repaired:?}");
+    assert!(
+        String::from_utf8_lossy(&repaired.stderr).contains("downgraded from full-access to ask")
+    );
+    let repaired_report = report(&repaired);
+    assert!(repaired_report.get("permission_downgraded").is_none());
+
+    // A definition created with full-access as its initial mode is not a downgrade.
+    let initial = Command::new(env!("CARGO_BIN_EXE_tarz"))
+        .args([
+            "session",
+            "create",
+            "--store",
+            store.to_str().unwrap(),
+            "--json",
+            "--provider",
+            "openai-chat",
+            "--model",
+            "initial-full-access",
+            "--api-key-env",
+            "TARZ_TEST_KEY",
+            "--permission-mode",
+            "full-access",
+        ])
+        .env("TARZ_TEST_KEY", KEY)
+        .output()
+        .unwrap();
+    assert!(initial.status.success(), "{initial:?}");
+    let initial_id = report(&initial)["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let repaired = repair(&store, &initial_id);
+    assert!(repaired.status.success(), "{repaired:?}");
+    assert!(
+        !String::from_utf8_lossy(&repaired.stderr).contains("downgraded from full-access to ask")
+    );
+}
+
+fn repair(store: &Path, id: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_tarz"))
+        .args(["session", "repair", id, "--store"])
+        .arg(store)
+        .args(["--dry-run", "--json"])
+        .env("TARZ_TEST_KEY", KEY)
+        .output()
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn second_sigint_abandons_a_blocked_save_and_exports_importable_recovery() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = folder.path().join("store");
+    let recovery = folder.path().join("recovery");
+    std::fs::create_dir(&recovery).unwrap();
+    let fixture = Fixture::new(1);
+    let id = create(&store, &fixture.endpoint, "10");
+    let (mut child, stderr) = capture_stderr(spawn(
+        run(&store, &id, "blocked save input")
+            .arg("--recovery-dir")
+            .arg(&recovery),
+    ));
+    fixture.request();
+    let record_path = store.join("sessions").join(format!("{id}.json"));
+    std::fs::remove_file(&record_path).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(&record_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fixture.answer("blocked but returned answer");
+    interrupt_until_prompt(&child, &stderr);
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "first SIGINT must not exit"
+    );
+    interrupt(&child);
+    let output = finished(child);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let result = report(&output);
+    assert_eq!(result["save_wait_abandoned"], true);
+    assert_eq!(result["saved"], false);
+    assert_eq!(result["recovery_importable"], true);
+    let path = Path::new(result["recovery_file"].as_str().unwrap());
+    assert_eq!(path.parent().unwrap(), recovery);
+    let materials = tarz_core::material::load(path).unwrap();
+    assert_eq!(materials.blocks().len(), 2);
+
+    let imported_store = folder.path().join("imported");
+    let imported = Command::new(env!("CARGO_BIN_EXE_tarz"))
+        .args([
+            "session",
+            "create",
+            "--store",
+            imported_store.to_str().unwrap(),
+            "--json",
+            "--provider",
+            "openai-chat",
+            "--model",
+            "imported-model",
+            "--api-key-env",
+            "TARZ_TEST_KEY",
+            "--load",
+        ])
+        .arg(path)
+        .env("TARZ_TEST_KEY", KEY)
+        .output()
+        .unwrap();
+    assert!(imported.status.success(), "{imported:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn one_sigint_during_a_blocked_save_waits_and_normal_completion_creates_no_recovery() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = folder.path().join("store");
+    let recovery = folder.path().join("recovery");
+    std::fs::create_dir(&recovery).unwrap();
+    let fixture = Fixture::new(1);
+    let id = create(&store, &fixture.endpoint, "10");
+    let (mut child, stderr) = capture_stderr(spawn(
+        run(&store, &id, "normally saved input")
+            .arg("--recovery-dir")
+            .arg(&recovery),
+    ));
+    fixture.request();
+    let record_path = store.join("sessions").join(format!("{id}.json"));
+    let original = std::fs::read(&record_path).unwrap();
+    std::fs::remove_file(&record_path).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(&record_path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fixture.answer("normally saved answer");
+    interrupt_until_prompt(&child, &stderr);
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "one SIGINT must not exit"
+    );
+    // Unblock the save only after the prompt proves the wait is live. The
+    // writer thread is bounded so a broken fixture fails instead of hanging.
+    let (done_tx, done_rx) = mpsc::channel();
+    let fifo_path = record_path.clone();
+    std::thread::spawn(move || {
+        let mut fifo = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&fifo_path)
+            .unwrap();
+        fifo.write_all(&original).unwrap();
+        let _ = done_tx.send(());
+    });
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("blocked save reader did not accept the baseline record");
+
+    let output = finished(child);
+    assert!(output.status.success(), "{output:?}");
+    let result = report(&output);
+    assert!(result["recovery_file"].is_null());
+    assert_eq!(std::fs::read_dir(&recovery).unwrap().count(), 0);
+    assert_eq!(record(&store, &id)["revision"], 2);
+}
+
+#[cfg(unix)]
+fn capture_stderr(mut child: Child) -> (Child, mpsc::Receiver<String>) {
+    use std::io::BufRead;
+    let stderr = child.stderr.take().expect("piped stderr");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    (child, rx)
+}
+
+#[cfg(unix)]
+fn interrupt_until_prompt(child: &Child, stderr: &mpsc::Receiver<String>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        interrupt(child);
+        if let Ok(line) = stderr.recv_timeout(Duration::from_secs(1))
+            && line.contains("press Ctrl-C again")
+        {
+            return;
+        }
+    }
+    panic!("saving prompt did not appear");
+}
+
+#[cfg(unix)]
+fn interrupt(child: &Child) {
+    assert!(
+        Command::new("kill")
+            .args(["-s", "INT", &child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn create_initial_save_failure_exports_recovery_to_the_selected_directory() {
+    use causa::kernel::{BlockContent, Context, ContextBlock, Role};
+
+    let folder = tempfile::tempdir().unwrap();
+    let material = folder.path().join("large-material.json");
+    let context = Context::from_blocks(vec![ContextBlock::new(
+        causa::runtime::new_block_id(),
+        BlockContent::text(
+            Role::User,
+            "x".repeat(tarz_core::material::MAX_IMPORT_BYTES - 64 * 1024),
+        ),
+        Default::default(),
+    )])
+    .unwrap();
+    let mut file = std::fs::File::create(&material).unwrap();
+    serde_json::to_writer(&mut file, &context).unwrap();
+    drop(file);
+    drop(context);
+    assert!(
+        std::fs::metadata(&material).unwrap().len() <= tarz_core::material::MAX_IMPORT_BYTES as u64
+    );
+
+    let recovery = folder.path().join("initial-recovery");
+    std::fs::create_dir(&recovery).unwrap();
+    // The material is below the record limit; the configured definition
+    // padding pushes the complete session record over it at commit time.
+    // Use a config file rather than a 128 KiB argv entry, which exceeds
+    // Linux MAX_ARG_STRLEN and the Windows command-line limit.
+    let config_path = folder.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            "version = 1\ndefault_profile = 'p'\n[profiles.p]\nprovider = 'openai-chat'\nmodel = 'oversized-record'\napi_key_env = 'TARZ_TEST_KEY'\ntimeout_secs = 10\n[profiles.p.extra_body]\npad = \"{}\"\n",
+            "p".repeat(128 * 1024)
+        ),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tarz"))
+        .args([
+            "session",
+            "create",
+            "--store",
+            folder.path().join("store").to_str().unwrap(),
+            "--json",
+            "--config",
+        ])
+        .arg(&config_path)
+        .arg("--load")
+        .arg(&material)
+        .arg("--recovery-dir")
+        .arg(&recovery)
+        .env("TARZ_TEST_KEY", KEY)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let value = report(&output);
+    assert_eq!(value["status"], "not_started");
+    assert_eq!(value["error"], "initial session save failed");
+    assert_eq!(value["recovery_importable"], true);
+    let path = Path::new(value["recovery_file"].as_str().unwrap());
+    assert_eq!(path.parent().unwrap(), recovery);
+    let restored = tarz_core::material::load(path).unwrap();
+    assert_eq!(restored.blocks().len(), 1);
+}

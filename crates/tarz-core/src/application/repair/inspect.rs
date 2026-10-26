@@ -1,17 +1,14 @@
 use super::types::*;
 use crate::application::{ApplicationError, ManagedSession};
-use crate::definition::{Provider, SessionDefinition};
+use crate::definition::{RenderOptions, SessionDefinition};
 use crate::session::WorkRef;
 use causa::kernel::{
     BlockContent, BlockId, CacheDirective, ContentPart, Context, ModelRef,
     ToolResultStatus::UnknownOutcome,
 };
 use causa::protocol::translation::{
-    anthropic::render_anthropic_messages,
-    media::MediaSet,
-    openai_chat::render_openai_chat_messages,
-    openai_responses::render_openai_responses_input,
-    render_options::{AnthropicRenderOptions, ChatRenderOptions, ResponsesRenderOptions},
+    anthropic::render_anthropic_messages, media::MediaSet,
+    openai_chat::render_openai_chat_messages, openai_responses::render_openai_responses_input,
 };
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
@@ -116,7 +113,10 @@ pub(super) fn scan(context: &Context) -> Scan {
     }
 }
 
-pub(super) fn render(context: &Context, definition: &SessionDefinition) -> Result<(), String> {
+pub(super) fn render(
+    context: &Context,
+    definition: &SessionDefinition,
+) -> Result<serde_json::Value, String> {
     let frame = context.frame();
     let media = MediaSet::new();
     // Only the materials are checked and no request is sent, so a session
@@ -125,34 +125,36 @@ pub(super) fn render(context: &Context, definition: &SessionDefinition) -> Resul
     let mut generation = definition.run_options().generation;
     generation.max_tokens = generation.max_tokens.or(Some(1));
     let model = ModelRef::new(&definition.model);
-    let res = match definition.provider {
-        Provider::OpenAiChat => render_openai_chat_messages(
+    let options = definition
+        .protocol_render_options()
+        .map_err(|error| bounded(&error.to_string(), 512))?;
+    let res = match options {
+        RenderOptions::Chat(options) => render_openai_chat_messages(
             &frame,
             &media,
             &generation,
             &model,
             CacheDirective::None,
-            &ChatRenderOptions::default(),
+            &options,
         ),
-        Provider::OpenAiResponses => render_openai_responses_input(
+        RenderOptions::Responses(options) => render_openai_responses_input(
             &frame,
             &media,
             &generation,
             &model,
             CacheDirective::None,
-            &ResponsesRenderOptions::default(),
+            &options,
         ),
-        Provider::Anthropic => render_anthropic_messages(
+        RenderOptions::Anthropic(options) => render_anthropic_messages(
             &frame,
             &media,
             &generation,
             &model,
             CacheDirective::None,
-            &AnthropicRenderOptions::default(),
+            &options,
         ),
     };
-    res.map(|_| ())
-        .map_err(|error| bounded(&error.to_string(), 512))
+    res.map_err(|error| bounded(&error.to_string(), 512))
 }
 
 pub(super) fn diagnose(context: &Context, definition: &SessionDefinition) -> RepairDiagnosis {
@@ -359,4 +361,75 @@ pub(super) fn extract_call_path(arguments: &serde_json::Value) -> String {
         .and_then(|v| v.as_str())
         .map(|p| bounded(p, 512))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use crate::definition::{CredentialRef, Provider, SessionDefinition};
+    use causa::kernel::{BlockContent, Context, ContextBlock, Role};
+
+    fn definition(render_options: serde_json::Value) -> SessionDefinition {
+        SessionDefinition {
+            provider: Provider::OpenAiChat,
+            model: "fixture-model".into(),
+            endpoint: None,
+            credential: CredentialRef::Environment("PATH".into()),
+            work_timeout_secs: Some(10),
+            retained_work_capacity: 1,
+            max_model_rounds: 1,
+            max_tool_calls: 0,
+            max_tokens: Some(7),
+            reasoning_effort: None,
+            extra_body: Default::default(),
+            max_model_attempts: None,
+            render_options: render_options.as_object().cloned().unwrap_or_default(),
+            workspace_root: None,
+            tools: Vec::new(),
+            tool_limits: Default::default(),
+            write_limits: None,
+            permission_mode: None,
+            mcp_servers: Vec::new(),
+        }
+    }
+
+    fn context() -> Context {
+        Context::from_blocks(vec![ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, "hello"),
+            Default::default(),
+        )])
+        .unwrap()
+    }
+
+    #[test]
+    fn preflight_render_uses_the_saved_chat_render_options() {
+        let default = render(&context(), &definition(serde_json::json!({}))).unwrap();
+        assert_eq!(default["max_completion_tokens"], 7);
+        assert!(default.get("max_tokens").is_none());
+
+        let saved = render(
+            &context(),
+            &definition(serde_json::json!({"max_tokens_field": "max_tokens"})),
+        )
+        .unwrap();
+        assert_eq!(saved["max_tokens"], 7);
+        assert!(saved.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn preflight_render_uses_the_saved_responses_render_options() {
+        let mut default_definition = definition(serde_json::json!({}));
+        default_definition.provider = Provider::OpenAiResponses;
+        let default = render(&context(), &default_definition).unwrap();
+        assert_eq!(default["store"], false);
+
+        let mut saved_definition = default_definition;
+        saved_definition.render_options = serde_json::json!({"store": true})
+            .as_object()
+            .cloned()
+            .unwrap();
+        let saved = render(&context(), &saved_definition).unwrap();
+        assert_eq!(saved["store"], true);
+    }
 }

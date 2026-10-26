@@ -375,6 +375,7 @@ impl Tool for WorkspaceToolImpl {
                 super::operations::execute_prepared_write(
                     &shared.workspace,
                     prepared,
+                    &shared.write_limits,
                     &shared.observations,
                     &worker_control,
                     #[cfg(test)]

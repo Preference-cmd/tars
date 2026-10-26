@@ -309,12 +309,24 @@ pub fn parse_tools(value: &str) -> Result<Vec<WorkspaceTool>, ConfigError> {
             "search_text" => WorkspaceTool::SearchText,
             "write_file" => WorkspaceTool::WriteFile,
             "edit_file" => WorkspaceTool::EditFile,
-            _ => return Err(ConfigError::InvalidTools),
+            _ => return Err(invalid_tools()),
         };
         if tools.contains(&tool) {
-            return Err(ConfigError::InvalidTools);
+            return Err(invalid_tools());
         }
         tools.push(tool);
     }
     Ok(tools)
+}
+
+// The message follows the single declaration list so a new built-in tool is
+// named without editing this error.
+fn invalid_tools() -> ConfigError {
+    ConfigError::InvalidTools(
+        WorkspaceTool::ALL
+            .iter()
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
 }

@@ -1,16 +1,17 @@
 use super::options::SessionCommand;
 use crate::cli::command::{failure, output};
 use crate::cli::execute::{classify, early_failure, model_failure, report_detail};
-use crate::cli::managed_execution;
+use crate::cli::managed_execution::{self, RecoveryFile, SaveWait};
 use causa::kernel::Context;
 use causa::runtime::new_block_id;
 use serde_json::json;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 use tarz_core::application::{
-    CloseOutcome, ClosePolicy, CommitDisposition, Lifecycle, PreparedCreate, SaveStatus,
-    SessionHost,
+    ApplicationError, CloseOutcome, ClosePolicy, CommitDisposition, Lifecycle, PreparedCreate,
+    SaveStatus, SessionHost,
 };
 use tarz_core::definition::SessionDefinition;
 
@@ -25,7 +26,17 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
             Err(error) => return failure(error),
         };
         return match tarz_core::material::save_new(&path, &context) {
-            Ok(()) => output(&format!("{}\n", path.display())),
+            Ok(saved) => {
+                if !saved.importable {
+                    let _ = writeln!(
+                        io::stderr().lock(),
+                        "Tarz: exported materials: {}{}",
+                        path.display(),
+                        managed_execution::recovery_limit_warning(false)
+                    );
+                }
+                output(&format!("{}\n", path.display()))
+            }
             Err(error) => failure(error),
         };
     }
@@ -36,14 +47,18 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
         Ok(runtime) => runtime,
         Err(error) => return failure(error),
     };
-    runtime.block_on(async {
+    let (code, abandoned) = runtime.block_on(async {
         match command {
             SessionCommand::Create {
                 store,
                 definition,
                 load,
+                recovery_dir,
                 json,
-            } => create(store, *definition, load, json).await,
+            } => (
+                create(store, *definition, load, recovery_dir, json).await,
+                false,
+            ),
             SessionCommand::Run {
                 store,
                 id,
@@ -52,7 +67,7 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 recovery_dir,
                 json,
             } => run_saved(store, id, input, permission_mode, recovery_dir, json).await,
-            SessionCommand::List { store, json } => list(store, json).await,
+            SessionCommand::List { store, json } => (list(store, json).await, false),
             SessionCommand::Repair {
                 store,
                 id,
@@ -60,24 +75,38 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 expected_revision,
                 recovery_dir,
                 json,
-            } => super::repair::run(store, id, apply, expected_revision, recovery_dir, json).await,
+            } => (
+                super::repair::run(store, id, apply, expected_revision, recovery_dir, json).await,
+                false,
+            ),
             SessionCommand::ExportMaterials { .. } => {
                 unreachable!("offline export handled before runtime")
             }
         }
-    })
+    });
+    if abandoned {
+        // A save that was abandoned may still be blocked in blocking I/O.
+        runtime.shutdown_background();
+    }
+    code
 }
 
 async fn create(
     store: PathBuf,
     definition: SessionDefinition,
     load: Option<PathBuf>,
+    recovery_dir: PathBuf,
     json_output: bool,
 ) -> ExitCode {
     let context = match load {
         Some(path) => match tarz_core::material::load(path) {
             Ok(context) => context,
-            Err(_) => return early_failure(json_output, "initial material load failed"),
+            Err(error) => {
+                return early_failure(
+                    json_output,
+                    &format!("initial material load failed: {error}"),
+                );
+            }
         },
         None => Context::new(),
     };
@@ -92,7 +121,7 @@ async fn create(
             if let Some(status) = status
                 && status.lifecycle == Lifecycle::InitializationBlocked
             {
-                let recovered = export_initial_recovery(&context);
+                let recovered = export_initial_recovery(&context, &recovery_dir);
                 let close = host.close(&status.target, ClosePolicy::DiscardLocal).await;
                 let saved_revision = close
                     .as_ref()
@@ -108,7 +137,8 @@ async fn create(
                             "status":"not_started", "conversation_id":id.as_str(),
                             "work_id":null,"text":"","saved":saved_revision.is_some(),"revision":saved_revision,"error":"initial session save failed",
                             "save_error":error.to_string(),
-                            "recovery_file":recovered.as_ref().ok(),
+                            "recovery_file":recovered.as_ref().ok().map(|file| &file.path),
+                            "recovery_importable":recovered.as_ref().ok().map(|file| file.importable),
                             "recovery_error":recovered.as_ref().err(),
                             "close_error":close.as_ref().err().map(|e|e.to_string()),
                             "close_outcome":close.as_ref().ok().map(close_value),
@@ -116,11 +146,12 @@ async fn create(
                     ));
                 }
                 match recovered {
-                    Ok(path) => {
+                    Ok(file) => {
                         let _ = writeln!(
                             io::stderr().lock(),
-                            "Tarz: initial save failed; recovery materials: {}",
-                            path.display()
+                            "Tarz: initial save failed; recovery materials: {}{}",
+                            file.path.display(),
+                            managed_execution::recovery_limit_warning(file.importable)
                         );
                     }
                     Err(error) => {
@@ -146,12 +177,17 @@ async fn create(
     }
 }
 
-fn export_initial_recovery(context: &Context) -> Result<PathBuf, &'static str> {
-    let path = std::env::current_dir()
-        .map_err(|_| "recovery directory is unavailable")?
-        .join(format!("tarz-recovery-{}.json", new_block_id().0));
-    tarz_core::material::save_new(&path, context).map_err(|_| "recovery material export failed")?;
-    Ok(path)
+fn export_initial_recovery(
+    context: &Context,
+    directory: &Path,
+) -> Result<RecoveryFile, &'static str> {
+    let path = directory.join(format!("tarz-recovery-{}.json", new_block_id().0));
+    let saved = tarz_core::material::save_new(&path, context)
+        .map_err(|_| "recovery material export failed")?;
+    Ok(RecoveryFile {
+        path,
+        importable: saved.importable,
+    })
 }
 
 async fn run_saved(
@@ -161,16 +197,16 @@ async fn run_saved(
     permission_mode: Option<tarz_core::permission::PermissionMode>,
     recovery_dir: PathBuf,
     json_output: bool,
-) -> ExitCode {
+) -> (ExitCode, bool) {
     let used_stdin_input = input.is_none();
     let input = match managed_execution::input_text(input) {
         Ok(input) => input,
-        Err(error) => return early_failure(json_output, error),
+        Err(error) => return (early_failure(json_output, error), false),
     };
     let host = SessionHost::new(Some(store));
     let session = match host.open(id.into()).await {
         Ok(session) => session,
-        Err(error) => return early_failure(json_output, &error.to_string()),
+        Err(error) => return (early_failure(json_output, &error.to_string()), false),
     };
     managed_execution::report_mcp_status(&session);
     if let Some(mode) = permission_mode {
@@ -178,42 +214,76 @@ async fn run_saved(
             let _ = host
                 .close(&session.target(), ClosePolicy::DiscardLocal)
                 .await;
-            return early_failure(json_output, &error.to_string());
+            return (early_failure(json_output, &error.to_string()), false);
         }
         if let Err(error) = session.wait_saved().await {
             let _ = host
                 .close(&session.target(), ClosePolicy::DiscardLocal)
                 .await;
-            return early_failure(json_output, &error.to_string());
+            return (early_failure(json_output, &error.to_string()), false);
         }
+    }
+    // An explicit mode supersedes the saved mode for this invocation, so the
+    // reopen fact is no longer actionable for the user.
+    if permission_mode.is_none() {
+        managed_execution::report_open_notices(&session);
     }
     let connect_approvals = crate::cli::approval::should_connect_stdio(used_stdin_input);
     let report = match managed_execution::work(&session, input, connect_approvals).await {
         Ok(report) => report,
         Err(error) => {
             let _ = host.close(&session.target(), ClosePolicy::Save).await;
-            return early_failure(json_output, &error);
+            return (early_failure(json_output, &error), false);
         }
     };
     let (status, text, execution_error, mut code) = classify(&report.result);
     let model_error = model_failure(&report.result);
-    let mut saved_revision = report.save.as_ref().ok().and_then(revision);
-    let save_error = report.save.as_ref().err().map(ToString::to_string);
+    let abandoned = matches!(report.save, SaveWait::Abandoned);
+    let save_result = match &report.save {
+        SaveWait::Finished(result) => Some(result),
+        SaveWait::Abandoned => None,
+    };
+    let mut saved_revision = save_result
+        .and_then(|result| result.as_ref().ok())
+        .and_then(revision);
+    let save_error = save_result
+        .and_then(|result| result.as_ref().err())
+        .map(ToString::to_string);
     let mut recovery_file = None;
+    let mut recovery_importable = None;
     let mut recovery_error = None;
-    if save_error.is_some() {
+    if save_error.is_some() || abandoned {
         code = 1;
         match managed_execution::recovery(&session, &recovery_dir) {
-            Ok(path) => recovery_file = Some(path),
+            Ok(file) => {
+                recovery_importable = Some(file.importable);
+                recovery_file = Some(file.path);
+            }
             Err(error) => recovery_error = Some(error),
         }
     }
-    let policy = if save_error.is_some() {
+    let policy = if save_error.is_some() || abandoned {
         ClosePolicy::DiscardLocal
     } else {
         ClosePolicy::Save
     };
-    let close = host.close(&session.target(), policy).await;
+    // An abandoned wait may leave the supervisor blocked in a save. Give close
+    // a short bound, then leave the runtime without waiting for that I/O.
+    let close = if abandoned {
+        match tokio::time::timeout(
+            Duration::from_secs(2),
+            host.close(&session.target(), policy),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(ApplicationError::Faulted(
+                "session close is still blocked after interruption".into(),
+            )),
+        }
+    } else {
+        host.close(&session.target(), policy).await
+    };
     let close_error = close.as_ref().err().map(|error| error.to_string());
     if let Ok(outcome) = &close {
         saved_revision = revision(&outcome.save).or(saved_revision);
@@ -222,7 +292,9 @@ async fn run_saved(
     if close_error.is_some() || report.signal_failed {
         code = 1;
     }
-    let error = if save_error.is_some() {
+    let error = if abandoned {
+        Some("stopped waiting for saving after a second interrupt")
+    } else if save_error.is_some() {
         Some("session save failed")
     } else if close_error.is_some() {
         Some("session close failed")
@@ -234,8 +306,9 @@ async fn run_saved(
     if let Some(path) = &recovery_file {
         let _ = writeln!(
             io::stderr().lock(),
-            "Tarz: recovery materials: {}",
-            path.display()
+            "Tarz: recovery materials: {}{}",
+            path.display(),
+            managed_execution::recovery_limit_warning(recovery_importable.unwrap_or(true))
         );
     }
     if let Some(error) = recovery_error {
@@ -255,9 +328,11 @@ async fn run_saved(
                 "status":status,"text":text,"conversation_id":report.work.conversation_id.as_str(),
                 "work_id":report.work.turn_id.0,"saved":saved_revision.is_some(),"revision":saved_revision,
                 "error":error,"execution_error":execution_error,"save_error":save_error,
+                "save_wait_abandoned":abandoned,
                 "error_kind":model_error.as_ref().map(|failure| failure.kind),
                 "error_detail":model_error.as_ref().map(|failure| failure.detail.as_str()),
-                "recovery_file":recovery_file,"recovery_error":recovery_error,"close_error":close_error,
+                "recovery_file":recovery_file,"recovery_importable":recovery_importable,
+                "recovery_error":recovery_error,"close_error":close_error,
                 "close_outcome":close.as_ref().ok().map(close_value),
             })
         )
@@ -267,9 +342,9 @@ async fn run_saved(
         String::new()
     };
     if output(&rendered) != ExitCode::SUCCESS {
-        return ExitCode::FAILURE;
+        return (ExitCode::FAILURE, abandoned);
     }
-    ExitCode::from(code)
+    (ExitCode::from(code), abandoned)
 }
 
 async fn list(store: PathBuf, json_output: bool) -> ExitCode {
@@ -360,5 +435,20 @@ pub(super) fn report_confirmation(outcome: &CloseOutcome) {
             }
         };
         let _ = writeln!(io::stderr().lock(), "Tarz: {message}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::export_initial_recovery;
+    use causa::kernel::Context;
+
+    #[test]
+    fn initial_recovery_uses_the_selected_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = export_initial_recovery(&Context::new(), directory.path()).unwrap();
+        assert_eq!(file.path.parent(), Some(directory.path()));
+        assert!(file.importable);
+        assert!(tarz_core::material::load(&file.path).is_ok());
     }
 }

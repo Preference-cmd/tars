@@ -12,8 +12,39 @@ use tarz_core::session::{SubmitRequest, WorkRef, WorkResult, WorkState};
 pub(super) struct WorkReport {
     pub work: WorkRef,
     pub result: Arc<WorkResult>,
-    pub save: Result<SaveStatus, ApplicationError>,
+    pub save: SaveWait,
     pub signal_failed: bool,
+}
+
+/// The independent save barrier either settled or was explicitly abandoned.
+pub(super) enum SaveWait {
+    Finished(Result<SaveStatus, ApplicationError>),
+    Abandoned,
+}
+
+/// A new recovery material file and whether this version can import it.
+pub(super) struct RecoveryFile {
+    pub path: PathBuf,
+    pub importable: bool,
+}
+
+/// The stderr/notice suffix for a recovery export that exceeds the import limit.
+pub(super) fn recovery_limit_warning(importable: bool) -> &'static str {
+    if importable {
+        ""
+    } else {
+        " (exceeds the 64 MiB import limit; this version cannot import it directly)"
+    }
+}
+
+/// Report a saved-mode downgrade that opening applied, once.
+pub(super) fn report_open_notices(session: &ManagedSession) {
+    if session.open_report().permission_downgraded {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "Tarz: reopened permission mode was downgraded from full-access to ask; the saved definition was not created with full-access"
+        );
+    }
 }
 
 /// A host for commands that save or repair a session and run no work: it
@@ -97,6 +128,9 @@ pub(super) async fn work(
             observation = session.wait(&receipt.work, Duration::from_secs(60)) => {
                 observation.map_err(|error| error.to_string())?
             },
+            // Cancellation remains cooperative and is bounded by the work
+            // deadline; the independent save barrier below has no such bound
+            // and gets the explicit second-interrupt escape hatch.
             signal = tokio::signal::ctrl_c(), if !stopping => {
                 signal_failed = signal.is_err();
                 if let Some(approver) = &approver {
@@ -116,26 +150,55 @@ pub(super) async fn work(
     }
     // A raw Finished observation precedes persistence. Keep the runtime alive
     // through the independent host save barrier, including cancelled work.
-    let save = session.wait_saved().await;
+    let (save, wait_signal_failed) = wait_saved(session).await;
     Ok(WorkReport {
         work: receipt.work,
         result,
         save,
-        signal_failed,
+        signal_failed: signal_failed || wait_signal_failed,
     })
+}
+
+/// Wait for the save barrier, but let a second Ctrl-C abandon an unresponsive
+/// wait. The first interrupt only explains the escape hatch; the save itself
+/// keeps running until closing or process exit.
+async fn wait_saved(session: &ManagedSession) -> (SaveWait, bool) {
+    let mut prompted = false;
+    loop {
+        tokio::select! {
+            biased;
+            result = session.wait_saved() => return (SaveWait::Finished(result), false),
+            signal = tokio::signal::ctrl_c() => {
+                if signal.is_err() {
+                    return (SaveWait::Finished(session.wait_saved().await), true);
+                }
+                if prompted {
+                    return (SaveWait::Abandoned, false);
+                }
+                let _ = writeln!(
+                    io::stderr().lock(),
+                    "Tarz: saving; press Ctrl-C again to stop waiting and export recovery materials"
+                );
+                prompted = true;
+            }
+        }
+    }
 }
 
 pub(super) fn recovery(
     session: &ManagedSession,
     directory: &Path,
-) -> Result<PathBuf, &'static str> {
+) -> Result<RecoveryFile, &'static str> {
     let snapshot = session
         .read_materials()
         .map_err(|_| "returned materials are unavailable for recovery")?;
     let path = directory.join(format!("tarz-recovery-{}.json", new_block_id().0));
-    tarz_core::material::save_new(&path, &snapshot.context)
+    let saved = tarz_core::material::save_new(&path, &snapshot.context)
         .map_err(|_| "recovery material export failed")?;
-    Ok(path)
+    Ok(RecoveryFile {
+        path,
+        importable: saved.importable,
+    })
 }
 
 #[cfg(test)]
@@ -170,5 +233,13 @@ mod tests {
             ]
         );
         assert!(mcp_notices(&[]).is_empty());
+    }
+
+    #[test]
+    fn recovery_limit_warning_names_the_import_boundary() {
+        assert_eq!(super::recovery_limit_warning(true), "");
+        let warning = super::recovery_limit_warning(false);
+        assert!(warning.contains("64 MiB"));
+        assert!(warning.contains("cannot import"));
     }
 }

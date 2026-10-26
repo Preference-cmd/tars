@@ -8,7 +8,7 @@ CLI 与 TUI 共用 `tarz-core::config`。配置在进程启动时读取为不可
 2. 环境变量 `TARZ_CONFIG`。
 3. Unix/macOS：绝对路径 `$XDG_CONFIG_HOME/tarz/config.toml`，未设置时为 `~/.config/tarz/config.toml`；Windows：`%APPDATA%/Tarz/config.toml`。
 
-不会自动搜索当前项目的配置文件。默认路径不存在时使用空配置；显式路径、`TARZ_CONFIG` 指向的文件不存在或配置无效时拒绝启动。`--no-config` 忽略文件及环境选择，与 `--config` 互斥。配置加载/参数错误返回退出码 2，帮助和离线 demo 不读取配置。
+不会自动搜索当前项目的配置文件。默认路径不存在时使用空配置；显式路径、`TARZ_CONFIG` 指向的文件不存在或配置无效时拒绝启动。`--no-config` 忽略文件及环境选择，与 `--config` 互斥。配置文件的读取、解析、校验和预设解析错误返回退出码 1；未知参数、缺少参数值等参数错误返回 2。帮助和离线 demo 不读取配置。
 
 参照根目录的 [config.example.toml](../config.example.toml)：
 

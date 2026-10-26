@@ -38,6 +38,8 @@ Create options:
                       when stdin and stderr are terminals and input is not from --stdin;
                       otherwise rejects without blocking.
   --load              Initial Context material file; creates a new conversation
+  --recovery-dir      Material recovery directory on initial save failure
+                      (default current directory)
 
 Run options:
   --input             User text; mutually exclusive with --stdin

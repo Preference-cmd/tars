@@ -22,13 +22,15 @@ pub(super) async fn run(
         Ok(session) => session,
         Err(error) => return early_failure(json_output, &error.to_string()),
     };
+    managed_execution::report_open_notices(&session);
     let current_revision = revision(&session.status().save).expect("opened persistent revision");
     let mut value = json!({
         "status": "preview", "conversation_id": id, "mode": "remove_unpaired",
         "revision": current_revision, "expected_revision": expected_revision,
         "uncommitted_results_available": false, "diagnosis": null, "plan": null,
         "applied": false, "saved": true, "error": null, "save_error": null,
-        "recovery_file": null, "recovery_error": null, "close_error": null,
+        "recovery_file": null, "recovery_error": null, "recovery_importable": null,
+        "close_error": null,
     });
     let planned = (|| {
         if let Some(expected) = expected_revision
@@ -83,7 +85,10 @@ pub(super) async fn run(
                                 value["error"] = json!("session save failed");
                                 value["save_error"] = json!(error.to_string());
                                 match managed_execution::recovery(&session, &recovery_dir) {
-                                    Ok(path) => value["recovery_file"] = json!(path),
+                                    Ok(file) => {
+                                        value["recovery_file"] = json!(file.path);
+                                        value["recovery_importable"] = json!(file.importable);
+                                    }
                                     Err(error) => value["recovery_error"] = json!(error),
                                 }
                             }
@@ -155,7 +160,12 @@ pub(super) async fn run(
             text.push_str(&format!("Apply explicitly with --apply --expected-revision {current_revision}; no new work will be sent.\n"));
         }
         if let Some(path) = value["recovery_file"].as_str() {
-            text.push_str(&format!("Recovery materials: {path}\n"));
+            let warning = if value["recovery_importable"] == false {
+                managed_execution::recovery_limit_warning(false)
+            } else {
+                ""
+            };
+            text.push_str(&format!("Recovery materials: {path}{warning}\n"));
         }
         for field in ["save_error", "recovery_error", "close_error"] {
             if let Some(error) = value[field].as_str() {

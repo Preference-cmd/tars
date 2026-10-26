@@ -1,4 +1,4 @@
-use super::configuration;
+use super::configuration::{self, CliError};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -13,7 +13,7 @@ pub(super) struct RunOptions {
 }
 
 impl RunOptions {
-    pub fn parse(args: &[OsString]) -> Result<Self, String> {
+    pub fn parse(args: &[OsString]) -> Result<Self, CliError> {
         let mut values = HashMap::new();
         let mut stdin = false;
         let mut json = false;
@@ -54,14 +54,14 @@ impl RunOptions {
                 _ => return Err("unknown or duplicate option".into()),
             }
         }
-        let string = |key| -> Result<Option<String>, &'static str> {
+        let string = |key| -> Result<Option<String>, CliError> {
             values
                 .get(key)
                 .map(|value| {
                     value
                         .to_str()
                         .map(str::to_owned)
-                        .ok_or("text option must be UTF-8")
+                        .ok_or_else(|| CliError::argument("text option must be UTF-8"))
                 })
                 .transpose()
         };

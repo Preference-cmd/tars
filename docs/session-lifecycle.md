@@ -65,7 +65,7 @@ owner/worker 异常会隔离新工作，等待可确认的任务停止，保留�
 
 `session create` 只创建并确认初始记录。`session run ID` 重开保存定义，提交新工作，等待独立保存结果后关闭；不能临时覆盖 provider/model。`session list` 无需解析凭据。它们均要求显式 `--store`。
 
-CLI 在保存失败时保留原执行 status/text，另输出 save_error；按用户选择导出随机不覆盖的恢复 Context，再以 1 退出。recovery_error、close_error 和 close_outcome 单列；恢复文件包含实际返回材料，不包含原工作表或未提交内容。Ctrl-C 取消工作后仍等待交还和保存。
+CLI 在保存失败时保留原执行 status/text，另输出 save_error；按用户选择导出随机不覆盖的恢复 Context，再以 1 退出。recovery_error、close_error 和 close_outcome 单列；恢复文件包含实际返回材料，不包含原工作表或未提交内容。Ctrl-C 取消工作后仍等待交还和保存；保存等待期间第二次 Ctrl-C 会停止等待、导出实际 Context 并以错误退出。
 
 `tarz run` 创建 transient host，仍支持原 `--load/--save`：导入获得新 ConversationId，只有显式 `--save` 导出 Context，报告与退出码保持。低层 offline demo 是独立 fixture，用来观察单会话契约。
 

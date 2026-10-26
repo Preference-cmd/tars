@@ -154,6 +154,10 @@ impl ManagedSession {
     pub fn status(&self) -> SessionStatus {
         self.entry.status()
     }
+    /// Facts learned while this instance was opened.
+    pub fn open_report(&self) -> OpenReport {
+        self.entry.lock().open_report
+    }
     /// Replay a retained key first; otherwise synchronously admit under the save barrier.
     pub fn submit(&self, request: SubmitRequest) -> Result<WorkReceipt, ManagedSubmitRejection> {
         let mut state = self.entry.lock();

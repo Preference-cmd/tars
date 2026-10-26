@@ -136,7 +136,7 @@ fn discovery_precedence_disabled_and_invalid_config_are_observable() {
         .arg(invalid)
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("invalid TOML"));
     assert!(!error.contains("secret-must-not-appear"));
@@ -793,7 +793,7 @@ fn wm11_cli_rejects_unknown_mcp_ids_and_keeps_secrets_out_of_errors() {
         .arg(&config_path)
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(!error.contains("secret-marker"), "{error}");
 
@@ -811,7 +811,7 @@ fn wm11_cli_rejects_unknown_mcp_ids_and_keeps_secrets_out_of_errors() {
         .arg(&config_path)
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(1));
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("mcp.json"), "{error}");
 
@@ -971,7 +971,7 @@ fn wm11_cli_mcp_config_location_rules() {
         .args(["--mcp", "custom"])
         .output()
         .unwrap();
-    assert_eq!(out2.status.code(), Some(2), "case 2: {out2:?}");
+    assert_eq!(out2.status.code(), Some(1), "case 2: {out2:?}");
 
     // Sibling mcp.json in the same directory as TARZ_CONFIG is loaded.
     let dir3 = tempfile::tempdir().unwrap();
@@ -1056,7 +1056,7 @@ fn wm11_cli_negative_config_does_not_spawn_child_processes() {
         .args(["--mcp", "evil"])
         .output()
         .unwrap();
-    assert_eq!(out_create.status.code(), Some(2));
+    assert_eq!(out_create.status.code(), Some(1));
     assert!(
         !marker_create.exists(),
         "process was spawned during session create!"
@@ -1080,11 +1080,75 @@ fn wm11_cli_negative_config_does_not_spawn_child_processes() {
         .args(["--mcp", "evil", "--input", "hello"])
         .output()
         .unwrap();
-    assert_eq!(out_run.status.code(), Some(2));
+    assert_eq!(out_run.status.code(), Some(1));
     assert!(!marker_run.exists(), "process was spawned during run!");
     let stderr_run = String::from_utf8_lossy(&out_run.stderr);
     assert!(
         !stderr_run.contains(secret),
         "stderr leaked secret: {stderr_run}"
     );
+}
+
+#[test]
+fn exit_codes_separate_configuration_errors_from_argument_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, config()).unwrap();
+
+    let invalid = dir.path().join("invalid.toml");
+    std::fs::write(&invalid, "version = 1\nunknown_key = true").unwrap();
+    let output = cli(dir.path())
+        .args(["session", "list", "--config"])
+        .arg(&invalid)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid TOML"));
+
+    let output = cli(dir.path())
+        .args(["session", "create", "--config"])
+        .arg(&config_path)
+        .args(["--profile", "absent"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown configuration profile"));
+
+    for arguments in [
+        vec!["session", "list", "--bogus"],
+        vec!["session", "list", "--store"],
+    ] {
+        let output = cli(dir.path()).args(&arguments).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+    }
+
+    let output = cli(dir.path())
+        .args(["session", "create", "--config"])
+        .arg(&config_path)
+        .args(["--tools", "list_directory,bogus"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    for tool in tarz_core::definition::WorkspaceTool::ALL {
+        assert!(error.contains(tool.name()), "{tool:?} missing: {error}");
+    }
+}
+
+#[test]
+fn invalid_values_inside_a_config_profile_remain_configuration_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "version = 1\ndefault_profile = 'p'\n[profiles.p]\nprovider = 'openai-chat'\nmodel = 'm'\ntimeout_secs = 0\n",
+    )
+    .unwrap();
+    let output = cli(dir.path())
+        .args(["session", "create", "--config"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("timeout"));
 }

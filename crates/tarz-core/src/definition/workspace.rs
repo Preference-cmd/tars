@@ -19,7 +19,7 @@ pub enum WorkspaceTool {
 
 impl WorkspaceTool {
     /// Every built-in tool, in declaration order.
-    pub(crate) const ALL: [Self; 5] = [
+    pub const ALL: [Self; 5] = [
         Self::ListDirectory,
         Self::ReadFile,
         Self::SearchText,
