@@ -23,7 +23,7 @@ CLI 参数 → SessionDefinition + 初始 Context → PreparedCreate
 
 底层 [SessionHandle](../crates/tarz-core/src/session/handle.rs)分配 TurnId，原子追加输入，保存原请求副本，并移交 Context 给 worker。每实例最多一个活动工作，无后台提交队列。工作期限从受理起覆盖逐工作装配和执行；不覆盖 opening、stdin 和磁盘 I/O。
 
-[Worker](../crates/tarz-core/src/session/worker.rs)检查控制，调用逐工作装配，再交给 Causa 公开 facade 的 `TurnRunner::run_streaming`。Causa 处理一次工作中的模型/工具循环，返回真实 Context、typed TurnResult 和未提交 ToolBatch；它不拥有 Tarz 目录、文件或工作历史。产品装配默认空工具目录，可按固定定义绑定三种只读工作区工具。根资源在实例内共享，工具包装和 ToolReporter 按 WorkRef 新建。旧 Context 中的工具材料不会触发旧工具重跑。
+[Worker](../crates/tarz-core/src/session/worker.rs)检查控制，调用逐工作装配，再交给 Causa 公开 facade 的 `TurnRunner::run_streaming`。Causa 处理一次工作中的模型/工具循环，返回真实 Context、typed TurnResult 和未提交 ToolBatch；它不拥有 Tarz 目录、文件或工作历史。产品装配默认空工具目录，可按固定定义绑定五个内置工作区工具（三个只读和两个写入）。根资源在实例内共享，工具包装和 ToolReporter 按 WorkRef 新建。旧 Context 中的工具材料不会触发旧工具重跑。
 
 ## 3. Finished 与 Saved
 
