@@ -32,6 +32,7 @@ impl RunOptions {
                 | "--input"
                 | "--workspace"
                 | "--tools"
+                | "--command-network"
                 | "--mcp"
                 | "--load"
                 | "--save"

@@ -86,6 +86,7 @@ fn definition(endpoint: &str, root: &Path, servers: Vec<McpServerConfig>) -> Ses
         tool_limits: WorkspaceToolLimits::default(),
         write_limits: None,
         permission_mode: Some(PermissionMode::FullAccess),
+        command: None,
         mcp_servers: servers,
     }
 }

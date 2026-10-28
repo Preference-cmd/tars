@@ -20,6 +20,7 @@ fn definition() -> SessionDefinition {
         tool_limits: Default::default(),
         write_limits: None,
         permission_mode: None,
+        command: None,
         mcp_servers: Vec::new(),
     }
 }
@@ -769,4 +770,56 @@ fn wm11_redact_substitutions_rules() {
     assert!(!redacted.contains("secret_token_12345"));
     assert!(redacted.contains("/abc"));
     assert!(!redacted.contains("${SHORT}"));
+}
+
+#[test]
+fn command_settings_roundtrip_old_records_and_validation() {
+    use super::{CommandNetwork, CommandSettings, WorkspaceTool};
+
+    let mut candidate = definition();
+    candidate.workspace_root = Some(std::env::current_dir().unwrap());
+    candidate.tools = vec![WorkspaceTool::RunCommand];
+    candidate.command = Some(CommandSettings {
+        network: CommandNetwork::Open,
+        default_timeout_secs: 30,
+        max_timeout_secs: 60,
+    });
+    candidate.validate().unwrap();
+    let encoded = serde_json::to_value(&candidate).unwrap();
+    assert_eq!(encoded["command"]["network"], "open");
+    assert_eq!(encoded["command"]["default_timeout_secs"], 30);
+    assert_eq!(
+        serde_json::from_value::<SessionDefinition>(encoded).unwrap(),
+        candidate
+    );
+
+    let old = serde_json::to_value(definition()).unwrap();
+    assert!(old.get("command").is_none());
+    let old = serde_json::from_value::<SessionDefinition>(old).unwrap();
+    assert_eq!(old.command, None);
+
+    candidate.command = None;
+    candidate.validate().unwrap();
+    assert_eq!(
+        candidate.effective_command_settings(),
+        Some(CommandSettings::default())
+    );
+
+    candidate.command = Some(CommandSettings::default());
+    candidate.tools.clear();
+    assert_eq!(
+        candidate.validate(),
+        Err(DefinitionError::CommandSettingsWithoutTool)
+    );
+
+    candidate.tools = vec![WorkspaceTool::RunCommand];
+    candidate.command = Some(CommandSettings {
+        default_timeout_secs: 61,
+        max_timeout_secs: 60,
+        ..CommandSettings::default()
+    });
+    assert_eq!(
+        candidate.validate(),
+        Err(DefinitionError::InvalidCommandSettings)
+    );
 }

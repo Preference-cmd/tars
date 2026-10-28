@@ -1,4 +1,5 @@
 use std::io;
+use std::process::ExitStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::process::{Child, ChildStderr, ChildStdout};
@@ -198,4 +199,16 @@ impl TreeControl for RecordingControl {
     fn attach(&self, child: Child) -> io::Result<ProcessTree> {
         Ok(ProcessTree::inactive(child))
     }
+}
+
+/// Map a process exit status to the reported exit code and signal.
+pub(crate) fn exit_status_code(status: ExitStatus) -> (Option<i32>, Option<i32>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return (Some(128 + signal), Some(signal));
+        }
+    }
+    (status.code(), None)
 }

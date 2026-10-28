@@ -1,7 +1,7 @@
 use super::file::ConfigError;
 use crate::definition::{
-    CredentialRef, McpServerConfig, Provider, SessionDefinition, WorkspaceTool,
-    WorkspaceToolLimits, WriteToolLimits,
+    CommandNetwork, CommandSettings, CredentialRef, McpServerConfig, Provider, SessionDefinition,
+    WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
 };
 use crate::permission::PermissionMode;
 use serde::Deserialize;
@@ -47,6 +47,8 @@ pub struct DefinitionOverrides {
     pub tool_limits: Option<WorkspaceToolLimits>,
     /// Explicit effective write tool limits, which may only lower supported bounds.
     pub write_limits: Option<WriteToolLimits>,
+    /// Explicit command-tool network; other command settings come from the preset.
+    pub command_network: Option<CommandNetwork>,
     /// Explicit initial permission mode.
     pub permission_mode: Option<PermissionMode>,
     /// Explicit MCP server ids; Some(empty) disables preset servers.
@@ -73,8 +75,29 @@ pub(super) struct Profile {
     tools: Option<Vec<WorkspaceTool>>,
     tool_limits: Option<ProfileToolLimits>,
     write_limits: Option<ProfileWriteLimits>,
+    command: Option<ProfileCommand>,
     permission_mode: Option<PermissionMode>,
     mcp: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileCommand {
+    network: Option<CommandNetwork>,
+    default_timeout_secs: Option<u64>,
+    max_timeout_secs: Option<u64>,
+}
+impl ProfileCommand {
+    fn effective(&self) -> CommandSettings {
+        let defaults = CommandSettings::default();
+        CommandSettings {
+            network: self.network.unwrap_or(defaults.network),
+            default_timeout_secs: self
+                .default_timeout_secs
+                .unwrap_or(defaults.default_timeout_secs),
+            max_timeout_secs: self.max_timeout_secs.unwrap_or(defaults.max_timeout_secs),
+        }
+    }
 }
 
 // Sparse startup defaults are deliberately separate from the complete persisted limits.
@@ -179,6 +202,34 @@ pub(super) fn resolve(
             .ok_or_else(|| ConfigError::UnknownMcpServer(id.clone()))?;
         mcp_servers.push(server.clone());
     }
+    let tools = options
+        .tools
+        .or_else(|| profile.and_then(|p| p.tools.clone()))
+        .unwrap_or_default();
+    let uses_command = tools.contains(&WorkspaceTool::RunCommand);
+    if profile.and_then(|p| p.command.as_ref()).is_some() && !uses_command {
+        return Err(ConfigError::Definition(
+            crate::definition::DefinitionError::CommandSettingsWithoutTool,
+        ));
+    }
+    if options.command_network.is_some() && !uses_command {
+        return Err(ConfigError::Definition(
+            crate::definition::DefinitionError::CommandSettingsWithoutTool,
+        ));
+    }
+    let command = if uses_command {
+        let mut settings = profile
+            .and_then(|p| p.command.as_ref())
+            .map(ProfileCommand::effective)
+            .unwrap_or_default();
+        if let Some(network) = options.command_network {
+            settings.network = network;
+        }
+        settings.validate().map_err(ConfigError::Definition)?;
+        Some(settings)
+    } else {
+        None
+    };
     let definition = SessionDefinition {
         provider,
         model,
@@ -226,10 +277,7 @@ pub(super) fn resolve(
             .or_else(|| profile.and_then(|p| p.render_options.clone()))
             .unwrap_or_default(),
         workspace_root,
-        tools: options
-            .tools
-            .or_else(|| profile.and_then(|p| p.tools.clone()))
-            .unwrap_or_default(),
+        tools,
         tool_limits: options
             .tool_limits
             .or_else(|| {
@@ -239,6 +287,7 @@ pub(super) fn resolve(
         write_limits: options.write_limits.or_else(|| {
             profile.and_then(|p| p.write_limits.as_ref().map(ProfileWriteLimits::effective))
         }),
+        command,
         permission_mode: match options
             .permission_mode
             .or(profile.and_then(|p| p.permission_mode))
@@ -309,6 +358,7 @@ pub fn parse_tools(value: &str) -> Result<Vec<WorkspaceTool>, ConfigError> {
             "search_text" => WorkspaceTool::SearchText,
             "write_file" => WorkspaceTool::WriteFile,
             "edit_file" => WorkspaceTool::EditFile,
+            "run_command" => WorkspaceTool::RunCommand,
             _ => return Err(invalid_tools()),
         };
         if tools.contains(&tool) {

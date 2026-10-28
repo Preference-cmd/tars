@@ -52,6 +52,7 @@ fn base_definition(endpoint: &str, root: &Path) -> SessionDefinition {
         tool_limits: WorkspaceToolLimits::default(),
         write_limits: None,
         permission_mode: None,
+        command: None,
         mcp_servers: Vec::new(),
     }
 }
@@ -1120,8 +1121,13 @@ async fn unprepared_write_in_ask_mode_records_unprepared_decision() {
     let hub = Arc::new(crate::permission::approval::ApprovalsHub::new());
     let prepared_empty = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
-    let processor =
-        crate::permission::PermissionProcessor::new(work, reporter.clone(), hub, prepared_empty);
+    let processor = crate::permission::PermissionProcessor::new(
+        work,
+        reporter.clone(),
+        hub,
+        crate::definition::CommandSettings::default(),
+        prepared_empty,
+    );
 
     let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
     let declaration_order = [call.call_block_id];
@@ -1860,7 +1866,7 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
 }
 
 #[test]
-fn wm17_decide_16_cells_exhaustive() {
+fn wm17_decide_20_cells_exhaustive() {
     use crate::permission::{PermissionMode, PermissionVerdict, ToolPermissionClass, decide};
 
     // ReadOnly
@@ -1870,6 +1876,13 @@ fn wm17_decide_16_cells_exhaustive() {
     );
     assert_eq!(
         decide(PermissionMode::ReadOnly, ToolPermissionClass::BuiltinWrite),
+        PermissionVerdict::Reject
+    );
+    assert_eq!(
+        decide(
+            PermissionMode::ReadOnly,
+            ToolPermissionClass::BuiltinCommand
+        ),
         PermissionVerdict::Reject
     );
     assert_eq!(
@@ -1888,6 +1901,10 @@ fn wm17_decide_16_cells_exhaustive() {
     );
     assert_eq!(
         decide(PermissionMode::Ask, ToolPermissionClass::BuiltinWrite),
+        PermissionVerdict::Ask
+    );
+    assert_eq!(
+        decide(PermissionMode::Ask, ToolPermissionClass::BuiltinCommand),
         PermissionVerdict::Ask
     );
     assert_eq!(
@@ -1915,6 +1932,13 @@ fn wm17_decide_16_cells_exhaustive() {
         PermissionVerdict::Execute
     );
     assert_eq!(
+        decide(
+            PermissionMode::AcceptEdits,
+            ToolPermissionClass::BuiltinCommand
+        ),
+        PermissionVerdict::Ask
+    );
+    assert_eq!(
         decide(PermissionMode::AcceptEdits, ToolPermissionClass::McpPrompt),
         PermissionVerdict::Ask
     );
@@ -1935,6 +1959,13 @@ fn wm17_decide_16_cells_exhaustive() {
         decide(
             PermissionMode::FullAccess,
             ToolPermissionClass::BuiltinWrite
+        ),
+        PermissionVerdict::Execute
+    );
+    assert_eq!(
+        decide(
+            PermissionMode::FullAccess,
+            ToolPermissionClass::BuiltinCommand
         ),
         PermissionVerdict::Execute
     );
@@ -2065,4 +2096,467 @@ async fn wm17_mode_switch_between_gate_and_confirmation() {
         "the current permission mode 'read-only' does not allow this write"
     );
     assert!(!root.path().join("between.txt").exists());
+}
+
+fn command_definition(endpoint: &str, root: &Path) -> SessionDefinition {
+    let mut definition = base_definition(endpoint, root);
+    definition.tools.push(WorkspaceTool::RunCommand);
+    definition.command = Some(crate::definition::CommandSettings::default());
+    definition
+}
+
+#[cfg(target_os = "macos")]
+fn call_command(arguments: serde_json::Value) -> ScriptedToolCall {
+    ScriptedToolCall {
+        name: "run_command".into(),
+        arguments,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn command_result(
+    session: &ManagedSession,
+    observation: &WorkObservation,
+    index: usize,
+) -> serde_json::Value {
+    let payload = session
+        .read_materials()
+        .unwrap()
+        .context
+        .blocks()
+        .iter()
+        .find_map(|block| match block.content() {
+            BlockContent::ToolResult(payload)
+                if payload.call_block_id == observation.tools.calls[index].call_block_id =>
+            {
+                Some(payload.clone())
+            }
+            _ => None,
+        })
+        .expect("command result");
+    payload.output.content
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_full_access_stays_sandboxed() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = root
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("tarz-command-outside-{}", uuid::Uuid::now_v7()));
+    let script = format!(
+        "printf inside > inside.txt; printf outside > '{}'",
+        outside.display()
+    );
+    let replies = vec![
+        Reply::Calls(vec![ScriptedToolCall {
+            name: "run_command".into(),
+            arguments: json!({ "command": script }),
+        }]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    session
+        .set_permission_mode(PermissionMode::FullAccess)
+        .unwrap();
+    let work = submit(&session, "sandboxed command");
+    let observation = finish(&session, &work).await;
+    assert_eq!(observation.tools.calls.len(), 1);
+    assert_eq!(
+        observation.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        observation.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::DirectExecution
+    );
+    let content = command_result(&session, &observation, 0);
+    assert_eq!(content["exit_code"], 1);
+    assert!(root.path().join("inside.txt").exists());
+    assert!(!outside.exists());
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_ask_allows_and_denies_with_the_command_subject() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![call_command(
+            json!({"command": "printf allow > allowed.txt"}),
+        )]),
+        Reply::Answer,
+        Reply::Calls(vec![call_command(
+            json!({"command": "printf deny > denied.txt"}),
+        )]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    let mut rx = session.connect_approvals();
+    let approvals = tokio::spawn(async move {
+        let allow = rx.recv().await.expect("allow request");
+        let ApprovalSubject::Command {
+            command,
+            workdir,
+            timeout_secs,
+            network,
+        } = &allow.subject
+        else {
+            panic!("expected Command subject")
+        };
+        assert_eq!(command, "printf allow > allowed.txt");
+        assert_eq!(workdir, ".");
+        assert_eq!(*timeout_secs, 120);
+        assert_eq!(*network, crate::definition::CommandNetwork::None);
+        allow.reply.send(ApprovalDecision::Allow).unwrap();
+
+        let deny = rx.recv().await.expect("deny request");
+        let ApprovalSubject::Command { command, .. } = &deny.subject else {
+            panic!("expected Command subject")
+        };
+        assert_eq!(command, "printf deny > denied.txt");
+        deny.reply
+            .send(ApprovalDecision::Deny {
+                reason: Some("user policy".into()),
+            })
+            .unwrap();
+    });
+
+    let allow_work = submit(&session, "allow command");
+    let allow_obs = finish(&session, &allow_work).await;
+    let deny_work = submit(&session, "deny command");
+    let deny_obs = finish(&session, &deny_work).await;
+    approvals.await.unwrap();
+
+    assert_eq!(
+        allow_obs.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        allow_obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndAllowed
+    );
+    assert!(root.path().join("allowed.txt").exists());
+    assert_eq!(
+        deny_obs.tools.calls[0].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    assert_eq!(
+        deny_obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndDenied
+    );
+    assert!(!root.path().join("denied.txt").exists());
+    assert!(
+        command_result(&session, &deny_obs, 0)
+            .to_string()
+            .contains("user declined this command")
+    );
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_read_only_refuses_before_asking() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![call_command(json!({"command": "printf no > no.txt"}))]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    session
+        .set_permission_mode(PermissionMode::ReadOnly)
+        .unwrap();
+    let work = submit(&session, "read-only command");
+    let observation = finish(&session, &work).await;
+    assert_eq!(
+        observation.tools.calls[0].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    assert_eq!(
+        observation.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::ModeRefused
+    );
+    assert!(!root.path().join("no.txt").exists());
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_invalid_workdir_and_missing_route_are_rejected_without_prompt() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![call_command(json!({
+            "command": "printf no > no.txt",
+            "workdir": "../"
+        }))]),
+        Reply::Answer,
+        Reply::Calls(vec![call_command(json!({"command": "printf no > no.txt"}))]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    let mut rx = session.connect_approvals();
+    let invalid_work = submit(&session, "invalid workdir");
+    let invalid_obs = finish(&session, &invalid_work).await;
+    assert_eq!(
+        invalid_obs.tools.calls[0].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), rx.recv())
+            .await
+            .is_err(),
+        "invalid workdir must not prompt"
+    );
+    drop(rx);
+
+    // A valid command in Ask mode still needs a connected route.
+    let no_route_work = submit(&session, "no route");
+    let no_route_obs = finish(&session, &no_route_work).await;
+    assert_eq!(
+        no_route_obs.tools.calls[0].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    assert_eq!(
+        no_route_obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::NoConfirmationRoute
+    );
+    assert!(!root.path().join("no.txt").exists());
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_timeout_and_cancel_are_reported_and_stop_work() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![call_command(json!({
+            "command": "sleep 5; printf done > timeout.txt",
+            "timeout_secs": 1
+        }))]),
+        Reply::Answer,
+        Reply::Calls(vec![call_command(json!({
+            "command": "printf started > started.txt; sleep 30; printf done > cancelled.txt"
+        }))]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    session
+        .set_permission_mode(PermissionMode::FullAccess)
+        .unwrap();
+
+    let timeout_work = submit(&session, "timeout command");
+    let timeout_obs = finish(&session, &timeout_work).await;
+    assert_eq!(
+        timeout_obs.tools.calls[0].status,
+        Some(ToolResultStatus::TimedOut)
+    );
+    assert_eq!(
+        command_result(&session, &timeout_obs, 0)["may_have_partially_executed"],
+        true
+    );
+    assert!(!root.path().join("timeout.txt").exists());
+
+    let cancel_work = submit(&session, "cancel command");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !root.path().join("started.txt").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "command did not start"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    session.cancel(&cancel_work).unwrap();
+    let cancel_obs = session
+        .wait(&cancel_work, Duration::from_secs(5))
+        .await
+        .unwrap();
+    // Causa's batch stops when the turn is cancelled and settles every
+    // started call as UnknownOutcome; the command's Drop guard still kills
+    // the process tree. This is the integration boundary, not a Cancelled
+    // result produced by the tool.
+    assert_eq!(
+        cancel_obs.tools.calls[0].status,
+        Some(ToolResultStatus::UnknownOutcome)
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!root.path().join("cancelled.txt").exists());
+
+    let inspection = session.inspect_repair(Some(&cancel_work)).unwrap();
+    let original = inspection.original.expect("retained command batch");
+    assert!(original.write_warnings_count >= 1);
+    assert_eq!(original.command_warnings_count, 1);
+    assert!(original.results.iter().any(|result| {
+        result
+            .write_warning
+            .as_ref()
+            .is_some_and(|warning| warning.kind == crate::application::RepairWarningKind::Command)
+    }));
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_tool_creation_fails_on_unsupported_platform() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![Reply::Answer];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let error = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .expect_err("run_command must fail closed on unsupported platforms");
+    assert!(error.to_string().contains("command"));
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn command_settings_survive_save_and_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = dir.path().join("store");
+    let host = SessionHost::new(Some(storage));
+    let mut definition = command_definition("https://example.test", dir.path());
+    definition.command = Some(crate::definition::CommandSettings {
+        network: crate::definition::CommandNetwork::Open,
+        default_timeout_secs: 30,
+        max_timeout_secs: 60,
+    });
+    let prepared = PreparedCreate::persistent(definition.clone(), Context::default());
+    let id = prepared.conversation_id().clone();
+    let session = host.create(prepared).await.unwrap();
+    session.wait_saved().await.unwrap();
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    let reopened = host.open(id).await.unwrap();
+    let saved = reopened.definition();
+    assert_eq!(saved.command, definition.command);
+    assert_eq!(saved.tools, definition.tools);
+    host.close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_accept_edits_still_asks() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![call_command(
+            json!({"command": "printf yes > accepted.txt"}),
+        )]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    session
+        .set_permission_mode(PermissionMode::AcceptEdits)
+        .unwrap();
+    let mut rx = session.connect_approvals();
+    let approval = tokio::spawn(async move {
+        let request = rx.recv().await.expect("command approval");
+        assert!(matches!(request.subject, ApprovalSubject::Command { .. }));
+        request.reply.send(ApprovalDecision::Allow).unwrap();
+    });
+    let work = submit(&session, "accept-edits command");
+    let observation = finish(&session, &work).await;
+    approval.await.unwrap();
+    assert_eq!(
+        observation.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        observation.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndAllowed
+    );
+    assert!(root.path().join("accepted.txt").exists());
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
 }

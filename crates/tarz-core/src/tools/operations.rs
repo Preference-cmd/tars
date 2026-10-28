@@ -95,6 +95,9 @@ pub(crate) fn run(
             #[cfg(test)]
             write_gate,
         ),
+        Params::Command(_) => Err(OperationError::Rejected(
+            "run_command must use the sandboxed command executor".into(),
+        )),
     }
     #[cfg(not(unix))]
     {

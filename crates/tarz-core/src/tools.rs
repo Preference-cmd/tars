@@ -1,10 +1,13 @@
 //! Workspace filesystem tools with bounded operations and work-owned cleanup.
 
+mod command;
 mod diff;
 mod execute;
 pub(crate) mod operations;
 pub(crate) mod parameters;
 pub(crate) mod resources;
+
+pub(crate) use command::CommandRuntime;
 
 #[cfg(test)]
 pub use diff::DiffSummary;

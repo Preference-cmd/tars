@@ -137,10 +137,18 @@ pub(super) async fn run(
             if summary.removed_count > summary.removed.len() {
                 text.push_str("  Identity display limited to 128 declarations.\n");
             }
-            let writes = summary.write_warnings_count - summary.external_warnings_count;
+            let writes = summary.write_warnings_count
+                - summary.external_warnings_count
+                - summary.command_warnings_count;
             if writes > 0 {
                 text.push_str(&format!(
                     "{writes} write call(s) may have changed files before interruption; read them again before continuing.\n"
+                ));
+            }
+            if summary.command_warnings_count > 0 {
+                text.push_str(&format!(
+                    "{} command call(s) may have executed before interruption; check the workspace before continuing.\n",
+                    summary.command_warnings_count
                 ));
             }
             if summary.external_warnings_count > 0 {

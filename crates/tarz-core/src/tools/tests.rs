@@ -756,3 +756,29 @@ async fn observation_probe() {
     );
     assert_eq!(shared.metrics().started, 3);
 }
+
+#[test]
+fn run_command_definition_and_hints_declare_the_sandbox() {
+    let (_dir, shared) = tools(WorkspaceToolLimits::default());
+    let call = call("run_command", json!({"command":"true"}));
+    let reporter = reporter(std::slice::from_ref(&call));
+    let tool = shared
+        .bind_for_test(&[WorkspaceTool::RunCommand], reporter)
+        .pop()
+        .unwrap();
+    let definition = tool.definition();
+    assert_eq!(definition.name, "run_command");
+    assert!(definition.description.contains("sandbox"));
+    assert_eq!(
+        definition.parameters["properties"]["command"]["maxLength"],
+        16384
+    );
+    assert_eq!(
+        definition.parameters["properties"]["timeout_secs"]["maximum"],
+        600
+    );
+    let hints = tool.hints();
+    assert_eq!(hints.read_only, Some(false));
+    assert_eq!(hints.destructive, Some(true));
+    assert_eq!(hints.idempotent, Some(false));
+}

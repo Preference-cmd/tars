@@ -1,5 +1,6 @@
 use super::inspect::{
     candidate_check, diagnose, extract_call_path, is_builtin_tool, scan, warning_kind,
+    warning_status_applies,
 };
 use super::types::*;
 use crate::application::{ApplicationError, ManagedSession, MaterialVersion};
@@ -7,7 +8,6 @@ use crate::definition::SessionDefinition;
 use crate::session::{SessionError, WorkResult};
 use causa::kernel::{
     BlockContent, BlockId, BlockMeta, Context, ContextBlock, Role, ToolBatch, ToolCallPayload,
-    ToolResultStatus,
 };
 use causa::runtime::{TurnInterruption, TurnResult, new_block_id};
 use std::collections::{HashMap, HashSet};
@@ -168,17 +168,18 @@ impl ManagedSession {
             .unpaired
             .iter()
             .filter_map(|id| {
-                if require_unknown
-                    && !matches!(
-                        results.get(id).map(|b| b.content()),
-                        Some(BlockContent::ToolResult(p))
-                            if p.status == ToolResultStatus::UnknownOutcome
-                    )
-                {
-                    return None;
-                }
                 let call = declarations.get(id)?;
                 let kind = warning_kind(&call.tool_name)?;
+                if require_unknown {
+                    let Some(BlockContent::ToolResult(payload)) =
+                        results.get(id).map(|block| block.content())
+                    else {
+                        return None;
+                    };
+                    if !warning_status_applies(&kind, &payload.status) {
+                        return None;
+                    }
+                }
                 Some(RepairWriteWarning {
                     call_block_id: *id,
                     tool_name: call.tool_name.clone(),
@@ -191,6 +192,10 @@ impl ManagedSession {
         let external_warnings_count = warnings
             .iter()
             .filter(|warning| warning.kind == RepairWarningKind::External)
+            .count();
+        let command_warnings_count = warnings
+            .iter()
+            .filter(|warning| warning.kind == RepairWarningKind::Command)
             .count();
         let write_warnings: Vec<RepairWriteWarning> =
             warnings.into_iter().take(DISPLAY_LIMIT).collect();
@@ -244,6 +249,7 @@ impl ManagedSession {
             explanation_id,
             write_warnings_count,
             external_warnings_count,
+            command_warnings_count,
             write_warnings,
         };
         Ok(RepairPlan {

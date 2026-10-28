@@ -15,16 +15,19 @@ pub enum WorkspaceTool {
     WriteFile,
     /// Replace exact text segments in a bounded workspace-relative file.
     EditFile,
+    /// Run one command in the platform sandbox.
+    RunCommand,
 }
 
 impl WorkspaceTool {
     /// Every built-in tool, in declaration order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::ListDirectory,
         Self::ReadFile,
         Self::SearchText,
         Self::WriteFile,
         Self::EditFile,
+        Self::RunCommand,
     ];
 
     /// Whether `name` is the model-facing name of a built-in tool.
@@ -40,6 +43,7 @@ impl WorkspaceTool {
             Self::SearchText => "search_text",
             Self::WriteFile => "write_file",
             Self::EditFile => "edit_file",
+            Self::RunCommand => "run_command",
         }
     }
 }

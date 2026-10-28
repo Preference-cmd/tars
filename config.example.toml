@@ -25,7 +25,7 @@ max_tool_calls = 64
 # permission_mode = "ask"
 # Explicit opt-in: root alone does not enable tools.
 # workspace_root = "../my-project"
-# tools = ["list_directory", "read_file", "search_text"]
+# tools = ["list_directory", "read_file", "search_text", "write_file", "edit_file", "run_command"]
 # Add "write_file" and "edit_file" to enable workspace writes; ask mode confirms each write.
 # MCP servers are defined in mcp.json next to this file (or in TARZ_MCP_CONFIG).
 # Select them by id; omitted or empty selects none.
@@ -38,6 +38,12 @@ max_tool_calls = 64
 # max_output_bytes = 32768
 
 # Optional lower write limits (never raises the supported ceilings).
+# Command settings are only valid when run_command is selected.
+# [profiles.default.command]
+# network = "none"              # none | open
+# default_timeout_secs = 120
+# max_timeout_secs = 600
+
 # [profiles.default.write_limits]
 # max_edit_file_bytes = 1048576
 # max_write_bytes = 524288

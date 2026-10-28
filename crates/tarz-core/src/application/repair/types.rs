@@ -31,6 +31,8 @@ pub enum RepairIssueKind {
 pub enum RepairWarningKind {
     /// A built-in write or edit call may have modified a workspace file.
     FileWrite,
+    /// A built-in command may have executed before interruption.
+    Command,
     /// An MCP or other non-builtin call may have had effects on its own server,
     /// outside the workspace and outside the application's control.
     External,
@@ -62,6 +64,9 @@ impl RepairWriteWarning {
             RepairWarningKind::FileWrite => format!(
                 "{tool_name} {path} may have changed the file; read it again before continuing"
             ),
+            RepairWarningKind::Command => {
+                format!("{tool_name} may have executed; check the workspace before continuing")
+            }
             RepairWarningKind::External => format!(
                 "{tool_name} may have caused external side effects; check the server state before continuing"
             ),
@@ -147,6 +152,8 @@ pub struct OriginalBatchPreview {
     /// Never greater than `write_warnings_count`; consumers may derive the
     /// built-in write count by subtraction.
     pub external_warnings_count: usize,
+    /// Total number of those warnings that concern sandboxed command calls.
+    pub command_warnings_count: usize,
 }
 
 /// Inspection of actual current materials, optionally with one retained work.
@@ -193,6 +200,8 @@ pub struct RepairSummary {
     /// Never greater than `write_warnings_count`; consumers may derive the
     /// built-in write count by subtraction.
     pub external_warnings_count: usize,
+    /// Total number of those warnings that concern sandboxed command calls.
+    pub command_warnings_count: usize,
     /// First 128 warnings in deterministic scan order.
     pub write_warnings: Vec<RepairWriteWarning>,
 }

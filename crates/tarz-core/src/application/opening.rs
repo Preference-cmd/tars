@@ -106,6 +106,7 @@ pub(super) async fn initialize(
             context,
             current_mode,
             mcp,
+            prepared.is_some(),
         )
         .await?
     };
@@ -117,6 +118,7 @@ pub(super) async fn initialize(
         context,
         current_mode,
         mcp,
+        prepared.is_some(),
     )
     .await?;
     let mut state = entry.lock();
@@ -167,6 +169,7 @@ async fn assembled(
     context: causa::kernel::Context,
     current_mode: crate::permission::PermissionMode,
     mcp: Option<Arc<crate::mcp::McpRuntime>>,
+    allow_unavailable_command: bool,
 ) -> Result<crate::session::Session, ApplicationError> {
     match crate::assembly::assemble(
         definition,
@@ -175,6 +178,7 @@ async fn assembled(
         host.tool_resources.clone(),
         current_mode,
         mcp.clone(),
+        allow_unavailable_command,
     ) {
         Ok(owner) => Ok(owner),
         Err(error) => {

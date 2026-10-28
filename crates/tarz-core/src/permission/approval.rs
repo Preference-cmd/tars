@@ -1,6 +1,7 @@
 //! Approval requests, decisions, and reviewer connection channel.
 
 use super::mode::PermissionMode;
+use crate::definition::CommandNetwork;
 use crate::session::WorkRef;
 use causa::kernel::BlockId;
 use std::sync::Mutex;
@@ -54,6 +55,17 @@ pub enum ApprovalSubject {
         action: WriteAction,
         /// Unified diff showing the proposed changes.
         diff: String,
+    },
+    /// Sandboxed shell command requiring confirmation.
+    Command {
+        /// Command text as provided by the model.
+        command: String,
+        /// Workspace-relative working directory, or "." for the root.
+        workdir: String,
+        /// Effective timeout in seconds.
+        timeout_secs: u64,
+        /// Network policy for this command.
+        network: CommandNetwork,
     },
     /// MCP tool call requiring confirmation.
     McpCall {

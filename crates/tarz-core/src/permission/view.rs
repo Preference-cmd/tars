@@ -90,6 +90,7 @@ impl PermissionView {
                     Some(ToolPermissionClass::KnownReadOnly)
                 }
                 "write_file" | "edit_file" => Some(ToolPermissionClass::BuiltinWrite),
+                "run_command" => Some(ToolPermissionClass::BuiltinCommand),
                 _ => None,
             }
         } else {

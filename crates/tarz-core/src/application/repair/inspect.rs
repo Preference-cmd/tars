@@ -4,7 +4,7 @@ use crate::definition::{RenderOptions, SessionDefinition};
 use crate::session::WorkRef;
 use causa::kernel::{
     BlockContent, BlockId, CacheDirective, ContentPart, Context, ModelRef,
-    ToolResultStatus::UnknownOutcome,
+    ToolResultStatus::{Cancelled, TimedOut, UnknownOutcome},
 };
 use causa::protocol::translation::{
     anthropic::render_anthropic_messages, media::MediaSet,
@@ -238,7 +238,12 @@ impl ManagedSession {
                     let warned = |entry: &causa::kernel::ToolCallEntry| {
                         let (_, result) = entry.result()?;
                         warning_kind(&entry.call().input.tool_name)
-                            .filter(|_| result.status == UnknownOutcome)
+                            .filter(|kind| match kind {
+                                RepairWarningKind::Command => {
+                                    matches!(result.status, UnknownOutcome | TimedOut | Cancelled)
+                                }
+                                _ => result.status == UnknownOutcome,
+                            })
                             .map(|kind| RepairWriteWarning {
                                 call_block_id: result.call_block_id,
                                 tool_name: entry.call().input.tool_name.clone(),
@@ -253,6 +258,10 @@ impl ManagedSession {
                     let external_warnings_count = warnings
                         .iter()
                         .filter(|warning| warning.kind == RepairWarningKind::External)
+                        .count();
+                    let command_warnings_count = warnings
+                        .iter()
+                        .filter(|warning| warning.kind == RepairWarningKind::Command)
                         .count();
                     OriginalBatchPreview {
                         work: work.clone(),
@@ -279,6 +288,7 @@ impl ManagedSession {
                         adoption_error,
                         write_warnings_count,
                         external_warnings_count,
+                        command_warnings_count,
                     }
                 })
             })
@@ -330,16 +340,31 @@ fn json_excerpt(value: &impl serde::Serialize, limit: usize) -> String {
 // The explicit adoption allow-list for original results. New capabilities
 // (including MCP) need a separately reviewed policy; adding a workspace tool
 // variant must not widen it implicitly.
-pub(super) const BUILTIN_TOOL_NAMES: [&str; 5] = [
+pub(super) const BUILTIN_TOOL_NAMES: [&str; 6] = [
     "list_directory",
     "read_file",
     "search_text",
     "write_file",
     "edit_file",
+    "run_command",
 ];
 
 pub(super) fn is_builtin_tool(tool_name: &str) -> bool {
     BUILTIN_TOOL_NAMES.contains(&tool_name)
+}
+
+/// Which result status makes a warning relevant for its side-effect kind.
+pub(super) fn warning_status_applies(
+    kind: &RepairWarningKind,
+    status: &causa::kernel::ToolResultStatus,
+) -> bool {
+    match kind {
+        RepairWarningKind::FileWrite => *status == UnknownOutcome,
+        RepairWarningKind::Command => {
+            matches!(*status, UnknownOutcome | TimedOut | Cancelled)
+        }
+        RepairWarningKind::External => *status == UnknownOutcome,
+    }
 }
 
 /// Which warning a tool call can carry: built-in writes may have changed a
@@ -350,6 +375,7 @@ pub(super) fn warning_kind(tool_name: &str) -> Option<RepairWarningKind> {
         // The write names must stay a subset of `BUILTIN_TOOL_NAMES`; a
         // built-in write missing from that list would surface as external.
         "write_file" | "edit_file" => Some(RepairWarningKind::FileWrite),
+        "run_command" => Some(RepairWarningKind::Command),
         name if BUILTIN_TOOL_NAMES.contains(&name) => None,
         _ => Some(RepairWarningKind::External),
     }
@@ -389,6 +415,7 @@ mod tests {
             tool_limits: Default::default(),
             write_limits: None,
             permission_mode: None,
+            command: None,
             mcp_servers: Vec::new(),
         }
     }
@@ -431,5 +458,42 @@ mod tests {
             .unwrap();
         let saved = render(&context(), &saved_definition).unwrap();
         assert_eq!(saved["store"], true);
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn run_command_is_builtin_and_carries_a_command_warning() {
+        assert!(is_builtin_tool("run_command"));
+        assert_eq!(
+            warning_kind("run_command"),
+            Some(RepairWarningKind::Command)
+        );
+        let warning = RepairWriteWarning {
+            call_block_id: causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+            tool_name: "run_command".into(),
+            path: String::new(),
+            kind: RepairWarningKind::Command,
+        };
+        assert!(warning.advice().contains("may have executed"));
+        assert!(warning_status_applies(
+            &RepairWarningKind::Command,
+            &causa::kernel::ToolResultStatus::TimedOut
+        ));
+        assert!(warning_status_applies(
+            &RepairWarningKind::Command,
+            &causa::kernel::ToolResultStatus::Cancelled
+        ));
+        assert!(warning_status_applies(
+            &RepairWarningKind::Command,
+            &causa::kernel::ToolResultStatus::UnknownOutcome
+        ));
+        assert!(!warning_status_applies(
+            &RepairWarningKind::Command,
+            &causa::kernel::ToolResultStatus::Succeeded
+        ));
     }
 }

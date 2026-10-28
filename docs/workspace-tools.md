@@ -1,17 +1,19 @@
 # 工作区工具
 
-Tarz 可以为新会话显式启用五个内置工作区工具：只读的 `list_directory`、`read_file`、`search_text`，以及写入的 `write_file`、`edit_file`。CLI/TUI 共用 core 的配置、实际工具和资源监督；模型往返仍由 Causa runner 执行。默认工具清单为空，仅设置工作区不会启用工具。
+Tarz 可以为新会话显式启用六个内置工具：只读的 `list_directory`、`read_file`、`search_text`，写入的 `write_file`、`edit_file`，以及在 macOS Seatbelt 沙箱内执行命令的 `run_command`。CLI/TUI 共用 core 的配置、实际工具和资源监督；模型往返仍由 Causa runner 执行。默认工具清单为空，仅设置工作区不会启用工具。
 
 ```sh
 tarz run --provider openai-chat --model "$MODEL_ID" \
   --workspace . --tools list_directory,read_file,search_text \
   --input '找出保存失败后的恢复路径，给出文件和行号'
 tarz session create --store ./data --provider openai-chat --model "$MODEL_ID" \
-  --workspace . --tools list_directory,read_file,search_text,write_file,edit_file \
-  --permission-mode ask --json
+  --workspace . --tools list_directory,read_file,search_text,write_file,edit_file,run_command \
+  --command-network none --permission-mode ask --json
 ```
 
 共享 TOML 预设中的 `workspace_root`、`tools`、`permission_mode` 和 `mcp` 会填入 `tarz-tui` 新建表单；TUI 不提供这些启动参数。表单提供 Workspace、Tools、权限模式和 MCP 字段；`--tools ''` 或清空表单 Tools 字段禁用预设工具。保存的会话固定工作区、选择及完整限额；重开采用原定义，不随配置或 cwd 改变。缺失或不再满足访问规则的根目录会使打开失败，不会退回当前目录，也不发模型请求。
+
+`run_command` 每次在沙箱内启动 `/bin/bash -c`，默认无网络、工作区可写、`.git` 只读、用户目录大多不可读；确认面板显示完整命令、工作目录、期限和网络策略。权限类别与四种模式的关系与写入工具相同但始终要求确认（`full-access` 除外）；Linux/Windows 暂不支持该工具。完整命令契约、输出上限和残余见[命令工具提案](../.agents/pipelines/proposals/feature/2026-10-27-sandboxed-shell-command.md)。
 
 ## 文件访问
 

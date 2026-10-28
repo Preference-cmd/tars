@@ -31,6 +31,7 @@ fn definition() -> SessionDefinition {
         tool_limits: Default::default(),
         write_limits: None,
         permission_mode: None,
+        command: None,
         mcp_servers: Vec::new(),
     }
 }

@@ -1,4 +1,4 @@
-use crate::definition::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
+use crate::definition::{CommandSettings, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::workspace::Workspace;
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -47,6 +47,14 @@ pub(crate) struct EditParams {
     pub edits: Vec<EditSegment>,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CommandParams {
+    pub command: String,
+    pub workdir: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
 #[derive(Clone)]
 pub(crate) enum Params {
     List(ListParams),
@@ -54,6 +62,7 @@ pub(crate) enum Params {
     Search(SearchParams),
     Write(WriteParams),
     Edit(EditParams),
+    Command(CommandParams),
 }
 
 impl Params {
@@ -62,6 +71,7 @@ impl Params {
         input: &serde_json::Value,
         limits: &WorkspaceToolLimits,
         write_limits: &WriteToolLimits,
+        command_settings: CommandSettings,
     ) -> Result<Self, Cow<'static, str>> {
         let object = input
             .as_object()
@@ -72,6 +82,7 @@ impl Params {
             WorkspaceTool::SearchText => &["path", "query", "max_matches"],
             WorkspaceTool::WriteFile => &["path", "content"],
             WorkspaceTool::EditFile => &["path", "edits"],
+            WorkspaceTool::RunCommand => &["command", "workdir", "timeout_secs"],
         };
         if object.len() > allowed.len() || object.keys().any(|key| !allowed.contains(&key.as_str()))
         {
@@ -88,10 +99,16 @@ impl Params {
                 "content" if value.as_str().is_none() => {
                     return Err(Cow::Borrowed("content must be a string"));
                 }
+                "command" if value.as_str().is_none() => {
+                    return Err(Cow::Borrowed("command must be a string"));
+                }
+                "workdir" if value.as_str().is_none() => {
+                    return Err(Cow::Borrowed("workdir must be a string"));
+                }
                 "edits" if value.as_array().is_none() => {
                     return Err(Cow::Borrowed("edits must be an array"));
                 }
-                "path" | "query" | "content" | "edits" => {}
+                "path" | "query" | "content" | "edits" | "command" | "workdir" => {}
                 _ if value.as_u64().is_none() => {
                     return Err(Cow::Borrowed("limits must be positive integers"));
                 }
@@ -111,6 +128,9 @@ impl Params {
                 Self::Write(WriteParams::deserialize(input).map_err(invalid)?)
             }
             WorkspaceTool::EditFile => Self::Edit(EditParams::deserialize(input).map_err(invalid)?),
+            WorkspaceTool::RunCommand => {
+                Self::Command(CommandParams::deserialize(input).map_err(invalid)?)
+            }
         };
         let path = match &params {
             Self::List(p) => &p.path,
@@ -118,9 +138,12 @@ impl Params {
             Self::Search(p) => &p.path,
             Self::Write(p) => &p.path,
             Self::Edit(p) => &p.path,
+            Self::Command(_) => "",
         };
-        Workspace::components(path)
-            .map_err(|_| Cow::Borrowed("invalid workspace-relative path"))?;
+        if !matches!(params, Self::Command(_)) {
+            Workspace::components(path)
+                .map_err(|_| Cow::Borrowed("invalid workspace-relative path"))?;
+        }
         match &params {
             Self::List(p)
                 if p.limit
@@ -157,6 +180,27 @@ impl Params {
                         p.content.len(),
                         write_limits.max_write_bytes
                     )));
+                }
+            }
+            Self::Command(p) => {
+                if p.command.is_empty() || p.command.len() > 16 * 1024 || p.command.contains('\0') {
+                    return Err(Cow::Borrowed(
+                        "command must be nonempty, at most 16 KiB and contain no NUL",
+                    ));
+                }
+                if let Some(workdir) = &p.workdir {
+                    if workdir.len() > 4096 {
+                        return Err(Cow::Borrowed("workdir must be a bounded string"));
+                    }
+                    Workspace::components(workdir)
+                        .map_err(|_| Cow::Borrowed("invalid workspace-relative path"))?;
+                }
+                if p.timeout_secs.is_some_and(|timeout| {
+                    timeout == 0 || timeout > command_settings.max_timeout_secs
+                }) {
+                    return Err(Cow::Borrowed(
+                        "timeout_secs exceeds the configured command bound",
+                    ));
                 }
             }
             Self::Edit(p) => {

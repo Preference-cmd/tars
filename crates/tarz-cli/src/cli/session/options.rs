@@ -113,6 +113,7 @@ impl SessionCommand {
                 | "--profile"
                 | "--workspace"
                 | "--tools"
+                | "--command-network"
                 | "--mcp"
                     if command == "create" =>
                 {

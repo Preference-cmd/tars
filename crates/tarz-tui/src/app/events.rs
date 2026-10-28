@@ -392,6 +392,12 @@ fn approval_max_scroll(entry: &super::Entry) -> usize {
                 .lines()
                 .count()
         }
+        tarz_core::permission::ApprovalSubject::Command { command, .. } => {
+            tarz_core::permission::escape_untrusted_text(command)
+                .lines()
+                .count()
+                + 5
+        }
         tarz_core::permission::ApprovalSubject::McpCall { arguments, .. } => {
             tarz_core::permission::escape_untrusted_text(arguments)
                 .lines()

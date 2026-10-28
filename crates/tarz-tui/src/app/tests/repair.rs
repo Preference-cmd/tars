@@ -45,6 +45,7 @@ async fn incomplete(app: &mut crate::app::App, provider: Provider, endpoint: &st
         tool_limits: Default::default(),
         write_limits: None,
         permission_mode: None,
+        command: None,
         mcp_servers: Vec::new(),
     };
     let context = Context::from_blocks(vec![
@@ -357,6 +358,7 @@ async fn repair_ui_shows_write_warning_for_unpaired_write_file() {
         tool_limits: Default::default(),
         write_limits: None,
         permission_mode: None,
+        command: None,
         mcp_servers: Vec::new(),
     };
     let context = Context::from_blocks(vec![
@@ -431,6 +433,7 @@ async fn repair_ui_shows_external_side_effect_warning_for_unpaired_mcp_call() {
         tool_limits: Default::default(),
         write_limits: None,
         permission_mode: None,
+        command: None,
         mcp_servers: Vec::new(),
     };
     let context = Context::from_blocks(vec![

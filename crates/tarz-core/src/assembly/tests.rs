@@ -32,6 +32,7 @@ fn definition() -> SessionDefinition {
         tool_limits: Default::default(),
         write_limits: None,
         permission_mode: None,
+        command: None,
         mcp_servers: Vec::new(),
     }
 }
@@ -48,6 +49,7 @@ fn invalid_definition_is_rejected_before_credential_resolution() {
             crate::tools::ToolResources::new(16),
             crate::permission::PermissionMode::Ask,
             None,
+            true,
         ),
         Err(AssemblyError::Definition(DefinitionError::BlankModel))
     ));
@@ -63,6 +65,7 @@ fn missing_credentials_report_only_a_sanitized_resolution_error() {
         crate::tools::ToolResources::new(16),
         crate::permission::PermissionMode::Ask,
         None,
+        true,
     ) {
         Ok(_) => panic!("missing credential accepted"),
         Err(error) => error,
@@ -139,6 +142,7 @@ fn unavailable_workspace_is_rejected_before_credentials_or_model_access() {
             crate::tools::ToolResources::new(16),
             crate::permission::PermissionMode::Ask,
             None,
+            true,
         ),
         Err(AssemblyError::Workspace(_))
     ));
@@ -187,7 +191,7 @@ fn unsupported_platform_rejects_enabled_workspace_but_still_assembles_empty_cata
     chosen.workspace_root = Some(std::env::current_dir().unwrap());
     chosen.tools = vec![crate::definition::WorkspaceTool::ReadFile];
     assert!(matches!(
-        assemble(&chosen, "id".into(), Context::default(), crate::tools::ToolResources::new(16), crate::permission::PermissionMode::Ask),
+        assemble(&chosen, "id".into(), Context::default(), crate::tools::ToolResources::new(16), crate::permission::PermissionMode::Ask, true),
         Err(AssemblyError::Workspace(error)) if matches!(&*error, crate::workspace::WorkspaceError::UnsupportedPlatform)
     ));
     chosen.tools.clear();
@@ -199,6 +203,42 @@ fn unsupported_platform_rejects_enabled_workspace_but_still_assembles_empty_cata
             crate::tools::ToolResources::new(16),
             crate::permission::PermissionMode::Ask,
             None,
+            true,
+        )
+        .is_ok()
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn command_runtime_is_allowed_on_reopen_but_not_on_create_without_a_backend() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut chosen = definition();
+    chosen.credential = CredentialRef::Environment("PATH".into());
+    chosen.workspace_root = Some(directory.path().canonicalize().unwrap());
+    chosen.tools = vec![crate::definition::WorkspaceTool::RunCommand];
+    chosen.command = Some(crate::definition::CommandSettings::default());
+    assert!(matches!(
+        assemble(
+            &chosen,
+            "id".into(),
+            Context::default(),
+            crate::tools::ToolResources::new(16),
+            crate::permission::PermissionMode::Ask,
+            None,
+            false,
+        ),
+        Err(AssemblyError::CommandUnavailable(_))
+    ));
+    assert!(
+        assemble(
+            &chosen,
+            "id".into(),
+            Context::default(),
+            crate::tools::ToolResources::new(16),
+            crate::permission::PermissionMode::Ask,
+            None,
+            true,
         )
         .is_ok()
     );

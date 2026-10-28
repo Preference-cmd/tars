@@ -340,6 +340,13 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
                 req.mode,
             )
         }
+        tarz_core::permission::ApprovalSubject::Command { .. } => {
+            format!(
+                "{} wants to run a command (permission mode: {})",
+                tarz_core::permission::escape_untrusted_text(&req.tool_name),
+                req.mode,
+            )
+        }
         tarz_core::permission::ApprovalSubject::McpCall { server, tool, .. } => {
             format!(
                 "{} wants to call MCP tool {}/{} (permission mode: {})",
@@ -375,7 +382,8 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
                     entry.approval_queue.len() - 1
                 )
             }
-            tarz_core::permission::ApprovalSubject::McpCall { .. } => {
+            tarz_core::permission::ApprovalSubject::Command { .. }
+            | tarz_core::permission::ApprovalSubject::McpCall { .. } => {
                 format!(
                     "({} more pending confirmation(s) in queue)",
                     entry.approval_queue.len() - 1
@@ -431,6 +439,29 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
                 })
                 .collect();
             frame.render_widget(Paragraph::new(visible_diff).block(diff_block()), regions[1]);
+        }
+        tarz_core::permission::ApprovalSubject::Command {
+            command,
+            workdir,
+            timeout_secs,
+            network,
+        } => {
+            let text = format!(
+                "Working directory: {}\nTimeout: {timeout_secs}s\nNetwork: {network}\nWorkspace: writable; .git read-only; home unreadable\n\n$ {}",
+                tarz_core::permission::escape_untrusted_text(workdir),
+                tarz_core::permission::escape_untrusted_text(command),
+            );
+            let lines: Vec<&str> = text.lines().collect();
+            let scroll = entry
+                .approval_scroll
+                .min(lines.len().saturating_sub(body_height));
+            let visible: Vec<Line> = lines
+                .iter()
+                .skip(scroll)
+                .take(body_height)
+                .map(|&line| Line::from(line))
+                .collect();
+            frame.render_widget(Paragraph::new(visible).block(block), regions[1]);
         }
         tarz_core::permission::ApprovalSubject::McpCall { arguments, .. } => {
             let escaped_args = tarz_core::permission::escape_untrusted_text(arguments);

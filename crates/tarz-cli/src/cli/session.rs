@@ -31,7 +31,8 @@ Create options:
   --render-options    JSON object of the protocol's render options, e.g. max_tokens_field
   --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
   --workspace         Root directory for selected workspace tools
-  --tools             Comma-separated list_directory,read_file,search_text,write_file,edit_file (default empty)
+  --tools             Comma-separated list_directory,read_file,search_text,write_file,edit_file,run_command (default empty)
+  --command-network   Command network: none or open (default none)
   --mcp               Comma-separated MCP server ids from mcp.json (default: profile; empty disables)
   --permission-mode   read-only | ask | accept-edits | full-access (default: profile or ask)
                       Initial permission mode saved in the definition. In ask mode, asks

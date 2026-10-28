@@ -18,6 +18,8 @@ pub(crate) enum AssemblyError {
     CredentialUnavailable,
     #[error("workspace resource unavailable: {0}")]
     Workspace(Arc<WorkspaceError>),
+    #[error("command tool unavailable: {0}")]
+    CommandUnavailable(String),
 }
 
 pub(crate) fn assemble(
@@ -27,24 +29,42 @@ pub(crate) fn assemble(
     resources: Arc<ToolResources>,
     current_mode: crate::permission::PermissionMode,
     mcp: Option<Arc<crate::mcp::McpRuntime>>,
+    allow_unavailable_command: bool,
 ) -> Result<Session, AssemblyError> {
     definition.validate()?;
+    let command_settings = definition.effective_command_settings();
+    let definition_command_settings = command_settings.unwrap_or_default();
     let workspace_tools = if definition.tools.is_empty() {
         None
     } else {
-        let workspace = Workspace::open(
-            definition
-                .workspace_root
-                .as_deref()
-                .expect("validated root"),
-        )
-        .map_err(|error| AssemblyError::Workspace(Arc::new(error)))?;
-        Some(WorkspaceTools::with_write_limits(
-            workspace,
-            definition.tool_limits.clone(),
-            definition.write_limits.unwrap_or_default(),
-            resources,
-        ))
+        let root = definition
+            .workspace_root
+            .as_deref()
+            .expect("validated root");
+        let workspace =
+            Workspace::open(root).map_err(|error| AssemblyError::Workspace(Arc::new(error)))?;
+        if let Some(settings) = command_settings {
+            let command = crate::tools::CommandRuntime::bind(root, settings)
+                .map_err(|error| AssemblyError::CommandUnavailable(error.to_string()))?;
+            if !allow_unavailable_command && let Some(reason) = command.unavailable_platform() {
+                return Err(AssemblyError::CommandUnavailable(reason));
+            }
+            Some(WorkspaceTools::with_command(
+                workspace,
+                definition.tool_limits.clone(),
+                definition.write_limits.unwrap_or_default(),
+                resources,
+                settings,
+                Some(command),
+            ))
+        } else {
+            Some(WorkspaceTools::with_write_limits(
+                workspace,
+                definition.tool_limits.clone(),
+                definition.write_limits.unwrap_or_default(),
+                resources,
+            ))
+        }
     };
     let CredentialRef::Environment(name) = &definition.credential;
     let api_key = std::env::var(name)
@@ -61,6 +81,14 @@ pub(crate) fn assemble(
     let selected = definition.tools.clone();
     let builtin_timeout = (!selected.is_empty())
         .then(|| std::time::Duration::from_secs(definition.tool_limits.call_timeout_secs));
+    let builtin_timeout = match (
+        builtin_timeout,
+        command_settings
+            .map(|settings| std::time::Duration::from_secs(settings.max_timeout_secs + 5)),
+    ) {
+        (Some(builtin), Some(command)) => Some(builtin.max(command)),
+        (builtin, command) => builtin.or(command),
+    };
     // The executor deadline applies to every call, built-in and MCP alike.
     // Each tool narrows it to its own frozen deadline (built-in limits or the
     // server's `tool_timeout_sec`), so the shared value is the largest.
@@ -139,6 +167,7 @@ pub(crate) fn assemble(
                     work,
                     reporter,
                     approvals.clone(),
+                    definition_command_settings,
                     prepared_writes,
                 )));
             }

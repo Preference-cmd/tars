@@ -28,6 +28,7 @@ pub use backend::{
 };
 pub use policy::{NetworkAccess, SandboxPolicy, SandboxPolicyError};
 pub use process::ProcessTree;
+pub(crate) use process::exit_status_code;
 
 #[cfg(test)]
 pub(crate) mod test_support;

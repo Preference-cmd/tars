@@ -61,6 +61,30 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
             }
             writer.flush()?;
         }
+        ApprovalSubject::Command {
+            command,
+            workdir,
+            timeout_secs,
+            network,
+        } => {
+            writeln!(
+                writer,
+                "Tarz: {} wants to run a command (permission mode: {})",
+                escape_untrusted_text(tool_name),
+                mode,
+            )?;
+            writeln!(
+                writer,
+                "Working directory: {}",
+                escape_untrusted_text(workdir)
+            )?;
+            writeln!(
+                writer,
+                "Timeout: {timeout_secs}s · Network: {network} · workspace writable, .git read-only, home unreadable"
+            )?;
+            writeln!(writer, "$ {}", escape_untrusted_text(command))?;
+            writer.flush()?;
+        }
         ApprovalSubject::McpCall {
             server,
             tool,
@@ -82,6 +106,7 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
 
     let prompt_text = match subject {
         ApprovalSubject::FileWrite { .. } => "Allow this write? [y/n] ",
+        ApprovalSubject::Command { .. } => "Allow this command? [y/n] ",
         ApprovalSubject::McpCall { .. } => "Allow this tool call? [y/n] ",
     };
 
@@ -205,6 +230,7 @@ pub(crate) fn spawn_approver(session: &tarz_core::application::ManagedSession) -
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use tarz_core::definition::CommandNetwork;
     use tarz_core::permission::{ApprovalDecision, PermissionMode, WriteAction};
 
     #[test]
@@ -416,6 +442,38 @@ mod tests {
 
         let out_str = String::from_utf8(writer).unwrap();
         assert_eq!(out_str.matches("Allow this write? [y/n] ").count(), 3);
+    }
+
+    #[test]
+    fn command_displays_sandbox_details_and_prompts() {
+        let subject = ApprovalSubject::Command {
+            command: "cargo test".into(),
+            workdir: "src".into(),
+            timeout_secs: 30,
+            network: CommandNetwork::None,
+        };
+        let mut reader = Cursor::new(b"y\n");
+        let mut writer = Vec::new();
+        let prompt_open = AtomicBool::new(false);
+        let cancelled = AtomicBool::new(false);
+        let decision = ask_approval(
+            "run_command",
+            PermissionMode::Ask,
+            &subject,
+            &mut reader,
+            &mut writer,
+            &prompt_open,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(decision, ApprovalDecision::Allow);
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("Working directory: src"));
+        assert!(output.contains("Timeout: 30s"));
+        assert!(output.contains("Network: none"));
+        assert!(output.contains(".git read-only"));
+        assert!(output.contains("$ cargo test"));
+        assert!(output.contains("Allow this command? [y/n]"));
     }
 
     #[test]

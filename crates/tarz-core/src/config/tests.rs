@@ -973,3 +973,51 @@ fn invalid_tool_names_are_derived_from_the_single_builtin_list() {
         );
     }
 }
+
+#[test]
+fn command_profile_resolves_defaults_and_network_override() {
+    use crate::definition::{CommandNetwork, CommandSettings, WorkspaceTool};
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let file = directory.path().join("config.toml");
+    let text = format!(
+        "{CONFIG}\nworkspace_root = \"workspace\"\ntools = [\"run_command\"]\n[profiles.local.command]\nnetwork = \"none\"\ndefault_timeout_secs = 30\nmax_timeout_secs = 60\n"
+    );
+    std::fs::write(&file, text).unwrap();
+    let config = Config::load(ConfigSource::File(file)).unwrap();
+    let definition = config.definition(None, Default::default()).unwrap();
+    assert_eq!(
+        definition.command,
+        Some(CommandSettings {
+            network: CommandNetwork::None,
+            default_timeout_secs: 30,
+            max_timeout_secs: 60,
+        })
+    );
+    assert_eq!(definition.tools, vec![WorkspaceTool::RunCommand]);
+    let overridden = config
+        .definition(
+            None,
+            DefinitionOverrides {
+                command_network: Some(CommandNetwork::Open),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(overridden.command.unwrap().network, CommandNetwork::Open);
+    assert_eq!(overridden.command.unwrap().default_timeout_secs, 30);
+}
+
+#[test]
+fn command_settings_without_run_command_are_refused_by_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let file = directory.path().join("config.toml");
+    let text = format!(
+        "{CONFIG}\nworkspace_root = \"workspace\"\ntools = [\"read_file\"]\n[profiles.local.command]\nmax_timeout_secs = 60\n"
+    );
+    std::fs::write(&file, text).unwrap();
+    assert!(Config::load(ConfigSource::File(file)).is_err());
+}

@@ -1,7 +1,7 @@
 use std::{collections::HashMap, ffi::OsString, process::ExitCode};
 use tarz_core::{
     config::{Config, ConfigSource, DefinitionOverrides, parse_mcp, parse_tools},
-    definition::{Provider, SessionDefinition},
+    definition::{CommandNetwork, Provider, SessionDefinition},
 };
 
 pub(super) type Values<'a> = HashMap<&'a str, &'a OsString>;
@@ -126,6 +126,15 @@ pub(super) fn definition(
             .transpose()?,
         tool_limits: None,
         write_limits: None,
+        command_network: string(values, "--command-network")?
+            .map(|value| match value.as_str() {
+                "none" => Ok(CommandNetwork::None),
+                "open" => Ok(CommandNetwork::Open),
+                _ => Err(CliError::argument(
+                    "--command-network must be none or open",
+                )),
+            })
+            .transpose()?,
         permission_mode: string(values, "--permission-mode")?
             .map(|value| {
                 value

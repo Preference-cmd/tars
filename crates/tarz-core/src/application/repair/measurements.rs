@@ -60,6 +60,7 @@ async fn repair_resource_probe() {
         tool_limits: Default::default(),
         write_limits: None,
         permission_mode: None,
+        command: None,
         mcp_servers: Vec::new(),
     };
     let directory = tempfile::tempdir().unwrap();

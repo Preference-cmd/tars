@@ -114,12 +114,18 @@ impl ToolBatchProcessor for ModeGateProcessor {
                             kind: PermissionDecisionKind::ModeRefused,
                         },
                     );
-                    let msg = if category == ToolPermissionClass::BuiltinWrite {
-                        format!("the current permission mode '{mode}' does not allow this write")
-                    } else {
-                        format!(
+                    let msg = match category {
+                        ToolPermissionClass::BuiltinWrite => {
+                            format!(
+                                "the current permission mode '{mode}' does not allow this write"
+                            )
+                        }
+                        ToolPermissionClass::BuiltinCommand => format!(
+                            "the current permission mode '{mode}' does not allow this command"
+                        ),
+                        _ => format!(
                             "the current permission mode '{mode}' does not allow this MCP tool call"
-                        )
+                        ),
                     };
                     resolve_call(
                         batch,

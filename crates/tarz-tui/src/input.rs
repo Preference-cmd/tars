@@ -67,7 +67,7 @@ pub(crate) const FIELD_NAMES: [&str; 9] = [
     "Credential environment variable",
     "Timeout seconds (1..86400)",
     "Workspace root (optional; does not enable tools)",
-    "Tools (comma-separated list_directory,read_file,search_text,write_file,edit_file)",
+    "Tools (comma-separated list_directory,read_file,search_text,write_file,edit_file,run_command)",
     "Permission mode (read-only | ask | accept-edits | full-access)",
     "MCP servers (comma-separated ids from mcp.json)",
 ];
@@ -209,6 +209,7 @@ impl Form {
                     tools: Some(parse_tools(&values[6]).map_err(|e| e.to_string())?),
                     tool_limits: Some(self.tool_limits.clone()),
                     write_limits: self.write_limits,
+                    command_network: None,
                     permission_mode: Some(permission_mode),
                     mcp: Some(parse_mcp(&values[8]).map_err(|e| e.to_string())?),
                 },

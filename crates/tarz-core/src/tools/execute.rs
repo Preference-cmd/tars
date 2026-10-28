@@ -4,7 +4,7 @@ use super::diff::DiffSummary;
 use super::operations::{OperationControl, run};
 use super::parameters::Params;
 use super::resources::{Counters, OperationGuard, ToolResources};
-use crate::definition::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
+use crate::definition::{CommandSettings, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::permission::WriteAction;
 use crate::session::ToolReporter;
 use crate::workspace::{FileVersion, Workspace};
@@ -38,6 +38,8 @@ pub struct WorkspaceTools {
     workspace: Arc<Workspace>,
     limits: WorkspaceToolLimits,
     pub(super) write_limits: WriteToolLimits,
+    command_settings: CommandSettings,
+    pub(super) command: Option<Arc<super::CommandRuntime>>,
     pub(super) local: Arc<Semaphore>,
     host: Arc<ToolResources>,
     counters: Arc<Counters>,
@@ -54,6 +56,12 @@ impl WorkspaceTools {
     }
     pub(crate) fn write_limits(&self) -> &WriteToolLimits {
         &self.write_limits
+    }
+    pub(crate) fn command_settings(&self) -> CommandSettings {
+        self.command_settings
+    }
+    pub(crate) fn command(&self) -> Option<&Arc<super::CommandRuntime>> {
+        self.command.as_ref()
     }
     pub(crate) fn workspace(&self) -> &Workspace {
         &self.workspace
@@ -91,11 +99,49 @@ impl WorkspaceTools {
         write_limits: WriteToolLimits,
         host: Arc<ToolResources>,
     ) -> Arc<Self> {
+        Self::with_parts(
+            workspace,
+            limits,
+            write_limits,
+            host,
+            CommandSettings::default(),
+            None,
+        )
+    }
+
+    pub(crate) fn with_command(
+        workspace: Arc<Workspace>,
+        limits: WorkspaceToolLimits,
+        write_limits: WriteToolLimits,
+        host: Arc<ToolResources>,
+        command_settings: CommandSettings,
+        command: Option<Arc<super::CommandRuntime>>,
+    ) -> Arc<Self> {
+        Self::with_parts(
+            workspace,
+            limits,
+            write_limits,
+            host,
+            command_settings,
+            command,
+        )
+    }
+
+    fn with_parts(
+        workspace: Arc<Workspace>,
+        limits: WorkspaceToolLimits,
+        write_limits: WriteToolLimits,
+        host: Arc<ToolResources>,
+        command_settings: CommandSettings,
+        command: Option<Arc<super::CommandRuntime>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             workspace,
             local: Arc::new(Semaphore::new(limits.max_concurrent_operations)),
             limits,
             write_limits,
+            command_settings,
+            command,
             host,
             counters: Arc::new(Counters::default()),
             observations: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -190,6 +236,75 @@ fn stopped(call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
     )
 }
 
+impl WorkspaceToolImpl {
+    async fn execute_command(
+        &self,
+        call: &ToolCallContext,
+        control: &CallControl,
+        params: Params,
+    ) -> ToolResultPayload {
+        let Params::Command(params) = params else {
+            return result(
+                call,
+                ToolResultStatus::Rejected,
+                serde_json::json!({ "error": "invalid command parameters" }),
+            );
+        };
+        let Some(runtime) = self.shared.command.as_ref() else {
+            let output = result(
+                call,
+                ToolResultStatus::Rejected,
+                serde_json::json!({ "error": "command runtime is not available" }),
+            );
+            self.reporter.returned(call, output.status.clone());
+            return output;
+        };
+        let prepared = match runtime.check(&params) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let output = result(
+                    call,
+                    ToolResultStatus::Rejected,
+                    serde_json::json!({ "error": error }),
+                );
+                self.reporter.returned(call, output.status.clone());
+                return output;
+            }
+        };
+        let command_control = control.with_timeout(super::command::bounded_timeout(
+            control.deadline(),
+            Duration::from_secs(prepared.timeout_secs),
+        ));
+        self.reporter.waiting(call);
+        let Some(permit) = runtime.acquire(&command_control).await else {
+            let output = stopped(call, &command_control);
+            self.reporter.returned(call, output.status.clone());
+            return output;
+        };
+        self.reporter.running(call);
+        let execution = runtime
+            .run(
+                prepared,
+                permit,
+                &command_control,
+                self.shared.limits.max_output_bytes,
+            )
+            .await;
+        let mut output = result(call, execution.status, execution.content);
+        if serde_json::to_vec(&output).map_or(true, |bytes| {
+            bytes.len() > self.shared.limits.max_output_bytes
+        }) {
+            output.output.content = serde_json::json!({
+                "truncated": true,
+                "complete": false,
+                "limit_reason": "output_bytes"
+            });
+        }
+        self.reporter.returned(call, output.status.clone());
+        output
+    }
+}
+
 #[async_trait::async_trait]
 impl Tool for WorkspaceToolImpl {
     fn definition(&self) -> ToolDefinition {
@@ -236,11 +351,21 @@ impl Tool for WorkspaceToolImpl {
                     }
                 }),
             ),
+            WorkspaceTool::RunCommand => (
+                "run_command",
+                "Run one shell command in a sandboxed workspace; network is disabled unless the session enables it.",
+                json!({
+                    "command": {"type":"string","minLength":1,"maxLength":16384},
+                    "workdir": {"type":"string","maxLength":4096},
+                    "timeout_secs": {"type":"integer","minimum":1,"maximum":self.shared.command_settings().max_timeout_secs}
+                }),
+            ),
         };
         let required = match self.kind {
             WorkspaceTool::SearchText => json!(["path", "query"]),
             WorkspaceTool::WriteFile => json!(["path", "content"]),
             WorkspaceTool::EditFile => json!(["path", "edits"]),
+            WorkspaceTool::RunCommand => json!(["command"]),
             _ => json!(["path"]),
         };
         ToolDefinition::new(
@@ -267,6 +392,11 @@ impl Tool for WorkspaceToolImpl {
                 .with_destructive(true)
                 .with_idempotent(false)
                 .with_open_world(false),
+            WorkspaceTool::RunCommand => causa::kernel::ToolHints::default()
+                .with_read_only(false)
+                .with_destructive(true)
+                .with_idempotent(false)
+                .with_open_world(false),
         }
     }
     async fn execute(
@@ -281,6 +411,7 @@ impl Tool for WorkspaceToolImpl {
                 &call.input.arguments,
                 &self.shared.limits,
                 &self.shared.write_limits,
+                self.shared.command_settings(),
             )
         } else {
             Err(std::borrow::Cow::Borrowed(
@@ -299,6 +430,9 @@ impl Tool for WorkspaceToolImpl {
                 return output;
             }
         };
+        if self.kind == WorkspaceTool::RunCommand {
+            return self.execute_command(call, control, params).await;
+        }
         let prepared_write = match self.kind {
             WorkspaceTool::WriteFile | WorkspaceTool::EditFile => {
                 let prepared = self.prepared.lock().unwrap().remove(&call.call_block_id);

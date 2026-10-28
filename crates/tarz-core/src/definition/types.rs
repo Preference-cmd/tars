@@ -1,3 +1,4 @@
+use super::command::CommandSettings;
 use super::mcp::McpServerConfig;
 use super::workspace::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::session::SessionConfig;
@@ -94,6 +95,10 @@ pub struct SessionDefinition {
     /// without new features unmodified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<crate::permission::PermissionMode>,
+    /// Frozen command-tool settings; present only when `run_command` is selected.
+    /// A record saved before this field existed reads as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<CommandSettings>,
     /// Frozen snapshots of the MCP servers selected when the session was created.
     /// Empty when no server is enabled. A record saved before this field existed
     /// reads as empty.
@@ -161,6 +166,12 @@ impl SessionDefinition {
         if let Some(write_limits) = &self.write_limits {
             write_limits.validate()?;
         }
+        if self.command.is_some() && !self.tools.contains(&WorkspaceTool::RunCommand) {
+            return Err(DefinitionError::CommandSettingsWithoutTool);
+        }
+        if let Some(command) = &self.command {
+            command.validate()?;
+        }
         if self.mcp_servers.len() > 8 {
             return Err(DefinitionError::InvalidMcpConfig);
         }
@@ -174,6 +185,14 @@ impl SessionDefinition {
             }
         }
         Ok(())
+    }
+
+    /// Effective command settings when `run_command` is selected; defaults fill
+    /// a missing optional value.
+    pub fn effective_command_settings(&self) -> Option<CommandSettings> {
+        self.tools
+            .contains(&WorkspaceTool::RunCommand)
+            .then(|| self.command.unwrap_or_default())
     }
 
     /// Returns the effective initial permission mode, treating None as Ask.
@@ -289,4 +308,10 @@ pub enum DefinitionError {
     /// count. The message is static and omits environment values.
     #[error("MCP server configuration is invalid")]
     InvalidMcpConfig,
+    /// Command settings are zero, inverted or above the hard timeout ceiling.
+    #[error("command settings require 1 <= default timeout <= maximum timeout <= 600 seconds")]
+    InvalidCommandSettings,
+    /// Command settings may not be present without selecting `run_command`.
+    #[error("command settings require the run_command tool")]
+    CommandSettingsWithoutTool,
 }

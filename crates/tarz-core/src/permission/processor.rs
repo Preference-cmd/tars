@@ -7,6 +7,7 @@ use super::approval::{
 use super::mode::PermissionMode;
 use super::precheck::resolve_call;
 use super::view::PermissionView;
+use crate::definition::{CommandSettings, WorkspaceTool};
 use crate::session::ToolReporter;
 use crate::session::WorkRef;
 use async_trait::async_trait;
@@ -24,6 +25,8 @@ pub enum ToolPermissionClass {
     KnownReadOnly,
     /// Built-in workspace write tools: `write_file`, `edit_file`.
     BuiltinWrite,
+    /// Built-in sandboxed command tool.
+    BuiltinCommand,
     /// MCP tool requiring confirmation: prompt approval, or writes approval without read-only or with destructive.
     McpPrompt,
     /// MCP tool configured with approve approval.
@@ -47,6 +50,7 @@ pub(crate) fn decide(mode: PermissionMode, category: ToolPermissionClass) -> Per
         PermissionMode::ReadOnly => match category {
             ToolPermissionClass::KnownReadOnly => PermissionVerdict::Execute,
             ToolPermissionClass::BuiltinWrite
+            | ToolPermissionClass::BuiltinCommand
             | ToolPermissionClass::McpPrompt
             | ToolPermissionClass::McpApprove => PermissionVerdict::Reject,
         },
@@ -54,15 +58,17 @@ pub(crate) fn decide(mode: PermissionMode, category: ToolPermissionClass) -> Per
             ToolPermissionClass::KnownReadOnly | ToolPermissionClass::McpApprove => {
                 PermissionVerdict::Execute
             }
-            ToolPermissionClass::BuiltinWrite | ToolPermissionClass::McpPrompt => {
-                PermissionVerdict::Ask
-            }
+            ToolPermissionClass::BuiltinWrite
+            | ToolPermissionClass::BuiltinCommand
+            | ToolPermissionClass::McpPrompt => PermissionVerdict::Ask,
         },
         PermissionMode::AcceptEdits => match category {
             ToolPermissionClass::KnownReadOnly
             | ToolPermissionClass::BuiltinWrite
             | ToolPermissionClass::McpApprove => PermissionVerdict::Execute,
-            ToolPermissionClass::McpPrompt => PermissionVerdict::Ask,
+            ToolPermissionClass::BuiltinCommand | ToolPermissionClass::McpPrompt => {
+                PermissionVerdict::Ask
+            }
         },
         PermissionMode::FullAccess => PermissionVerdict::Execute,
     }
@@ -103,6 +109,7 @@ pub(crate) struct PermissionProcessor {
     work: WorkRef,
     reporter: ToolReporter,
     hub: Arc<ApprovalsHub>,
+    command_settings: CommandSettings,
     prepared: Arc<
         std::sync::Mutex<
             std::collections::HashMap<causa::kernel::BlockId, crate::tools::PreparedWrite>,
@@ -115,6 +122,7 @@ impl PermissionProcessor {
         work: WorkRef,
         reporter: ToolReporter,
         hub: Arc<ApprovalsHub>,
+        command_settings: CommandSettings,
         prepared: Arc<
             std::sync::Mutex<
                 std::collections::HashMap<causa::kernel::BlockId, crate::tools::PreparedWrite>,
@@ -125,6 +133,7 @@ impl PermissionProcessor {
             work,
             reporter,
             hub,
+            command_settings,
             prepared,
         }
     }
@@ -207,12 +216,18 @@ impl ToolBatchProcessor for PermissionProcessor {
                             kind: PermissionDecisionKind::ModeRefused,
                         },
                     );
-                    let msg = if category == ToolPermissionClass::BuiltinWrite {
-                        format!("the current permission mode '{mode}' does not allow this write")
-                    } else {
-                        format!(
+                    let msg = match category {
+                        ToolPermissionClass::BuiltinWrite => {
+                            format!(
+                                "the current permission mode '{mode}' does not allow this write"
+                            )
+                        }
+                        ToolPermissionClass::BuiltinCommand => format!(
+                            "the current permission mode '{mode}' does not allow this command"
+                        ),
+                        _ => format!(
                             "the current permission mode '{mode}' does not allow this MCP tool call"
-                        )
+                        ),
                     };
                     resolve_call(
                         batch,
@@ -222,7 +237,7 @@ impl ToolBatchProcessor for PermissionProcessor {
                     )?;
                 }
                 PermissionVerdict::Ask => {
-                    let (subject, is_mcp) = match category {
+                    let (subject, is_mcp, is_command) = match category {
                         ToolPermissionClass::BuiltinWrite => {
                             let prepared = {
                                 let guard = self.prepared.lock().unwrap();
@@ -255,6 +270,51 @@ impl ToolBatchProcessor for PermissionProcessor {
                                     diff: prepared.diff.clone(),
                                 },
                                 false,
+                                false,
+                            )
+                        }
+                        ToolPermissionClass::BuiltinCommand => {
+                            let decoded = crate::tools::parameters::Params::decode(
+                                WorkspaceTool::RunCommand,
+                                &call.input.arguments,
+                                // The precheck already validated these values; a
+                                // failure here means the call changed underneath it.
+                                &crate::definition::WorkspaceToolLimits::default(),
+                                &crate::definition::WriteToolLimits::default(),
+                                self.command_settings,
+                            );
+                            let Ok(crate::tools::parameters::Params::Command(params)) = decoded
+                            else {
+                                self.reporter.record_permission_decision(
+                                    &call,
+                                    &invocation_id,
+                                    PermissionDecision {
+                                        mode,
+                                        revision,
+                                        kind: PermissionDecisionKind::Unprepared,
+                                    },
+                                );
+                                resolve_call(
+                                    batch,
+                                    call_block_id,
+                                    ToolResultStatus::Rejected,
+                                    serde_json::json!({
+                                        "error": "command parameters were not prepared by precheck"
+                                    }),
+                                )?;
+                                continue;
+                            };
+                            (
+                                ApprovalSubject::Command {
+                                    command: params.command,
+                                    workdir: params.workdir.unwrap_or_else(|| ".".into()),
+                                    timeout_secs: params
+                                        .timeout_secs
+                                        .unwrap_or(self.command_settings.default_timeout_secs),
+                                    network: self.command_settings.network,
+                                },
+                                false,
+                                true,
                             )
                         }
                         ToolPermissionClass::McpPrompt
@@ -272,6 +332,7 @@ impl ToolBatchProcessor for PermissionProcessor {
                                     arguments,
                                 },
                                 true,
+                                false,
                             )
                         }
                     };
@@ -360,7 +421,12 @@ impl ToolBatchProcessor for PermissionProcessor {
                                     kind: PermissionDecisionKind::AskedAndDenied,
                                 },
                             );
-                            let msg = if is_mcp {
+                            let msg = if is_command {
+                                match reason {
+                                    Some(r) => format!("user declined this command: {r}"),
+                                    None => "user declined this command".to_string(),
+                                }
+                            } else if is_mcp {
                                 match reason {
                                     Some(r) => format!("user declined this tool call: {r}"),
                                     None => "user declined this tool call".to_string(),

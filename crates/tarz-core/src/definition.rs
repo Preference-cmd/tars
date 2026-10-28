@@ -1,9 +1,11 @@
 //! Persistable, credential-free execution choices and their pure validation.
 
+mod command;
 mod mcp;
 mod types;
 mod workspace;
 
+pub use command::{CommandNetwork, CommandSettings};
 pub use mcp::{McpApproval, McpServerConfig, McpToolSetting};
 pub use workspace::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 

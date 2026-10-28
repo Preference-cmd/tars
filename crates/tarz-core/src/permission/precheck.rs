@@ -70,6 +70,56 @@ impl ToolBatchProcessor for PrecheckProcessor {
             };
             let call = entry.call().clone();
 
+            if call.input.tool_name == "run_command" {
+                let params = Params::decode(
+                    WorkspaceTool::RunCommand,
+                    &call.input.arguments,
+                    self.tools.limits(),
+                    self.tools.write_limits(),
+                    self.tools.command_settings(),
+                );
+                let params = match params {
+                    Ok(crate::tools::parameters::Params::Command(params)) => params,
+                    Ok(_) => {
+                        resolve_call(
+                            batch,
+                            call_block_id,
+                            ToolResultStatus::Rejected,
+                            serde_json::json!({ "error": "invalid command parameters" }),
+                        )?;
+                        continue;
+                    }
+                    Err(error) => {
+                        resolve_call(
+                            batch,
+                            call_block_id,
+                            ToolResultStatus::Rejected,
+                            serde_json::json!({ "error": error.to_string() }),
+                        )?;
+                        continue;
+                    }
+                };
+                let Some(runtime) = self.tools.command() else {
+                    resolve_call(
+                        batch,
+                        call_block_id,
+                        ToolResultStatus::Rejected,
+                        serde_json::json!({ "error": "command runtime is not available" }),
+                    )?;
+                    continue;
+                };
+                if let Err(error) = runtime.check(&params) {
+                    resolve_call(
+                        batch,
+                        call_block_id,
+                        ToolResultStatus::Rejected,
+                        serde_json::json!({ "error": error }),
+                    )?;
+                    continue;
+                }
+                continue;
+            }
+
             let kind = match call.input.tool_name.as_str() {
                 "write_file" => WorkspaceTool::WriteFile,
                 "edit_file" => WorkspaceTool::EditFile,
@@ -81,6 +131,7 @@ impl ToolBatchProcessor for PrecheckProcessor {
                 &call.input.arguments,
                 self.tools.limits(),
                 self.tools.write_limits(),
+                self.tools.command_settings(),
             );
             let params = match params {
                 Ok(params) => params,

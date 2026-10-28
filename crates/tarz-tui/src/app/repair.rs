@@ -16,12 +16,17 @@ fn warning_hint(warning: &RepairWriteWarning) -> String {
 }
 
 /// Aggregate lines per warning kind; `suffix` closes each line ("." or ":").
-fn warning_total_lines(total: usize, external: usize, suffix: &str) -> Vec<String> {
-    let writes = total - external;
+fn warning_total_lines(total: usize, external: usize, command: usize, suffix: &str) -> Vec<String> {
+    let writes = total - external - command;
     let mut lines = Vec::new();
     if writes > 0 {
         lines.push(format!(
             "{writes} write call(s) may have changed files before interruption; read them again before continuing{suffix}"
+        ));
+    }
+    if command > 0 {
+        lines.push(format!(
+            "{command} command call(s) may have executed before interruption; check the workspace before continuing{suffix}"
         ));
     }
     if external > 0 {
@@ -208,6 +213,7 @@ impl App {
                         lines.extend(warning_total_lines(
                             original.write_warnings_count,
                             original.external_warnings_count,
+                            original.command_warnings_count,
                             ".",
                         ));
                     }
@@ -318,6 +324,7 @@ impl App {
                 for line in warning_total_lines(
                     summary.write_warnings_count,
                     summary.external_warnings_count,
+                    summary.command_warnings_count,
                     ":",
                 ) {
                     panel.lines.push(line);
