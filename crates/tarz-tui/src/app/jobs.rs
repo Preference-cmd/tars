@@ -122,10 +122,16 @@ fn result_label(result: &WorkResult) -> &'static str {
 /// Longest notice shown after opening, in bytes.
 const MAX_OPENED_NOTICE_BYTES: usize = 256;
 
-/// The one-line notice after opening: a saved-mode downgrade and the first MCP
-/// server that did not start, with counts, cut to [`MAX_OPENED_NOTICE_BYTES`].
-/// The status text is escaped upstream.
-pub(super) fn opened_notice(status: &[tarz_core::McpServerStatus], downgraded: bool) -> String {
+/// The one-line notice after opening: a saved-mode downgrade, an unavailable
+/// command sandbox and the first MCP server that did not start, with counts,
+/// cut to [`MAX_OPENED_NOTICE_BYTES`]. The fixed command clause comes before the
+/// free-form MCP reason so truncation cannot hide it. Status text is escaped
+/// upstream.
+pub(super) fn opened_notice(
+    status: &[tarz_core::McpServerStatus],
+    downgraded: bool,
+    command_notice: Option<&str>,
+) -> String {
     let prefix = if downgraded {
         "Opened; permission mode reverted from full-access to ask; "
     } else {
@@ -133,15 +139,20 @@ pub(super) fn opened_notice(status: &[tarz_core::McpServerStatus], downgraded: b
     };
     let unavailable: Vec<_> = status.iter().filter(|server| !server.ready).collect();
     let skipped: usize = status.iter().map(|server| server.skipped_tools.len()).sum();
-    let mut notice = if let Some(first) = unavailable.first() {
-        format!(
-            "{prefix}MCP server '{}' is unavailable: {}",
+    let mut notice = prefix.to_owned();
+    if let Some(clause) = command_notice {
+        notice.push_str(clause);
+        notice.push_str("; ");
+    }
+    if let Some(first) = unavailable.first() {
+        notice.push_str(&format!(
+            "MCP server '{}' is unavailable: {}",
             first.id,
             first.reason.as_deref().unwrap_or("unknown reason")
-        )
+        ));
     } else {
-        format!("{prefix}only materials are restored, not old work records")
-    };
+        notice.push_str("only materials are restored, not old work records");
+    }
     if unavailable.len() > 1 {
         notice.push_str(&format!(" (+{} more unavailable)", unavailable.len() - 1));
     }
@@ -240,9 +251,14 @@ impl App {
                             entry.approval_reason = None;
                             entry.approval_scroll = 0;
                             entry.title = session.definition().model;
+                            let command_notice = session
+                                .command_status()
+                                .filter(|status| !status.is_available())
+                                .map(|_| "command sandbox unavailable (see /status)");
                             entry.notice = opened_notice(
                                 &session.mcp_status(),
                                 session.open_report().permission_downgraded,
+                                command_notice,
                             );
                             entry.session = Some(session);
                             entry.prepared = None;

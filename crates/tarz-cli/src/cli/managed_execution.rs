@@ -86,6 +86,25 @@ pub(super) fn report_mcp_status(session: &ManagedSession) {
     }
 }
 
+/// Report the probed command sandbox in full when a session is created.
+pub(super) fn report_command_details(session: &ManagedSession) {
+    if let Some(status) = session.command_status() {
+        let _ = writeln!(io::stderr().lock(), "Tarz: command sandbox: {status}");
+    }
+}
+
+/// Report the probed command sandbox in its short form when a session is
+/// opened for work. Sessions without the command tool print nothing.
+pub(super) fn report_command_brief(session: &ManagedSession) {
+    if let Some(status) = session.command_status() {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "Tarz: command sandbox: {}",
+            status.brief()
+        );
+    }
+}
+
 pub(super) fn input_text(input: Option<String>) -> Result<String, &'static str> {
     let text = match input {
         Some(text) => text,

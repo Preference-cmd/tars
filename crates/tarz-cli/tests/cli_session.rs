@@ -54,6 +54,40 @@ fn global_profile_changes_do_not_replace_a_reopened_definition() {
     assert_eq!(report(&output)["text"], "saved definition result");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn session_create_reports_the_full_command_sandbox_line_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let store = dir.path().join("store");
+    let output = command(&store, "create")
+        .args([
+            "--provider",
+            "openai-chat",
+            "--model",
+            "fixture-model",
+            "--api-key-env",
+            "TARZ_TEST_KEY",
+            "--tools",
+            "run_command",
+            "--workspace",
+        ])
+        .arg(&workspace)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "Tarz: command sandbox: seatbelt: file read full; file write full; network full; \
+             signal isolation full; descendant lifecycle partial ("
+        ),
+        "{stderr}"
+    );
+    assert_eq!(report(&output)["status"], "created");
+}
+
 struct Fixture {
     endpoint: String,
     requests: mpsc::Receiver<String>,

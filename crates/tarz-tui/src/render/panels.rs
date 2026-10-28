@@ -221,7 +221,9 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
 
 pub(super) fn form(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let form = app.form.as_ref().unwrap();
-    let compact = area.height < 2 + 3 * form.fields.len() as u16 + 4;
+    let command = form.command_summary();
+    let command_rows = u16::from(command.is_some());
+    let compact = area.height < 2 + 3 * form.fields.len() as u16 + 4 + command_rows;
     let shown: Vec<_> = if compact {
         vec![form.selected]
     } else {
@@ -229,6 +231,9 @@ pub(super) fn form(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
     let mut sizes = vec![Constraint::Length(2)];
     sizes.extend(std::iter::repeat_n(Constraint::Length(3), shown.len()));
+    if command.is_some() {
+        sizes.push(Constraint::Length(1));
+    }
     sizes.push(Constraint::Min(1));
     sizes.push(Constraint::Length(if compact { 2 } else { 3 }));
     let rows = Layout::vertical(sizes).split(area);
@@ -259,11 +264,18 @@ pub(super) fn form(frame: &mut Frame<'_>, app: &App, area: Rect) {
             frame.render_widget(Paragraph::new(field.lines().join("")), inner);
         }
     }
+    if let Some(command) = &command {
+        frame.render_widget(
+            Paragraph::new(command.as_str()).style(Style::default().fg(MUTED)),
+            rows[shown.len() + 1],
+        );
+    }
+    let error_row = shown.len() + 1 + usize::from(command.is_some());
     frame.render_widget(
         Paragraph::new(form.error.as_str())
             .wrap(Wrap { trim: false })
             .style(Style::default().fg(Color::Yellow)),
-        rows[shown.len() + 1],
+        rows[error_row],
     );
     let hint = if app.confirmation.is_some() {
         "Discard this form and unsent drafts, save sessions and quit? y / n"
@@ -278,7 +290,7 @@ pub(super) fn form(frame: &mut Frame<'_>, app: &App, area: Rect) {
             } else {
                 MUTED
             })),
-        rows[shown.len() + 2],
+        rows[error_row + 1],
     );
 }
 

@@ -54,6 +54,16 @@ impl std::fmt::Display for Limitation {
     }
 }
 
+impl std::fmt::Display for Capability {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => formatter.write_str("full"),
+            Self::Partial(limitation) => write!(formatter, "partial ({limitation})"),
+            Self::Unsupported(reason) => write!(formatter, "unsupported ({reason})"),
+        }
+    }
+}
+
 /// How completely a backend enforces one policy dimension.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -143,8 +153,7 @@ impl BackendReport {
 }
 
 /// Why a sandbox cannot be opened or cannot enforce a policy.
-#[derive(Clone, Debug, thiserror::Error)]
-#[error("{backend} sandbox is unavailable: {reason}")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SandboxUnavailable {
     /// The backend that reported the failure.
@@ -152,6 +161,22 @@ pub struct SandboxUnavailable {
     /// A bounded, user-facing reason.
     pub reason: String,
 }
+
+impl std::fmt::Display for SandboxUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.backend == BackendId::UNAVAILABLE {
+            formatter.write_str(&self.reason)
+        } else {
+            write!(
+                formatter,
+                "{} sandbox is unavailable: {}",
+                self.backend, self.reason
+            )
+        }
+    }
+}
+
+impl std::error::Error for SandboxUnavailable {}
 
 impl SandboxUnavailable {
     pub(crate) fn new(backend: BackendId, reason: impl Into<String>) -> Self {

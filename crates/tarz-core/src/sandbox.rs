@@ -19,6 +19,7 @@ mod policy;
 mod process;
 #[cfg(target_os = "macos")]
 mod seatbelt;
+mod status;
 #[cfg(not(target_os = "macos"))]
 mod unavailable;
 
@@ -29,7 +30,10 @@ pub use backend::{
 pub use policy::{NetworkAccess, SandboxPolicy, SandboxPolicyError};
 pub use process::ProcessTree;
 pub(crate) use process::exit_status_code;
+pub use status::SandboxStatus;
 
+#[cfg(test)]
+mod status_tests;
 #[cfg(test)]
 pub(crate) mod test_support;
 #[cfg(test)]

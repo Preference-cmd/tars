@@ -13,3 +13,4 @@ mod streaming;
 mod tools;
 
 mod approval;
+mod command;

@@ -169,7 +169,7 @@ fn opened_notice_names_unavailable_mcp_servers_on_one_bounded_line() {
     use tarz_core::{McpServerStatus, McpSkippedTool};
 
     assert_eq!(
-        opened_notice(&[], false),
+        opened_notice(&[], false, None),
         "Opened; only materials are restored, not old work records"
     );
     let skipped = McpSkippedTool {
@@ -197,7 +197,7 @@ fn opened_notice_names_unavailable_mcp_servers_on_one_bounded_line() {
         },
     ];
     assert_eq!(
-        opened_notice(&status, false),
+        opened_notice(&status, false, None),
         "Opened; MCP server 'git' is unavailable: startup timed out after 1s \
          (+1 more unavailable); 2 MCP tools skipped"
     );
@@ -207,10 +207,32 @@ fn opened_notice_names_unavailable_mcp_servers_on_one_bounded_line() {
         reason: Some("漢".repeat(200)),
         skipped_tools: Vec::new(),
     }];
-    let notice = opened_notice(&long, false);
+    let notice = opened_notice(&long, false, None);
     assert!(notice.len() <= 256 && !notice.contains('\n'));
     assert!(notice.starts_with("Opened; MCP server 'docs' is unavailable: 漢"));
-    assert!(opened_notice(&[], true).contains("permission mode reverted from full-access to ask"));
+    assert!(
+        opened_notice(&[], true, None).contains("permission mode reverted from full-access to ask")
+    );
+    let command_clause = "command sandbox unavailable (see /status)";
+    let command = opened_notice(&[], false, Some(command_clause));
+    assert_eq!(
+        command,
+        "Opened; command sandbox unavailable (see /status); only materials are restored, \
+         not old work records"
+    );
+    // The fixed command clause precedes the free-form MCP reason, so a long
+    // reason cannot truncate it away; the whole notice keeps the same bound.
+    let bounded = opened_notice(&long, false, Some(command_clause));
+    assert!(
+        bounded.starts_with(
+            "Opened; command sandbox unavailable (see /status); MCP server 'docs' is unavailable: 漢"
+        ),
+        "{bounded:?}"
+    );
+    assert!(
+        bounded.len() <= 256 && !bounded.contains('\n'),
+        "{bounded:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

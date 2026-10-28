@@ -164,6 +164,7 @@ async fn create(
         }
     };
     let revision = revision(&session.status().save);
+    managed_execution::report_command_details(&session);
     if let Err(error) = host.close(&session.target(), ClosePolicy::Save).await {
         return early_failure(json_output, &error.to_string());
     }
@@ -209,6 +210,7 @@ async fn run_saved(
         Err(error) => return (early_failure(json_output, &error.to_string()), false),
     };
     managed_execution::report_mcp_status(&session);
+    managed_execution::report_command_brief(&session);
     if let Some(mode) = permission_mode {
         if let Err(error) = session.set_permission_mode(mode) {
             let _ = host

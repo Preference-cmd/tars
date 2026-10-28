@@ -34,6 +34,7 @@ pub(crate) fn assemble(
     definition.validate()?;
     let command_settings = definition.effective_command_settings();
     let definition_command_settings = command_settings.unwrap_or_default();
+    let mut command_status = None;
     let workspace_tools = if definition.tools.is_empty() {
         None
     } else {
@@ -49,6 +50,9 @@ pub(crate) fn assemble(
             if !allow_unavailable_command && let Some(reason) = command.unavailable_platform() {
                 return Err(AssemblyError::CommandUnavailable(reason));
             }
+            // The runtime is moved into the shared tool set; capture the probe
+            // result first so the instance can report it without the tools.
+            command_status = Some(command.sandbox_status());
             Some(WorkspaceTools::with_command(
                 workspace,
                 definition.tool_limits.clone(),
@@ -206,6 +210,10 @@ pub(crate) fn assemble(
     .with_permissions(session_permissions);
     let session = match mcp {
         Some(mcp) => session.with_mcp(mcp),
+        None => session,
+    };
+    let session = match command_status {
+        Some(status) => session.with_command_status(status),
         None => session,
     };
 

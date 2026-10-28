@@ -1,7 +1,8 @@
 use super::parameters::CommandParams;
 use crate::definition::{CommandNetwork, CommandSettings};
 use crate::sandbox::{
-    BackendId, Launch, NetworkAccess, Sandbox, SandboxPolicy, SandboxUnavailable, exit_status_code,
+    BackendId, Launch, NetworkAccess, Sandbox, SandboxPolicy, SandboxStatus, SandboxUnavailable,
+    exit_status_code,
 };
 use crate::workspace::Workspace;
 use causa::kernel::{CallControl, ToolResultStatus};
@@ -122,6 +123,14 @@ impl CommandRuntime {
                     std::env::consts::OS
                 )
             })
+    }
+
+    /// The probed sandbox captured when this runtime was bound.
+    pub(crate) fn sandbox_status(&self) -> SandboxStatus {
+        match &self.sandbox {
+            Ok(sandbox) => SandboxStatus::Available(sandbox.report().clone()),
+            Err(error) => SandboxStatus::Unavailable(error.clone()),
+        }
     }
 
     fn policy(&self) -> Result<SandboxPolicy, String> {

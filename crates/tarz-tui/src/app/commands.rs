@@ -170,6 +170,13 @@ impl App {
                     format!("Recovery exports: {}", self.options.recovery_dir.display())];
                 if let Some(entry) = self.entries.get(self.selected) {
                     lines.extend([format!("Session: {}", entry.id()), format!("Model: {}", entry.title), entry.execution.clone(), entry.status.clone(), entry.notice.clone()]);
+                    if let Some(status) = entry
+                        .session
+                        .as_ref()
+                        .and_then(|session| session.command_status())
+                    {
+                        lines.push(format!("Commands: {status}"));
+                    }
                 }
                 lines.push(self.notice.clone());
                 self.panel = Some(Panel::Info { title: "Session details".into(), lines, scroll: 0 });

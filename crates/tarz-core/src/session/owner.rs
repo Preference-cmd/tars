@@ -14,6 +14,7 @@ pub struct Session {
     standard_builtin_repair: bool,
     pub(crate) permissions: Option<Arc<crate::permission::PermissionHub>>,
     mcp: Option<Arc<crate::mcp::McpRuntime>>,
+    command_status: Option<crate::sandbox::SandboxStatus>,
     #[cfg(test)]
     pub(crate) workspace_tools: Option<Arc<crate::tools::WorkspaceTools>>,
     #[cfg(test)]
@@ -36,6 +37,20 @@ impl Session {
     pub(crate) fn with_mcp(mut self, mcp: Arc<crate::mcp::McpRuntime>) -> Self {
         self.mcp = Some(mcp);
         self
+    }
+
+    pub(crate) fn with_command_status(mut self, status: crate::sandbox::SandboxStatus) -> Self {
+        self.command_status = Some(status);
+        self
+    }
+
+    /// The probed command sandbox captured when this instance was assembled.
+    ///
+    /// Returns `None` for instances without the command tool and for instances
+    /// constructed without assembly (such as test fixtures). The status is
+    /// frozen at assembly and does not change while the instance is open.
+    pub(crate) fn command_status(&self) -> Option<crate::sandbox::SandboxStatus> {
+        self.command_status.clone()
     }
 
     /// Release the instance's MCP connections so the close path can await them
@@ -148,6 +163,7 @@ impl Session {
             standard_builtin_repair: false,
             permissions: None,
             mcp: None,
+            command_status: None,
             #[cfg(test)]
             workspace_tools: None,
             #[cfg(test)]

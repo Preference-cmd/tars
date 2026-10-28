@@ -4,7 +4,8 @@ use std::sync::Arc;
 use tarz_core::{
     config::{Config, DefinitionOverrides, parse_mcp, parse_tools},
     definition::{
-        CredentialRef, Provider, SessionDefinition, WorkspaceToolLimits, WriteToolLimits,
+        CommandSettings, CredentialRef, Provider, SessionDefinition, WorkspaceTool,
+        WorkspaceToolLimits, WriteToolLimits,
     },
     permission::PermissionMode,
 };
@@ -59,6 +60,9 @@ pub(crate) struct Form {
     pub config: Arc<Config>,
     /// Named preset the form was opened from, so resolution keeps using it.
     pub profile: Option<String>,
+    /// Frozen command settings read from the preset. Display-only: the form
+    /// never edits them, and creation resolves them through the preset.
+    pub command: Option<CommandSettings>,
 }
 pub(crate) const FIELD_NAMES: [&str; 9] = [
     "Provider",
@@ -99,10 +103,32 @@ impl Default for Form {
             write_limits: None,
             config: Arc::new(Config::default()),
             profile: None,
+            command: None,
         }
     }
 }
 impl Form {
+    /// Read-only line describing the command settings that will apply, when
+    /// the current Tools field selects the command tool. The settings come
+    /// from the preset (or their defaults); the line is not a field and cannot
+    /// be edited or focused.
+    pub(crate) fn command_summary(&self) -> Option<String> {
+        let tools = parse_tools(&self.fields[6].lines().join("")).ok()?;
+        if !tools.contains(&WorkspaceTool::RunCommand) {
+            return None;
+        }
+        let settings = self.command.unwrap_or_default();
+        let source = if self.command.is_some() {
+            "preset"
+        } else {
+            "defaults"
+        };
+        Some(format!(
+            "Command: network {} · timeout {}s (max {}s) · {source}",
+            settings.network, settings.default_timeout_secs, settings.max_timeout_secs
+        ))
+    }
+
     pub fn new(
         config: Arc<Config>,
         profile: Option<String>,
@@ -116,6 +142,7 @@ impl Form {
         let Some(preset) = preset else {
             return form;
         };
+        form.command = preset.effective_command_settings();
         let provider = match preset.provider {
             Provider::OpenAiChat => "openai-chat",
             Provider::OpenAiResponses => "openai-responses",

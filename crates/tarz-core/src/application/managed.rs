@@ -40,6 +40,19 @@ impl ManagedSession {
             .map_or_else(Vec::new, |owner| owner.mcp_status())
     }
 
+    /// The probed command sandbox for this instance, captured when it opened.
+    ///
+    /// Returns `None` for instances without the command tool, for an instance
+    /// whose session is already closed, and for test fixtures. The status is
+    /// frozen at assembly; it does not change while the instance stays open.
+    pub fn command_status(&self) -> Option<crate::sandbox::SandboxStatus> {
+        let state = self.entry.lock();
+        state
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.command_status())
+    }
+
     /// Change the instance's active permission mode, incrementing revision on actual change.
     ///
     /// If the session is closing, this returns `Err(ApplicationError::Closing)`.

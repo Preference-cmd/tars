@@ -377,6 +377,45 @@ fn the_configured_output_limit_and_effort_reach_the_request() {
     assert_eq!(body["output_config"]["effort"], "low");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn command_sandbox_status_is_reported_on_stderr_but_not_in_json() {
+    let workspace = tempfile::tempdir().unwrap();
+    let (endpoint, _requests) = server(200, chat(), Duration::ZERO);
+    let output = command("openai-chat", &endpoint)
+        .args([
+            "--tools",
+            "run_command",
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--input",
+            "user question",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Tarz: command sandbox: seatbelt: descendant lifecycle partial ("),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("file read full"), "{stderr}");
+    let run_report = report(&output);
+    assert_eq!(run_report["status"], "completed");
+    let keys: Vec<&str> = run_report
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert!(
+        keys.iter()
+            .all(|key| !key.contains("command") && !key.contains("sandbox")),
+        "{keys:?}"
+    );
+}
+
 #[test]
 fn mcp_servers_that_fail_to_start_are_reported_on_stderr_but_not_in_json() {
     let directory = tempfile::tempdir().unwrap();
