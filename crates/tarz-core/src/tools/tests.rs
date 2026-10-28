@@ -872,3 +872,53 @@ async fn queued_command_that_never_starts_is_rejected_without_launching() {
     assert_eq!(snapshot.calls[0].status, Some(ToolResultStatus::Rejected));
     drop(permit);
 }
+
+#[tokio::test]
+async fn cancelled_queued_command_is_rejected_without_launching() {
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, launches) = recording_command_runtime(dir.path());
+    // Hold the session's only permit so acquire cannot succeed; the
+    // pre-cancelled token then takes the biased cancellation branch.
+    let permit = runtime.acquire(&control()).await.unwrap();
+    let workspace = Workspace::open(&dir.path().canonicalize().unwrap()).unwrap();
+    let shared = WorkspaceTools::with_command(
+        workspace,
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+        CommandSettings::default(),
+        Some(runtime),
+    );
+    let call = call("run_command", json!({"command": "printf ran > ran.txt"}));
+    let report = reporter(std::slice::from_ref(&call));
+    let tool = shared
+        .bind_for_test(&[WorkspaceTool::RunCommand], report.clone())
+        .pop()
+        .unwrap();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let cancelled = CallControl::new(cancellation, None);
+    let output = tool.execute(&call, &cancelled, None).await;
+    assert_eq!(output.status, ToolResultStatus::Rejected);
+    let content = output.output.content.clone();
+    assert!(
+        content["error"].as_str().unwrap().contains("not started"),
+        "{content}"
+    );
+    let reason = content["reason"].as_str().unwrap();
+    assert!(reason.contains("work was stopped"), "{reason}");
+    assert!(
+        content.get("may_have_partially_executed").is_none(),
+        "{content}"
+    );
+    assert!(
+        launches.lock().unwrap().is_empty(),
+        "a queued command stopped by cancellation must not launch a process"
+    );
+    assert!(!dir.path().join("ran.txt").exists());
+    report.freeze();
+    let snapshot = report.snapshot();
+    assert_eq!(snapshot.calls.len(), 1);
+    assert!(snapshot.calls[0].operation_not_started);
+    drop(permit);
+}
