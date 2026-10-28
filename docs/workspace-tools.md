@@ -13,7 +13,7 @@ tarz session create --store ./data --provider openai-chat --model "$MODEL_ID" \
 
 共享 TOML 预设中的 `workspace_root`、`tools`、`permission_mode` 和 `mcp` 会填入 `tarz-tui` 新建表单；TUI 不提供这些启动参数。表单提供 Workspace、Tools、权限模式和 MCP 字段；`--tools ''` 或清空表单 Tools 字段禁用预设工具。保存的会话固定工作区、选择及完整限额；重开采用原定义，不随配置或 cwd 改变。缺失或不再满足访问规则的根目录会使打开失败，不会退回当前目录，也不发模型请求。
 
-`run_command` 每次在沙箱内启动 `/bin/bash -c`，默认无网络、工作区可写、`.git` 只读、用户目录大多不可读；确认面板显示完整命令、工作目录、期限和网络策略。权限类别与四种模式的关系与写入工具相同但始终要求确认（`full-access` 除外）；Linux/Windows 暂不支持该工具。完整命令契约、输出上限和残余见[命令工具提案](../.agents/pipelines/proposals/feature/2026-10-27-sandboxed-shell-command.md)。
+`run_command` 每次在沙箱内启动 `/bin/bash -c`，默认无网络、工作区可写、`.git` 只读、用户目录大多不可读；确认面板显示完整命令、工作目录、期限和网络策略。权限按四种模式处理：`read-only` 拒绝；`ask` 与 `accept-edits` 都要求确认；`full-access` 直接执行，但命令仍在沙箱内。Linux/Windows 暂不支持该工具。完整命令契约、输出上限和残余见[命令工具提案](../.agents/pipelines/proposals/feature/2026-10-27-sandboxed-shell-command.md)。
 
 ## 文件访问
 
@@ -51,12 +51,14 @@ tarz session create --store ./data --provider openai-chat --model "$MODEL_ID" \
 
 这里的“权限模式”指 Tarz 的 `permission_mode`，决定哪些调用需要确认。MCP 条目里的 `approval` 是另一个设置，只决定该服务器或工具默认是否询问；两者组合后才是最终行为，见[配置](configuration.md#mcp-服务器)。
 
-| 模式 | 确知只读 | 内置写入 | MCP 需询问 | MCP `approve` |
-| --- | --- | --- | --- | --- |
-| `read-only` | 执行 | 拒绝 | 拒绝 | 拒绝 |
-| `ask`（默认） | 执行 | 询问 | 询问 | 执行 |
-| `accept-edits` | 执行 | 执行 | 询问 | 执行 |
-| `full-access` | 执行 | 执行 | 执行 | 执行 |
+| 模式 | 确知只读 | 内置写入 | 内置命令 | MCP 需询问 | MCP `approve` |
+| --- | --- | --- | --- | --- | --- |
+| `read-only` | 执行 | 拒绝 | 拒绝 | 拒绝 | 拒绝 |
+| `ask`（默认） | 执行 | 询问 | 询问 | 询问 | 执行 |
+| `accept-edits` | 执行 | 执行 | 询问 | 询问 | 执行 |
+| `full-access` | 执行 | 执行 | 执行 | 执行 | 执行 |
+
+“内置命令”指 `run_command`；`accept-edits` 下仍要求确认，`full-access` 下直接执行，但命令始终在沙箱内运行。
 
 “确知只读”指三个内置只读工具，以及 `approval = "writes"` 下声明只读且没有声明破坏性的 MCP 工具。“MCP 需询问”指 `prompt` 档工具，以及 `writes` 档下没有声明只读或声明了破坏性的工具。`approve` 只回答“要不要问”，不说明工具没有副作用，所以 `read-only` 仍拒绝它。`writes` 采信服务器的只读声明；服务器把会写入的工具声明为只读时 Tarz 无法识别，这是选择该档的代价。
 
@@ -105,7 +107,7 @@ TUI 区分 Waiting、Running、Returned（待材料提交）、Committed，以�
 
 CLI 执行 stdout 仍只输出最终文本或既有 JSON 报告；工具材料可通过保存/导出查看。保存失败重试原材料，不重跑工具或模型。重开可显示原已提交调用/结果，不恢复或执行旧工作。取消可能只留下已提交声明，结果仍在原未提交批次中；保存不会补造配对结果。新输入遇到未配对材料会被原样返还。TUI F7 / `/repair` 可预览采纳原结果或移除未配对声明，CLI `session repair` 可显式移除；应用并保存后再发送新工作。UnknownOutcome 和原工作状态不变，完整条件见[中断后继续](session-continuation.md)。
 
-写入执行到一半被取消时，Causa 给出 UnknownOutcome；原子写入保证文件只会是旧内容或新内容。修复预览对这类调用标出“文件可能已被写入，继续前请重新读取”。采纳原结果只支持正式装配的内置工具（三个只读加两个写入）；含 MCP 或其他非内置调用的批次只能移除，并提示外部副作用可能已经发生。
+写入执行到一半被取消时，Causa 给出 UnknownOutcome；原子写入保证文件只会是旧内容或新内容。修复预览对这类调用标出“文件可能已被写入，继续前请重新读取”。采纳原结果只支持正式装配的内置工具（三个只读、两个写入和一个命令工具）；含 MCP 或其他非内置调用的批次只能移除，并提示外部副作用可能已经发生。
 
 记录格式为 `tarz-session-v2`，`workspace_root`、`tools`、`tool_limits` 必须存在；写入限额、初始/当前权限模式和 MCP 快照可省略，省略时分别读作默认写入限额、`ask` 和没有服务器。v1 明确拒绝，不自动补权限或改写旧文件。可离线提取经过完整 Context 校验的材料，再显式创建采用新定义的会话：
 

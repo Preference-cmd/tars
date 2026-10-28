@@ -13,7 +13,7 @@ Tarz 的目的是验证并改进 Causa，应用是验证的载体，见 [README 
 | `crates/tarz-core/src/application/` | 活动目录、opening/关闭监督、实例视图、保存门禁与版本编辑 |
 | `crates/tarz-core/src/definition/` | 可序列化的固定定义与纯校验 |
 | `crates/tarz-core/src/config/` | 共享 TOML 加载、路径、命名模型预设与新定义默认值 |
-| `crates/tarz-core/src/workspace/`、`tools/` | 固定根目录句柄、工作区工具（三个只读工具与两个写入工具）、有界扫描与受监督文件任务 |
+| `crates/tarz-core/src/workspace/`、`tools/` | 固定根目录句柄、工作区工具（三个只读、两个写入和一个命令工具）、有界扫描与受监督文件任务 |
 | `crates/tarz-core/src/sandbox/` | 平台无关沙箱策略、后端能力报告、进程树与 macOS Seatbelt 后端；由 `run_command` 使用 |
 | `crates/tarz-core/src/mcp/` | 会话的 MCP 服务器：启动与关闭、子进程环境、工具过滤、结果上限与状态 |
 | `crates/tarz-core/src/assembly/` | 打开时解析凭据、装配 gateway/runner 与固定执行选项 |
@@ -37,7 +37,7 @@ workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false
 
 中断后继续通过 `inspect_repair/plan_repair/apply_repair` 显式处理材料。正式内置工具装配可采纳受控中断的原结果，重开无原批次时可移除未配对声明；新输入先经过配对准入，保存确认后才开始新工作。CLI `session repair` 与 TUI F7 共用此行为，完整条件、版本与保留边界见[中断后继续](session-continuation.md)。
 
-固定定义包含 provider、model、endpoint、凭据环境变量引用、工作期限、保留容量、模型/工具次数限制，以及工作区、工具选择、完整工具与写入限额、初始权限模式和 MCP 快照。打开时校验、解析一次并固定资源，创建和重开不调用模型。重开保留定义与 BlockId，但工作表、请求键、WorkRef、终态和未提交批次不恢复，不自动重跑旧工作。默认工具目录为空，可显式启用 list_directory/read_file/search_text/write_file/edit_file。边界及记录迁移见[工作区工具](workspace-tools.md)，本轮证据见[实施记录](../.agents/reviews/2026-10-04-workspace-tools/README.md)。
+固定定义包含 provider、model、endpoint、凭据环境变量引用、工作期限、保留容量、模型/工具次数限制，以及工作区、工具选择、完整工具与写入限额、初始权限模式和 MCP 快照。打开时校验、解析一次并固定资源，创建和重开不调用模型。重开保留定义与 BlockId，但工作表、请求键、WorkRef、终态和未提交批次不恢复，不自动重跑旧工作。默认工具目录为空，可显式启用 list_directory/read_file/search_text/write_file/edit_file/run_command。边界及记录迁移见[工作区工具](workspace-tools.md)，本轮证据见[实施记录](../.agents/reviews/2026-10-04-workspace-tools/README.md)。
 
 低层 `session` 仍供核心与 fixture 消费者使用；产品 CLI 通过托管入口。其原去重、取消、typed 结果、批次和材料交还契约保留。
 
