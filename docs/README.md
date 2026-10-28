@@ -4,6 +4,8 @@ Tarz 的目的是验证并改进 Causa，应用是验证的载体，见 [README 
 
 2026-10-26：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tarz-tui` 已接通会话、输入、临时流式正文预览、结果、取消及保存恢复；工作区工具（三个只读工具与 `write_file`/`edit_file`）与可靠状态已接通；写入前先读后改，`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；四种权限模式可在运行中切换并随记录保存，`tarz-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。MCP 通过独立的 `mcp.json` 配置（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和内置 MCP 客户端的工具调用已接通，MCP 调用按 `mcp.json` 的 `approval` 设置和当前权限模式执行、确认（终端或 TUI 确认面板）或拒绝；GUI、命令执行、父子 Agent、安装和发布也仍在后续范围。
 
+2026-10-27：`tarz-core::sandbox` 已提供平台无关策略、后端能力报告、进程树与 macOS Seatbelt 后端；探针验证文件、网络、信号与凭据边界。该层尚未接入内置工具，命令工具、权限类别、定义与配置、修复和 UI 仍在后续步骤。
+
 ## 代码结构
 
 | 路径 | 当前职责 |
@@ -12,6 +14,7 @@ Tarz 的目的是验证并改进 Causa，应用是验证的载体，见 [README 
 | `crates/tarz-core/src/definition/` | 可序列化的固定定义与纯校验 |
 | `crates/tarz-core/src/config/` | 共享 TOML 加载、路径、命名模型预设与新定义默认值 |
 | `crates/tarz-core/src/workspace/`、`tools/` | 固定根目录句柄、工作区工具（三个只读工具与两个写入工具）、有界扫描与受监督文件任务 |
+| `crates/tarz-core/src/sandbox/` | 平台无关沙箱策略、后端能力报告、进程树与 macOS Seatbelt 后端；尚未接入内置工具 |
 | `crates/tarz-core/src/mcp/` | 会话的 MCP 服务器：启动与关闭、子进程环境、工具过滤、结果上限与状态 |
 | `crates/tarz-core/src/assembly/` | 打开时解析凭据、装配 gateway/runner 与固定执行选项 |
 | `crates/tarz-core/src/session/` | 单会话 owner/handle、原工作受理、监督、去重、可靠结果与有界临时观察 |

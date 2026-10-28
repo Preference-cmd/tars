@@ -12,6 +12,7 @@ pub mod definition;
 pub mod material;
 mod mcp;
 pub mod permission;
+pub mod sandbox;
 pub mod session;
 mod store;
 pub(crate) mod tools;
