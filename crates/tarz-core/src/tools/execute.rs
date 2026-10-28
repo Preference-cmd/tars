@@ -236,6 +236,28 @@ fn stopped(call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
     )
 }
 
+/// A command that expired or was stopped while queued never started a process.
+/// It is rejected rather than reported as timed out or cancelled, so the model
+/// cannot read it as a command that ran and hung, and repair warning rules,
+/// which treat timed-out and cancelled commands as possibly executed, ignore it.
+fn not_started(call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
+    let cause = if control.is_cancelled() {
+        "the work was stopped while this command was waiting for the previous command"
+    } else {
+        "the deadline expired while this command was waiting for the previous command"
+    };
+    result(
+        call,
+        ToolResultStatus::Rejected,
+        serde_json::json!({
+            "error": "the command was not started",
+            "reason": format!(
+                "commands in one session run one at a time; {cause}, so no process was started"
+            ),
+        }),
+    )
+}
+
 impl WorkspaceToolImpl {
     async fn execute_command(
         &self,
@@ -277,7 +299,7 @@ impl WorkspaceToolImpl {
         ));
         self.reporter.waiting(call);
         let Some(permit) = runtime.acquire(&command_control).await else {
-            let output = stopped(call, &command_control);
+            let output = not_started(call, &command_control);
             self.reporter.returned(call, output.status.clone());
             return output;
         };

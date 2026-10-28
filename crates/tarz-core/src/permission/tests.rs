@@ -2466,6 +2466,145 @@ async fn command_timeout_and_cancel_are_reported_and_stop_work() {
         .unwrap();
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_command_rejection_is_not_warned_by_repair() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![
+            call_command(json!({
+                "command": "printf started > started.txt; sleep 30; printf done > first.txt"
+            })),
+            call_command(json!({
+                "command": "printf queued > queued.txt",
+                "timeout_secs": 1
+            })),
+        ]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let mut definition = command_definition(&fixture.endpoint, root.path());
+    // The running command's own timeout is bounded below the work deadline.
+    // Keep that bound well above the queued command's one second so the first
+    // command is still running when the second rejects and work is cancelled.
+    definition.work_timeout_secs = Some(30);
+    let session = host
+        .create(PreparedCreate::transient(definition, Context::default()))
+        .await
+        .unwrap();
+    session
+        .set_permission_mode(PermissionMode::FullAccess)
+        .unwrap();
+
+    let work = submit(&session, "queued command in a batch");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !root.path().join("started.txt").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the first command did not start"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // While the first command holds the session's command permit, the second
+    // must return Rejected after its own one-second deadline, not wait forever.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let observed = session.observe(&work).unwrap();
+        if observed
+            .tools
+            .calls
+            .get(1)
+            .and_then(|call| call.status.clone())
+            == Some(ToolResultStatus::Rejected)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the queued command did not reject while the first command was running"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    session.cancel(&work).unwrap();
+    let observation = finish(&session, &work).await;
+
+    assert_eq!(observation.tools.calls.len(), 2);
+    assert_eq!(
+        observation.tools.calls[0].status,
+        Some(ToolResultStatus::UnknownOutcome)
+    );
+    assert_eq!(
+        observation.tools.calls[1].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    assert!(!root.path().join("queued.txt").exists());
+    assert!(!root.path().join("first.txt").exists());
+
+    let inspection = session.inspect_repair(Some(&work)).unwrap();
+    let original = inspection.original.expect("retained command batch");
+    assert_eq!(original.completed_count, 2);
+    let rejected = original
+        .results
+        .iter()
+        .find(|result| result.status == ToolResultStatus::Rejected)
+        .expect("queued command result");
+    let unknown = original
+        .results
+        .iter()
+        .find(|result| result.status == ToolResultStatus::UnknownOutcome)
+        .expect("interrupted command result");
+    assert_eq!(
+        rejected.call_block_id,
+        observation.tools.calls[1].call_block_id
+    );
+    assert_eq!(
+        unknown.call_block_id,
+        observation.tools.calls[0].call_block_id
+    );
+    assert!(
+        rejected.write_warning.is_none(),
+        "a command that never started must not warn about execution"
+    );
+    let warning = unknown.write_warning.as_ref().expect("command warning");
+    assert_eq!(warning.kind, crate::application::RepairWarningKind::Command);
+    assert_eq!(original.command_warnings_count, 1);
+    assert_eq!(original.write_warnings_count, 1);
+
+    let plan = session
+        .plan_repair(crate::application::RepairMode::AdoptOriginal(work.clone()))
+        .unwrap();
+    let summary = plan.summary();
+    assert_eq!(summary.command_warnings_count, 1);
+    assert_eq!(summary.write_warnings_count, 1);
+    assert_eq!(summary.write_warnings.len(), 1);
+    assert_eq!(
+        summary.write_warnings[0].call_block_id,
+        unknown.call_block_id
+    );
+    assert_eq!(
+        summary.write_warnings[0].kind,
+        crate::application::RepairWarningKind::Command
+    );
+    assert!(
+        summary.write_warnings[0]
+            .advice()
+            .contains("may have executed"),
+        "only the interrupted command may be reported as possibly executed"
+    );
+    assert!(
+        !summary
+            .write_warnings
+            .iter()
+            .any(|warning| warning.call_block_id == rejected.call_block_id),
+        "the rejected queued command must not appear in the repair warnings"
+    );
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_tool_creation_fails_on_unsupported_platform() {

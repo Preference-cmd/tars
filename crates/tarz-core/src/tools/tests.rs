@@ -1,6 +1,10 @@
 use super::execute::TestGate;
-use super::{ToolResources, WorkspaceTools};
-use crate::definition::{WorkspaceTool, WorkspaceToolLimits};
+use super::{CommandRuntime, ToolResources, WorkspaceTools};
+use crate::definition::{CommandSettings, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
+use crate::sandbox::test_support::RecordingBackend;
+use crate::sandbox::{
+    BackendId, BackendReport, Capability, Launch, Limitation, Sandbox, SandboxPolicy,
+};
 use crate::session::{ToolPhase, ToolReporter, WorkRef};
 use crate::workspace::Workspace;
 use causa::kernel::{
@@ -781,4 +785,91 @@ fn run_command_definition_and_hints_declare_the_sandbox() {
     assert_eq!(hints.read_only, Some(false));
     assert_eq!(hints.destructive, Some(true));
     assert_eq!(hints.idempotent, Some(false));
+}
+
+/// Launches recorded by the recording sandbox backend.
+type RecordedLaunches = Arc<std::sync::Mutex<Vec<(SandboxPolicy, Launch)>>>;
+
+/// A command runtime backed by the recording test backend, with the recorded
+/// launches available for assertions. The backend reports every capability and
+/// performs no isolation, so the calls show whether a launch was attempted.
+fn recording_command_runtime(root: &std::path::Path) -> (Arc<CommandRuntime>, RecordedLaunches) {
+    let backend = RecordingBackend::available(BackendReport::new(
+        BackendId::RECORDING,
+        Capability::Full,
+        Capability::Full,
+        Capability::Full,
+        Capability::Full,
+        Capability::Partial(Limitation::ProcessGroupEscape),
+    ));
+    let launches = backend.calls();
+    let sandbox = Sandbox::open_with(Box::new(backend)).unwrap();
+    let runtime =
+        CommandRuntime::bind_with_sandbox(root, CommandSettings::default(), Ok(sandbox)).unwrap();
+    (runtime, launches)
+}
+
+#[tokio::test]
+async fn queued_command_that_never_starts_is_rejected_without_launching() {
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, launches) = recording_command_runtime(dir.path());
+    // Hold the session's only command permit, as a previous command would.
+    let permit = runtime.acquire(&control()).await.unwrap();
+    let workspace = Workspace::open(&dir.path().canonicalize().unwrap()).unwrap();
+    let shared = WorkspaceTools::with_command(
+        workspace,
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+        CommandSettings::default(),
+        Some(runtime),
+    );
+    let call = call(
+        "run_command",
+        json!({"command": "printf ran > ran.txt", "timeout_secs": 1}),
+    );
+    let report = reporter(std::slice::from_ref(&call));
+    let tool = shared
+        .bind_for_test(&[WorkspaceTool::RunCommand], report.clone())
+        .pop()
+        .unwrap();
+    let started = Instant::now();
+    let output = tool.execute(&call, &control(), None).await;
+    let elapsed = started.elapsed();
+    assert_eq!(output.status, ToolResultStatus::Rejected);
+    assert!(
+        elapsed >= Duration::from_millis(900),
+        "queued command must wait for its deadline, not reject immediately: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "queued command must return near its own deadline: {elapsed:?}"
+    );
+    let content = output.output.content.clone();
+    assert!(
+        content["error"].as_str().unwrap().contains("not started"),
+        "{content}"
+    );
+    let reason = content["reason"].as_str().unwrap();
+    assert!(reason.contains("one at a time"), "{reason}");
+    assert!(
+        reason.contains("waiting for the previous command"),
+        "{reason}"
+    );
+    assert!(reason.contains("deadline expired"), "{reason}");
+    assert!(
+        content.get("may_have_partially_executed").is_none(),
+        "{content}"
+    );
+    assert!(
+        launches.lock().unwrap().is_empty(),
+        "a queued command that never started must not launch a process"
+    );
+    assert!(!dir.path().join("ran.txt").exists());
+    report.freeze();
+    let snapshot = report.snapshot();
+    assert_eq!(snapshot.calls.len(), 1);
+    assert!(snapshot.calls[0].operation_not_started);
+    assert_eq!(snapshot.calls[0].status, Some(ToolResultStatus::Rejected));
+    drop(permit);
 }
