@@ -106,7 +106,9 @@ pub(super) async fn initialize(
             context,
             current_mode,
             mcp,
-            prepared.is_some(),
+            // Creating must fail closed without a backend; reopening may keep
+            // the saved command tool and reject each call at runtime.
+            prepared.is_none(),
         )
         .await?
     };
@@ -118,7 +120,7 @@ pub(super) async fn initialize(
         context,
         current_mode,
         mcp,
-        prepared.is_some(),
+        prepared.is_none(),
     )
     .await?;
     let mut state = entry.lock();
