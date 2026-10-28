@@ -297,10 +297,12 @@ fn stdio_command(
     substitutions: &mut Vec<(String, String)>,
 ) -> Result<tokio::process::Command, String> {
     let mut command = tokio::process::Command::new(program);
-    // The adapter bounds its shutdown handshake at two seconds, while the
-    // transport waits three for the child before killing it; when the
-    // handshake gives up first, the child is dropped without that kill. A
-    // server still busy with a call would then outlive the session.
+    // Causa bounds its close at two seconds, but rmcp's service task may
+    // still be shutting down: it drains in-flight responses for up to two
+    // seconds, closes stdin, then waits three seconds before killing the
+    // child. The whole sequence is bounded by five seconds from the close
+    // call. `kill_on_drop` covers the case where this runtime ends first and
+    // the task is dropped before that kill runs.
     command.kill_on_drop(true);
     let mut expanded_args = Vec::with_capacity(config.args.len());
     for arg in &config.args {

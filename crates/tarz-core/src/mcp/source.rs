@@ -24,9 +24,14 @@ pub(crate) const MAX_RESULT_BYTES: usize = 64 * 1024;
 /// Room for the omitted-byte count, which grows the notice after measuring.
 const NOTICE_DIGITS_MARGIN: usize = 24;
 /// Bound on an orderly MCP shutdown, including waiting for a stdio child to
-/// exit. The adapter gives up on its handshake after two seconds while the
-/// transport keeps closing in the background and kills the child after
-/// three, so five seconds covers both.
+/// exit. Causa's `close` returns after at most two seconds; rmcp's task may
+/// still be shutting down: it drains in-flight responses for up to two
+/// seconds (overlapping that wait), closes stdin, then waits up to three
+/// seconds before killing the child. The whole sequence is bounded by five
+/// seconds from the close call, so this bound sits right at the edge: when it
+/// expires, `shutdown` returns without waiting for the child; while the
+/// runtime lives the task still kills it, and `kill_on_drop` covers the case
+/// where the runtime ends first.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct SourceState {
