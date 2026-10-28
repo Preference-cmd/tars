@@ -90,9 +90,8 @@ pub struct SessionDefinition {
     /// Explicit bounds for workspace write and edit operations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_limits: Option<WriteToolLimits>,
-    /// Initial execution permission mode; None defaults to Ask.
-    /// Explicit Ask is normalized to None when creating a new session to keep records
-    /// without new features unmodified.
+    /// Initial execution permission mode; None means Ask. Explicit Ask is
+    /// normalized to None when creating a session so unchanged records stay unmodified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<crate::permission::PermissionMode>,
     /// Frozen command-tool settings; present only when `run_command` is selected.
@@ -195,7 +194,7 @@ impl SessionDefinition {
             .then(|| self.command.unwrap_or_default())
     }
 
-    /// Returns the effective initial permission mode, treating None as Ask.
+    /// Effective initial mode; None means Ask.
     pub fn initial_permission_mode(&self) -> crate::permission::PermissionMode {
         self.permission_mode
             .unwrap_or(crate::permission::PermissionMode::Ask)

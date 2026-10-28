@@ -4,10 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 
-/// Injectable monotonic clock abstraction for `App`.
-///
-/// In production, uses real system time (`Instant::now()`).
-/// In tests, uses a manually advanced clock without sleeping.
+/// Injectable monotonic clock: real in production, manually advanced in tests
+/// so guard-window behavior needs no sleeping.
 #[derive(Clone, Debug)]
 pub(crate) struct Clock {
     source: ClockSource,
@@ -27,14 +25,12 @@ impl Default for Clock {
 }
 
 impl Clock {
-    /// Create a real system clock.
     pub(crate) fn real() -> Self {
         Self {
             source: ClockSource::Real,
         }
     }
 
-    /// Create a manual clock initialized to the given instant.
     #[cfg(test)]
     pub(crate) fn manual(initial: Instant) -> Self {
         Self {
@@ -42,7 +38,6 @@ impl Clock {
         }
     }
 
-    /// Current monotonic time.
     pub(crate) fn now(&self) -> Instant {
         match &self.source {
             ClockSource::Real => Instant::now(),
@@ -51,7 +46,7 @@ impl Clock {
         }
     }
 
-    /// Advance the manual clock by `duration`. Has no effect on real clock.
+    /// Advance the manual clock; a real clock ignores this.
     #[cfg(test)]
     pub(crate) fn advance(&self, duration: Duration) {
         match &self.source {

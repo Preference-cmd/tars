@@ -24,8 +24,7 @@ pub(super) const MAX_JOBS: usize = 64;
 /// changes without a key press, so keys typed for something else do not decide it.
 pub(crate) const CONFIRM_GUARD_WINDOW: Duration = Duration::from_millis(500);
 
-/// Monotonic guard window that drops accidental keys for a duration after
-/// sensitive confirmation content appears or changes on screen.
+/// Armable window that ignores keys until it expires.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GuardWindow {
     until: Option<Instant>,
@@ -36,23 +35,19 @@ impl GuardWindow {
         Self { until: None }
     }
 
-    /// Arms the guard window for `duration` starting from `now`.
     pub(crate) fn arm(&mut self, now: Instant, duration: Duration) {
         self.until = Some(now + duration);
     }
 
-    /// Disarms the guard window immediately.
     pub(crate) fn disarm(&mut self) {
         self.until = None;
     }
 
-    /// Returns true if the window is currently armed and `now` is before expiry.
     pub(crate) fn is_guarded(&self, now: Instant) -> bool {
         self.until.is_some_and(|until| now < until)
     }
 
-    /// Checks if the window has expired at `now`. If expired, disarms it and
-    /// returns `true` (so the caller can mark the UI dirty for redraw).
+    /// Disarm once expired and report it, so the caller can redraw the hint.
     pub(crate) fn check_expired(&mut self, now: Instant) -> bool {
         if self.until.is_some_and(|until| now >= until) {
             self.until = None;
@@ -81,7 +76,7 @@ pub(crate) struct VisibleApproval {
     pub request_id: u64,
 }
 
-/// Pending approval request held by the TUI for reviewer confirmation.
+/// Approval request held by the TUI until the reviewer answers.
 pub(crate) struct PendingApproval {
     pub(crate) id: u64,
     pub(crate) tool_name: String,
@@ -287,9 +282,7 @@ impl App {
             true
         }
     }
-    /// Current visible approval identity, if the approval panel is currently
-    /// drawn and not obscured by user-opened panels, forms, confirmations or a
-    /// too-small terminal.
+    /// The approval actually on screen, or `None` when it is obscured.
     pub(crate) fn current_visible_approval(&self) -> Option<VisibleApproval> {
         if self.panel.is_some()
             || self.form.is_some()
@@ -308,9 +301,8 @@ impl App {
             request_id: front.id,
         })
     }
-    /// Evaluates whether the visible approval changed and manages the 500 ms
-    /// guard window. Marks `dirty = true` when a window starts or expires so
-    /// the hint is redrawn appropriately.
+    /// Re-arm the 500 ms window whenever the visible approval changes, and mark
+    /// the UI dirty when it starts or expires so the hint is redrawn.
     pub(crate) fn update_approval_guard(&mut self) {
         let current = self.current_visible_approval();
         if current != self.last_visible_approval {
@@ -326,8 +318,6 @@ impl App {
             self.dirty = true;
         }
     }
-    /// Returns true if the visible approval panel is currently within the
-    /// accidental-key ignore window ([`CONFIRM_GUARD_WINDOW`]).
     pub(crate) fn is_approval_guarded(&self) -> bool {
         let current = self.current_visible_approval();
         if current.is_none() {
@@ -338,8 +328,7 @@ impl App {
         }
         self.approval_guard.is_guarded(self.clock.now())
     }
-    /// Evaluates whether the repair guard window has expired. Marks
-    /// `dirty = true` when the window expires so the hint is redrawn.
+    /// Mark the UI dirty when the repair guard expires so the hint is redrawn.
     pub(crate) fn update_repair_guard(&mut self) {
         if let Some(super::Panel::Repair(panel)) = self.panel.as_mut()
             && panel.guard.check_expired(self.clock.now())
@@ -347,8 +336,6 @@ impl App {
             self.dirty = true;
         }
     }
-    /// Returns true if the visible repair panel is currently within the
-    /// accidental-key ignore window ([`CONFIRM_GUARD_WINDOW`]).
     pub(crate) fn is_repair_guarded(&self) -> bool {
         match &self.panel {
             Some(super::Panel::Repair(panel)) if panel.plan.is_some() => {
@@ -357,7 +344,6 @@ impl App {
             _ => false,
         }
     }
-    /// Advance the app clock by `duration` and update confirmation guards.
     #[cfg(test)]
     pub(crate) fn advance_clock(&mut self, duration: Duration) {
         self.clock.advance(duration);

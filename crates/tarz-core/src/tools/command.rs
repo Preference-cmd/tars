@@ -275,9 +275,9 @@ impl CommandRuntime {
         if stopped.is_some() {
             status = tree.terminate(STOP_GRACE).await.ok();
         }
-        // The pipe closes when the direct child and its group exit. A
-        // descendant that escaped the group can keep it open; the capture is
-        // still bounded and the detached reader is a documented residual.
+        // The pipe closes only when the direct child and its group exit; an
+        // escaped descendant can hold it open. The capture stays bounded and
+        // the detached reader is a documented residual.
         let _ = tokio::time::timeout(READER_WAIT, reader_task).await;
         if let Some(error) = wait_error {
             return failed(format!("command wait failed: {error}"));

@@ -787,12 +787,10 @@ fn run_command_definition_and_hints_declare_the_sandbox() {
     assert_eq!(hints.idempotent, Some(false));
 }
 
-/// Launches recorded by the recording sandbox backend.
 type RecordedLaunches = Arc<std::sync::Mutex<Vec<(SandboxPolicy, Launch)>>>;
 
-/// A command runtime backed by the recording test backend, with the recorded
-/// launches available for assertions. The backend reports every capability and
-/// performs no isolation, so the calls show whether a launch was attempted.
+/// A command runtime over the recording backend, which performs no isolation,
+/// so the recorded launches show whether a process launch was attempted.
 fn recording_command_runtime(root: &std::path::Path) -> (Arc<CommandRuntime>, RecordedLaunches) {
     let backend = RecordingBackend::available(BackendReport::new(
         BackendId::RECORDING,
@@ -813,7 +811,8 @@ fn recording_command_runtime(root: &std::path::Path) -> (Arc<CommandRuntime>, Re
 async fn queued_command_that_never_starts_is_rejected_without_launching() {
     let dir = tempfile::tempdir().unwrap();
     let (runtime, launches) = recording_command_runtime(dir.path());
-    // Hold the session's only command permit, as a previous command would.
+    // Hold the session's only command permit, as a running command would, so
+    // this call has to queue and then time out before it can start.
     let permit = runtime.acquire(&control()).await.unwrap();
     let workspace = Workspace::open(&dir.path().canonicalize().unwrap()).unwrap();
     let shared = WorkspaceTools::with_command(

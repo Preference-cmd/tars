@@ -399,7 +399,6 @@ async fn oversized_results_lose_their_middle_within_the_limit() {
     runtime.close().await;
 }
 
-/// The omitted count in a truncation notice.
 fn omitted(body: &str) -> usize {
     let start = body.find("[... truncated: ").expect("notice") + "[... truncated: ".len();
     let end = start + body[start..].find(' ').expect("count end");
@@ -427,7 +426,6 @@ fn truncation_cuts_on_character_boundaries_and_counts_the_omission() {
     assert!(original.ends_with(tail) && !tail.is_empty());
     assert_eq!(omitted(&body), original.len() - head.len() - tail.len());
 
-    // Structured content is cut through its serialized form.
     let structured = json!({ "rows": vec!["x".repeat(100); 2_000] });
     let mut payload = ToolResultPayload::new(
         BlockId::new(uuid::Uuid::now_v7()),
@@ -438,7 +436,6 @@ fn truncation_cuts_on_character_boundaries_and_counts_the_omission() {
     assert!(serde_json::to_vec(&payload).unwrap().len() <= MAX_RESULT_BYTES);
     assert!(text(&payload).starts_with("{\"rows\":[\"xxx"));
 
-    // A result within the limit is left exactly as it was.
     let small = ToolResultPayload::new(
         BlockId::new(uuid::Uuid::now_v7()),
         ToolResultStatus::Succeeded,
@@ -733,10 +730,8 @@ async fn wm13_prompt_denied_with_reason_and_turn_continues() {
         PermissionDecisionKind::AskedAndDenied
     );
 
-    // Fixture was never called (log is empty)
     assert_eq!(std::fs::read_to_string(&log_file).unwrap_or_default(), "");
 
-    // Model's next request contains refusal text with reason
     let requests = fixture.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 2);
     let req2_str = requests[1].to_string();
@@ -767,7 +762,6 @@ async fn wm13_tool_level_approve_in_ask_and_read_only() {
         log_file.display().to_string(),
     );
 
-    // Part 1: In Ask mode, runs directly without asking
     let fixture1 = Fixture::new(
         "openai-chat",
         vec![
@@ -806,7 +800,6 @@ async fn wm13_tool_level_approve_in_ask_and_read_only() {
         .await
         .unwrap();
 
-    // Part 2: In ReadOnly mode, rejected with mode name, call log count does not increase
     std::fs::remove_file(&log_file).unwrap();
     let fixture2 = Fixture::new(
         "openai-chat",
@@ -847,8 +840,6 @@ async fn wm13_writes_annotated_lookup_mutate_wipe() {
     let mut fx = server("fx", "serve");
     fx.approval = McpApproval::Writes;
 
-    // ReadOnly mode:
-    // lookup executes; mutate & wipe rejected
     let fixture_ro = Fixture::new(
         "openai-chat",
         vec![
@@ -881,8 +872,6 @@ async fn wm13_writes_annotated_lookup_mutate_wipe() {
         .await
         .unwrap();
 
-    // Ask mode:
-    // lookup executes directly; mutate & wipe ask
     let fixture_ask = Fixture::new(
         "openai-chat",
         vec![
@@ -956,8 +945,6 @@ async fn wm13_writes_annotated_lookup_mutate_wipe() {
         .await
         .unwrap();
 
-    // AcceptEdits mode:
-    // lookup executes directly; mutate & wipe ask
     let fixture_ae = Fixture::new(
         "openai-chat",
         vec![
@@ -1007,8 +994,6 @@ async fn wm13_writes_annotated_lookup_mutate_wipe() {
         .await
         .unwrap();
 
-    // FullAccess mode:
-    // all three execute directly
     let fixture_fa = Fixture::new(
         "openai-chat",
         vec![
@@ -1174,7 +1159,6 @@ async fn wm13_list_changed_unlock_adds_late_tool() {
     let (host, session) = open(def).await;
     let mut rx = session.connect_approvals();
 
-    // Round 1
     let approval_task1 = tokio::spawn(async move {
         let req = rx.recv().await.expect("unlock request");
         req.reply.send(ApprovalDecision::Allow).unwrap();
@@ -1187,7 +1171,6 @@ async fn wm13_list_changed_unlock_adds_late_tool() {
         Some(ToolResultStatus::Succeeded)
     );
 
-    // Round 2
     let approval_task2 = tokio::spawn(async move {
         let req = rx.recv().await.expect("late tool request");
         let ApprovalSubject::McpCall { tool, .. } = &req.subject else {
@@ -1203,10 +1186,8 @@ async fn wm13_list_changed_unlock_adds_late_tool() {
         Some(ToolResultStatus::Succeeded)
     );
 
-    // Assert tool definitions in fixture requests:
-    // Exactly 4 model requests.
-    // requests[0] did NOT have mcp_fx_late; requests[2] DOES have mcp_fx_late.
-    // requests[1] is not asserted (通知先于结果到达，第二轮第一次请求之前一定已经重新列出).
+    // The notification arrives before the result, so requests[1] is not
+    // asserted: the second round's first request is already re-listed.
     {
         let requests = fixture.requests.lock().unwrap();
         assert_eq!(requests.len(), 4, "must have recorded exactly 4 requests");
@@ -1217,7 +1198,6 @@ async fn wm13_list_changed_unlock_adds_late_tool() {
                 .any(|t| t["function"]["name"] == "mcp_fx_late"),
             "mcp_fx_late must not be in round 1 tool definitions"
         );
-        // requests[1] 不做断言：通知先于结果到达，第二轮第一次请求之前一定已经重新列出。
         let round2_tools = requests[2]["tools"].as_array().expect("tools in round 2");
         assert!(
             round2_tools
@@ -1239,10 +1219,6 @@ async fn wm13_list_changed_unlock_adds_late_tool() {
 
     let _ = std::fs::remove_file(&log_file);
 
-    // Part 2: If late is disabled via disabled_tools, unlock first,
-    // verify late does NOT appear in round 2 tool definitions,
-    // and calling it yields Rejected with "tool mcp_fx_late is not available",
-    // no approval request on rx, and fixture call log does not contain late.
     let fixture_dis = Fixture::new(
         "openai-chat",
         vec![
@@ -1265,7 +1241,6 @@ async fn wm13_list_changed_unlock_adds_late_tool() {
     let (host_dis, session_dis) = open(def_dis).await;
     let mut rx_dis = session_dis.connect_approvals();
 
-    // Round 1 in disabled: unlock
     let approval_dis1 = tokio::spawn(async move {
         let req = rx_dis.recv().await.expect("unlock request");
         req.reply.send(ApprovalDecision::Allow).unwrap();
@@ -1278,7 +1253,6 @@ async fn wm13_list_changed_unlock_adds_late_tool() {
         Some(ToolResultStatus::Succeeded)
     );
 
-    // Round 2 in disabled: model attempts to call late tool
     let obs_dis2 = run(&session_dis, "call disabled late").await;
     assert_eq!(
         obs_dis2.tools.calls[0].status,
@@ -1298,7 +1272,6 @@ async fn wm13_list_changed_unlock_adds_late_tool() {
         PermissionDecisionKind::Unavailable
     );
 
-    // Assert round 2 tool definitions did NOT include mcp_fx_late and exactly 4 requests
     {
         let requests_dis = fixture_dis.requests.lock().unwrap();
         assert_eq!(
@@ -1317,13 +1290,11 @@ async fn wm13_list_changed_unlock_adds_late_tool() {
         );
     }
 
-    // No approval request was sent
     assert!(
         rx_dis.try_recv().is_err(),
         "no approval request should be sent for disabled tool"
     );
 
-    // Call log contains unlock, but NOT late
     let call_log = std::fs::read_to_string(&log_file).unwrap_or_default();
     assert!(call_log.contains("unlock"));
     assert!(
@@ -1439,7 +1410,6 @@ async fn wm13_mcp_call_cancelled_during_approval_wait() {
             ApprovalSubject::McpCall { ref tool, .. } if tool == "echo"
         ));
         entered_clone.notify_one();
-        // Wait without answering until cancelled
         tokio::time::sleep(Duration::from_secs(5)).await;
     });
 
@@ -1898,19 +1868,17 @@ async fn wm17_accept_edits_does_not_affect_mcp_prompt_but_full_access_does() {
     let session_clone = session.clone();
 
     let approval_task = tokio::spawn(async move {
-        // Request 1: arrives under Ask
         let req1 = rx.recv().await.expect("req1");
         let ApprovalSubject::McpCall { tool, .. } = &req1.subject else {
             panic!()
         };
         assert_eq!(tool, "echo");
-        // Switch to AcceptEdits mid-batch
+        // McpPrompt still asks under AcceptEdits.
         session_clone
             .set_permission_mode(PermissionMode::AcceptEdits)
             .unwrap();
         req1.reply.send(ApprovalDecision::Allow).unwrap();
 
-        // Request 2: should STILL arrive because McpPrompt requires Ask under AcceptEdits!
         let req2 = rx
             .recv()
             .await
@@ -1919,13 +1887,12 @@ async fn wm17_accept_edits_does_not_affect_mcp_prompt_but_full_access_does() {
             panic!()
         };
         assert_eq!(tool, "echo");
-        // Now switch to FullAccess
+        // FullAccess executes directly, so no third request arrives.
         session_clone
             .set_permission_mode(PermissionMode::FullAccess)
             .unwrap();
         req2.reply.send(ApprovalDecision::Allow).unwrap();
 
-        // Request 3: must NOT arrive because FullAccess executes directly!
         let next = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
         assert!(next.is_err(), "call 3 must not ask under FullAccess");
     });
@@ -2421,10 +2388,9 @@ async fn http_url_variables_that_would_be_percent_encoded_are_refused() {
     }
 }
 
-/// Standard persistent assembly with the stdio fixture. Submits one work whose
-/// scripted batch contains `replies` and cancels it once the MCP `hang` call
-/// has reached the server: the batch ends interrupted with the external call
-/// unresolved and its declaration unpaired in the materials.
+/// Persistent session over the stdio fixture whose single batch calls the
+/// hanging tool; cancels once that call reaches the server, leaving the batch
+/// interrupted with the external call unresolved and its declaration unpaired.
 async fn cancel_after_hang_reaches_the_server(
     root: &Path,
     tools: Vec<WorkspaceTool>,
@@ -2537,7 +2503,6 @@ async fn wm09_mcp_call_cancelled_mid_execution_rejects_adoption_and_warns_extern
     assert_eq!(warning.tool_name, "mcp_fx_hang");
     assert_eq!(warning.path, "");
 
-    // Planning refuses the same scope with the same error; removal stays.
     assert!(matches!(
         session.plan_repair(RepairMode::AdoptOriginal(work.clone())),
         Err(ApplicationError::Repair(RepairError::NonBuiltinCalls))
@@ -2553,7 +2518,6 @@ async fn wm09_mcp_call_cancelled_mid_execution_rejects_adoption_and_warns_extern
     session.apply_repair(&plan).unwrap();
     session.wait_saved().await.unwrap();
 
-    // The next turn renders without the removed declaration and completes.
     let next = session
         .submit(SubmitRequest {
             request_key: "after repair".into(),
@@ -2639,7 +2603,6 @@ async fn wm09_builtin_read_and_mcp_call_cancelled_cannot_be_partially_adopted() 
     let plan = session.plan_repair(RepairMode::RemoveUnpaired).unwrap();
     let summary = plan.summary();
     assert_eq!(summary.removed_count, 2);
-    // The built-in read carries no warning; only the external call does.
     assert_eq!(summary.write_warnings_count, 1);
     assert_eq!(summary.external_warnings_count, 1);
     assert_eq!(summary.write_warnings[0].tool_name, "mcp_fx_hang");

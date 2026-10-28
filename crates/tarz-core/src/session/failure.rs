@@ -150,7 +150,6 @@ mod tests {
             ModelFailure::of(&refused(404).with_code("authentication_error")).kind,
             "not_found"
         );
-        // The gateway's message is shown as given.
         let failure = ModelFailure::of(&new(
             ModelInvokeErrorKind::Permanent,
             "openai error 401: bad key",

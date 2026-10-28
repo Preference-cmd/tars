@@ -20,7 +20,6 @@ pub struct FileVersion {
 }
 
 impl FileVersion {
-    /// Construct a file version from an open file descriptor's stat and its content bytes.
     #[cfg(unix)]
     pub(crate) fn from_stat_and_content(stat: &rustix::fs::Stat, content: &[u8]) -> Self {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -81,8 +80,8 @@ impl Drop for TempFileCleanup<'_> {
 
 #[cfg(unix)]
 impl Workspace {
-    /// Ensure all intermediate parent directories exist along the relative components,
-    /// creating missing directories step-by-step from the root handle.
+    /// Ensure every parent component exists, creating missing directories
+    /// from the root handle.
     pub(crate) fn ensure_parent_directory(
         &self,
         components: &[String],
@@ -99,7 +98,6 @@ impl Workspace {
         Ok(current)
     }
 
-    /// Open existing parent directory components without creating missing directories.
     pub(crate) fn parent_directory(
         &self,
         components: &[String],
@@ -113,11 +111,10 @@ impl Workspace {
 
     /// Atomically write content to a file in the given parent directory.
     ///
-    /// Writes content to a randomly named temporary file in the same directory,
-    /// syncs it to disk, checks cancellation, and replaces or creates the target file.
-    /// If an existing file is replaced (`existing_mode` is `Some`), its permission bits are preserved.
-    /// If creating a new file (`existing_mode` is `None`), `renameat_with` with `RenameFlags::NOREPLACE`
-    /// (or fallback via `linkat`) is used to reject existing targets with `AtomicWriteError::AlreadyExists`.
+    /// The content goes to a randomly named temp file that is synced before the
+    /// cancellation check and then renamed over the target, preserving
+    /// `existing_mode` when given. Creating a new file uses `RenameFlags::NOREPLACE`
+    /// (or a `linkat` fallback) so an existing target reports `AlreadyExists`.
     pub(crate) fn atomic_write<E, F>(
         &self,
         parent_dir: &rustix::fd::OwnedFd,

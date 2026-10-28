@@ -335,7 +335,6 @@ fn repair_cli_shows_write_warning_for_unpaired_write_file() {
         .unwrap()
         .to_owned();
 
-    // 1. JSON output preview has plan.write_warnings
     let json_preview = command(&store, &id).output().unwrap();
     assert!(json_preview.status.success(), "{json_preview:?}");
     let val = report(&json_preview);
@@ -347,7 +346,6 @@ fn repair_cli_shows_write_warning_for_unpaired_write_file() {
     assert_eq!(warnings[0]["tool_name"], "write_file");
     assert_eq!(warnings[0]["path"], "written.txt");
 
-    // 2. Human-readable text output preview has warning line
     let text_preview = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args(["session", "repair", &id, "--no-config", "--store"])
         .arg(&store)
@@ -362,7 +360,6 @@ fn repair_cli_shows_write_warning_for_unpaired_write_file() {
         "stdout: {stdout}"
     );
 
-    // 3. Apply repair succeeds and saves record
     let applied = command(&store, &id)
         .args(["--apply", "--expected-revision", "1"])
         .output()
@@ -424,7 +421,6 @@ fn repair_cli_shows_external_side_effect_warning_for_unpaired_mcp_call() {
         .unwrap()
         .to_owned();
 
-    // 1. JSON preview: the plan carries the external hint kind and totals.
     let json_preview = command(&store, &id).output().unwrap();
     assert!(json_preview.status.success(), "{json_preview:?}");
     let val = report(&json_preview);
@@ -437,7 +433,6 @@ fn repair_cli_shows_external_side_effect_warning_for_unpaired_mcp_call() {
     assert_eq!(warnings[0]["kind"], "external");
     assert_eq!(warnings[0]["tool_name"], "mcp_fx_echo");
 
-    // 2. Human-readable output has the external hint line and total.
     let text_preview = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args(["session", "repair", &id, "--no-config", "--store"])
         .arg(&store)
@@ -458,7 +453,6 @@ fn repair_cli_shows_external_side_effect_warning_for_unpaired_mcp_call() {
         "stdout: {stdout}"
     );
 
-    // 3. Apply repair succeeds and saves the record.
     let applied = command(&store, &id)
         .args(["--apply", "--expected-revision", "1"])
         .output()

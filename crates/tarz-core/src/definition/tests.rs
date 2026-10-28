@@ -307,7 +307,6 @@ fn write_tool_limits_validation_and_serialization() {
     assert_eq!(default_limits.max_edit_segments, 32);
     assert!(default_limits.validate().is_ok());
 
-    // Rejects zero
     let zero_edit = WriteToolLimits {
         max_edit_file_bytes: 0,
         ..default_limits
@@ -335,7 +334,6 @@ fn write_tool_limits_validation_and_serialization() {
         DefinitionError::InvalidToolLimits
     );
 
-    // Rejects above ceiling
     let high_edit = WriteToolLimits {
         max_edit_file_bytes: default_limits.max_edit_file_bytes + 1,
         ..default_limits
@@ -363,7 +361,6 @@ fn write_tool_limits_validation_and_serialization() {
         DefinitionError::InvalidToolLimits
     );
 
-    // Serde roundtrip on SessionDefinition
     let mut def = definition();
     def.write_limits = Some(WriteToolLimits {
         max_edit_file_bytes: 1024 * 1024,
@@ -626,7 +623,6 @@ fn wm11_timeout_environment_and_filter_fields_are_bounded() {
             "env var name {name:?}"
         );
     }
-    // Template syntax error in env or args
     for bad_template in ["${UNCLOSED", "${123}", "${FOO${BAR}}"] {
         let mut candidate = stdio_server();
         candidate.env =
@@ -637,7 +633,6 @@ fn wm11_timeout_environment_and_filter_fields_are_bounded() {
         candidate.args = vec![bad_template.into()];
         assert_eq!(candidate.validate(), Err(DefinitionError::InvalidMcpConfig));
     }
-    // Headers validation
     for (name, val) in [
         ("Bad Name", "value"),
         ("Accept", "application/json"),

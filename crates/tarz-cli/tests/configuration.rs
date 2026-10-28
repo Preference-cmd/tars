@@ -657,7 +657,7 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
     // An explicit empty selection clears the preset's server.
     let cleared = create(&["--mcp", ""]);
 
-    // Delete mcp.json to verify reopening and listing continue to succeed from saved definitions
+    // Reopening and listing must still work from the saved definition.
     std::fs::remove_file(dir.path().join("mcp.json")).unwrap();
     let entries_after_delete = host.list().await.unwrap();
     assert_eq!(entries_after_delete.len(), 3);
@@ -797,7 +797,6 @@ fn wm11_cli_rejects_unknown_mcp_ids_and_keeps_secrets_out_of_errors() {
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(!error.contains("secret-marker"), "{error}");
 
-    // config.toml containing [mcp_servers] fails with hint
     std::fs::write(
         &config_path,
         format!(
@@ -894,7 +893,6 @@ async fn wm10_stage_g_snapshot_conversion_to_current_format() {
     assert_eq!(docs.headers["Authorization"], "Bearer ${DOCS_MCP_TOKEN}");
     assert_eq!(docs.approval, tarz_core::definition::McpApproval::Prompt);
 
-    // Serialization of the converted record uses new field names
     let serialized = serde_json::to_value(def).unwrap();
     let s_git = &serialized["mcp_servers"][0];
     assert!(s_git.get("env_vars").is_none());
@@ -1155,10 +1153,9 @@ fn invalid_values_inside_a_config_profile_remain_configuration_errors() {
 
 #[test]
 fn profile_definition_errors_exit_as_configuration_errors() {
-    // Config::load resolves every profile with the defaults before a command
-    // can supply an override, so each of these is refused while loading. Both
-    // a definition-free command (list) and a definition-building one (create)
-    // must report the promised configuration exit code and no argument hint.
+    // Config::load resolves every profile before a command can override it, so
+    // both a definition-free (list) and a building command (create) must report
+    // a configuration exit code and no argument hint.
     let cases = [
         ("model = '   '", "model identifier must not be blank"),
         (

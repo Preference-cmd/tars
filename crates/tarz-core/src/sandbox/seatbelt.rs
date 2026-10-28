@@ -109,10 +109,9 @@ impl SeatbeltBackend {
         }
 
         if policy.system_baseline() {
-            // `kern.proc*` includes kern.procargs2, which exposes another
-            // process's environment. On macOS 27 this prefix deny and the
-            // process-info pair below are both required; either alone still
-            // permits the read.
+            // `kern.proc*` exposes another process's environment through
+            // kern.procargs2. On macOS 27 this deny and the process-info pair
+            // below are both required; either alone still permits the read.
             profile.push_str("(allow sysctl-read)\n");
             profile.push_str("(deny sysctl-read (sysctl-name-prefix \"kern.proc\"))\n");
             profile.push_str("(allow file-read-metadata)\n");

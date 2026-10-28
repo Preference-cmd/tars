@@ -531,7 +531,6 @@ fn record_omits_permission_mode_when_matching_initial_mode() {
     let mut def = definition();
     def.permission_mode = Some(crate::permission::PermissionMode::AcceptEdits);
 
-    // Current mode equals initial mode (AcceptEdits) -> permission_mode is None
     let record_same = SavedSessionRecord::new(
         id.clone(),
         Uuid::now_v7().to_string(),
@@ -545,7 +544,6 @@ fn record_omits_permission_mode_when_matching_initial_mode() {
     let val_same = serde_json::to_value(&record_same).unwrap();
     assert!(val_same.get("permission_mode").is_none());
 
-    // Current mode differs from initial mode (ReadOnly vs AcceptEdits) -> permission_mode is Some(ReadOnly)
     let record_diff = SavedSessionRecord::new(
         id.clone(),
         Uuid::now_v7().to_string(),

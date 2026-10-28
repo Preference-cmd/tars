@@ -44,7 +44,6 @@ impl Session {
         self.mcp.take()
     }
 
-    /// Snapshot of this instance's MCP servers, or an empty list without MCP.
     pub(crate) fn mcp_status(&self) -> Vec<crate::McpServerStatus> {
         self.mcp.as_ref().map_or_else(Vec::new, |mcp| mcp.status())
     }

@@ -122,10 +122,9 @@ fn result_label(result: &WorkResult) -> &'static str {
 /// Longest notice shown after opening, in bytes.
 const MAX_OPENED_NOTICE_BYTES: usize = 256;
 
-/// The one-line notice after opening. It names the first MCP server that did
-/// not start and counts the rest and the skipped tools, and states a saved-mode
-/// downgrade; the status text is already escaped, and the line is cut to
-/// [`MAX_OPENED_NOTICE_BYTES`].
+/// The one-line notice after opening: a saved-mode downgrade and the first MCP
+/// server that did not start, with counts, cut to [`MAX_OPENED_NOTICE_BYTES`].
+/// The status text is escaped upstream.
 pub(super) fn opened_notice(status: &[tarz_core::McpServerStatus], downgraded: bool) -> String {
     let prefix = if downgraded {
         "Opened; permission mode reverted from full-access to ask; "

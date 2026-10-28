@@ -167,9 +167,7 @@ impl ToolReporter {
         }
     }
 
-    /// Routes the runner's observations to the state updates below. The
-    /// updates take their facts as arguments, so tests drive any event order
-    /// without building a `RunEvent`.
+    /// Maps runner events onto the updates below, which tests call directly with facts.
     pub(crate) fn observe(&self, event: &RunEvent<'_>) {
         match event {
             RunEvent::ToolBatchReady {
@@ -191,15 +189,13 @@ impl ToolReporter {
         }
     }
 
-    /// Newly declared calls are waiting for tool processing.
     pub(crate) fn batch_ready(&self, invocation_id: &InvocationId, batch: &ToolBatch) {
         for entry in batch.calls() {
             self.update(entry.call(), invocation_id, ToolPhase::Waiting, None, false);
         }
     }
 
-    /// Tool processing returned: resolved calls carry their status, the rest
-    /// never started. Both are authoritative over later wrapper callbacks.
+    /// Settled calls keep this result; later wrapper callbacks cannot reopen them.
     pub(crate) fn batch_returned(&self, invocation_id: &InvocationId, batch: &ToolBatch) {
         for entry in batch.results() {
             if let Some((_, result)) = entry.result() {
@@ -223,7 +219,7 @@ impl ToolReporter {
         }
     }
 
-    /// Results reached the context; only an actual append marks a call committed.
+    /// Only an actual result append marks a call committed.
     pub(crate) fn blocks_committed(&self, invocation_id: &InvocationId, blocks: &[ContextBlock]) {
         for block in blocks {
             if let BlockContent::ToolResult(result) = block.content() {

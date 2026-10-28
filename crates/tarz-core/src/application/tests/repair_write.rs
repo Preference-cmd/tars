@@ -61,7 +61,6 @@ async fn wm08_write_cancelled_before_rename_unknown_outcome_old_content_and_clea
         .await
         .unwrap();
 
-    // Round 1: read file so it is recorded in observations
     let read_work = session
         .submit(SubmitRequest {
             request_key: "r1".into(),
@@ -109,7 +108,6 @@ async fn wm08_write_cancelled_before_rename_unknown_outcome_old_content_and_clea
         "old content\n"
     );
 
-    // Temp file must be cleaned up.
     for entry in std::fs::read_dir(&workspace).unwrap() {
         let name = entry.unwrap().file_name().to_string_lossy().to_string();
         assert!(
@@ -118,7 +116,6 @@ async fn wm08_write_cancelled_before_rename_unknown_outcome_old_content_and_clea
         );
     }
 
-    // Inspect repair original preview has write warning.
     let inspection = session.inspect_repair(Some(&original)).unwrap();
     let original_batch = inspection.original.as_ref().unwrap();
     assert_eq!(original_batch.write_warnings_count, 1);
@@ -131,7 +128,6 @@ async fn wm08_write_cancelled_before_rename_unknown_outcome_old_content_and_clea
     assert_eq!(warning.tool_name, "write_file");
     assert_eq!(warning.path, "file.txt");
 
-    // Plan repair with AdoptOriginal lists the write warning.
     let plan = session
         .plan_repair(RepairMode::AdoptOriginal(original.clone()))
         .unwrap();
@@ -144,10 +140,8 @@ async fn wm08_write_cancelled_before_rename_unknown_outcome_old_content_and_clea
     session.apply_repair(&plan).unwrap();
     session.wait_saved().await.unwrap();
 
-    // Clear test gate before next turn.
     session.workspace_tools().unwrap().set_write_gate(None);
 
-    // Submit next turn: model edits file without reading first.
     let next = session
         .submit(SubmitRequest {
             request_key: "r3".into(),
@@ -280,7 +274,6 @@ async fn wm08_write_cancelled_after_rename_unknown_outcome_new_content() {
         .await
         .unwrap();
 
-    // Round 1: read file so it is recorded in observations
     let read_work = session
         .submit(SubmitRequest {
             request_key: "r1".into(),
@@ -328,7 +321,6 @@ async fn wm08_write_cancelled_after_rename_unknown_outcome_new_content() {
         "new content\n"
     );
 
-    // Inspect repair original preview has write warning.
     let inspection = session.inspect_repair(Some(&original)).unwrap();
     let original_batch = inspection.original.as_ref().unwrap();
     assert_eq!(original_batch.write_warnings_count, 1);
@@ -341,7 +333,6 @@ async fn wm08_write_cancelled_after_rename_unknown_outcome_new_content() {
     assert_eq!(warning.tool_name, "write_file");
     assert_eq!(warning.path, "file.txt");
 
-    // Plan repair with AdoptOriginal lists the write warning.
     let plan = session
         .plan_repair(RepairMode::AdoptOriginal(original.clone()))
         .unwrap();
@@ -354,10 +345,8 @@ async fn wm08_write_cancelled_after_rename_unknown_outcome_new_content() {
     session.apply_repair(&plan).unwrap();
     session.wait_saved().await.unwrap();
 
-    // Clear test gate before next turn.
     session.workspace_tools().unwrap().set_write_gate(None);
 
-    // Submit next turn: model edits file without reading first.
     let next = session
         .submit(SubmitRequest {
             request_key: "r3".into(),
@@ -506,7 +495,6 @@ async fn wm08_remove_unpaired_shows_write_warning_for_interrupted_write() {
     finished(&session, &original).await;
     session.wait_saved().await.unwrap();
 
-    // Plan repair with RemoveUnpaired must list the write warning.
     let plan = session.plan_repair(RepairMode::RemoveUnpaired).unwrap();
     let summary = plan.summary();
     assert_eq!(summary.removed_count, 1);
@@ -519,7 +507,6 @@ async fn wm08_remove_unpaired_shows_write_warning_for_interrupted_write() {
     session.apply_repair(&plan).unwrap();
     session.wait_saved().await.unwrap();
 
-    // Diagnosis is now ready.
     let inspection = session.inspect_repair(None).unwrap();
     assert!(inspection.diagnosis.is_ready());
 }
@@ -656,14 +643,12 @@ async fn wm09_rejected_write_and_cancelled_write_during_approval_adopts_rejected
         .unwrap()
         .work;
 
-    // First write_file approval request arrives: reject it.
     let req1 = tokio::time::timeout(std::time::Duration::from_secs(5), approvals.recv())
         .await
         .expect("first approval timeout")
         .expect("approval channel closed");
     let _ = req1.reply.send(ApprovalDecision::Deny { reason: None });
 
-    // Second write_file approval request arrives: cancel turn while waiting.
     let _req2 = tokio::time::timeout(std::time::Duration::from_secs(5), approvals.recv())
         .await
         .expect("second approval timeout")
@@ -751,7 +736,6 @@ async fn wm09_read_and_write_cancelled_before_rename_adopts_both_warns_write_onl
         .unwrap()
         .work;
 
-    // 1. Wait with timeout until read_file reports Returned.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             match progress.recv().await {
@@ -775,12 +759,10 @@ async fn wm09_read_and_write_cancelled_before_rename_adopts_both_warns_write_onl
     .await
     .expect("read_file returned timeout");
 
-    // 2. Wait with timeout until write_file reaches the test gate before rename.
     tokio::time::timeout(Duration::from_secs(5), write_gate.reached.notified())
         .await
         .expect("write_gate reached timeout");
 
-    // Cancel this turn while write_file is stopped before rename.
     session.cancel(&original).unwrap();
     write_gate.release();
 
@@ -793,7 +775,6 @@ async fn wm09_read_and_write_cancelled_before_rename_adopts_both_warns_write_onl
     assert_eq!(original_batch.pending_count, 0);
     assert_eq!(original_batch.write_warnings_count, 1);
 
-    // Verify individual results in original batch preview
     let read_result = original_batch
         .results
         .iter()
@@ -827,7 +808,6 @@ async fn wm09_read_and_write_cancelled_before_rename_adopts_both_warns_write_onl
     session.apply_repair(&plan).unwrap();
     session.wait_saved().await.unwrap();
 
-    // Submit new turn to verify conversation continues normally
     let next = session
         .submit(SubmitRequest {
             request_key: "r2".into(),

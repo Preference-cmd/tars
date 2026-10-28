@@ -187,7 +187,7 @@ impl ToolBatchProcessor for PrecheckProcessor {
                 continue;
             }
 
-            // Perform inspection under supervised file operations permits.
+            // Inspect under the same operation permits that execution uses.
             let acquire = async {
                 let local = self.tools.local().acquire_owned().await.ok()?;
                 let host = self.tools.host().slots.clone().acquire_owned().await.ok()?;

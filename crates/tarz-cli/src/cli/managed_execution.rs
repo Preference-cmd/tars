@@ -22,7 +22,7 @@ pub(super) enum SaveWait {
     Abandoned,
 }
 
-/// A new recovery material file and whether this version can import it.
+/// A new recovery material file.
 pub(super) struct RecoveryFile {
     pub path: PathBuf,
     pub importable: bool,
@@ -79,7 +79,6 @@ pub(super) fn mcp_notices(status: &[McpServerStatus]) -> Vec<String> {
     lines
 }
 
-/// Print [`mcp_notices`] for an opened session to stderr.
 pub(super) fn report_mcp_status(session: &ManagedSession) {
     let mut stderr = io::stderr().lock();
     for line in mcp_notices(&session.mcp_status()) {

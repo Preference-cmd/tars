@@ -1,9 +1,7 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
-//! Model retries through the real CLI process against a scripted local
-//! server: a rate-limited later round is repeated with the same request,
-//! and an exhausted attempt limit ends as a failure that keeps the earlier
-//! materials usable for new work. Generation settings and render options
-//! are checked here too, on the request bodies the server records.
+//! Model retries through the real CLI against a scripted local server: a
+//! rate-limited later round repeats the same request, and an exhausted attempt
+//! limit keeps earlier materials usable. Generation settings are checked too.
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::TcpListener;

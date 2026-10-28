@@ -92,7 +92,6 @@ impl ManagedSession {
         )
     }
 
-    /// Return the workspace tools instance for test instrumentation.
     #[cfg(test)]
     pub(crate) fn workspace_tools(&self) -> Option<Arc<crate::tools::WorkspaceTools>> {
         let state = self.entry.lock();

@@ -55,7 +55,6 @@ fn ask_mode_non_terminal_write_rejected_without_blocking() {
         ],
     );
 
-    // 1. Run with rejected write_file call in ask mode
     let child = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "run",
@@ -114,7 +113,7 @@ fn ask_mode_non_terminal_write_rejected_without_blocking() {
     );
     drop(reqs);
 
-    // 2. Run read-only call under the same fixture to verify report keys match
+    // The read-only call runs under the same fixture so report keys must match.
     let readonly_child = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "run",
@@ -459,7 +458,6 @@ fn session_preset_accept_edits_unaffected_by_config_change_to_read_only() {
     );
     fs::write(&config_path, &initial_config).unwrap();
 
-    // Create session using config preset
     let out = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "session",
@@ -480,7 +478,6 @@ fn session_preset_accept_edits_unaffected_by_config_change_to_read_only() {
     let create_rep: Value = serde_json::from_slice(&out.stdout).unwrap();
     let id = create_rep["conversation_id"].as_str().unwrap();
 
-    // Now change config preset permission_mode to read-only
     let modified_config = format!(
         "version = 1\n\
         default_profile = 'test_profile'\n\
@@ -544,7 +541,6 @@ fn session_lifecycle_modes_create_ask_run_accept_edits_then_rerun_without_flag()
     let fixture = tools::Fixture::with_responses(
         "openai-chat",
         vec![
-            // Round 1 in first session run:
             tools::tool(
                 "openai-chat",
                 "write_file",
@@ -552,7 +548,7 @@ fn session_lifecycle_modes_create_ask_run_accept_edits_then_rerun_without_flag()
                 "call_1",
             ),
             tools::answer_with_text("openai-chat", "first write done"),
-            // Round 2 in second session run (no flag passed, should still execute without asking):
+            // Round 2 arrives without the flag: the saved mode must still apply.
             tools::tool(
                 "openai-chat",
                 "write_file",
@@ -563,7 +559,6 @@ fn session_lifecycle_modes_create_ask_run_accept_edits_then_rerun_without_flag()
         ],
     );
 
-    // 1. Create with initial ask
     let out = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "session",
@@ -593,7 +588,6 @@ fn session_lifecycle_modes_create_ask_run_accept_edits_then_rerun_without_flag()
     let rep: Value = serde_json::from_slice(&out.stdout).unwrap();
     let id = rep["conversation_id"].as_str().unwrap().to_owned();
 
-    // 2. session run with --permission-mode accept-edits
     let child1 = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "session",
@@ -626,7 +620,6 @@ fn session_lifecycle_modes_create_ask_run_accept_edits_then_rerun_without_flag()
         "from accept-edits"
     );
 
-    // 3. session run WITHOUT --permission-mode flag
     let child2 = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "session",
@@ -678,7 +671,8 @@ fn session_lifecycle_full_access_reverts_to_ask_on_reopen() {
                 "call_1",
             ),
             tools::answer_with_text("openai-chat", "fa done"),
-            // Run 2: reopen without flags -> reverts to ask -> non-terminal rejects write
+            // Run 2: reopen without flags reverts full-access to ask, so a
+            // non-terminal write is rejected.
             tools::tool(
                 "openai-chat",
                 "write_file",
@@ -689,7 +683,6 @@ fn session_lifecycle_full_access_reverts_to_ask_on_reopen() {
         ],
     );
 
-    // 1. Create with initial ask
     let out = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "session",
@@ -719,7 +712,6 @@ fn session_lifecycle_full_access_reverts_to_ask_on_reopen() {
     let rep: Value = serde_json::from_slice(&out.stdout).unwrap();
     let id = rep["conversation_id"].as_str().unwrap().to_owned();
 
-    // 2. session run --permission-mode full-access
     let child1 = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "session",
@@ -748,7 +740,6 @@ fn session_lifecycle_full_access_reverts_to_ask_on_reopen() {
     );
     assert!(workspace.join("fa.txt").exists());
 
-    // Check store record has current_mode full-access
     let records: Vec<_> = fs::read_dir(store.join("sessions"))
         .unwrap()
         .filter_map(|e| e.ok())
@@ -758,7 +749,7 @@ fn session_lifecycle_full_access_reverts_to_ask_on_reopen() {
     let record_content = fs::read_to_string(records[0].path()).unwrap();
     assert!(record_content.contains("\"permission_mode\":\"full-access\""));
 
-    // 3. session run without flags (non-terminal stdin). Reopening must revert to ask!
+    // Reopen without flags: full-access reverts to ask, so the write is rejected.
     let child2 = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "session",
@@ -808,7 +799,6 @@ fn session_run_mode_change_save_failure_does_not_submit_and_exits_code_1() {
     fs::create_dir_all(&store).unwrap();
 
     let fixture = tools::Fixture::with_responses("openai-chat", vec![]);
-    // 1. Create a session
     let out = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "session",
@@ -854,8 +844,8 @@ fn session_run_mode_change_save_failure_does_not_submit_and_exits_code_1() {
         return;
     }
 
-    // Try session run with --permission-mode change: save will fail
-    // 1) Text mode: exits code 1, stderr has error
+    // The mode change needs a save; both text and JSON must exit 1 without
+    // submitting the input.
     let child_text = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "session",
@@ -883,7 +873,6 @@ fn session_run_mode_change_save_failure_does_not_submit_and_exits_code_1() {
         "stderr must report 'session save is blocked', got: {err_msg}"
     );
 
-    // 2) JSON mode: exits code 1, stdout JSON has status not_started and error contains 'session save is blocked'
     let child_json = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "session",
@@ -919,7 +908,6 @@ fn session_run_mode_change_save_failure_does_not_submit_and_exits_code_1() {
     // Fixture should NOT have received any model requests (input was not submitted)
     assert_eq!(fixture.requests.lock().unwrap().len(), 0);
 
-    // 3) Restore directory permissions and inspect the saved session record
     drop(_restore);
     std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -927,12 +915,9 @@ fn session_run_mode_change_save_failure_does_not_submit_and_exits_code_1() {
     let record_str = std::fs::read_to_string(&record_path).expect("read session record file");
     let record_val: Value = serde_json::from_str(&record_str).expect("parse session record json");
 
-    // Wire format verification
     assert_eq!(record_val["format"], "tarz-session-v2");
-    // Definition permission_mode was normalized to None (Ask) on creation
     assert!(record_val["definition"].get("permission_mode").is_none());
-    // SavedSessionRecord.permission_mode is None when current mode equals initial mode (Ask).
-    // DiscardLocal must ensure accept-edits was discarded and not left in the record.
+    // DiscardLocal must drop accept-edits; Ask stays implicit in the record.
     assert!(
         record_val.get("permission_mode").is_none(),
         "record must omit permission_mode when current mode is creation mode (ask)"
@@ -943,7 +928,6 @@ fn session_run_mode_change_save_failure_does_not_submit_and_exits_code_1() {
         "DiscardLocal must not leave accept-edits in record"
     );
 
-    // Verify session list succeeds without error and session is saved
     let out_list = Command::new(env!("CARGO_BIN_EXE_tarz"))
         .args([
             "session",

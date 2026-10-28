@@ -481,7 +481,6 @@ async fn corrupt_open_releases_slot_without_overwrite_and_retries_after_explicit
         .unwrap();
     assert!(writer.read_latest().is_err());
     drop(writer);
-    // Only this explicit fixture repair changes the corrupt record.
     std::fs::write(&path, valid_record).unwrap();
     normal_fixture(&host);
     let reopened = host.open(original.conversation_id().clone()).await.unwrap();

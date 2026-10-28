@@ -47,8 +47,8 @@ async fn main() -> ExitCode {
     };
     if let Some(error) = error {
         eprintln!("Tarz TUI: {error}");
-        // Without an input surface, try saving, then export actual materials before
-        // releasing resources. This is separate from an interactive quit failure.
+        // Without an input surface, try saving, then export actual materials
+        // before releasing resources; this is not an interactive quit failure.
         for report in app.emergency_close().await {
             eprintln!("Tarz TUI: {report}");
         }

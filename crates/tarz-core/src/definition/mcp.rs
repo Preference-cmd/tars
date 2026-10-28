@@ -100,7 +100,7 @@ impl TryFrom<RawMcpServerConfig> for McpServerConfig {
 pub struct McpServerConfig {
     /// Stable server identifier used in tool names and configuration selections.
     pub id: String,
-    /// Executable started for a stdio server; mutually exclusive with `url`.\
+    /// Executable started for a stdio server; mutually exclusive with `url`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     /// Arguments passed to the stdio server command.
@@ -313,7 +313,6 @@ pub(crate) fn expand_template_recording(
     Ok(result)
 }
 
-/// Expand `${VAR}` and `${VAR:-default}` references in `s` using the process environment.
 #[cfg(test)]
 pub(crate) fn expand_template(s: &str) -> Result<String, String> {
     expand_template_recording(s, &mut Vec::new())
@@ -331,7 +330,6 @@ pub(crate) fn redact_substitutions(text: &str, substitutions: &[(String, String)
     if substitutions.is_empty() {
         return text.to_owned();
     }
-    // Values shorter than 4 bytes are not replaced to avoid mangling ordinary text.
     let mut eligible: Vec<(&str, &str)> = substitutions
         .iter()
         .filter_map(|(pattern, value)| {
@@ -343,7 +341,6 @@ pub(crate) fn redact_substitutions(text: &str, substitutions: &[(String, String)
         })
         .collect();
 
-    // Sort longer values first so substring values do not shadow containing values.
     eligible.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
     let mut result = text.to_owned();
@@ -375,12 +372,10 @@ pub(crate) fn is_tchar(b: u8) -> bool {
         )
 }
 
-/// Validate HTTP header name (non-empty token).
 pub(crate) fn valid_header_name(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(is_tchar)
 }
 
-/// Check if a header name is reserved by the MCP transport.
 pub(crate) fn is_transport_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower == "accept"
@@ -389,7 +384,6 @@ pub(crate) fn is_transport_header(name: &str) -> bool {
         || lower.starts_with("mcp-")
 }
 
-/// Validate unexpanded HTTP header value template.
 pub(crate) fn valid_header_value_template(value: &str) -> bool {
     if validate_template(value).is_err() {
         return false;

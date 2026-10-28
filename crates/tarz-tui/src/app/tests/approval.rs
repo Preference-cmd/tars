@@ -121,17 +121,14 @@ async fn wm05_allow_write_via_enter_and_y() {
     let mut app = app(dir.path());
     create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
 
-    // Send input
     app.entries[0].editor.insert_str("create test.txt");
     app.event(key(KeyCode::Enter));
 
-    // Wait for approval request
     until(&mut app, |a| {
         !a.entries[a.selected].approval_queue.is_empty()
     })
     .await;
 
-    // Check panel screen
     let view = screen(&app);
     assert!(view.contains("write_file wants to create test.txt (permission mode: ask)"));
     assert!(view.contains("+hello world"));
@@ -139,14 +136,11 @@ async fn wm05_allow_write_via_enter_and_y() {
         "Enter / y allow · n deny · Esc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
     ));
 
-    // Allow via Enter
     advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Enter));
 
-    // Wait for turn completion
     until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
 
-    // Verify file content
     let content = std::fs::read_to_string(workspace.join("test.txt")).unwrap();
     assert_eq!(content, "hello world\n");
 }
@@ -217,24 +211,19 @@ async fn wm05_deny_write_with_reason() {
     .await;
 
     advance_past_approval_window(&mut app);
-    // Press 'n' to enter reason input
     app.event(key(KeyCode::Char('n')));
     let view = screen(&app);
     assert!(view.contains("Reason for the model (optional, Enter to skip):"));
 
-    // Type reason
     for c in "wrong path".chars() {
         app.event(key(KeyCode::Char(c)));
     }
     app.event(key(KeyCode::Enter));
 
-    // Wait for completion
     until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
 
-    // File must not exist
     assert!(!workspace.join("denied.txt").exists());
 
-    // Verify model second request contains Rejected with reason
     let requests = fixture.requests.lock().unwrap();
     assert!(requests.len() >= 2);
     let last_req = requests.last().unwrap();
@@ -272,7 +261,6 @@ async fn wm05_deny_write_without_reason() {
     .await;
 
     advance_past_approval_window(&mut app);
-    // Press 'n', then Enter without typing anything
     app.event(key(KeyCode::Char('n')));
     app.event(key(KeyCode::Enter));
 
@@ -316,17 +304,14 @@ async fn wm05_deny_reason_esc_returns_to_question_then_allows() {
     .await;
 
     advance_past_approval_window(&mut app);
-    // Press 'n'
     app.event(key(KeyCode::Char('n')));
     assert!(screen(&app).contains("Reason for the model"));
 
-    // Press Esc in reason mode -> returns to question
     app.event(key(KeyCode::Esc));
     let view = screen(&app);
     assert!(!view.contains("Reason for the model"));
     assert!(view.contains("Enter / y allow · n deny"));
 
-    // Now press Enter -> allows write!
     app.event(key(KeyCode::Enter));
 
     until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
@@ -367,7 +352,6 @@ async fn wm05_two_writes_different_files_and_duplicate_file_in_batch() {
     app.entries[0].editor.insert_str("write two files");
     app.event(key(KeyCode::Enter));
 
-    // Wait for first approval (file1.txt)
     until(&mut app, |a| {
         !a.entries[a.selected].approval_queue.is_empty()
     })
@@ -376,7 +360,6 @@ async fn wm05_two_writes_different_files_and_duplicate_file_in_batch() {
     advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Enter));
 
-    // Wait for second approval (file2.txt)
     until(&mut app, |a| {
         a.entries[a.selected]
             .approval_queue
@@ -431,7 +414,6 @@ async fn wm05_two_writes_different_files_and_duplicate_file_in_batch() {
         .insert_str("duplicate write in batch");
     app2.event(key(KeyCode::Enter));
 
-    // First one asks
     until(&mut app2, |a| {
         !a.entries[a.selected].approval_queue.is_empty()
     })
@@ -440,7 +422,7 @@ async fn wm05_two_writes_different_files_and_duplicate_file_in_batch() {
     advance_past_approval_window(&mut app2);
     app2.event(key(KeyCode::Enter));
 
-    // Turn completes without asking a second time (second is rejected by precheck)
+    // The duplicate is rejected by precheck, so no second panel appears.
     until(&mut app2, |a| {
         a.entries[a.selected].execution == "Completed"
     })
@@ -477,15 +459,12 @@ async fn wm05_approval_panel_esc_cancels_turn() {
     })
     .await;
 
-    // Press Esc in question view
     app.event(key(KeyCode::Esc));
 
-    // Wait for turn cancellation
     until(&mut app, |a| a.entries[a.selected].execution == "Cancelled").await;
     assert!(app.entries[0].approval_queue.is_empty());
     assert!(!workspace.join("cancel_me.txt").exists());
 
-    // Check session save status
     until(&mut app, |a| a.entries[a.selected].status.contains("saved")).await;
 }
 
@@ -518,17 +497,15 @@ async fn wm05_untrusted_text_escaped_in_rendered_buffer() {
     .await;
 
     let view = screen(&app);
-    // Rendered output contains escaped forms
     assert!(view.contains(r"\x1b"));
     assert!(view.contains(r"\r"));
     assert!(view.contains(r"\u{61c}"));
 
-    // Rendered output MUST NOT contain raw control chars
+    // No raw control character may reach the buffer.
     assert!(!view.contains('\x1b'));
     assert!(!view.contains('\r'));
     assert!(!view.contains('\u{061C}'));
 
-    // Cancel out
     app.event(key(KeyCode::Esc));
 }
 
@@ -567,7 +544,6 @@ async fn wm05_diff_scroll_page_down() {
     assert!(top_view.contains("line_1_content"));
     assert!(!top_view.contains("line_95_content"));
 
-    // Scroll down
     for _ in 0..20 {
         app.event(key(KeyCode::PageDown));
     }
@@ -604,7 +580,6 @@ async fn wm05_letters_ignored_when_panel_open_draft_preserved() {
     })
     .await;
 
-    // Draft was cleared on submit, let us set draft on editor to check it is not modified
     app.entries[0].editor.insert_str("draft_preserved");
     app.event(key(KeyCode::Char('a')));
     app.event(key(KeyCode::Char('b')));
@@ -621,15 +596,12 @@ async fn wm17_mode_switching_cycle_and_command() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app(dir.path());
 
-    // Create session
     let fixture = wire::Fixture::with_responses("openai-chat", vec![]);
     create_test_session(&mut app, &fixture.endpoint, dir.path(), "ask").await;
 
-    // 1. Initial mode is ask
     let view = screen(&app);
     assert!(view.contains("mode ask"));
 
-    // 2. Shift-Tab -> accept-edits
     app.event(key(KeyCode::BackTab));
     assert_eq!(
         app.entries[0]
@@ -644,7 +616,6 @@ async fn wm17_mode_switching_cycle_and_command() {
     assert!(screen(&app).contains("mode accept-edits"));
     assert_eq!(app.notice, "Permission mode: accept-edits");
 
-    // 3. Shift-Tab -> read-only
     app.event(key(KeyCode::BackTab));
     assert_eq!(
         app.entries[0]
@@ -659,7 +630,6 @@ async fn wm17_mode_switching_cycle_and_command() {
     assert!(screen(&app).contains("mode read-only"));
     assert_eq!(app.notice, "Permission mode: read-only");
 
-    // 4. Shift-Tab -> ask
     app.event(key(KeyCode::BackTab));
     assert_eq!(
         app.entries[0]
@@ -674,7 +644,6 @@ async fn wm17_mode_switching_cycle_and_command() {
     assert!(screen(&app).contains("mode ask"));
     assert_eq!(app.notice, "Permission mode: ask");
 
-    // 5. /mode full-access via command panel
     app.event(key(KeyCode::Char('/')));
     for c in "mode full-access".chars() {
         app.event(key(KeyCode::Char(c)));
@@ -692,7 +661,6 @@ async fn wm17_mode_switching_cycle_and_command() {
     );
     assert!(screen(&app).contains("mode full-access"));
 
-    // 6. Shift-Tab from full-access -> ask
     app.event(key(KeyCode::BackTab));
     assert_eq!(
         app.entries[0]
@@ -706,7 +674,6 @@ async fn wm17_mode_switching_cycle_and_command() {
     );
     assert!(screen(&app).contains("mode ask"));
 
-    // 7. /mode without args opens choice panel
     app.event(key(KeyCode::Char('/')));
     for c in "mode".chars() {
         app.event(key(KeyCode::Char(c)));
@@ -716,7 +683,7 @@ async fn wm17_mode_switching_cycle_and_command() {
         app.panel,
         Some(crate::app::Panel::ModeSelect { .. })
     ));
-    // Select accept-edits (Down from ask(1) -> accept-edits(2))
+    // Ask is listed second, so Down selects accept-edits.
     app.event(key(KeyCode::Down));
     app.event(key(KeyCode::Enter));
     assert!(app.panel.is_none());
@@ -731,7 +698,7 @@ async fn wm17_mode_switching_cycle_and_command() {
         PermissionMode::AcceptEdits
     );
 
-    // 8. /mode bogus shows legal names and leaves mode unchanged
+    // /mode bogus shows the legal names and leaves the mode unchanged.
     app.event(key(KeyCode::Char('/')));
     for c in "mode bogus".chars() {
         app.event(key(KeyCode::Char(c)));
@@ -802,15 +769,14 @@ async fn wm17_mode_switch_inside_panel() {
     assert!(screen(&app).contains("wants to create sw1.txt"));
 
     advance_past_approval_window(&mut app);
-    // Switch mode inside panel: Shift-Tab to accept-edits
+    // Shift-Tab changes the mode while the panel is open.
     app.event(key(KeyCode::BackTab));
     let view = screen(&app);
     assert!(view.contains("Permission mode changed to accept-edits"));
 
-    // Allow the first write
     app.event(key(KeyCode::Enter));
 
-    // Turn completes without showing second panel (auto allowed!)
+    // The second write is auto-allowed, so no second panel appears.
     until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
     assert_eq!(
         std::fs::read_to_string(workspace.join("sw1.txt")).unwrap(),
@@ -821,7 +787,6 @@ async fn wm17_mode_switch_inside_panel() {
         "sw2"
     );
 
-    // Switch back to ask via /mode ask
     app.event(key(KeyCode::Char('/')));
     for c in "mode ask".chars() {
         app.event(key(KeyCode::Char(c)));
@@ -849,11 +814,9 @@ async fn wm17_mode_switch_inside_panel() {
     })
     .await;
 
-    // Send round 2
     app.entries[0].editor.insert_str("round 2 write");
     app.event(key(KeyCode::Enter));
 
-    // Panel shows again!
     until(&mut app, |a| {
         !a.entries[a.selected].approval_queue.is_empty()
     })
@@ -890,30 +853,24 @@ async fn wm05_two_sessions_background_approval_hint_and_switching() {
     let fixture_b = wire::Fixture::with_responses("openai-chat", responses_b);
 
     let mut app = app(dir.path());
-    // Create Session A (index 0)
     create_test_session(&mut app, &fixture_a.endpoint, &workspace, "ask").await;
-    // Create Session B (index 1)
     create_test_session(&mut app, &fixture_b.endpoint, &workspace, "ask").await;
 
-    // Switch to B and submit work
     app.selected = 1;
     app.entries[1].editor.insert_str("start B");
     app.event(key(KeyCode::Enter));
 
-    // Immediately switch back to A before B's approval arrives
+    // Switch back to A before B's approval arrives.
     app.selected = 0;
 
-    // Wait until B's approval arrives in B's queue
     until(&mut app, |a| !a.entries[1].approval_queue.is_empty()).await;
 
-    // On Session A, confirmation panel is NOT shown!
+    // Session A shows no panel, only the waiting notice.
     assert!(app.entries[0].approval_queue.is_empty());
     let view_a = screen(&app);
     assert!(!view_a.contains("wants to create b_file.txt"));
-    // But waiting notice is visible on A!
     assert!(view_a.contains("is waiting for confirmation"));
 
-    // Check sessions panel also marks B
     app.event(key(KeyCode::Char('/')));
     for c in "sessions".chars() {
         app.event(key(KeyCode::Char(c)));
@@ -923,13 +880,11 @@ async fn wm05_two_sessions_background_approval_hint_and_switching() {
     assert!(sess_view.contains("waiting for confirmation"));
     app.event(key(KeyCode::Esc));
 
-    // Switch to B
     app.selected = 1;
     let view_b = screen(&app);
     assert!(view_b.contains("write_file wants to create b_file.txt"));
 
     advance_past_approval_window(&mut app);
-    // Answer on B
     app.event(key(KeyCode::Enter));
     until(&mut app, |a| a.entries[1].execution == "Completed").await;
     assert_eq!(
@@ -964,7 +919,7 @@ async fn wm05_ctrl_q_and_close_with_panel_open_complete_in_bounded_time() {
     })
     .await;
 
-    // Test Ctrl-Q while panel is open: must complete within timeout!
+    // Ctrl-Q with a panel open must still exit within the bound.
     app.event(ctrl('q'));
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         until(&mut app, |a| a.done).await;
@@ -974,7 +929,6 @@ async fn wm05_ctrl_q_and_close_with_panel_open_complete_in_bounded_time() {
 
     assert!(!workspace.join("will_not_write.txt").exists());
 
-    // Test /close while panel is open on reopened session
     let responses2 = vec![sse_single_tool(
         "write_file",
         json!({"path": "will_not_write2.txt", "content": "test2"}),
@@ -990,7 +944,6 @@ async fn wm05_ctrl_q_and_close_with_panel_open_complete_in_bounded_time() {
     })
     .await;
 
-    // Close session directly via close action
     app2.close(0, ClosePolicy::Save);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         until(&mut app2, |a| a.entries[0].session.is_none()).await;
@@ -1008,7 +961,6 @@ async fn wm17_permission_mode_persistence() {
     let mut app1 = app(dir.path());
     create_test_session(&mut app1, &fixture.endpoint, dir.path(), "ask").await;
 
-    // Switch to accept-edits
     app1.event(key(KeyCode::BackTab));
     assert_eq!(
         app1.entries[0]
@@ -1021,18 +973,15 @@ async fn wm17_permission_mode_persistence() {
         PermissionMode::AcceptEdits
     );
 
-    // Save and close
     app1.close(0, ClosePolicy::Save);
     until(&mut app1, |a| a.entries[0].session.is_none()).await;
 
-    // Reopen in same or new host
     let mut app2 = super::support::app(dir.path());
     app2.list();
     until(&mut app2, |a| !a.entries.is_empty()).await;
     app2.open();
     until(&mut app2, |a| a.entries[0].session.is_some()).await;
 
-    // Must be accept-edits!
     assert_eq!(
         app2.entries[0]
             .session
@@ -1044,7 +993,7 @@ async fn wm17_permission_mode_persistence() {
         PermissionMode::AcceptEdits
     );
 
-    // Now switch to full-access (initial was ask)
+    // full-access is only kept when it was the creation mode, so it reverts.
     app2.event(key(KeyCode::Char('/')));
     for c in "mode full-access".chars() {
         app2.event(key(KeyCode::Char(c)));
@@ -1061,7 +1010,6 @@ async fn wm17_permission_mode_persistence() {
         PermissionMode::FullAccess
     );
 
-    // Close and reopen -> must revert to ask!
     app2.close(0, ClosePolicy::Save);
     until(&mut app2, |a| a.entries[0].session.is_none()).await;
 
@@ -1115,7 +1063,6 @@ fn wm17_new_session_form_permission_mode_and_write_limits() {
     assert_eq!(def.permission_mode, Some(PermissionMode::AcceptEdits));
     assert_eq!(def.write_limits.as_ref().unwrap().max_write_bytes, 4096);
 
-    // Change to read-only
     let mut form2 = Form::new(
         std::sync::Arc::new(tarz_core::config::Config::default()),
         None,
@@ -1125,7 +1072,6 @@ fn wm17_new_session_form_permission_mode_and_write_limits() {
     let def2 = form2.definition().unwrap();
     assert_eq!(def2.permission_mode, Some(PermissionMode::ReadOnly));
 
-    // Invalid mode name errors with all four names
     let mut form3 = Form::new(
         std::sync::Arc::new(tarz_core::config::Config::default()),
         None,
@@ -1161,7 +1107,6 @@ async fn wm13_mcp_approval_panel_display_and_actions() {
     let mut app = app(dir.path());
     create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
 
-    // 1. Enqueue McpCall approval request
     let (tx1, mut rx1) = tokio::sync::oneshot::channel();
     app.entries[0]
         .approval_queue
@@ -1186,7 +1131,6 @@ async fn wm13_mcp_approval_panel_display_and_actions() {
     assert!(!view.contains('\x1b'));
     assert!(view.contains("Enter / y allow"));
 
-    // Press y to allow
     advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Char('y')));
     assert_eq!(
@@ -1195,7 +1139,6 @@ async fn wm13_mcp_approval_panel_display_and_actions() {
     );
     assert!(app.entries[0].approval_queue.is_empty());
 
-    // 2. Enqueue second McpCall approval request
     let (tx2, mut rx2) = tokio::sync::oneshot::channel();
     app.entries[0]
         .approval_queue
@@ -1212,7 +1155,6 @@ async fn wm13_mcp_approval_panel_display_and_actions() {
             },
         ));
 
-    // Press n to enter reason prompt, then type reason and press Enter to deny
     advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Char('n')));
     for c in "unsafe tool".chars() {
@@ -1229,7 +1171,6 @@ async fn wm13_mcp_approval_panel_display_and_actions() {
     );
     assert!(app.entries[0].approval_queue.is_empty());
 
-    // 3. Enqueue third McpCall approval request and test Esc key cancellation
     let (tx3, mut rx3) = tokio::sync::oneshot::channel();
     app.entries[0]
         .approval_queue
@@ -1247,10 +1188,9 @@ async fn wm13_mcp_approval_panel_display_and_actions() {
         ));
     assert_eq!(app.entries[0].approval_queue.len(), 1);
 
-    // Press Esc to cancel turn
     app.event(key(KeyCode::Esc));
 
-    // Approval queue must be cleared on Esc and responder channel was dropped without allow/deny
+    // Esc clears the queue and drops the reply channel without a decision.
     assert!(app.entries[0].approval_queue.is_empty());
     assert!(app.entries[0].approval_reason.is_none());
     assert!(rx3.try_recv().is_err());
@@ -1435,10 +1375,9 @@ async fn wm18_draft_in_input_box_approval_guard_ignores_keys_then_allows() {
     let mut app = app(dir.path());
     create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
 
-    // User is typing a draft in the input box
+    // A draft is already in the input box when the approval arrives.
     app.entries[0].editor.insert_str("next message draft");
 
-    // Approval arrives
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     app.entries[0]
         .approval_queue
@@ -1455,31 +1394,26 @@ async fn wm18_draft_in_input_box_approval_guard_ignores_keys_then_allows() {
             },
         ));
 
-    // Within 0.5 s, press y and Enter
+    // y and Enter arrive inside the 500 ms window.
     app.event(key(KeyCode::Char('y')));
     app.event(key(KeyCode::Enter));
 
-    // Nothing was allowed or sent to responder
     assert!(rx.try_recv().is_err());
     assert_eq!(app.entries[0].approval_queue.len(), 1);
 
-    // The draft remains exactly as it was, and the pressed keys did not enter it
     assert_eq!(
         app.entries[0].editor.lines().join("\n"),
         "next message draft"
     );
 
-    // Advance past the 0.5s window
     advance_past_approval_window(&mut app);
 
-    // Now Enter allows
     app.event(key(KeyCode::Enter));
     assert_eq!(
         rx.try_recv().unwrap(),
         tarz_core::permission::ApprovalDecision::Allow
     );
     assert!(app.entries[0].approval_queue.is_empty());
-    // Draft is still intact
     assert_eq!(
         app.entries[0].editor.lines().join("\n"),
         "next message draft"
@@ -1530,7 +1464,6 @@ async fn wm18_two_queued_requests_second_has_own_window() {
             },
         ));
 
-    // Advance past first window and allow first request
     advance_past_approval_window(&mut app);
     app.event(key(KeyCode::Enter));
     assert_eq!(
@@ -1538,19 +1471,16 @@ async fn wm18_two_queued_requests_second_has_own_window() {
         tarz_core::permission::ApprovalDecision::Allow
     );
 
-    // Second request is now visible and has its OWN 0.5 s window
+    // The second request starts its own window.
     assert!(app.is_approval_guarded());
 
-    // Pressing 'y' immediately is ignored
     app.event(key(KeyCode::Char('y')));
     assert!(rx2.try_recv().is_err());
     assert_eq!(app.entries[0].approval_queue.len(), 1);
 
-    // Advance past second window
     advance_past_approval_window(&mut app);
     assert!(!app.is_approval_guarded());
 
-    // Now 'y' allows second request
     app.event(key(KeyCode::Char('y')));
     assert_eq!(
         rx2.try_recv().unwrap(),
@@ -1589,27 +1519,22 @@ async fn wm18_guard_window_esc_cancels_and_scroll_keys_scroll() {
         },
     ));
 
-    // Guard window is active
+    // Only cancel and scroll act during the guard window.
     assert!(app.is_approval_guarded());
     assert_eq!(app.entries[0].approval_scroll, 0);
 
-    // Down key scrolls the diff during guard window
     app.event(key(KeyCode::Down));
     assert_eq!(app.entries[0].approval_scroll, 1);
 
-    // PgDn key scrolls down by 5
     app.event(key(KeyCode::PageDown));
     assert_eq!(app.entries[0].approval_scroll, 6);
 
-    // Up key scrolls up
     app.event(key(KeyCode::Up));
     assert_eq!(app.entries[0].approval_scroll, 5);
 
-    // PgUp scrolls up by 5
     app.event(key(KeyCode::PageUp));
     assert_eq!(app.entries[0].approval_scroll, 0);
 
-    // Esc cancels during guard window
     app.event(key(KeyCode::Esc));
     assert!(app.entries[0].approval_queue.is_empty());
     assert!(rx.try_recv().is_err());
@@ -1625,12 +1550,9 @@ async fn wm18_switching_to_session_with_pending_approval_starts_window() {
 
     let fixture = wire::Fixture::with_responses("openai-chat", vec![]);
     let mut app = app(dir.path());
-    // Create session 0
     create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
-    // Create session 1
     create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
 
-    // Enqueue approval on session 1
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     app.entries[1]
         .approval_queue
@@ -1647,26 +1569,22 @@ async fn wm18_switching_to_session_with_pending_approval_starts_window() {
             },
         ));
 
-    // Currently on session 0: no approval visible
+    // Session 0 has nothing pending; switching to session 1 starts the window.
     app.selected = 0;
     app.update_approval_guard();
     assert!(!app.is_approval_guarded());
 
-    // Switch to session 1
     app.selected = 1;
     app.update_approval_guard();
     assert!(app.is_approval_guarded());
 
-    // Pressing Enter immediately is ignored
     app.event(key(KeyCode::Enter));
     assert!(rx.try_recv().is_err());
     assert_eq!(app.entries[1].approval_queue.len(), 1);
 
-    // Advance clock past 500 ms
     advance_past_approval_window(&mut app);
     assert!(!app.is_approval_guarded());
 
-    // Enter now allows
     app.event(key(KeyCode::Enter));
     assert_eq!(
         rx.try_recv().unwrap(),
@@ -1700,11 +1618,10 @@ async fn wm18_hint_line_dimmed_during_window_and_normal_after() {
             |_| {},
         ));
 
-    // Draw buffer while guarded
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| render::draw(frame, &app)).unwrap();
 
-    // Find the cell with 'E' from "Enter / y allow"
+    // Find the hint cell through its text rather than a fixed coordinate.
     let buffer = terminal.backend().buffer();
     let hint_text = "Enter / y allow";
     let (hint_x, hint_y) = (0..buffer.area.height)
@@ -1723,11 +1640,9 @@ async fn wm18_hint_line_dimmed_during_window_and_normal_after() {
         cell_during.modifier
     );
 
-    // Advance clock past 500 ms and check dirty flag
     advance_past_approval_window(&mut app);
     assert!(app.dirty, "app must be marked dirty when window expires");
 
-    // Redraw after window expired
     terminal.draw(|frame| render::draw(frame, &app)).unwrap();
     let buffer_after = terminal.backend().buffer();
     let cell_after = &buffer_after[(hint_x, hint_y)];
@@ -1769,25 +1684,20 @@ async fn wm18_panel_hidden_by_small_terminal_then_shown_starts_window() {
             },
         ));
 
-    // When hidden, it's not visible
     assert!(app.current_visible_approval().is_none());
 
-    // Resize to large enough terminal
     app.event(Event::Resize(40, 25));
 
-    // Panel is now visible and guard window must start
+    // Becoming visible must start the guard window.
     assert!(app.is_approval_guarded());
 
-    // Pressing 'y' during window is ignored
     app.event(key(KeyCode::Char('y')));
     assert!(rx.try_recv().is_err());
     assert_eq!(app.entries[0].approval_queue.len(), 1);
 
-    // Advance clock past 500 ms
     advance_past_approval_window(&mut app);
     assert!(!app.is_approval_guarded());
 
-    // Now 'y' allows
     app.event(key(KeyCode::Char('y')));
     assert_eq!(
         rx.try_recv().unwrap(),
@@ -1808,18 +1718,16 @@ async fn wm18_user_opened_panels_respond_immediately_without_window() {
     let mut app = app(dir.path());
     create_test_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
 
-    // 1. Commands panel ('/')
+    // User-opened panels are answered immediately: no guard window.
     app.event(key(KeyCode::Char('/')));
     assert!(matches!(
         app.panel,
         Some(crate::app::Panel::Commands { .. })
     ));
     assert!(!app.is_approval_guarded());
-    // Esc closes immediately
     app.event(key(KeyCode::Esc));
     assert!(app.panel.is_none());
 
-    // 2. Sessions panel ('/sessions')
     app.event(key(KeyCode::Char('/')));
     for c in "sessions".chars() {
         app.event(key(KeyCode::Char(c)));
@@ -1833,7 +1741,6 @@ async fn wm18_user_opened_panels_respond_immediately_without_window() {
     app.event(key(KeyCode::Esc));
     assert!(app.panel.is_none());
 
-    // 3. Mode select panel ('/mode')
     app.event(key(KeyCode::Char('/')));
     for c in "mode".chars() {
         app.event(key(KeyCode::Char(c)));
@@ -1844,7 +1751,6 @@ async fn wm18_user_opened_panels_respond_immediately_without_window() {
         Some(crate::app::Panel::ModeSelect { .. })
     ));
     assert!(!app.is_approval_guarded());
-    // Immediately choose accept-edits (Down -> Enter)
     app.event(key(KeyCode::Down));
     app.event(key(KeyCode::Enter));
     assert!(app.panel.is_none());

@@ -22,12 +22,9 @@ pub(crate) trait TreeSignaller: Send + Sync {
 
 /// A backend-neutral handle to one sandboxed command and its process tree.
 ///
-/// The handle owns the direct child. [`ProcessTree::wait`] reaps it and then
-/// kills any remaining members of its process group, so a command that exits
-/// after starting a background process does not leak that process.
-/// [`ProcessTree::terminate`] sends a soft stop, waits up to the grace period
-/// while watching the direct child, then sends a hard kill. Drop sends a hard
-/// kill without waiting.
+/// The handle reaps the direct child before killing remaining group members,
+/// so a command that exits after starting a background process does not leak
+/// it; dropping the handle sends a hard kill without waiting.
 ///
 /// Tokio reaps exited children in its signal driver. Once the group leader has
 /// exited, its process group id can be reused; if the group is already empty,
@@ -81,9 +78,8 @@ impl ProcessTree {
 
     /// Ask the process group to stop, then force it after `grace`.
     ///
-    /// Returns the direct child's status after reaping it. If the child exits
-    /// during the grace period, any descendants still in its group are killed
-    /// before the handle is disarmed.
+    /// A child that exits during the grace period still has any remaining
+    /// group members killed before the handle is disarmed.
     pub async fn terminate(&mut self, grace: Duration) -> io::Result<std::process::ExitStatus> {
         if !self.armed.load(Ordering::SeqCst) {
             let _ = self.child.start_kill();
@@ -201,7 +197,7 @@ impl TreeControl for RecordingControl {
     }
 }
 
-/// Map a process exit status to the reported exit code and signal.
+/// Report a signal as a shell does: exit code `128 + signal`, plus the signal.
 pub(crate) fn exit_status_code(status: ExitStatus) -> (Option<i32>, Option<i32>) {
     #[cfg(unix)]
     {

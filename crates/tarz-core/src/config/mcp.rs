@@ -54,8 +54,8 @@ fn is_exact_var_without_default(val: &str) -> bool {
 
 /// Parse and validate an `mcp.json` text.
 ///
-/// Returns the parsed servers map and any warnings collected for ignored foreign fields.
-/// Errors omit all argument, header, environment, and URL values.
+/// Returns the servers and the warnings for ignored foreign fields. Errors omit
+/// all argument, header, environment, and URL values.
 pub(super) fn parse_mcp_json(
     text: &str,
 ) -> Result<(BTreeMap<String, McpServerConfig>, Vec<String>), ConfigError> {
@@ -150,7 +150,6 @@ pub(super) fn parse_mcp_json(
             ));
         }
 
-        // Validate explicit transport type against supported implementations.
         let transport_type = if let Some(type_val) = server_map.get("type") {
             let type_str = type_val.as_str().ok_or_else(|| {
                 ConfigError::InvalidMcpFile(format!("MCP server '{id}': 'type' must be a string"))
@@ -172,7 +171,6 @@ pub(super) fn parse_mcp_json(
             None
         };
 
-        // Command and URL are mutually exclusive based on transport.
         let command = if let Some(cmd_val) = server_map.get("command") {
             let cmd_str = cmd_val.as_str().ok_or_else(|| {
                 ConfigError::InvalidMcpFile(format!(
@@ -262,7 +260,6 @@ pub(super) fn parse_mcp_json(
             }
         }
 
-        // Collect command-line arguments for stdio transport.
         let args = if let Some(args_val) = server_map.get("args") {
             let args_arr = args_val.as_array().ok_or_else(|| {
                 ConfigError::InvalidMcpFile(format!(
@@ -288,7 +285,7 @@ pub(super) fn parse_mcp_json(
             Vec::new()
         };
 
-        // Validate and collect environment variables, checking for literal secrets.
+        // A secret-looking name must hold a ${VAR} reference, never a literal.
         let env = if let Some(env_val) = server_map.get("env") {
             let env_obj = env_val.as_object().ok_or_else(|| {
                 ConfigError::InvalidMcpFile(format!(
@@ -324,7 +321,6 @@ pub(super) fn parse_mcp_json(
             BTreeMap::new()
         };
 
-        // Validate and collect HTTP headers according to transport and credential rules.
         let headers = if let Some(headers_val) = server_map.get("headers") {
             let headers_obj = headers_val.as_object().ok_or_else(|| {
                 ConfigError::InvalidMcpFile(format!(
@@ -377,7 +373,6 @@ pub(super) fn parse_mcp_json(
             BTreeMap::new()
         };
 
-        // Enforce timeout bounds.
         let startup_timeout_sec = if let Some(val) = server_map.get("startupTimeoutSec") {
             let timeout = val.as_u64().ok_or_else(|| {
                 ConfigError::InvalidMcpFile(format!(
@@ -410,7 +405,6 @@ pub(super) fn parse_mcp_json(
             60
         };
 
-        // Parse server-level approval policy, rejecting deprecated 'auto'.
         let approval = if let Some(app_val) = server_map.get("approval") {
             let app_str = app_val.as_str().ok_or_else(|| {
                 ConfigError::InvalidMcpFile(format!(
@@ -436,7 +430,6 @@ pub(super) fn parse_mcp_json(
             McpApproval::Prompt
         };
 
-        // Parse tool-level approval overrides.
         let tools = if let Some(tools_val) = server_map.get("tools") {
             let tools_obj = tools_val.as_object().ok_or_else(|| {
                 ConfigError::InvalidMcpFile(format!("MCP server '{id}': 'tools' must be an object"))
@@ -496,7 +489,6 @@ pub(super) fn parse_mcp_json(
             BTreeMap::new()
         };
 
-        // Tool filtering: enabledTools and disabledTools are mutually exclusive.
         let enabled_tools = if let Some(val) = server_map.get("enabledTools") {
             let arr = val.as_array().ok_or_else(|| {
                 ConfigError::InvalidMcpFile(format!(
@@ -588,7 +580,6 @@ pub(super) fn parse_mcp_json(
             (None, None) => {}
         }
 
-        // Parse session-critical requirement flag.
         let required = if let Some(req_val) = server_map.get("required") {
             req_val.as_bool().ok_or_else(|| {
                 ConfigError::InvalidMcpFile(format!(

@@ -7,7 +7,6 @@ use tarz_core::permission::{
     ApprovalDecision, ApprovalSubject, PermissionMode, WriteAction, escape_untrusted_text,
 };
 
-/// Determine whether the CLI approval channel should be connected.
 pub(crate) fn should_connect_approvals(
     stdin_is_terminal: bool,
     stderr_is_terminal: bool,
@@ -16,7 +15,6 @@ pub(crate) fn should_connect_approvals(
     stdin_is_terminal && stderr_is_terminal && !used_stdin_input
 }
 
-/// Determine whether the CLI approval channel should be connected using process stdio.
 pub(crate) fn should_connect_stdio(used_stdin_input: bool) -> bool {
     use std::io::IsTerminal;
     should_connect_approvals(
@@ -26,7 +24,6 @@ pub(crate) fn should_connect_stdio(used_stdin_input: bool) -> bool {
     )
 }
 
-/// Present an approval request to the user and read their decision.
 pub(crate) fn ask_approval<R: BufRead, W: Write>(
     tool_name: &str,
     mode: PermissionMode,
@@ -159,14 +156,14 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
     }
 }
 
-/// Handle to an active background approval responder thread.
+/// Handle to the background thread that reads approval answers.
 pub(crate) struct ApproverHandle {
     prompt_open: Arc<AtomicBool>,
     cancelled: Arc<AtomicBool>,
 }
 
 impl ApproverHandle {
-    /// Signal cancellation to the approval thread and emit a newline if a prompt is open.
+    /// Signal cancellation and leave a clean line if a prompt is open.
     pub(crate) fn on_cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         if self.prompt_open.swap(false, Ordering::SeqCst) {
@@ -174,13 +171,11 @@ impl ApproverHandle {
         }
     }
 
-    /// Mark the approver as finished when execution completes.
     pub(crate) fn finish(self) {
         self.cancelled.store(true, Ordering::SeqCst);
     }
 }
 
-/// Spawn the approval responder thread for the given session.
 pub(crate) fn spawn_approver(session: &tarz_core::application::ManagedSession) -> ApproverHandle {
     let mut rx = session.connect_approvals();
     let prompt_open = Arc::new(AtomicBool::new(false));

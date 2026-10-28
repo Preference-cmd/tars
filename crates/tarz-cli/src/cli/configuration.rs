@@ -6,7 +6,7 @@ use tarz_core::{
 
 pub(super) type Values<'a> = HashMap<&'a str, &'a OsString>;
 
-/// An invocation failure with the exit class its help text promises.
+/// An invocation failure carrying the exit class promised by `--help`.
 #[derive(Debug)]
 pub(super) struct CliError {
     kind: CliErrorKind,
@@ -190,13 +190,9 @@ pub(super) fn definition(
         .map_err(|error| definition_error(error, values))
 }
 
-/// Config-file loading and profile resolution are configuration errors; an
-/// invalid value supplied on this command line remains an argument error.
-///
-/// `Config::load` resolves every profile against the defaults and returns any
-/// profile error before this point, so a `ConfigError::Definition` reaching
-/// here can only have been introduced by an explicit override. The help
-/// promise is therefore per field, not per error type.
+/// Config-file failures are configuration errors; an invalid value from this
+/// command line stays an argument error. `Config::load` resolves every profile
+/// first, so a definition error here can only come from an explicit override.
 fn definition_error(error: tarz_core::config::ConfigError, values: &Values<'_>) -> CliError {
     use tarz_core::config::ConfigError;
     let explicit = match &error {

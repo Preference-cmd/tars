@@ -64,12 +64,11 @@ impl SandboxPolicy {
 
     /// Keep a path writable-root-relative read-only.
     ///
-    /// The path's parent must resolve inside one of the writable roots. The
-    /// leaf itself does not need to exist: a workspace root without `.git`
-    /// still denies writes if the command creates `.git` later. If the leaf
-    /// exists and resolves inside a writable root, that resolved path is
-    /// denied too; a symlink resolving outside is already outside the writable
-    /// roots and is denied by default.
+    /// The parent must resolve inside a writable root; the leaf need not
+    /// exist, so a missing `.git` is still denied when the command creates it.
+    /// An existing leaf that resolves inside a writable root is denied at the
+    /// resolved path too; a symlink resolving outside is already outside the
+    /// writable roots and is denied by default.
     pub fn with_read_only_subpath(
         mut self,
         path: impl AsRef<Path>,

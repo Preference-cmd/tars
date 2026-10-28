@@ -392,7 +392,6 @@ async fn repair_ui_shows_write_warning_for_unpaired_write_file() {
 
     inspect(&mut app).await;
 
-    // Press "r" to plan RemoveUnpaired, which populates write warnings for removed write declarations.
     plan(&mut app).await;
     let text = screen(&app);
     assert!(
@@ -519,14 +518,12 @@ async fn wm18_repair_plan_guard_window_drops_enter_then_applies_after_expiry() {
     inspect(&mut app).await;
     plan(&mut app).await;
 
-    // Window must be active immediately after plan arrives
+    // The guard window starts as soon as the plan arrives.
     assert!(app.is_repair_guarded());
     assert!(matches!(&app.panel, Some(Panel::Repair(p)) if p.plan.is_some()));
 
-    // Press Enter within the window: must NOT apply
     app.event(key(KeyCode::Enter));
 
-    // Assert: plan still present, no apply started, materials unchanged, draft unchanged
     assert!(
         matches!(&app.panel, Some(Panel::Repair(p)) if p.plan.is_some()),
         "plan must still be present"
@@ -547,11 +544,9 @@ async fn wm18_repair_plan_guard_window_drops_enter_then_applies_after_expiry() {
         "draft must remain unchanged"
     );
 
-    // Advance clock past 500 ms window
     advance_past_repair_window(&mut app);
     assert!(!app.is_repair_guarded());
 
-    // Enter now applies
     app.event(key(KeyCode::Enter));
     until(&mut app, |app| {
         app.entries[0].notice.starts_with("Repair applied;")
@@ -652,7 +647,6 @@ async fn wm18_repair_guard_window_ignores_actions_and_allows_esc_and_scroll() {
     };
     assert!(scrolled_up < scrolled_pgdn, "Up key must scroll up");
 
-    // Esc closes the panel within window
     app.event(key(KeyCode::Esc));
     assert!(
         app.panel.is_none(),
@@ -694,7 +688,6 @@ async fn wm18_repair_hint_dimmed_during_window_and_normal_after() {
         cell_during.modifier
     );
 
-    // Advance clock past 500 ms and check dirty flag
     advance_past_repair_window(&mut app);
     assert!(
         app.dirty,
@@ -702,7 +695,6 @@ async fn wm18_repair_hint_dimmed_during_window_and_normal_after() {
     );
     assert!(!app.is_repair_guarded());
 
-    // Redraw after window expired
     terminal.draw(|frame| render::draw(frame, &app)).unwrap();
     let buffer_after = terminal.backend().buffer();
     let cell_after = &buffer_after[(hint_x, hint_y)];
@@ -724,27 +716,23 @@ async fn wm18_repair_second_plan_starts_fresh_window() {
     inspect(&mut app).await;
     plan(&mut app).await;
 
-    // First window active
     assert!(app.is_repair_guarded());
 
-    // Advance clock past the first window
     advance_past_repair_window(&mut app);
     assert!(!app.is_repair_guarded());
 
-    // User presses r again to generate a new plan
     app.event(key(KeyCode::Char('r')));
     until(&mut app, |app| {
         matches!(&app.panel, Some(Panel::Repair(panel)) if !panel.busy && panel.plan.is_some())
     })
     .await;
 
-    // Second plan must start a fresh window!
+    // A second plan starts its own window.
     assert!(
         app.is_repair_guarded(),
         "second plan must start its own new guard window"
     );
 
-    // Within second window, Enter does NOT apply
     app.event(key(KeyCode::Enter));
     assert!(
         matches!(&app.panel, Some(Panel::Repair(p)) if p.plan.is_some()),
@@ -757,11 +745,9 @@ async fn wm18_repair_second_plan_starts_fresh_window() {
     );
     assert_eq!(session.read_materials().unwrap().version, before.version);
 
-    // Advance past second window
     advance_past_repair_window(&mut app);
     assert!(!app.is_repair_guarded());
 
-    // Enter now applies
     app.event(key(KeyCode::Enter));
     until(&mut app, |app| {
         app.entries[0].notice.starts_with("Repair applied;")

@@ -23,15 +23,13 @@ const MAX_TOOL_NAME_BYTES: usize = 64;
 pub(crate) const MAX_RESULT_BYTES: usize = 64 * 1024;
 /// Room for the omitted-byte count, which grows the notice after measuring.
 const NOTICE_DIGITS_MARGIN: usize = 24;
-/// Bound on an orderly MCP shutdown, including waiting for a stdio child to
-/// exit. Causa's `close` returns after at most two seconds; rmcp's task may
-/// still be shutting down: it drains in-flight responses for up to two
-/// seconds (overlapping that wait), closes stdin, then waits up to three
-/// seconds before killing the child. The whole sequence is bounded by five
-/// seconds from the close call, so this bound sits right at the edge: when it
-/// expires, `shutdown` returns without waiting for the child; while the
-/// runtime lives the task still kills it, and `kill_on_drop` covers the case
-/// where the runtime ends first.
+/// Bound on an orderly MCP shutdown, including waiting for a stdio child.
+/// Causa's `close` returns after at most two seconds; rmcp may still drain
+/// in-flight responses for two seconds that overlap that wait, close stdin,
+/// then wait three seconds before killing the child. The whole sequence is
+/// bounded by five seconds from the close call: when this bound expires, the
+/// rmcp task still kills the child while the runtime lives, and `kill_on_drop`
+/// covers a runtime that ends first.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct SourceState {
@@ -341,7 +339,6 @@ impl DynamicToolSource for McpServerSource {
 /// results, well inside [`MAX_RESULT_BYTES`] once wrapped.
 pub(crate) const MAX_ERROR_BYTES: usize = 16 * 1024;
 
-/// Bound the server-provided text inside an error.
 pub(crate) fn limit_error(error: ToolExecutionError) -> ToolExecutionError {
     match error {
         ToolExecutionError::Protocol(text) => ToolExecutionError::Protocol(cut_middle(text)),
@@ -369,9 +366,9 @@ fn cut_middle(text: String) -> String {
     )
 }
 
-/// Keep the whole serialized result within [`MAX_RESULT_BYTES`]. An oversized
-/// observation becomes one string holding its head, a notice naming how many
-/// bytes were omitted, and its tail, each end cut on a character boundary.
+/// Keep the whole serialized result within [`MAX_RESULT_BYTES`] as one string
+/// holding the head, a notice naming the omitted bytes, and the tail, each end
+/// cut on a character boundary.
 pub(crate) fn limit_result(payload: &mut ToolResultPayload) {
     if serialized_len(payload) <= MAX_RESULT_BYTES {
         return;

@@ -106,7 +106,6 @@ fn call_read(path: &str) -> Reply {
     )
 }
 
-// 1. 4 Modes Table: write_file and read_file in the same batch across all 4 modes
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn four_modes_table_write_and_read() {
     for mode in [
@@ -207,12 +206,10 @@ async fn four_modes_table_write_and_read() {
     }
 }
 
-// 2. Core approval flow: Allow, Deny with reason, batch ordering, and rejection reason sent to model
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wm05_core_allow_deny_and_batch_ordering() {
     let root = tempfile::tempdir().unwrap();
     let replies = vec![
-        // Turn 1: two writes to different files
         Reply::Calls(vec![
             ScriptedToolCall {
                 name: "write_file".into(),
@@ -224,7 +221,6 @@ async fn wm05_core_allow_deny_and_batch_ordering() {
             },
         ]),
         Reply::Answer,
-        // Turn 2: two writes to the same file in a single batch
         Reply::Calls(vec![
             ScriptedToolCall {
                 name: "write_file".into(),
@@ -250,9 +246,7 @@ async fn wm05_core_allow_deny_and_batch_ordering() {
 
     let mut rx = session.connect_approvals();
 
-    // Turn 1: file1 Allow, file2 Deny with reason
     let approval_task1 = tokio::spawn(async move {
-        // Request 1: file1
         let req1 = rx.recv().await.expect("req1");
         let ApprovalSubject::FileWrite { path, .. } = &req1.subject else {
             panic!("expected FileWrite")
@@ -260,7 +254,6 @@ async fn wm05_core_allow_deny_and_batch_ordering() {
         assert_eq!(path, "file1.txt");
         req1.reply.send(ApprovalDecision::Allow).unwrap();
 
-        // Request 2: file2
         let req2 = rx.recv().await.expect("req2");
         let ApprovalSubject::FileWrite { path, .. } = &req2.subject else {
             panic!("expected FileWrite")
@@ -287,7 +280,6 @@ async fn wm05_core_allow_deny_and_batch_ordering() {
     assert!(root.path().join("file1.txt").exists());
     assert!(!root.path().join("file2.txt").exists());
 
-    // Verify ToolProgress records decisions
     let d0 = obs1.tools.calls[0].permission_decision.as_ref().unwrap();
     assert_eq!(d0.mode, PermissionMode::Ask);
     assert_eq!(d0.kind, PermissionDecisionKind::AskedAndAllowed);
@@ -296,7 +288,6 @@ async fn wm05_core_allow_deny_and_batch_ordering() {
     assert_eq!(d1.mode, PermissionMode::Ask);
     assert_eq!(d1.kind, PermissionDecisionKind::AskedAndDenied);
 
-    // Verify rejection reason appears in the model follow-up request
     {
         let requests = fixture.requests.lock().unwrap();
         assert!(requests.len() >= 2);
@@ -307,7 +298,6 @@ async fn wm05_core_allow_deny_and_batch_ordering() {
         );
     }
 
-    // Turn 2: two writes to SAME file
     let approval_task2 = tokio::spawn(async move {
         let req = rx.recv().await.expect("req for same.txt");
         let ApprovalSubject::FileWrite { path, .. } = &req.subject else {
@@ -315,7 +305,6 @@ async fn wm05_core_allow_deny_and_batch_ordering() {
         };
         assert_eq!(path, "same.txt");
         req.reply.send(ApprovalDecision::Allow).unwrap();
-        // There must NOT be a second request for same.txt
         let next = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
         assert!(next.is_err(), "should not produce 2nd approval request");
         rx
@@ -335,7 +324,7 @@ async fn wm05_core_allow_deny_and_batch_ordering() {
     let d_same0 = obs2.tools.calls[0].permission_decision.as_ref().unwrap();
     assert_eq!(d_same0.kind, PermissionDecisionKind::AskedAndAllowed);
 
-    // Second call rejected in precheck: must NOT record a permission decision
+    // A precheck rejection records no permission decision.
     assert!(obs2.tools.calls[1].permission_decision.is_none());
 
     let context = session.read_materials().unwrap().context;
@@ -362,7 +351,6 @@ async fn wm05_core_allow_deny_and_batch_ordering() {
         .unwrap();
 }
 
-// 3. File modified between request and Allow -> Failed, external content preserved
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wm04_file_modified_between_approval_and_allow() {
     let root = tempfile::tempdir().unwrap();
@@ -385,7 +373,6 @@ async fn wm04_file_modified_between_approval_and_allow() {
         .await
         .unwrap();
 
-    // Turn 1: read file
     let work1 = submit(&session, "read target");
     finish(&session, &work1).await;
 
@@ -400,7 +387,6 @@ async fn wm04_file_modified_between_approval_and_allow() {
         assert_eq!(path, "target.txt");
         // External third-party modification occurs before Allow
         std::fs::write(root_path.join("target.txt"), "external third party edit\n").unwrap();
-        // Now send Allow
         req.reply.send(ApprovalDecision::Allow).unwrap();
     });
 
@@ -438,7 +424,6 @@ async fn wm04_file_modified_between_approval_and_allow() {
         .unwrap();
 }
 
-// 4. Approval wait and cancellation
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wm07_call_timeout_does_not_abort_approval_wait() {
     let root = tempfile::tempdir().unwrap();
@@ -447,7 +432,7 @@ async fn wm07_call_timeout_does_not_abort_approval_wait() {
     let fixture = Fixture::new("openai-chat", replies, None);
     let host = SessionHost::new(None);
     let mut def = base_definition(&fixture.endpoint, root.path());
-    def.tool_limits.call_timeout_secs = 1; // 1 second call timeout
+    def.tool_limits.call_timeout_secs = 1;
 
     let session = host
         .create(PreparedCreate::transient(def, Context::default()))
@@ -457,7 +442,7 @@ async fn wm07_call_timeout_does_not_abort_approval_wait() {
     let mut rx = session.connect_approvals();
     let approval_task = tokio::spawn(async move {
         let req = rx.recv().await.expect("approval request");
-        // Wait over 2 seconds (exceeding call_timeout_secs = 1)
+        // Exceed the one-second call timeout before answering.
         tokio::time::sleep(Duration::from_millis(2100)).await;
         req.reply.send(ApprovalDecision::Allow).unwrap();
     });
@@ -501,7 +486,6 @@ async fn wm07_cancel_during_approval_wait() {
     let approval_task = tokio::spawn(async move {
         let _req = rx.recv().await.expect("approval request");
         entered_clone.notify_one();
-        // Wait without answering until cancelled
         tokio::time::sleep(Duration::from_secs(5)).await;
     });
 
@@ -542,7 +526,7 @@ async fn wm07_work_deadline_truncates_approval_wait() {
     let fixture = Fixture::new("openai-chat", replies, None);
     let host = SessionHost::new(Some(store_root.path().into()));
     let mut def = base_definition(&fixture.endpoint, root.path());
-    def.work_timeout_secs = Some(1); // 1 second work timeout
+    def.work_timeout_secs = Some(1);
 
     let session = host
         .create(PreparedCreate::persistent(def, Context::default()))
@@ -552,7 +536,7 @@ async fn wm07_work_deadline_truncates_approval_wait() {
     let mut rx = session.connect_approvals();
     let approval_task = tokio::spawn(async move {
         let _req = rx.recv().await.expect("approval request");
-        // Sleep 2 seconds without answering, exceeding work_timeout_secs
+        // Exceed the one-second work timeout without answering.
         tokio::time::sleep(Duration::from_millis(2000)).await;
     });
 
@@ -581,7 +565,6 @@ async fn wm07_work_deadline_truncates_approval_wait() {
         .unwrap();
 }
 
-// 5. No confirmation route returns Rejected without blocking
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_confirmation_route_unconnected_returns_rejected() {
     let root = tempfile::tempdir().unwrap();
@@ -597,7 +580,6 @@ async fn no_confirmation_route_unconnected_returns_rejected() {
         .await
         .unwrap();
 
-    // Never connected approvals
     let work = submit(&session, "no receiver");
     let obs = finish(&session, &work).await;
 
@@ -627,7 +609,6 @@ async fn no_confirmation_route_dropped_receiver_returns_rejected() {
         .await
         .unwrap();
 
-    // Connected then dropped receiver
     let rx = session.connect_approvals();
     drop(rx);
 
@@ -663,7 +644,7 @@ async fn no_confirmation_route_dropped_reply_handle_returns_rejected() {
     let mut rx = session.connect_approvals();
     let drop_task = tokio::spawn(async move {
         let req = rx.recv().await.expect("req");
-        drop(req.reply); // Drop reply handle explicitly
+        drop(req.reply);
     });
 
     let work = submit(&session, "dropped reply");
@@ -681,12 +662,10 @@ async fn no_confirmation_route_dropped_reply_handle_returns_rejected() {
         .unwrap();
 }
 
-// 6. Runtime mode switch
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_mode_switch_wm17() {
     let root = tempfile::tempdir().unwrap();
     let replies = vec![
-        // Turn 1: batch with 2 writes
         Reply::Calls(vec![
             ScriptedToolCall {
                 name: "write_file".into(),
@@ -698,7 +677,6 @@ async fn runtime_mode_switch_wm17() {
             },
         ]),
         Reply::Answer,
-        // Turn 2: next batch with 1 write
         Reply::Calls(vec![ScriptedToolCall {
             name: "write_file".into(),
             arguments: json!({"path": "file3.txt", "content": "3"}),
@@ -725,14 +703,13 @@ async fn runtime_mode_switch_wm17() {
             panic!("expected FileWrite")
         };
         assert_eq!(path, "file1.txt");
-        // Switch to AcceptEdits mid-batch before replying
+        // Switch mid-batch, before replying.
         let (mode, rev) = session_clone
             .set_permission_mode(PermissionMode::AcceptEdits)
             .unwrap();
         assert_eq!(mode, PermissionMode::AcceptEdits);
         assert_eq!(rev, 1);
         req.reply.send(ApprovalDecision::Allow).unwrap();
-        // Second write should NOT trigger an approval request
         let next = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await;
         assert!(next.is_err(), "second write must not ask under AcceptEdits");
         rx
@@ -764,7 +741,6 @@ async fn runtime_mode_switch_wm17() {
     assert_eq!(d1.revision, 1);
     assert_eq!(d1.kind, PermissionDecisionKind::DirectExecution);
 
-    // Switch back to Ask
     let (current, rev) = session.set_permission_mode(PermissionMode::Ask).unwrap();
     assert_eq!(current, PermissionMode::Ask);
     assert_eq!(rev, 2);
@@ -799,7 +775,6 @@ async fn runtime_mode_switch_wm17() {
         .unwrap();
 }
 
-// 7. Processor chain order and hints
 struct VerifyingProcessor {
     seen_mode: Mutex<Option<PermissionMode>>,
     seen_revision: Mutex<Option<u64>>,
@@ -871,7 +846,6 @@ async fn processor_chain_order_and_hints_wm17() {
         .await
         .unwrap();
 
-    // Mode switches: initial Ask(0) -> ReadOnly(1) -> AcceptEdits(2)
     let (m1, r1) = session
         .set_permission_mode(PermissionMode::ReadOnly)
         .unwrap();
@@ -904,7 +878,7 @@ async fn processor_chain_order_and_hints_wm17() {
     assert_eq!(seen_mode, Some(PermissionMode::AcceptEdits));
     assert_eq!(seen_rev, Some(2));
 
-    // Assert that mode & revision read by test processor matches decisions on all calls
+    // The mode and revision read by the test processor must match every decision.
     for call in &obs.tools.calls {
         let decision = call
             .permission_decision
@@ -918,36 +892,30 @@ async fn processor_chain_order_and_hints_wm17() {
     let hints = verifier.seen_hints.lock().unwrap().clone();
     assert_eq!(hints.len(), 5);
 
-    // Assert complete tool hints for all five built-in tools
-    // 1. read_file
     assert_eq!(hints[0].0, "read_file");
     assert_eq!(hints[0].1.read_only, Some(true));
     assert_eq!(hints[0].1.destructive, None);
     assert_eq!(hints[0].1.idempotent, None);
     assert_eq!(hints[0].1.open_world, Some(false));
 
-    // 2. list_directory
     assert_eq!(hints[1].0, "list_directory");
     assert_eq!(hints[1].1.read_only, Some(true));
     assert_eq!(hints[1].1.destructive, None);
     assert_eq!(hints[1].1.idempotent, None);
     assert_eq!(hints[1].1.open_world, Some(false));
 
-    // 3. search_text
     assert_eq!(hints[2].0, "search_text");
     assert_eq!(hints[2].1.read_only, Some(true));
     assert_eq!(hints[2].1.destructive, None);
     assert_eq!(hints[2].1.idempotent, None);
     assert_eq!(hints[2].1.open_world, Some(false));
 
-    // 4. write_file
     assert_eq!(hints[3].0, "write_file");
     assert_eq!(hints[3].1.read_only, Some(false));
     assert_eq!(hints[3].1.destructive, Some(true));
     assert_eq!(hints[3].1.idempotent, Some(true));
     assert_eq!(hints[3].1.open_world, Some(false));
 
-    // 5. edit_file
     assert_eq!(hints[4].0, "edit_file");
     assert_eq!(hints[4].1.read_only, Some(false));
     assert_eq!(hints[4].1.destructive, Some(true));
@@ -959,7 +927,6 @@ async fn processor_chain_order_and_hints_wm17() {
         .unwrap();
 }
 
-// 8. Model prompts unaffected by mode switch
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prompts_and_materials_unaffected_by_mode_switch_wm17() {
     let root = tempfile::tempdir().unwrap();
@@ -980,7 +947,6 @@ async fn prompts_and_materials_unaffected_by_mode_switch_wm17() {
 
     let materials_before = session.read_materials().unwrap().context;
 
-    // Switch mode
     session
         .set_permission_mode(PermissionMode::AcceptEdits)
         .unwrap();
@@ -995,7 +961,6 @@ async fn prompts_and_materials_unaffected_by_mode_switch_wm17() {
     let work2 = submit(&session, "turn second question");
     finish(&session, &work2).await;
 
-    // Verify requests captured by Fixture contain no permission instructions
     {
         let requests = fixture.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
@@ -1021,7 +986,6 @@ async fn prompts_and_materials_unaffected_by_mode_switch_wm17() {
         .unwrap();
 }
 
-// 9. Turn isolation: Prepared write from turn 1 cannot be executed in turn 2
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_isolation_prepared_write_cannot_be_executed_in_subsequent_turn() {
     let root = tempfile::tempdir().unwrap();
@@ -1044,7 +1008,6 @@ async fn turn_isolation_prepared_write_cannot_be_executed_in_subsequent_turn() {
 
     let mut rx = session.connect_approvals();
 
-    // Turn 1: Deny write
     let deny_task = tokio::spawn(async move {
         let req = rx.recv().await.expect("req1");
         req.reply
@@ -1061,7 +1024,6 @@ async fn turn_isolation_prepared_write_cannot_be_executed_in_subsequent_turn() {
 
     assert_eq!(obs1.tools.calls[0].status, Some(ToolResultStatus::Rejected));
 
-    // Turn 2: Allow write
     let allow_task = tokio::spawn(async move {
         let req = rx.recv().await.expect("req2");
         req.reply.send(ApprovalDecision::Allow).unwrap();
@@ -1083,7 +1045,6 @@ async fn turn_isolation_prepared_write_cannot_be_executed_in_subsequent_turn() {
         .unwrap();
 }
 
-// 10. Unprepared write under Ask mode records Unprepared decision and returns Rejected
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unprepared_write_in_ask_mode_records_unprepared_decision() {
     use causa::kernel::{
@@ -1153,7 +1114,6 @@ async fn unprepared_write_in_ask_mode_records_unprepared_decision() {
     );
 }
 
-// 11. Session constructed without permissions behavior
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_without_permissions_behavior() {
     let conversation_id = crate::session::ConversationId::from("no-perm-test");
@@ -1172,14 +1132,11 @@ async fn session_without_permissions_behavior() {
         config,
     );
 
-    // permission_mode returns None
     assert_eq!(session.permission_mode(), None);
 
-    // set_permission_mode returns Err(ApplicationError::PermissionUnavailable)
     let res = session.set_permission_mode(PermissionMode::ReadOnly);
     assert!(matches!(res, Err(ApplicationError::PermissionUnavailable)));
 
-    // connect_approvals returns immediately closed receiver
     let mut rx = session.connect_approvals();
     assert!(rx.recv().await.is_none());
 }
@@ -1199,8 +1156,6 @@ fn tool_result_error(session: &ManagedSession, call_block_id: causa::kernel::Blo
         .unwrap()
         .to_string()
 }
-
-// Old V2 record tests
 
 #[tokio::test]
 async fn legacy_v2_record_fixture_reopen_preserves_bytes() {
@@ -1243,7 +1198,6 @@ async fn field_writing_rules_and_omissions() {
     let dir = tempfile::tempdir().unwrap();
     let storage = dir.path().join("store");
 
-    // Part A: New session without new features
     let mut def = base_definition("https://example.test", dir.path());
     def.permission_mode = None;
     def.write_limits = None;
@@ -1265,7 +1219,6 @@ async fn field_writing_rules_and_omissions() {
     assert!(json_a["definition"].get("permission_mode").is_none());
     assert!(json_a["definition"].get("write_limits").is_none());
 
-    // Part B: Current mode equals initial mode
     let mut def_b = base_definition("https://example.test", dir.path());
     def_b.permission_mode = Some(PermissionMode::AcceptEdits);
 
@@ -1282,7 +1235,6 @@ async fn field_writing_rules_and_omissions() {
     assert_eq!(json_b["definition"]["permission_mode"], "accept-edits");
     assert!(json_b.get("permission_mode").is_none());
 
-    // Switch to ReadOnly: current != initial
     session_b
         .set_permission_mode(PermissionMode::ReadOnly)
         .unwrap();
@@ -1292,7 +1244,6 @@ async fn field_writing_rules_and_omissions() {
         serde_json::from_slice(&std::fs::read(&record_b_path).unwrap()).unwrap();
     assert_eq!(json_b2["permission_mode"], "read-only");
 
-    // Switch back to AcceptEdits: current == initial
     session_b
         .set_permission_mode(PermissionMode::AcceptEdits)
         .unwrap();
@@ -1356,7 +1307,6 @@ async fn wm17_reopen_permission_mode_recovery() {
     let storage = dir.path().join("store");
     let host = SessionHost::new(Some(storage.clone()));
 
-    // Case 1: Switched to accept-edits -> reopens as accept-edits
     let def1 = base_definition("https://example.test", dir.path());
     let p1 = PreparedCreate::persistent(def1, Context::default());
     let id1 = p1.conversation_id().clone();
@@ -1369,7 +1319,6 @@ async fn wm17_reopen_permission_mode_recovery() {
     assert_eq!(r1.permission_mode(), Some((PermissionMode::AcceptEdits, 0)));
     host.close(&r1.target(), ClosePolicy::Save).await.unwrap();
 
-    // Case 2: Initial is ask, switched to full-access -> reopens as ask
     let def2 = base_definition("https://example.test", dir.path());
     let p2 = PreparedCreate::persistent(def2, Context::default());
     let id2 = p2.conversation_id().clone();
@@ -1382,7 +1331,6 @@ async fn wm17_reopen_permission_mode_recovery() {
     assert_eq!(r2.permission_mode(), Some((PermissionMode::Ask, 0)));
     host.close(&r2.target(), ClosePolicy::Save).await.unwrap();
 
-    // Case 3: Initial is full-access -> reopens as full-access
     let mut def3 = base_definition("https://example.test", dir.path());
     def3.permission_mode = Some(PermissionMode::FullAccess);
     let p3 = PreparedCreate::persistent(def3, Context::default());
@@ -1395,8 +1343,6 @@ async fn wm17_reopen_permission_mode_recovery() {
     assert_eq!(r3.permission_mode(), Some((PermissionMode::FullAccess, 0)));
     host.close(&r3.target(), ClosePolicy::Save).await.unwrap();
 }
-
-// Saving scenarios
 
 #[tokio::test]
 async fn saving_scenario_1_idle_switch_triggers_save_context_unchanged_revision_incremented() {
@@ -1416,7 +1362,6 @@ async fn saving_scenario_1_idle_switch_triggers_save_context_unchanged_revision_
 
     let before_blocks = s.read_materials().unwrap().context.blocks().to_vec();
 
-    // Idle switch: triggers save, revision + 1
     s.set_permission_mode(PermissionMode::AcceptEdits).unwrap();
     let after_status = s.wait_saved().await.unwrap();
     let after_rev = match after_status {
@@ -1425,7 +1370,6 @@ async fn saving_scenario_1_idle_switch_triggers_save_context_unchanged_revision_
     };
     assert_eq!(after_rev, initial_rev + 1);
 
-    // Context unchanged
     let after_blocks = s.read_materials().unwrap().context.blocks().to_vec();
     assert_eq!(before_blocks, after_blocks);
 
@@ -1453,9 +1397,7 @@ async fn saving_scenario_2_switch_during_active_work_saved_after_work() {
 
     let work = submit(&s, "active work");
 
-    // Receive approval request while work is active
     let req = rx.recv().await.expect("request received");
-    // Switch multiple times during active work
     s_clone
         .set_permission_mode(PermissionMode::ReadOnly)
         .unwrap();
@@ -1463,13 +1405,11 @@ async fn saving_scenario_2_switch_during_active_work_saved_after_work() {
         .set_permission_mode(PermissionMode::AcceptEdits)
         .unwrap();
 
-    // Now reply to allow
     req.reply.send(ApprovalDecision::Allow).unwrap();
 
     let obs = finish(&s, &work).await;
     assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
 
-    // The single save after work contains the latest mode
     let record_path = storage
         .join("sessions")
         .join(format!("{}.json", id.as_str()));
@@ -1493,7 +1433,6 @@ async fn saving_scenario_3_switch_with_pending_failed_commit_retries_original_th
     let s = host.create(p).await.unwrap();
     s.wait_saved().await.unwrap();
 
-    // Inject save failure on the writer
     s.set_writer_fault_hook(Some(Arc::new(|stage| {
         if stage == CommitStage::Write {
             FaultAction::Fail(std::io::Error::other("injected storage error"))
@@ -1502,36 +1441,30 @@ async fn saving_scenario_3_switch_with_pending_failed_commit_retries_original_th
         }
     })));
 
-    // Trigger save via edit
     let _ = s.edit(
         s.read_materials().unwrap().version,
         vec![crate::application::text_input("mutated")],
     );
 
-    // Wait until save is blocked
     crate::application::tests::support::until(|| {
         matches!(s.status().save, SaveStatus::SaveBlocked { .. })
     })
     .await;
 
-    // Pending commit is fixed with original Ask mode (permission_mode is None)
+    // The pending commit keeps the original Ask mode, stored as None.
     let pending_commit_id = s.pending_commit_id().unwrap();
     assert_eq!(s.pending_commit_permission_mode(), Some(None));
 
-    // Switch mode while save is blocked
     s.set_permission_mode(PermissionMode::AcceptEdits).unwrap();
 
-    // Pending commit is UNTOUCHED
     assert_eq!(s.pending_commit_id().unwrap(), pending_commit_id);
     assert_eq!(s.pending_commit_permission_mode(), Some(None));
 
-    // Clear fault hook and retry
     s.set_writer_fault_hook(None);
 
     let retry_status = s.retry_save().await.unwrap();
     assert!(matches!(retry_status, SaveStatus::Saved { .. }));
 
-    // Verify disk record now contains AcceptEdits
     let record_path = storage
         .join("sessions")
         .join(format!("{}.json", id.as_str()));
@@ -1554,12 +1487,10 @@ async fn saving_scenario_4_close_save_guarantees_latest_mode_saved() {
     let s = host.create(p).await.unwrap();
     s.wait_saved().await.unwrap();
 
-    // Switch mode and close with Save immediately
     s.set_permission_mode(PermissionMode::AcceptEdits).unwrap();
     let outcome = host.close(&s.target(), ClosePolicy::Save).await.unwrap();
     assert!(matches!(outcome.save, SaveStatus::Saved { .. }));
 
-    // Reopen confirms latest mode is saved
     let reopened = host.open(id).await.unwrap();
     assert_eq!(
         reopened.permission_mode(),
@@ -1584,7 +1515,6 @@ async fn saving_scenario_5_transient_session_switch_does_not_save() {
     let status = s.wait_saved().await.unwrap();
     assert!(matches!(status, SaveStatus::NotTracked));
 
-    // No sessions dir or file created
     let sessions_dir = storage.join("sessions");
     assert!(!sessions_dir.exists() || std::fs::read_dir(sessions_dir).unwrap().next().is_none());
 
@@ -1603,16 +1533,12 @@ async fn wm03_reopen_requires_read_before_edit() {
     std::fs::write(&file_path, "alpha beta\n").unwrap();
 
     let replies = vec![
-        // Round 1: read_file
         call_read("test.txt"),
         Reply::Answer,
-        // Round 2 (in reopened session): edit_file without reading
         call_edit("test.txt", "alpha", "gamma"),
         Reply::Answer,
-        // Round 3 (in reopened session): re-read file
         call_read("test.txt"),
         Reply::Answer,
-        // Round 4 (in reopened session): edit_file after re-reading
         call_edit("test.txt", "alpha", "gamma"),
         Reply::Answer,
     ];
@@ -1626,7 +1552,6 @@ async fn wm03_reopen_requires_read_before_edit() {
     let id = prepared.conversation_id().clone();
     let session = host.create(prepared).await.unwrap();
 
-    // Round 1: read_file succeeds
     let work1 = submit(&session, "round 1 read");
     let obs1 = finish(&session, &work1).await;
     assert_eq!(
@@ -1634,15 +1559,12 @@ async fn wm03_reopen_requires_read_before_edit() {
         Some(ToolResultStatus::Succeeded)
     );
 
-    // Close session
     host.close(&session.target(), ClosePolicy::Save)
         .await
         .unwrap();
 
-    // Reopen session
     let reopened = host.open(id.clone()).await.unwrap();
 
-    // Round 2: edit_file without prior read in reopened session fails precheck
     let work2 = submit(&reopened, "round 2 edit");
     let obs2 = finish(&reopened, &work2).await;
     assert_eq!(obs2.tools.calls[0].status, Some(ToolResultStatus::Rejected));
@@ -1650,7 +1572,6 @@ async fn wm03_reopen_requires_read_before_edit() {
     assert!(err_msg.contains("must be read with read_file before editing"));
     assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "alpha beta\n");
 
-    // Round 3: read_file to re-observe file
     let work3 = submit(&reopened, "round 3 re-read");
     let obs3 = finish(&reopened, &work3).await;
     assert_eq!(
@@ -1658,7 +1579,6 @@ async fn wm03_reopen_requires_read_before_edit() {
         Some(ToolResultStatus::Succeeded)
     );
 
-    // Round 4: edit_file now succeeds after re-reading
     let work4 = submit(&reopened, "round 4 edit after read");
     let obs4 = finish(&reopened, &work4).await;
     assert_eq!(
@@ -1693,28 +1613,20 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
     assert!(status.success());
 
     let replies = vec![
-        // Round 1: read_file target.txt to observe it for edit_file tests
         call_read("target.txt"),
         Reply::Answer,
-        // Negative test 1: write_file absolute path
         call_write("/tmp/abs_path.txt", "evil"),
         Reply::Answer,
-        // Negative test 2: write_file parent .. path
         call_write("../outside.txt", "evil"),
         Reply::Answer,
-        // Negative test 3: write_file target is symlink
         call_write("link.txt", "evil"),
         Reply::Answer,
-        // Negative test 4: write_file target is FIFO
         call_write("fifo.txt", "evil"),
         Reply::Answer,
-        // Negative test 5: edit_file not found
         call_edit("target.txt", "nonexistent", "new"),
         Reply::Answer,
-        // Negative test 6: edit_file matches multiple places
         call_edit("target.txt", "alpha", "new"),
         Reply::Answer,
-        // Negative test 7: edit_file overlapping segments
         Reply::Call(
             "edit_file".into(),
             json!({
@@ -1726,7 +1638,6 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
             }),
         ),
         Reply::Answer,
-        // Negative test 8: edit_file empty old_text
         Reply::Call(
             "edit_file".into(),
             json!({
@@ -1735,10 +1646,8 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
             }),
         ),
         Reply::Answer,
-        // Directory creation 1: write_file a/b/c.txt, denied
         call_write("a/b/c.txt", "nested content\n"),
         Reply::Answer,
-        // Directory creation 2: write_file a/b/c.txt, allowed
         call_write("a/b/c.txt", "nested content\n"),
         Reply::Answer,
     ];
@@ -1754,36 +1663,30 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
 
     let mut rx = session.connect_approvals();
 
-    // Round 1: observe target.txt
     let w0 = submit(&session, "observe");
     let o0 = finish(&session, &w0).await;
     assert_eq!(o0.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
 
-    // Test 1: absolute path
     let w1 = submit(&session, "abs write");
     let o1 = finish(&session, &w1).await;
     assert_eq!(o1.tools.calls[0].status, Some(ToolResultStatus::Rejected));
     assert!(rx.try_recv().is_err(), "no approval request for abs path");
 
-    // Test 2: parent ..
     let w2 = submit(&session, "parent write");
     let o2 = finish(&session, &w2).await;
     assert_eq!(o2.tools.calls[0].status, Some(ToolResultStatus::Rejected));
     assert!(rx.try_recv().is_err(), "no approval request for parent ..");
 
-    // Test 3: symlink
     let w3 = submit(&session, "symlink write");
     let o3 = finish(&session, &w3).await;
     assert_eq!(o3.tools.calls[0].status, Some(ToolResultStatus::Rejected));
     assert!(rx.try_recv().is_err(), "no approval request for symlink");
 
-    // Test 4: fifo
     let w4 = submit(&session, "fifo write");
     let o4 = finish(&session, &w4).await;
     assert_eq!(o4.tools.calls[0].status, Some(ToolResultStatus::Rejected));
     assert!(rx.try_recv().is_err(), "no approval request for fifo");
 
-    // Test 5: edit not found
     let w5 = submit(&session, "edit not found");
     let o5 = finish(&session, &w5).await;
     assert_eq!(o5.tools.calls[0].status, Some(ToolResultStatus::Rejected));
@@ -1794,7 +1697,6 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
         "no approval request for edit not found"
     );
 
-    // Test 6: edit multiple matches
     let w6 = submit(&session, "edit multi");
     let o6 = finish(&session, &w6).await;
     assert_eq!(o6.tools.calls[0].status, Some(ToolResultStatus::Rejected));
@@ -1805,7 +1707,6 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
         "no approval request for multi match"
     );
 
-    // Test 7: edit overlapping
     let w7 = submit(&session, "edit overlap");
     let o7 = finish(&session, &w7).await;
     assert_eq!(o7.tools.calls[0].status, Some(ToolResultStatus::Rejected));
@@ -1813,7 +1714,6 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
     assert!(err7.contains("edits[1]"), "must indicate segment 1: {err7}");
     assert!(rx.try_recv().is_err(), "no approval request for overlap");
 
-    // Test 8: edit empty old_text
     let w8 = submit(&session, "edit empty");
     let o8 = finish(&session, &w8).await;
     assert_eq!(o8.tools.calls[0].status, Some(ToolResultStatus::Rejected));
@@ -1824,10 +1724,8 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
         "no approval request for empty old_text"
     );
 
-    // Verify target file bytes remain completely unchanged
     assert_eq!(std::fs::read(&target_file).unwrap(), original_bytes);
 
-    // Directory creation Part A: Deny
     assert!(!ws_dir.join("a").exists());
     let w9 = submit(&session, "create a/b/c.txt deny");
     let req9 = rx
@@ -1846,7 +1744,6 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
         "directory a must not be created when denied"
     );
 
-    // Directory creation Part B: Allow
     let w10 = submit(&session, "create a/b/c.txt allow");
     let req10 = rx
         .recv()
@@ -1869,7 +1766,6 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
 fn wm17_decide_20_cells_exhaustive() {
     use crate::permission::{PermissionMode, PermissionVerdict, ToolPermissionClass, decide};
 
-    // ReadOnly
     assert_eq!(
         decide(PermissionMode::ReadOnly, ToolPermissionClass::KnownReadOnly),
         PermissionVerdict::Execute
@@ -1894,7 +1790,6 @@ fn wm17_decide_20_cells_exhaustive() {
         PermissionVerdict::Reject
     );
 
-    // Ask
     assert_eq!(
         decide(PermissionMode::Ask, ToolPermissionClass::KnownReadOnly),
         PermissionVerdict::Execute
@@ -1916,7 +1811,6 @@ fn wm17_decide_20_cells_exhaustive() {
         PermissionVerdict::Execute
     );
 
-    // AcceptEdits
     assert_eq!(
         decide(
             PermissionMode::AcceptEdits,
@@ -1947,7 +1841,6 @@ fn wm17_decide_20_cells_exhaustive() {
         PermissionVerdict::Execute
     );
 
-    // FullAccess
     assert_eq!(
         decide(
             PermissionMode::FullAccess,
@@ -2440,10 +2333,9 @@ async fn command_timeout_and_cancel_are_reported_and_stop_work() {
         .wait(&cancel_work, Duration::from_secs(5))
         .await
         .unwrap();
-    // Causa's batch stops when the turn is cancelled and settles every
-    // started call as UnknownOutcome; the command's Drop guard still kills
-    // the process tree. This is the integration boundary, not a Cancelled
-    // result produced by the tool.
+    // Causa settles every started call as UnknownOutcome when the turn is
+    // cancelled; the command's Drop guard still kills the process tree. This
+    // is the integration boundary, not a Cancelled result from the tool.
     assert_eq!(
         cancel_obs.tools.calls[0].status,
         Some(ToolResultStatus::UnknownOutcome)
@@ -2485,8 +2377,8 @@ async fn queued_command_rejection_is_not_warned_by_repair() {
     let fixture = Fixture::new("openai-chat", replies, None);
     let host = SessionHost::new(None);
     let mut definition = command_definition(&fixture.endpoint, root.path());
-    // The running command's own timeout is bounded below the work deadline.
-    // Keep that bound well above the queued command's one second so the first
+    // The running command's own timeout is bounded below the work deadline;
+    // keep that bound well above the queued command's one second so the first
     // command is still running when the second rejects and work is cancelled.
     definition.work_timeout_secs = Some(30);
     let session = host

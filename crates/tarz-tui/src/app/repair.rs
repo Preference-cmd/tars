@@ -10,7 +10,6 @@ use tarz_core::{
     session::WorkRef,
 };
 
-/// One bounded hint line for a possible pre-interruption side effect.
 fn warning_hint(warning: &RepairWriteWarning) -> String {
     format!("  {}", warning.advice())
 }
@@ -501,7 +500,6 @@ impl App {
     }
 }
 
-/// Scrolls the preview lines of the repair panel; other keys do nothing.
 fn scroll_repair(panel: &mut RepairPanel, code: KeyCode, view_width: u16) {
     let max = crate::transcript::detail_rows(&panel.lines, view_width)
         .count()

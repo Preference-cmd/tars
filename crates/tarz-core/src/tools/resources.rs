@@ -11,7 +11,7 @@ pub struct ToolResources {
 }
 
 impl ToolResources {
-    /// Construct the host's actual-operation limit. Zero admits no operations.
+    /// The host's actual-operation limit; zero admits no operations.
     pub fn new(limit: usize) -> Arc<Self> {
         Arc::new(Self {
             slots: Arc::new(Semaphore::new(limit)),

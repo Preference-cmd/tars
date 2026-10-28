@@ -189,13 +189,8 @@ mod tests {
 
     #[test]
     fn format_mcp_arguments_multibyte_utf8_boundary_truncation() {
-        // Construct JSON where byte 1024 falls inside a 3-byte UTF-8 character.
-        // Prefix is `{"msg":"` which is 8 bytes.
-        // We add ASCII 'a' bytes so the multibyte character starts right before byte 1024.
-        // Prefix length 8 + 1015 = 1023 bytes.
-        // Then add '中' (3 bytes: [0xE4, 0xB8, 0xAD]).
-        // Byte 1023 is first byte of '中', byte 1024 is second byte of '中'.
-        // Truncation at 1024 must back up to byte 1023 and append '…'.
+        // The JSON prefix is 8 bytes, so 1015 'a's put the first byte of 中
+        // at 1023 and its next byte at 1024, inside the character.
         let padding = "a".repeat(1015);
         let val = json!({ "msg": format!("{padding}中extra") });
         let full = serde_json::to_string(&val).unwrap();

@@ -363,14 +363,12 @@ impl App {
     }
 }
 
-/// Drops every pending request of the entry and its unfinished deny reason.
 fn clear_approvals(entry: &mut super::Entry) {
     entry.approval_queue.clear();
     entry.approval_reason = None;
     entry.approval_scroll = 0;
 }
 
-/// Scrolls the diff or arguments of the front request; other keys do nothing.
 fn scroll_approval(entry: &mut super::Entry, code: KeyCode) {
     let max = approval_max_scroll(entry);
     entry.approval_scroll = match code {

@@ -358,7 +358,6 @@ fn config_explicit_overrides_permission_mode_and_write_limits() {
     std::fs::write(&path, text).unwrap();
     let config = Config::load(ConfigSource::File(path)).unwrap();
 
-    // Explicit override replaces preset
     let overridden = config
         .definition(
             None,
@@ -407,7 +406,6 @@ fn config_write_limits_can_only_be_lowered_not_raised() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
 
-    // Exceeds max_write_bytes
     let text_high = format!(
         "{CONFIG}[profiles.local.write_limits]
 max_write_bytes = 99999999
@@ -421,7 +419,6 @@ max_write_bytes = 99999999
         super::ConfigError::Definition(DefinitionError::InvalidToolLimits)
     ));
 
-    // Zero is rejected
     let text_zero = format!(
         "{CONFIG}[profiles.local.write_limits]
 max_write_bytes = 0
@@ -467,14 +464,13 @@ async fn modifying_config_file_does_not_affect_reopened_session() {
         .await
         .unwrap();
 
-    // Now rewrite config with a different permission mode
     let text2 = format!(
         "{CONFIG}permission_mode = \"read-only\"
 "
     );
     std::fs::write(&cfg_path, &text2).unwrap();
 
-    // Reopen session: it still uses its saved definition, unaffected by config change
+    // Reopening uses the saved definition, not the changed configuration.
     let reopened = host.open(id).await.unwrap();
     assert_eq!(
         reopened.definition().permission_mode,

@@ -78,7 +78,6 @@ impl Config {
             None => None,
         };
 
-        // Load TOML configuration file when a configuration path is available.
         let (mut config, toml_base_dir) = if let Some(ref path) = toml_path {
             match std::fs::File::open(path) {
                 Ok(file) => {
@@ -111,9 +110,8 @@ impl Config {
             (Self::default(), None)
         };
 
-        // When TARZ_MCP_CONFIG is unset, mcp.json is located next to the TOML
-        // configuration file; when no TOML path exists (e.g. absent home directory),
-        // no default MCP configuration is searched in the working directory.
+        // Without TARZ_MCP_CONFIG, mcp.json sits beside the TOML file. A missing
+        // TOML path means no MCP file at all: never search the working directory.
         let (mcp_path, mcp_required) = if let Some(path) = std::env::var_os("TARZ_MCP_CONFIG") {
             let path = PathBuf::from(path);
             let path = if path.is_absolute() {
@@ -163,7 +161,6 @@ impl Config {
             }
         }
 
-        // Resolve profile MCP selections against the loaded MCP server catalog.
         for (name, profile) in &config.profiles {
             if name.trim().is_empty() {
                 return Err(ConfigError::EmptyProfile);

@@ -158,7 +158,6 @@ async fn write_file_validation_failure_creates_neither_target_nor_intermediate_d
         },
     );
 
-    // Content exceeds limit
     let result = invoke(
         &shared,
         WorkspaceTool::WriteFile,
@@ -168,7 +167,6 @@ async fn write_file_validation_failure_creates_neither_target_nor_intermediate_d
     assert_eq!(result.status, ToolResultStatus::Rejected);
     assert!(!dir.path().join("newdir").exists());
 
-    // Illegal path with parent component
     let result = invoke(
         &shared,
         WorkspaceTool::WriteFile,
@@ -189,7 +187,6 @@ async fn write_file_counterexamples_are_all_rejected() {
     std::fs::create_dir(dir.path().join("real_dir")).unwrap();
     symlink("real_dir", dir.path().join("symlink_dir")).unwrap();
 
-    // Absolute path
     let res = invoke(
         &shared,
         WorkspaceTool::WriteFile,
@@ -198,7 +195,6 @@ async fn write_file_counterexamples_are_all_rejected() {
     .await;
     assert_eq!(res.status, ToolResultStatus::Rejected);
 
-    // Parent path
     let res = invoke(
         &shared,
         WorkspaceTool::WriteFile,
@@ -207,7 +203,6 @@ async fn write_file_counterexamples_are_all_rejected() {
     .await;
     assert_eq!(res.status, ToolResultStatus::Rejected);
 
-    // Target is a symlink
     let res = invoke(
         &shared,
         WorkspaceTool::WriteFile,
@@ -220,7 +215,6 @@ async fn write_file_counterexamples_are_all_rejected() {
         "existing"
     );
 
-    // Intermediate directory is a symlink
     let res = invoke(
         &shared,
         WorkspaceTool::WriteFile,
@@ -229,7 +223,6 @@ async fn write_file_counterexamples_are_all_rejected() {
     .await;
     assert_eq!(res.status, ToolResultStatus::Rejected);
 
-    // Target is a FIFO
     assert!(
         std::process::Command::new("mkfifo")
             .arg(dir.path().join("fifo_file"))
@@ -280,7 +273,6 @@ async fn write_file_overwriting_existing_file_preserves_permission_bits() {
     std::fs::write(&file_path, "echo 'old'\n").unwrap();
     std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    // Read first (read-before-write)
     let read_res = invoke(
         &shared,
         WorkspaceTool::ReadFile,
@@ -289,7 +281,6 @@ async fn write_file_overwriting_existing_file_preserves_permission_bits() {
     .await;
     assert_eq!(read_res.status, ToolResultStatus::Succeeded);
 
-    // Overwrite
     let write_res = invoke(
         &shared,
         WorkspaceTool::WriteFile,
@@ -311,7 +302,6 @@ async fn edit_file_multiple_segments_apply_simultaneously() {
     let original = "fn alpha() -> i32 { 1 }\nfn beta() -> i32 { 2 }\nfn gamma() -> i32 { 3 }\n";
     std::fs::write(&file_path, original).unwrap();
 
-    // Must read first
     invoke(&shared, WorkspaceTool::ReadFile, json!({"path": "code.rs"})).await;
 
     let res = invoke(
@@ -354,7 +344,6 @@ async fn edit_file_error_cases_are_rejected_with_edits_index() {
     )
     .await;
 
-    // 1. Not found
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -371,7 +360,6 @@ async fn edit_file_error_cases_are_rejected_with_edits_index() {
     assert!(err.contains("edits[0]"));
     assert!(err.contains("not found"));
 
-    // 2. Matches multiple
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -388,7 +376,6 @@ async fn edit_file_error_cases_are_rejected_with_edits_index() {
     assert!(err.contains("edits[0]"));
     assert!(err.contains("multiple"));
 
-    // 3. Overlap
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -406,7 +393,6 @@ async fn edit_file_error_cases_are_rejected_with_edits_index() {
     assert!(err.contains("edits[0]") && err.contains("edits[1]"));
     assert!(err.contains("overlap"));
 
-    // 4. Empty old_text
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -423,7 +409,6 @@ async fn edit_file_error_cases_are_rejected_with_edits_index() {
     assert!(err.contains("edits[0]"));
     assert!(err.contains("must not be empty"));
 
-    // 5. Identical old_text and new_text
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -440,7 +425,6 @@ async fn edit_file_error_cases_are_rejected_with_edits_index() {
     assert!(err.contains("edits[0]"));
     assert!(err.contains("identical"));
 
-    // Verify file content was never modified
     let unmod = std::fs::read_to_string(&file_path).unwrap();
     assert_eq!(unmod, original);
     assert!(!has_temporary_files(dir.path()));
@@ -457,7 +441,6 @@ async fn edit_file_limits_segments_and_sizes() {
         },
     );
 
-    // File exceeds max_edit_file_bytes
     let big_path = dir.path().join("big.txt");
     std::fs::write(&big_path, "a".repeat(100)).unwrap();
     invoke(&shared, WorkspaceTool::ReadFile, json!({"path": "big.txt"})).await;
@@ -473,7 +456,6 @@ async fn edit_file_limits_segments_and_sizes() {
     .await;
     assert_eq!(res.status, ToolResultStatus::Rejected);
 
-    // Small file for segment and write size tests
     let small_path = dir.path().join("small.txt");
     std::fs::write(&small_path, "1\n2\n3\n4\n").unwrap();
     invoke(
@@ -483,7 +465,6 @@ async fn edit_file_limits_segments_and_sizes() {
     )
     .await;
 
-    // Too many segments (3 > max 2)
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -499,7 +480,6 @@ async fn edit_file_limits_segments_and_sizes() {
     .await;
     assert_eq!(res.status, ToolResultStatus::Rejected);
 
-    // Result exceeds max_write_bytes (new content > 40 bytes)
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -529,7 +509,7 @@ async fn edit_file_crlf_file_remains_crlf_after_editing() {
     )
     .await;
 
-    // Pass replacement with lone \n; it should be converted to \r\n
+    // A lone \n in a replacement is converted to \r\n for a CRLF file.
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -558,7 +538,6 @@ async fn in_instance_observation_and_stale_detection() {
     let file_path = dir.path().join("observed.txt");
     std::fs::write(&file_path, "version 1\n").unwrap();
 
-    // 1. Edit without reading -> Rejected
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -570,7 +549,6 @@ async fn in_instance_observation_and_stale_detection() {
     .await;
     assert_eq!(res.status, ToolResultStatus::Rejected);
 
-    // 2. Overwrite without reading -> Rejected
     let res = invoke(
         &shared,
         WorkspaceTool::WriteFile,
@@ -579,7 +557,6 @@ async fn in_instance_observation_and_stale_detection() {
     .await;
     assert_eq!(res.status, ToolResultStatus::Rejected);
 
-    // 3. Read file -> now observed
     let read_res = invoke(
         &shared,
         WorkspaceTool::ReadFile,
@@ -588,7 +565,6 @@ async fn in_instance_observation_and_stale_detection() {
     .await;
     assert_eq!(read_res.status, ToolResultStatus::Succeeded);
 
-    // 4. Modify file externally -> stale Rejected
     std::fs::write(&file_path, "version 1 external modification\n").unwrap();
     let res = invoke(
         &shared,
@@ -607,7 +583,6 @@ async fn in_instance_observation_and_stale_detection() {
             .contains("changed")
     );
 
-    // 5. Read again to observe the new version
     invoke(
         &shared,
         WorkspaceTool::ReadFile,
@@ -615,7 +590,6 @@ async fn in_instance_observation_and_stale_detection() {
     )
     .await;
 
-    // 6. Edit successfully
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -627,7 +601,6 @@ async fn in_instance_observation_and_stale_detection() {
     .await;
     assert_eq!(res.status, ToolResultStatus::Succeeded);
 
-    // 7. Edit again without re-reading -> succeeds because table updated
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -639,7 +612,6 @@ async fn in_instance_observation_and_stale_detection() {
     .await;
     assert_eq!(res.status, ToolResultStatus::Succeeded);
 
-    // 8. Partial read (max_lines) also observes the file
     let partial_path = dir.path().join("multiline.txt");
     std::fs::write(&partial_path, "line 1\nline 2\nline 3\nline 4\n").unwrap();
     let partial_read = invoke(
@@ -650,7 +622,7 @@ async fn in_instance_observation_and_stale_detection() {
     .await;
     assert_eq!(partial_read.status, ToolResultStatus::Succeeded);
 
-    // Now edit multiline.txt without full read -> succeeds!
+    // A partial read observes the whole file, so an unread line can be edited.
     let res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -662,7 +634,6 @@ async fn in_instance_observation_and_stale_detection() {
     .await;
     assert_eq!(res.status, ToolResultStatus::Succeeded);
 
-    // 9. New WorkspaceTools instance requires reading again
     let new_workspace = Workspace::open(&dir.path().canonicalize().unwrap()).unwrap();
     let new_shared = WorkspaceTools::new(
         new_workspace,
@@ -758,7 +729,6 @@ async fn cancellation_before_rename_leaves_file_intact_and_removes_tempfile() {
     let file_path = dir.path().join("cancel_target.txt");
     std::fs::write(&file_path, "original content\n").unwrap();
 
-    // Observe file
     invoke(
         &shared,
         WorkspaceTool::ReadFile,
@@ -783,24 +753,20 @@ async fn cancellation_before_rename_leaves_file_intact_and_removes_tempfile() {
         .await
     });
 
-    // Wait until worker reached the gate (temp file written and fsynced, right before rename)
+    // Stop the worker right before the rename, once the temp file is fsynced.
     gate.reached.notified().await;
 
-    // Verify temp file exists while paused
     assert!(has_temporary_files(dir.path()));
 
-    // Cancel and release the gate
     cancel_token.cancel();
     gate.release();
 
     let result = task.await.unwrap();
     assert_eq!(result.status, ToolResultStatus::Cancelled);
 
-    // Target file must be unchanged
     let content = std::fs::read_to_string(&file_path).unwrap();
     assert_eq!(content, "original content\n");
 
-    // No temporary files left behind
     assert!(!has_temporary_files(dir.path()));
 }
 
@@ -811,7 +777,6 @@ async fn crlf_with_chinese_and_emoji_multibyte_utf8_edit_and_overwrite() {
     let original = "你好，世界！\r\n测试🚀表情符号\r\n第三行内容\r\n";
     std::fs::write(&file_path, original).unwrap();
 
-    // 1. Observe file via read_file
     let read_res = invoke(
         &shared,
         WorkspaceTool::ReadFile,
@@ -820,7 +785,6 @@ async fn crlf_with_chinese_and_emoji_multibyte_utf8_edit_and_overwrite() {
     .await;
     assert_eq!(read_res.status, ToolResultStatus::Succeeded);
 
-    // 2. edit_file with multibyte Chinese and emoji, using lone \n
     let edit_res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -843,7 +807,6 @@ async fn crlf_with_chinese_and_emoji_multibyte_utf8_edit_and_overwrite() {
     assert_eq!(std::fs::read(&file_path).unwrap(), expected_edit.as_bytes());
     assert!(!has_temporary_files(dir.path()));
 
-    // 3. Overwrite write_file with multibyte Chinese and emoji, using lone \n
     let overwrite_content = "全新第一行👋欢迎\n第二行🌟包含emoji和汉字\n";
     let write_res = invoke(
         &shared,
@@ -874,7 +837,7 @@ async fn scan_limit_rejection_and_max_lines_partial_read() {
     let large_content = "a".repeat(150);
     std::fs::write(&file_path, &large_content).unwrap();
 
-    // 1. read_file reaches scan limit -> not observed in table
+    // A scan-limited read is not recorded, so a later edit cannot rely on it.
     let read_res = invoke(
         &shared,
         WorkspaceTool::ReadFile,
@@ -885,7 +848,6 @@ async fn scan_limit_rejection_and_max_lines_partial_read() {
     assert_eq!(read_res.output.content["truncated"], true);
     assert_eq!(read_res.output.content["limit_reason"], "file_scan_bytes");
 
-    // 2. edit_file rejects because file size exceeds max_file_scan_bytes
     let edit_res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -899,7 +861,6 @@ async fn scan_limit_rejection_and_max_lines_partial_read() {
     let err = edit_res.output.content["error"].as_str().unwrap();
     assert!(err.contains("exceeds maximum readable size") || err.contains("must be read"));
 
-    // 3. write_file (overwrite) also rejects
     let write_res = invoke(
         &shared,
         WorkspaceTool::WriteFile,
@@ -908,7 +869,6 @@ async fn scan_limit_rejection_and_max_lines_partial_read() {
     .await;
     assert_eq!(write_res.status, ToolResultStatus::Rejected);
 
-    // 4. Test max_lines partial read on a file within max_file_scan_bytes
     let multiline_path = dir.path().join("multiline_lines.txt");
     std::fs::write(&multiline_path, "line1\nline2\nline3\n").unwrap();
 
@@ -922,7 +882,6 @@ async fn scan_limit_rejection_and_max_lines_partial_read() {
     assert_eq!(partial_read.output.content["truncated"], true);
     assert_eq!(partial_read.output.content["limit_reason"], "max_lines");
 
-    // Can edit successfully after max_lines partial read
     let edit_res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -958,14 +917,12 @@ async fn write_file_new_target_conflict_before_rename_is_rejected() {
         .await
     });
 
-    // Wait until worker reached the gate (temp file written and fsynced, right before rename)
+    // Pause the worker right before the rename, once the temp file is fsynced.
     gate.reached.notified().await;
     assert!(has_temporary_files(dir.path()));
 
-    // Create target file externally while write_file is paused at the gate
     std::fs::write(&target_path, "externally created\n").unwrap();
 
-    // Release gate and wait for completion
     gate.release();
     let res = task.await.unwrap();
 
@@ -973,11 +930,9 @@ async fn write_file_new_target_conflict_before_rename_is_rejected() {
     let err = res.output.content["error"].as_str().unwrap();
     assert!(err.contains("already exists") && err.contains("must be read with read_file"));
 
-    // Target file content created externally must remain untouched
     let content = std::fs::read_to_string(&target_path).unwrap();
     assert_eq!(content, "externally created\n");
 
-    // No temporary files left behind
     assert!(!has_temporary_files(dir.path()));
 }
 
@@ -987,7 +942,6 @@ async fn deleted_after_reading_returns_rejected_for_edit_and_creates_for_write()
     let file_path = dir.path().join("read_then_delete.txt");
     std::fs::write(&file_path, "initial content\n").unwrap();
 
-    // 1. Read file so it is observed
     let read_res = invoke(
         &shared,
         WorkspaceTool::ReadFile,
@@ -996,10 +950,8 @@ async fn deleted_after_reading_returns_rejected_for_edit_and_creates_for_write()
     .await;
     assert_eq!(read_res.status, ToolResultStatus::Succeeded);
 
-    // 2. Delete file externally
     std::fs::remove_file(&file_path).unwrap();
 
-    // 3. edit_file should return Rejected indicating file has changed since read
     let edit_res = invoke(
         &shared,
         WorkspaceTool::EditFile,
@@ -1013,7 +965,6 @@ async fn deleted_after_reading_returns_rejected_for_edit_and_creates_for_write()
     let err = edit_res.output.content["error"].as_str().unwrap();
     assert!(err.contains("changed"));
 
-    // 4. write_file on deleted target takes create branch and succeeds as created
     let write_res = invoke(
         &shared,
         WorkspaceTool::WriteFile,

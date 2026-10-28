@@ -81,8 +81,7 @@ impl WorkspaceTools {
         &self.observations
     }
 
-    /// Bind a selected root to frozen application limits, default write
-    /// limits and shared host slots.
+    /// Bind a selected root to frozen limits, default write limits and host slots.
     #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     pub fn new(
         workspace: Arc<Workspace>,
@@ -92,7 +91,6 @@ impl WorkspaceTools {
         Self::with_write_limits(workspace, limits, WriteToolLimits::default(), host)
     }
 
-    /// Bind a selected root to application limits, write limits, and shared host slots.
     pub fn with_write_limits(
         workspace: Arc<Workspace>,
         limits: WorkspaceToolLimits,
@@ -152,7 +150,6 @@ impl WorkspaceTools {
         })
     }
 
-    /// Produce new per-work tool wrappers for test runs with an empty prepared map.
     #[cfg(test)]
     pub(crate) fn bind_for_test(
         self: &Arc<Self>,
@@ -166,7 +163,6 @@ impl WorkspaceTools {
         )
     }
 
-    /// Produce new per-work tool wrappers sharing turn-scoped prepared writes.
     pub(crate) fn bind_with_prepared(
         self: &Arc<Self>,
         selected: &[WorkspaceTool],
@@ -236,10 +232,9 @@ fn stopped(call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
     )
 }
 
-/// A command that expired or was stopped while queued never started a process.
-/// It is rejected rather than reported as timed out or cancelled, so the model
-/// cannot read it as a command that ran and hung, and repair warning rules,
-/// which treat timed-out and cancelled commands as possibly executed, ignore it.
+/// A command stopped while queued never started a process, so it is rejected
+/// rather than reported as timed out or cancelled: the model cannot read it as
+/// a command that hung, and repair warnings treat those statuses as executed.
 fn not_started(call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
     let cause = if control.is_cancelled() {
         "the work was stopped while this command was waiting for the previous command"

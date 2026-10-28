@@ -7,10 +7,8 @@ use std::sync::{Arc, Mutex};
 
 /// A test-only backend that records launches and performs no isolation.
 ///
-/// It is compiled only under `cfg(test)` and is available to unit tests in
-/// this crate, not to separate integration-test crates. On Unix it attaches a
-/// real process group so tool tests can exercise termination; on other
-/// platforms its process tree is inert. Production code cannot select it.
+/// On Unix it attaches a real process group so command tests can exercise
+/// termination; elsewhere the tree is inert. Production cannot select it.
 pub(crate) struct RecordingBackend {
     report: Result<BackendReport, SandboxUnavailable>,
     calls: Arc<Mutex<Vec<(SandboxPolicy, Launch)>>>,
