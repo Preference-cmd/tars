@@ -2591,3 +2591,125 @@ async fn command_accept_edits_still_asks() {
         .await
         .unwrap();
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_cancel_repair_adopts_and_never_reruns() {
+    let root = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![call_command(json!({
+            "command": "printf x >> runs.txt; printf started > started.txt; sleep 30; printf done > done.txt"
+        }))]),
+        // The only model reply after the interrupted turn belongs to the new
+        // input; it must not ask for another command.
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(Some(storage.path().join("store")));
+    let mut definition = command_definition(&fixture.endpoint, root.path());
+    // Keep the command's bounded timeout above the cancellation window.
+    definition.work_timeout_secs = Some(30);
+    let session = host
+        .create(PreparedCreate::persistent(definition, Context::default()))
+        .await
+        .unwrap();
+    session.wait_saved().await.unwrap();
+    session
+        .set_permission_mode(PermissionMode::FullAccess)
+        .unwrap();
+    session.wait_saved().await.unwrap();
+
+    let work = submit(&session, "start a long command");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !root.path().join("started.txt").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the command did not start"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    session.cancel(&work).unwrap();
+    let observation = finish(&session, &work).await;
+    assert_eq!(observation.tools.calls.len(), 1);
+    assert_eq!(
+        observation.tools.calls[0].status,
+        Some(ToolResultStatus::UnknownOutcome)
+    );
+    let original_id = observation.tools.calls[0].call_block_id;
+
+    let inspection = session.inspect_repair(Some(&work)).unwrap();
+    let original = inspection.original.expect("retained command batch");
+    assert_eq!(original.command_warnings_count, 1);
+    let warning = original.results[0]
+        .write_warning
+        .as_ref()
+        .expect("command warning");
+    assert_eq!(warning.kind, crate::application::RepairWarningKind::Command);
+    let plan = session
+        .plan_repair(crate::application::RepairMode::AdoptOriginal(work.clone()))
+        .unwrap();
+    let summary = plan.summary();
+    assert_eq!(summary.command_warnings_count, 1);
+    assert_eq!(summary.write_warnings_count, 1);
+    assert_eq!(summary.write_warnings[0].call_block_id, original_id);
+    assert_eq!(
+        summary.write_warnings[0].kind,
+        crate::application::RepairWarningKind::Command
+    );
+    assert!(
+        summary.write_warnings[0]
+            .advice()
+            .contains("may have executed"),
+        "the repair material must warn that the command may have executed"
+    );
+    session.apply_repair(&plan).unwrap();
+    session.wait_saved().await.unwrap();
+
+    let next = submit(&session, "continue after repair");
+    let next_observation = finish(&session, &next).await;
+    assert!(
+        next_observation.tools.calls.is_empty(),
+        "the command must not rerun during continuation"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("runs.txt")).unwrap(),
+        "x",
+        "the command ran more than once"
+    );
+
+    {
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "the fixture served two work turns");
+        let second = requests[1].to_string();
+        assert!(
+            second.contains("material_repair"),
+            "the repaired material did not reach the model: {second}"
+        );
+        assert!(
+            second.contains("no acceptable result was observed"),
+            "the model did not see the unknown command result: {second}"
+        );
+    }
+
+    let context = session.read_materials().unwrap().context;
+    let adopted = context
+        .blocks()
+        .iter()
+        .find_map(|block| match block.content() {
+            BlockContent::ToolResult(payload) if payload.call_block_id == original_id => {
+                Some(payload.status.clone())
+            }
+            _ => None,
+        });
+    assert_eq!(
+        adopted,
+        Some(ToolResultStatus::UnknownOutcome),
+        "the adopted original call must stay an unknown outcome"
+    );
+    assert!(!root.path().join("done.txt").exists(), "the command reran");
+    assert!(root.path().join("started.txt").exists());
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}

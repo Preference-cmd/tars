@@ -1,4 +1,5 @@
 mod claims;
+mod command_status;
 mod lifecycle;
 mod opening;
 mod progress;

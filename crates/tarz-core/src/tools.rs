@@ -21,6 +21,8 @@ pub(crate) use execute::result;
 pub use resources::ToolMetrics;
 pub use resources::ToolResources;
 
+#[cfg(all(test, target_os = "macos"))]
+mod command_acceptance_tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
