@@ -501,19 +501,11 @@ impl SandboxBackend for SeatbeltBackend {
     ) -> Result<SandboxedCommand, SandboxError> {
         launch.validate()?;
         let profile = self.profile(policy)?;
-        let mut command = tokio::process::Command::new(&self.executable);
+        let mut command = Self::base_command(&self.executable, &launch);
         command.arg("-p");
         command.arg(profile);
         command.arg(launch.program());
         command.args(launch.launch_args());
-        if let Some(directory) = launch.working_directory() {
-            command.current_dir(directory);
-        }
-        command.env_clear();
-        for (name, value) in launch.environment() {
-            command.env(name, value);
-        }
-        command.process_group(0);
         Ok(SandboxedCommand::new(
             command,
             Box::new(ProcessGroupControl),
@@ -522,8 +514,18 @@ impl SandboxBackend for SeatbeltBackend {
 
     fn unconfined(&self, launch: Launch) -> Result<SandboxedCommand, SandboxError> {
         launch.validate()?;
-        let mut command = tokio::process::Command::new(launch.program());
+        let mut command = Self::base_command(launch.program(), &launch);
         command.args(launch.launch_args());
+        Ok(SandboxedCommand::new(
+            command,
+            Box::new(ProcessGroupControl),
+        ))
+    }
+}
+
+impl SeatbeltBackend {
+    fn base_command(program: &Path, launch: &Launch) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(program);
         if let Some(directory) = launch.working_directory() {
             command.current_dir(directory);
         }
@@ -532,10 +534,7 @@ impl SandboxBackend for SeatbeltBackend {
             command.env(name, value);
         }
         command.process_group(0);
-        Ok(SandboxedCommand::new(
-            command,
-            Box::new(ProcessGroupControl),
-        ))
+        command
     }
 }
 

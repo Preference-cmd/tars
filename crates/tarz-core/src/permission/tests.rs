@@ -1088,7 +1088,7 @@ async fn unprepared_write_in_ask_mode_records_unprepared_decision() {
         hub,
         crate::definition::CommandSettings::default(),
         prepared_empty,
-        crate::tools::OutsideSandboxGrants::new(),
+        crate::permission::OutsideSandboxGrants::new(),
     );
 
     let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
@@ -1112,6 +1112,75 @@ async fn unprepared_write_in_ask_mode_records_unprepared_decision() {
     assert_eq!(
         result.output.content["error"],
         "write operation was not prepared by precheck"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unprepared_outside_command_records_unprepared_outside_decision() {
+    use causa::kernel::{
+        CallControl, InvocationId, RoundId, ToolCallContext, ToolCallPayload, TurnId,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    let call_id = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
+    let call = ToolCallContext::new(
+        call_id,
+        ToolCallPayload::new(
+            "run_command",
+            json!({
+                "command": "true",
+                "outside_sandbox": "yes",
+                "justification": "reason",
+            }),
+        ),
+    );
+    let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
+    let work = WorkRef {
+        conversation_id: "test".into(),
+        turn_id: turn_id.clone(),
+    };
+    let reporter =
+        crate::session::ToolReporter::new(work.clone(), tokio::sync::broadcast::channel(128).0);
+    let batch_initial = ToolBatch::new(vec![call.clone()]).unwrap();
+    reporter.batch_ready(
+        &InvocationId {
+            turn_id: turn_id.clone(),
+            round_id: RoundId(0),
+        },
+        &batch_initial,
+    );
+
+    let hub = Arc::new(crate::permission::approval::ApprovalsHub::new());
+    let processor = crate::permission::PermissionProcessor::new(
+        work,
+        reporter.clone(),
+        hub,
+        crate::definition::CommandSettings::default(),
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        crate::permission::OutsideSandboxGrants::new(),
+    );
+
+    let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
+    let declaration_order = [call.call_block_id];
+    let control = CallControl::new(CancellationToken::new(), None);
+    let view = crate::permission::PermissionHub::new(PermissionMode::Ask).view();
+    let processor_data = causa::kernel::ProcessorData::new(view);
+    let ctx = ProcessorContext::new(&turn_id, RoundId(0), &declaration_order, &control)
+        .with_data(&processor_data);
+
+    processor.process(&mut batch, &ctx).await.unwrap();
+
+    let snap = reporter.snapshot();
+    assert_eq!(snap.calls.len(), 1);
+    assert_eq!(
+        snap.calls[0].permission_decision.as_ref().unwrap().kind,
+        PermissionDecisionKind::UnpreparedOutsideSandbox
+    );
+    let (_, result) = batch.results().first().unwrap().result().unwrap();
+    assert_eq!(result.status, ToolResultStatus::Rejected);
+    assert_eq!(
+        result.output.content["error"],
+        "command parameters were not prepared by precheck"
     );
 }
 
@@ -2071,7 +2140,7 @@ async fn command_ask_allows_and_denies_with_the_command_subject() {
             command,
             workdir,
             timeout_secs,
-            network,
+            target,
             ..
         } = &allow.subject
         else {
@@ -2080,7 +2149,12 @@ async fn command_ask_allows_and_denies_with_the_command_subject() {
         assert_eq!(command, "printf allow > allowed.txt");
         assert_eq!(workdir, ".");
         assert_eq!(*timeout_secs, 120);
-        assert_eq!(*network, crate::definition::CommandNetwork::None);
+        assert_eq!(
+            *target,
+            crate::permission::CommandTarget::Sandboxed {
+                network: crate::definition::CommandNetwork::None
+            }
+        );
         allow.reply.send(ApprovalDecision::Allow).unwrap();
 
         let deny = rx.recv().await.expect("deny request");
@@ -2598,19 +2672,16 @@ async fn command_outside_sandbox_ask_allows_and_denies_with_the_subject() {
         for allow in [true, false] {
             let request = rx.recv().await.expect("outside command request");
             let ApprovalSubject::Command {
-                outside_sandbox,
-                justification,
-                command,
-                ..
+                target, command, ..
             } = &request.subject
             else {
                 panic!("expected Command subject")
             };
-            assert!(*outside_sandbox);
-            assert_eq!(
-                justification.as_deref(),
-                Some("needs to write outside the workspace")
-            );
+            assert!(matches!(
+                target,
+                crate::permission::CommandTarget::Outside { justification }
+                    if justification == "needs to write outside the workspace"
+            ));
             assert!(command.contains("printf"));
             request
                 .reply
@@ -2701,13 +2772,13 @@ async fn command_outside_sandbox_accept_edits_asks_and_allows_with_a_route() {
     let mut rx = session.connect_approvals();
     let approval = tokio::spawn(async move {
         let request = rx.recv().await.expect("outside command approval");
-        let ApprovalSubject::Command {
-            outside_sandbox, ..
-        } = &request.subject
-        else {
+        let ApprovalSubject::Command { target, .. } = &request.subject else {
             panic!("expected Command subject")
         };
-        assert!(*outside_sandbox);
+        assert!(matches!(
+            target,
+            crate::permission::CommandTarget::Outside { .. }
+        ));
         request.reply.send(ApprovalDecision::Allow).unwrap();
     });
     let work = submit(&session, "accept-edits outside command");
@@ -3014,7 +3085,7 @@ async fn malformed_outside_flag_in_accept_edits_is_gated_as_outside() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn command_accept_edits_runs_sandboxed_commands_with_open_network() {
+async fn command_accept_edits_runs_sandboxed_commands_with_the_open_setting() {
     let root = tempfile::tempdir().unwrap();
     let replies = vec![
         Reply::Calls(vec![call_command(

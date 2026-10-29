@@ -5,9 +5,9 @@ use crate::sandbox::{
     SandboxUnavailable, exit_status_code,
 };
 use crate::workspace::Workspace;
-use causa::kernel::{BlockId, CallControl, ToolResultStatus};
+use causa::kernel::{CallControl, ToolResultStatus};
 use serde_json::{Value, json};
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -53,48 +53,9 @@ pub(crate) struct PreparedCommand {
     pub(crate) command: String,
     pub(crate) workdir: PathBuf,
     pub(crate) timeout_secs: u64,
-    pub(crate) policy: SandboxPolicy,
+    pub(crate) policy: Option<SandboxPolicy>,
     pub(crate) outside_sandbox: bool,
 }
-
-/// Per-call permission to run one command outside the sandbox.
-///
-/// The permission processor issues a grant only after it has applied the mode
-/// table and any confirmation. The command tool consumes it; a call that
-/// bypasses the processor finds no grant and is rejected instead of falling
-/// back to a sandboxed or bare launch.
-#[derive(Default)]
-pub(crate) struct OutsideSandboxGrants {
-    granted: Mutex<HashSet<BlockId>>,
-}
-
-impl OutsideSandboxGrants {
-    pub(crate) fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-
-    pub(crate) fn grant(&self, call: BlockId) {
-        self.granted
-            .lock()
-            .expect("command grant lock")
-            .insert(call);
-    }
-
-    pub(crate) fn take(&self, call: BlockId) -> Option<OutsideSandboxGrant> {
-        self.granted
-            .lock()
-            .expect("command grant lock")
-            .remove(&call)
-            .then_some(OutsideSandboxGrant(()))
-    }
-
-    pub(crate) fn clear(&self) {
-        self.granted.lock().expect("command grant lock").clear();
-    }
-}
-
-/// Proof that one call was granted outside-sandbox execution.
-pub(crate) struct OutsideSandboxGrant(());
 
 /// The result of one command attempt, including bounded output.
 pub(crate) struct CommandExecution {
@@ -225,13 +186,16 @@ impl CommandRuntime {
         }
         let workdir = self.resolve_workdir(params.workdir.as_deref())?;
         let sandbox = self.sandbox.as_ref().map_err(|error| error.to_string())?;
-        let policy = self.policy()?;
-        if !outside_sandbox {
+        let policy = if outside_sandbox {
+            None
+        } else {
+            let policy = self.policy()?;
             sandbox
                 .report()
                 .check(&policy)
                 .map_err(|error| error.to_string())?;
-        }
+            Some(policy)
+        };
         Ok(PreparedCommand {
             command: params.command.clone(),
             workdir,
@@ -270,7 +234,7 @@ impl CommandRuntime {
     pub(crate) async fn run(
         &self,
         prepared: PreparedCommand,
-        grant: Option<OutsideSandboxGrant>,
+        grant: Option<crate::permission::OutsideSandboxGrant>,
         _permit: OwnedSemaphorePermit,
         control: &CallControl,
         max_output_bytes: usize,
@@ -298,7 +262,10 @@ impl CommandRuntime {
         let wrapped = if prepared.outside_sandbox {
             sandbox.unconfined(launch)
         } else {
-            sandbox.wrap(&prepared.policy, launch)
+            let Some(policy) = &prepared.policy else {
+                return rejected("command sandbox policy is missing");
+            };
+            sandbox.wrap(policy, launch)
         };
         let mut wrapped = match wrapped {
             Ok(command) => command,

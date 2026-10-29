@@ -1,6 +1,5 @@
 #[cfg(test)]
 use super::ToolMetrics;
-use super::command::OutsideSandboxGrants;
 use super::diff::DiffSummary;
 use super::operations::{OperationControl, run};
 use super::parameters::Params;
@@ -41,7 +40,7 @@ pub struct WorkspaceTools {
     pub(super) write_limits: WriteToolLimits,
     command_settings: CommandSettings,
     pub(super) command: Option<Arc<super::CommandRuntime>>,
-    outside_sandbox_grants: Arc<OutsideSandboxGrants>,
+    outside_sandbox_grants: Arc<crate::permission::OutsideSandboxGrants>,
     pub(super) local: Arc<Semaphore>,
     host: Arc<ToolResources>,
     counters: Arc<Counters>,
@@ -65,7 +64,7 @@ impl WorkspaceTools {
     pub(crate) fn command(&self) -> Option<&Arc<super::CommandRuntime>> {
         self.command.as_ref()
     }
-    pub(crate) fn outside_sandbox_grants(&self) -> Arc<OutsideSandboxGrants> {
+    pub(crate) fn outside_sandbox_grants(&self) -> Arc<crate::permission::OutsideSandboxGrants> {
         self.outside_sandbox_grants.clone()
     }
     pub(crate) fn workspace(&self) -> &Workspace {
@@ -145,7 +144,7 @@ impl WorkspaceTools {
             write_limits,
             command_settings,
             command,
-            outside_sandbox_grants: OutsideSandboxGrants::new(),
+            outside_sandbox_grants: crate::permission::OutsideSandboxGrants::new(),
             host,
             counters: Arc::new(Counters::default()),
             observations: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -404,8 +403,8 @@ impl Tool for WorkspaceToolImpl {
                     "command": {"type":"string","minLength":1,"maxLength":16384},
                     "workdir": {"type":"string","maxLength":4096},
                     "timeout_secs": {"type":"integer","minimum":1,"maximum":self.shared.command_settings().max_timeout_secs},
-                    "outside_sandbox": {"type":"boolean"},
-                    "justification": {"type":"string","maxLength":1024}
+                    "outside_sandbox": {"type":"boolean","description":"Run this one command outside the sandbox; requires justification."},
+                    "justification": {"type":"string","maxLength":1024,"description":"Why outside execution is needed; at most 1 KiB (UTF-8 bytes)."}
                 }),
             ),
         };

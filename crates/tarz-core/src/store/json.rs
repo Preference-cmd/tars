@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io::{self, Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -43,6 +43,23 @@ impl std::fmt::Debug for SessionStore {
             .finish_non_exhaustive()
     }
 }
+fn normalize_root(root: PathBuf) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(&root) {
+        return canonical;
+    }
+    let mut normalized = PathBuf::new();
+    for component in root.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
 #[derive(Debug)]
 pub(crate) struct ListedSession {
     pub(crate) conversation_id: String,
@@ -52,6 +69,7 @@ pub(crate) struct ListedSession {
 impl SessionStore {
     pub(crate) fn new(root: PathBuf) -> Self {
         let root = std::path::absolute(&root).unwrap_or(root);
+        let root = normalize_root(root);
         Self {
             directory: root.join("sessions"),
             counters: Arc::default(),

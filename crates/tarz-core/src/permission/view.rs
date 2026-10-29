@@ -91,7 +91,9 @@ impl PermissionView {
         name: &str,
         arguments: &serde_json::Value,
     ) -> Option<ToolPermissionClass> {
-        if name == "run_command" && crate::tools::parameters::requests_outside_sandbox(arguments) {
+        if name == crate::definition::WorkspaceTool::RunCommand.name()
+            && crate::tools::parameters::requests_outside_sandbox(arguments)
+        {
             return Some(ToolPermissionClass::CommandOutsideSandbox);
         }
         self.classify_tool(name)

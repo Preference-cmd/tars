@@ -455,6 +455,14 @@ fn a_relative_root_resolves_to_an_absolute_directory() {
 }
 
 #[test]
+fn a_relative_root_with_parent_components_is_normalized() {
+    let store = SessionStore::new(std::path::PathBuf::from("missing/../data"));
+    assert!(store.directory().is_absolute());
+    assert!(!store.directory().to_string_lossy().contains(".."));
+    assert!(store.directory().ends_with("data/sessions"));
+}
+
+#[test]
 fn oversized_save_stops_before_disk_write_and_store_hook_reaches_new_writer() {
     let (_folder, store, id, writer) = setup();
     let initial = op(&id, None, "small old record");

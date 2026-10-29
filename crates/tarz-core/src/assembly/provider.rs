@@ -199,7 +199,7 @@ pub(crate) fn assemble(
                     prepared_writes,
                     outside_sandbox_grants
                         .clone()
-                        .unwrap_or_else(crate::tools::OutsideSandboxGrants::new),
+                        .unwrap_or_else(crate::permission::OutsideSandboxGrants::new),
                 )));
             }
             let mcp = mcp_for_work.clone();

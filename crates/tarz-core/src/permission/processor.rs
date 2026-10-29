@@ -1,7 +1,7 @@
 //! Permission processor applying mode policies and managing confirmation flows.
 
 use super::approval::{
-    ApprovalDecision, ApprovalReply, ApprovalRequest, ApprovalSubject, ApprovalsHub,
+    ApprovalDecision, ApprovalReply, ApprovalRequest, ApprovalSubject, ApprovalsHub, CommandTarget,
     format_mcp_arguments,
 };
 use super::mode::PermissionMode;
@@ -123,7 +123,7 @@ pub(crate) struct PermissionProcessor {
             std::collections::HashMap<causa::kernel::BlockId, crate::tools::PreparedWrite>,
         >,
     >,
-    grants: Arc<crate::tools::OutsideSandboxGrants>,
+    grants: Arc<super::OutsideSandboxGrants>,
 }
 
 impl PermissionProcessor {
@@ -137,7 +137,7 @@ impl PermissionProcessor {
                 std::collections::HashMap<causa::kernel::BlockId, crate::tools::PreparedWrite>,
             >,
         >,
-        grants: Arc<crate::tools::OutsideSandboxGrants>,
+        grants: Arc<super::OutsideSandboxGrants>,
     ) -> Self {
         Self {
             work,
@@ -161,7 +161,7 @@ impl ToolBatchProcessor for PermissionProcessor {
             turn_id: ctx.turn_id.clone(),
             round_id: ctx.round_id,
         };
-        // Grants belong to one batch and never outlive a cancelled call.
+        // A cancelled call can leave its grant until the next batch starts.
         self.grants.clear();
 
         let view = ctx
@@ -330,6 +330,15 @@ impl ToolBatchProcessor for PermissionProcessor {
                                 )?;
                                 continue;
                             };
+                            let target = if outside {
+                                CommandTarget::Outside {
+                                    justification: params.justification.unwrap_or_default(),
+                                }
+                            } else {
+                                CommandTarget::Sandboxed {
+                                    network: self.command_settings.network,
+                                }
+                            };
                             (
                                 ApprovalSubject::Command {
                                     command: params.command,
@@ -337,9 +346,7 @@ impl ToolBatchProcessor for PermissionProcessor {
                                     timeout_secs: params
                                         .timeout_secs
                                         .unwrap_or(self.command_settings.default_timeout_secs),
-                                    network: self.command_settings.network,
-                                    outside_sandbox: outside,
-                                    justification: params.justification,
+                                    target,
                                 },
                                 false,
                                 true,

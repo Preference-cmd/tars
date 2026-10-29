@@ -4,7 +4,8 @@ use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tarz_core::permission::{
-    ApprovalDecision, ApprovalSubject, PermissionMode, WriteAction, escape_untrusted_text,
+    ApprovalDecision, ApprovalSubject, CommandTarget, PermissionMode, WriteAction, command_body,
+    escape_untrusted_text,
 };
 
 pub(crate) fn should_connect_approvals(
@@ -58,54 +59,21 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
             }
             writer.flush()?;
         }
-        ApprovalSubject::Command {
-            command,
-            workdir,
-            timeout_secs,
-            network,
-            outside_sandbox,
-            justification,
-        } => {
-            if *outside_sandbox {
-                writeln!(
-                    writer,
-                    "Tarz: {} wants to run a command outside the sandbox (permission mode: {})",
-                    escape_untrusted_text(tool_name),
-                    mode,
-                )?;
-                writeln!(
-                    writer,
-                    "NOT in the sandbox: full disk read/write, network and credentials are available"
-                )?;
-                writeln!(
-                    writer,
-                    "Justification: {}",
-                    escape_untrusted_text(justification.as_deref().unwrap_or("(none)"))
-                )?;
-                writeln!(
-                    writer,
-                    "Working directory: {}",
-                    escape_untrusted_text(workdir)
-                )?;
-                writeln!(writer, "Timeout: {timeout_secs}s")?;
-            } else {
-                writeln!(
-                    writer,
-                    "Tarz: {} wants to run a command (permission mode: {})",
-                    escape_untrusted_text(tool_name),
-                    mode,
-                )?;
-                writeln!(
-                    writer,
-                    "Working directory: {}",
-                    escape_untrusted_text(workdir)
-                )?;
-                writeln!(
-                    writer,
-                    "Timeout: {timeout_secs}s · Network: {network} · workspace writable, .git hooks and config read-only, credentials unreadable"
-                )?;
+        ApprovalSubject::Command { target, .. } => {
+            writeln!(
+                writer,
+                "Tarz: {} wants to run a command{} (permission mode: {})",
+                escape_untrusted_text(tool_name),
+                if matches!(target, CommandTarget::Outside { .. }) {
+                    " outside the sandbox"
+                } else {
+                    ""
+                },
+                mode,
+            )?;
+            for line in command_body(subject).expect("command subject") {
+                writeln!(writer, "{line}")?;
             }
-            writeln!(writer, "$ {}", escape_untrusted_text(command))?;
             writer.flush()?;
         }
         ApprovalSubject::McpCall {
@@ -130,7 +98,7 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
     let prompt_text = match subject {
         ApprovalSubject::FileWrite { .. } => "Allow this write? [y/n] ",
         ApprovalSubject::Command {
-            outside_sandbox: true,
+            target: CommandTarget::Outside { .. },
             ..
         } => "Allow this command outside the sandbox? [y/n] ",
         ApprovalSubject::Command { .. } => "Allow this command? [y/n] ",
@@ -475,9 +443,9 @@ mod tests {
             command: "cargo test".into(),
             workdir: "src".into(),
             timeout_secs: 30,
-            network: CommandNetwork::None,
-            outside_sandbox: false,
-            justification: None,
+            target: CommandTarget::Sandboxed {
+                network: CommandNetwork::None,
+            },
         };
         let mut reader = Cursor::new(b"y\n");
         let mut writer = Vec::new();
@@ -510,9 +478,9 @@ mod tests {
             command: "cargo test".into(),
             workdir: "src".into(),
             timeout_secs: 30,
-            network: CommandNetwork::None,
-            outside_sandbox: true,
-            justification: Some("the sandbox blocks the user cargo cache".into()),
+            target: CommandTarget::Outside {
+                justification: "the sandbox blocks the user cargo cache".into(),
+            },
         };
         let mut reader = Cursor::new(b"y\n");
         let mut writer = Vec::new();

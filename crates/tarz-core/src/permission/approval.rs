@@ -1,5 +1,6 @@
 //! Approval requests, decisions, and reviewer connection channel.
 
+use super::escape::escape_untrusted_text;
 use super::mode::PermissionMode;
 use crate::definition::CommandNetwork;
 use crate::session::WorkRef;
@@ -44,6 +45,22 @@ impl std::fmt::Display for WriteAction {
     }
 }
 
+/// Where a confirmed command would run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CommandTarget {
+    /// Inside the sandbox, with the session's network policy.
+    Sandboxed {
+        /// Network policy for this command.
+        network: CommandNetwork,
+    },
+    /// Outside the sandbox, with the model's justification.
+    Outside {
+        /// The model's reason for requesting an outside run.
+        justification: String,
+    },
+}
+
 /// The subject of an approval request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalSubject {
@@ -64,12 +81,8 @@ pub enum ApprovalSubject {
         workdir: String,
         /// Effective timeout in seconds.
         timeout_secs: u64,
-        /// Network policy for this command.
-        network: CommandNetwork,
-        /// Whether the command would run outside the sandbox.
-        outside_sandbox: bool,
-        /// The model's reason for requesting an outside run.
-        justification: Option<String>,
+        /// Where the command would run and what governs it.
+        target: CommandTarget,
     },
     /// MCP tool call requiring confirmation.
     McpCall {
@@ -80,6 +93,62 @@ pub enum ApprovalSubject {
         /// Compact JSON arguments, bounded to 1024 UTF-8 bytes with an ellipsis when truncated.
         arguments: String,
     },
+}
+
+/// Body lines for a command confirmation, with untrusted text escaped.
+///
+/// Renderers should use this instead of laying out the fields themselves, so
+/// the visible body and its scroll range cannot drift apart. Returns `None`
+/// for non-command subjects.
+pub fn command_body(subject: &ApprovalSubject) -> Option<Vec<String>> {
+    let ApprovalSubject::Command {
+        command,
+        workdir,
+        timeout_secs,
+        target,
+    } = subject
+    else {
+        return None;
+    };
+    let mut lines = Vec::new();
+    match target {
+        CommandTarget::Outside { justification } => {
+            lines.push(
+                "NOT in the sandbox: full disk read/write, network and credentials are available"
+                    .to_owned(),
+            );
+            let escaped_justification = escape_untrusted_text(justification);
+            let mut justification = escaped_justification.lines();
+            lines.push(format!(
+                "Justification: {}",
+                justification.next().unwrap_or_default()
+            ));
+            lines.extend(justification.map(str::to_owned));
+            lines.push(format!(
+                "Working directory: {}",
+                escape_untrusted_text(workdir)
+            ));
+            lines.push(format!("Timeout: {timeout_secs}s"));
+        }
+        CommandTarget::Sandboxed { network } => {
+            lines.push(format!(
+                "Working directory: {}",
+                escape_untrusted_text(workdir)
+            ));
+            lines.push(format!("Timeout: {timeout_secs}s"));
+            lines.push(format!("Network: {network}"));
+            lines.push(
+                "Workspace: writable; .git hooks and config read-only; credentials unreadable"
+                    .to_owned(),
+            );
+        }
+    }
+    lines.push(String::new());
+    let escaped_command = escape_untrusted_text(command);
+    let mut command = escaped_command.lines();
+    lines.push(format!("$ {}", command.next().unwrap_or_default()));
+    lines.extend(command.map(str::to_owned));
+    Some(lines)
 }
 
 /// Formats arguments JSON compactly, truncated at a UTF-8 character boundary to at most 1024 bytes.
@@ -162,6 +231,50 @@ impl ApprovalsHub {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn command_body_describes_both_targets_and_escapes_untrusted_text() {
+        let sandboxed = ApprovalSubject::Command {
+            command: "printf a\nprintf b".into(),
+            workdir: "src".into(),
+            timeout_secs: 30,
+            target: CommandTarget::Sandboxed {
+                network: CommandNetwork::None,
+            },
+        };
+        let lines = command_body(&sandboxed).unwrap();
+        assert_eq!(lines[0], "Working directory: src");
+        assert_eq!(lines[1], "Timeout: 30s");
+        assert_eq!(lines[2], "Network: none");
+        assert!(lines[3].contains(".git hooks and config read-only"));
+        assert_eq!(lines[4], "");
+        assert_eq!(lines[5], "$ printf a");
+        assert_eq!(lines[6], "printf b");
+
+        let outside = ApprovalSubject::Command {
+            command: "printf a".into(),
+            workdir: ".".into(),
+            timeout_secs: 120,
+            target: CommandTarget::Outside {
+                justification: "line one\nline two\x1b".into(),
+            },
+        };
+        let lines = command_body(&outside).unwrap();
+        assert!(lines[0].starts_with("NOT in the sandbox"));
+        assert_eq!(lines[1], "Justification: line one");
+        assert_eq!(lines[2], "line two\\x1b");
+        assert_eq!(lines[3], "Working directory: .");
+        assert_eq!(lines[4], "Timeout: 120s");
+        assert_eq!(lines[5], "");
+        assert_eq!(lines[6], "$ printf a");
+
+        let mcp = ApprovalSubject::McpCall {
+            server: "srv".into(),
+            tool: "tool".into(),
+            arguments: "{}".into(),
+        };
+        assert!(command_body(&mcp).is_none());
+    }
 
     #[test]
     fn format_mcp_arguments_within_limit_outputs_compact_json() {

@@ -394,12 +394,11 @@ impl Sandbox {
         self.backend.wrap(policy, launch)
     }
 
-    /// Build one process without isolation, but with the same process-tree
-    /// control as a wrapped launch.
+    /// Build one process without sandbox isolation, but with the same
+    /// process-tree control as a wrapped launch.
     ///
-    /// This never falls back to a bare spawn: a backend that cannot provide it
-    /// returns an error, so a platform without a sandbox also has no
-    /// unconfined launch.
+    /// This is a direct spawn. A backend that cannot provide it returns an
+    /// error, so a platform without a sandbox also has no unconfined launch.
     pub fn unconfined(&self, launch: Launch) -> Result<SandboxedCommand, SandboxError> {
         launch.validate()?;
         self.backend.unconfined(launch)

@@ -3,6 +3,7 @@
 mod approval;
 mod escape;
 mod gate;
+mod grants;
 mod mode;
 mod precheck;
 mod processor;
@@ -10,7 +11,7 @@ mod view;
 
 pub use approval::{
     ApprovalDecision, ApprovalReceiver, ApprovalReply, ApprovalRequest, ApprovalSubject,
-    WriteAction,
+    CommandTarget, WriteAction, command_body,
 };
 pub use escape::escape_untrusted_text;
 pub use mode::{ParsePermissionModeError, PermissionMode};
@@ -18,6 +19,7 @@ pub use processor::{PermissionDecision, PermissionDecisionKind, ToolPermissionCl
 pub use view::PermissionView;
 
 pub(crate) use gate::ModeGateProcessor;
+pub(crate) use grants::{OutsideSandboxGrant, OutsideSandboxGrants};
 pub(crate) use precheck::PrecheckProcessor;
 pub(crate) use processor::PermissionProcessor;
 #[cfg(test)]

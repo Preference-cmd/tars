@@ -248,13 +248,13 @@ impl Params {
                     && (text.len() > 1024 || text.contains('\0'))
                 {
                     return Err(Cow::Borrowed(
-                        "justification must be at most 1 KiB without NUL",
+                        "justification must be at most 1 KiB (UTF-8 bytes) without NUL",
                     ));
                 }
                 if p.outside_sandbox == Some(true) && p.outside_justification().is_none() {
                     return Err(Cow::Borrowed(
                         "outside_sandbox requires a nonempty justification of at most 1 KiB \
-                         without NUL",
+                         (UTF-8 bytes) without NUL",
                     ));
                 }
             }

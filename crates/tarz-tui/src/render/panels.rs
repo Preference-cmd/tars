@@ -353,7 +353,7 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
             )
         }
         tarz_core::permission::ApprovalSubject::Command {
-            outside_sandbox: true,
+            target: tarz_core::permission::CommandTarget::Outside { .. },
             ..
         } => {
             format!(
@@ -462,45 +462,23 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
                 .collect();
             frame.render_widget(Paragraph::new(visible_diff).block(diff_block()), regions[1]);
         }
-        tarz_core::permission::ApprovalSubject::Command {
-            command,
-            workdir,
-            timeout_secs,
-            network,
-            outside_sandbox,
-            justification,
-        } => {
-            let text = if *outside_sandbox {
-                format!(
-                    "NOT in the sandbox: full disk read/write, network and credentials are available\nJustification: {}\nWorking directory: {}\nTimeout: {timeout_secs}s\n\n$ {}",
-                    tarz_core::permission::escape_untrusted_text(
-                        justification.as_deref().unwrap_or("(none)")
-                    ),
-                    tarz_core::permission::escape_untrusted_text(workdir),
-                    tarz_core::permission::escape_untrusted_text(command),
-                )
-            } else {
-                format!(
-                    "Working directory: {}\nTimeout: {timeout_secs}s\nNetwork: {network}\nWorkspace: writable; .git hooks and config read-only; credentials unreadable\n\n$ {}",
-                    tarz_core::permission::escape_untrusted_text(workdir),
-                    tarz_core::permission::escape_untrusted_text(command),
-                )
-            };
-            let lines: Vec<&str> = text.lines().collect();
+        tarz_core::permission::ApprovalSubject::Command { .. } => {
+            let body =
+                tarz_core::permission::command_body(&req.subject).expect("command approval body");
             let scroll = entry
                 .approval_scroll
-                .min(lines.len().saturating_sub(body_height));
-            let visible: Vec<Line> = lines
+                .min(body.len().saturating_sub(body_height));
+            let visible: Vec<Line> = body
                 .iter()
                 .skip(scroll)
                 .take(body_height)
-                .map(|&line| {
-                    let style = if *outside_sandbox && line.starts_with("NOT in the sandbox") {
+                .map(|line| {
+                    let style = if line.starts_with("NOT in the sandbox") {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
-                    Line::styled(line, style)
+                    Line::styled(line.as_str(), style)
                 })
                 .collect();
             frame.render_widget(Paragraph::new(visible).block(block), regions[1]);
