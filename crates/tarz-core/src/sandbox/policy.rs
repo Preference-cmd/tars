@@ -138,23 +138,46 @@ impl SandboxPolicy {
         let root = canonical_directory(root.as_ref())?;
         let git = root.join(".git");
         self = self.with_protected_entry(&git)?;
-        let Ok(resolved) = std::fs::canonicalize(&git) else {
-            return Ok(self);
-        };
-        if !resolved.is_dir() || !resolved.starts_with(&root) {
-            return Ok(self);
+        let mut bases = vec![git.clone()];
+        match symlink_target(&git) {
+            Some(target) => {
+                let projected = canonical_or_projected(&lexical_normalize(&target))?;
+                if !projected.starts_with(&root) {
+                    return Ok(self);
+                }
+                // Protect the target entry too: otherwise the command could
+                // replace the target with another symlink after this policy
+                // was built.
+                self = self.with_protected_entry(&projected)?;
+                bases.push(projected);
+            }
+            None => {
+                let Ok(resolved) = std::fs::canonicalize(&git) else {
+                    return Ok(self);
+                };
+                if !resolved.is_dir() || !resolved.starts_with(&root) {
+                    return Ok(self);
+                }
+                bases.push(resolved);
+            }
         }
-        for base in [git, resolved] {
+        for base in bases {
             for name in ["hooks", "config", "config.worktree", "modules", "worktrees"] {
                 let path = base.join(name);
                 validate_path(&path)?;
                 self.read_only_subpaths.push(path.clone());
                 // A hook or config entry may itself be a symlink to another
-                // workspace path; that target must be read-only too.
-                if let Ok(leaf) = std::fs::canonicalize(&path)
-                    && leaf.starts_with(&root)
+                // workspace path, including a target that does not exist yet;
+                // that target must be read-only too.
+                let target = symlink_target(&path)
+                    .map(|target| canonical_or_projected(&lexical_normalize(&target)))
+                    .transpose()?
+                    .or_else(|| std::fs::canonicalize(&path).ok());
+                if let Some(target) = target
+                    && target.starts_with(&root)
                 {
-                    self.read_only_subpaths.push(leaf);
+                    self = self.with_protected_entry(&target)?;
+                    self.read_only_subpaths.push(target);
                 }
             }
         }
@@ -343,4 +366,35 @@ fn validate_path(path: &Path) -> Result<(), SandboxPolicyError> {
 fn normalize(paths: &mut Vec<PathBuf>) {
     paths.sort();
     paths.dedup();
+}
+
+fn symlink_target(path: &Path) -> Option<PathBuf> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_symlink() {
+        return None;
+    }
+    let target = std::fs::read_link(path).ok()?;
+    if target.is_absolute() {
+        Some(target)
+    } else {
+        Some(path.parent()?.join(target))
+    }
+}
+
+/// Remove `.` and `..` without touching the filesystem.
+///
+/// Only used for symlink targets before projection: a missing target cannot
+/// be canonicalized, but its lexical form still has to be a valid policy path.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }

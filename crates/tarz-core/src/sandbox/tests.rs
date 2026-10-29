@@ -1615,6 +1615,89 @@ echo git-file-protected
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dangling_git_leaf_symlink_targets_are_read_only() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(workspace.join(".git")).unwrap();
+        std::os::unix::fs::symlink("../.githooks", workspace.join(".git/hooks")).unwrap();
+        std::os::unix::fs::symlink("../.gitconfig", workspace.join(".git/config")).unwrap();
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_git_metadata_protection(&workspace)
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+if mkdir "$ws/.githooks" 2>/dev/null; then exit 1; fi
+if printf x > "$ws/.githooks/pre-commit" 2>/dev/null; then exit 2; fi
+if printf x > "$ws/.gitconfig" 2>/dev/null; then exit 3; fi
+if printf x > "$ws/.git/hooks/pre-commit" 2>/dev/null; then exit 4; fi
+if printf x > "$ws/.git/config" 2>/dev/null; then exit 5; fi
+echo dangling-leaf-protected
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("dangling-leaf-protected"));
+        assert!(!workspace.join(".githooks").exists());
+        assert!(!workspace.join(".gitconfig").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dangling_git_symlink_protects_its_target() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::os::unix::fs::symlink(".gitdir", workspace.join(".git")).unwrap();
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_git_metadata_protection(&workspace)
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+if mkdir "$ws/.gitdir" 2>/dev/null; then exit 1; fi
+if printf x > "$ws/.gitdir/hooks/pre-commit" 2>/dev/null; then exit 2; fi
+if printf x > "$ws/.gitdir/config" 2>/dev/null; then exit 3; fi
+echo dangling-git-protected
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("dangling-git-protected"));
+        assert!(!workspace.join(".gitdir").exists());
+        assert!(
+            std::fs::symlink_metadata(workspace.join(".git"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
     #[tokio::test]
     async fn git_entry_cannot_be_deleted_or_renamed() {
         let base = tempfile::tempdir().unwrap();
