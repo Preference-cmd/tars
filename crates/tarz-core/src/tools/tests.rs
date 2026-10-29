@@ -803,7 +803,8 @@ fn recording_command_runtime(root: &std::path::Path) -> (Arc<CommandRuntime>, Re
     let launches = backend.calls();
     let sandbox = Sandbox::open_with(Box::new(backend)).unwrap();
     let runtime =
-        CommandRuntime::bind_with_sandbox(root, CommandSettings::default(), Ok(sandbox)).unwrap();
+        CommandRuntime::bind_with_sandbox(root, CommandSettings::default(), Ok(sandbox), None)
+            .unwrap();
     (runtime, launches)
 }
 

@@ -448,6 +448,13 @@ fn assert_child_text(context: &Context) {
 }
 
 #[test]
+fn a_relative_root_resolves_to_an_absolute_directory() {
+    let store = SessionStore::new(std::path::PathBuf::from("relative-store"));
+    assert!(store.directory().is_absolute());
+    assert!(store.directory().ends_with("relative-store/sessions"));
+}
+
+#[test]
 fn oversized_save_stops_before_disk_write_and_store_hook_reaches_new_writer() {
     let (_folder, store, id, writer) = setup();
     let initial = op(&id, None, "small old record");

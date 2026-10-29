@@ -18,7 +18,7 @@ Tarz 是 Causa 的验证项目：用一个真实的 Agent 应用检验 Causa 的
 
 当前已实现单会话工作闭环，并提供离线 CLI 演示：原子提交、同键重放、逐工作装配、取消与结果观察、材料编辑及保存/导入。演示使用脚本模型和真实本地工具，经过 Session 与 Causa runner 执行，不需要凭据或网络。
 
-`tarz run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tarz session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。`tarz-tui` 提供原生终端原型与临时流式正文预览，两端共用 TOML 配置，并可显式选择工作区和工作区工具。MCP 独立配置文件 `mcp.json`（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和运行期工具已接通（只接通工具，不含 resources/prompts/sampling），MCP 调用按 `mcp.json` 的 `approval` 设置和当前权限模式执行、确认（终端或 TUI 确认面板）或拒绝，真实第三方 MCP 服务验证待补；内置 `run_command` 在 macOS Seatbelt 沙箱中执行（默认无网络，工作区可写、`.git` 只读、用户目录大多不可读），TUI `/status` 与 CLI `session create` 显示沙箱后端和能力，Linux/Windows 暂无该工具；GUI、父子 Agent 和安装渠道尚未实现；CLI 与 TUI 可以写入文件：`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；`tarz-tui` 已接通写入确认面板、命令确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。当前开发版本为 `0.0.0`，尚无公开发布。
+`tarz run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tarz session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。`tarz-tui` 提供原生终端原型与临时流式正文预览，两端共用 TOML 配置，并可显式选择工作区和工作区工具。MCP 独立配置文件 `mcp.json`（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和运行期工具已接通（只接通工具，不含 resources/prompts/sampling），MCP 调用按 `mcp.json` 的 `approval` 设置和当前权限模式执行、确认（终端或 TUI 确认面板）或拒绝，真实第三方 MCP 服务验证待补；内置 `run_command` 在 macOS Seatbelt 沙箱中执行（默认无网络，工作区可写、`.git` 钩子与配置只读、凭据位置不可读写），TUI `/status` 与 CLI `session create` 显示沙箱后端和能力，Linux/Windows 暂无该工具；GUI、父子 Agent 和安装渠道尚未实现；CLI 与 TUI 可以写入文件：`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；`tarz-tui` 已接通写入确认面板、命令确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。当前开发版本为 `0.0.0`，尚无公开发布。
 
 ## 本地构建与运行
 

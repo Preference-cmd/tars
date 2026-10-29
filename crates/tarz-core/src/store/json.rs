@@ -51,12 +51,17 @@ pub(crate) struct ListedSession {
 }
 impl SessionStore {
     pub(crate) fn new(root: PathBuf) -> Self {
+        let root = std::path::absolute(&root).unwrap_or(root);
         Self {
             directory: root.join("sessions"),
             counters: Arc::default(),
             #[cfg(test)]
             hook: Arc::default(),
         }
+    }
+    /// The directory that holds every session record.
+    pub(crate) fn directory(&self) -> &Path {
+        &self.directory
     }
     #[cfg(test)]
     pub(crate) fn set_fault_hook(&self, hook: Option<FaultHook>) {

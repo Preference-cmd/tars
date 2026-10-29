@@ -13,7 +13,7 @@ tarz session create --store ./data --provider openai-chat --model "$MODEL_ID" \
 
 共享 TOML 预设中的 `workspace_root`、`tools`、`permission_mode` 和 `mcp` 会填入 `tarz-tui` 新建表单；TUI 不提供这些启动参数。表单提供 Workspace、Tools、权限模式和 MCP 字段；`--tools ''` 或清空表单 Tools 字段禁用预设工具。当前 Tools 包含 `run_command` 时，表单还显示一行只读的 `command` 摘要（网络、默认期限和上限），不能编辑。保存的会话固定工作区、选择及完整限额；重开采用原定义，不随配置或 cwd 改变。缺失或不再满足访问规则的根目录会使打开失败，不会退回当前目录，也不发模型请求。
 
-`run_command` 每次在沙箱内启动 `/bin/bash -c`，默认无网络、工作区可写、`.git` 只读、用户目录大多不可读；确认面板显示完整命令、工作目录、期限和网络策略。权限按四种模式处理：`read-only` 拒绝；`ask` 与 `accept-edits` 都要求确认；`full-access` 直接执行，但命令仍在沙箱内。Linux/Windows 暂不支持该工具。完整契约、沙箱范围、状态显示和残余见[命令工具](#命令工具)。
+`run_command` 每次在沙箱内启动 `/bin/bash -c`，默认无网络、工作区可写、`.git` 钩子与配置只读、凭据位置不可读写；确认面板显示完整命令、工作目录、期限和网络策略。权限按四种模式处理：`read-only` 拒绝；`ask` 与 `accept-edits` 都要求确认；`full-access` 直接执行，但命令仍在沙箱内。Linux/Windows 暂不支持该工具。完整契约、沙箱范围、状态显示和残余见[命令工具](#命令工具)。
 
 ## 文件访问
 
@@ -87,9 +87,9 @@ tarz session create --store ./data --provider openai-chat --model "$MODEL_ID" \
 
 输出合并 stdout 和 stderr；超过结果预算时保留开头和结尾并报告省略字节数；非 UTF-8 与控制字符会被清理；空输出为 `(no output)`。shell 退出（含非零）为 Succeeded 并带 `exit_code`；被信号杀死时另带 `signal` 和 `128+signal`。命令自身超时为 TimedOut、取消为 Cancelled，二者都带已收到的输出和“可能已部分执行”；参数、路径或沙箱不可用为 Rejected，没有启动进程；起进程失败为 Failed。命令不以后台作业继续运行，也不提供交互式 stdin/TTY；完整输出不落盘。
 
-沙箱默认拒绝，再放行工作区读写、`.git` 只读、私有临时目录和 `/dev/null` 等。用户主目录除工具链只读基线外不可读；网络默认关闭（含 loopback 与 DNS），`network = "open"` 才放行出站；信号只能发给沙箱内进程。没有关闭沙箱的开关：`full-access` 只跳过确认，命令仍在沙箱内。沙箱不可用时创建会话失败；已保存会话重开时每次调用 Rejected 并带原因。Linux/Windows 没有后端，不能创建带命令工具的新会话。
+沙箱默认拒绝，再放行：工作区与私有临时目录读写；整机只读（包括用户主目录、`/Applications` 与 `/private/var`）；`/dev` 只放行 `/dev/null`、`/dev/zero`、`/dev/urandom`、`/dev/random`，读 `/dev/tty` 失败；当前存储目录 `DIR/sessions` 在与会话工作区和私有临时目录都不重叠时读写都拒绝。凭据位置读写都拒绝，包括 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.azure`、`~/.config/gcloud`、`~/.kube`、`~/.docker`、`~/.config/gh`、`~/.password-store`、`~/.zsh_sessions`、`~/Library/Keychains`、`/Library/Keychains`、`/Library/Preferences/SystemConfiguration` 等目录，以及 `~/.netrc`、`~/.git-credentials`、`~/.config/git/credentials`、`~/.npmrc`、`~/.pypirc`、`~/.gem/credentials`、`~/.cargo/credentials.toml`、`~/.cargo/credentials`、`~/.vault-token`、`~/.terraform.d/credentials.tfrc.json`、`~/.zsh_history`、`~/.bash_history` 等文件；工作区恰好等于主目录时同样拒绝。工作区根目录的 `.git` 中，`hooks`、`config`、`config.worktree`、`modules`、`worktrees` 只读，`.git` 本身不能创建、删除或改名；objects、refs、index 和 logs 照常可写，沙箱外运行的 git 不受这些限制影响。嵌套仓库的 `.git` 不在保护范围内。网络默认关闭（含 loopback、DNS 与 unix socket）；`network = "open"` 只放行 IP 出站与系统 DNS 的 `/private/var/run/mDNSResponder`，其他 unix socket（如 ssh-agent 与 Docker）仍拒绝。信号只能发给沙箱内进程。没有关闭沙箱的开关：`full-access` 只跳过确认，命令仍在沙箱内。沙箱不可用时创建会话失败；已保存会话重开时每次调用 Rejected 并带原因。Linux/Windows 没有后端，不能创建带命令工具的新会话。
 
-TUI `/status` 显示 `Commands: <backend>: ...` 的完整后端与各维度；打开时若沙箱不可用，一行提示会说明。CLI `session create` 在 stderr 打印完整状态；`tarz run` 和 `session run` 打印非完整维度的简短状态。确认面板显示完整命令、工作目录、期限和网络策略；权限规则见上一节。
+TUI `/status` 显示 `Commands: <backend>: ...` 的完整后端与各维度；打开时若沙箱不可用，一行提示会说明。CLI `session create` 在 stderr 打印完整状态；`tarz run` 和 `session run` 打印非完整维度的简短状态。确认面板显示完整命令、工作目录、期限和网络策略，以及“工作区可写、`.git` 钩子与配置只读、凭据不可读”；权限规则见上一节。
 
 配置使用 `[profiles.NAME.command]` 的 `network`、`default_timeout_secs` 和 `max_timeout_secs`，只在预设包含 `run_command` 时生效；CLI `--command-network` 覆盖网络。TUI 新建表单只读显示当前 Tools 选择下的摘要。保存的定义固定完整值，重开不随全局配置变化。
 
@@ -98,8 +98,11 @@ TUI `/status` 显示 `Commands: <backend>: ...` 的完整后端与各维度；�
 - 主动 `setsid()`/`setpgid()` 的后代可以逃出进程组，仍受沙箱策略约束；Tarz 结束时只清理已知进程组。
 - Tarz 被 `SIGKILL` 时，正在运行的命令可能残留。
 - 进程组号在 leader 退出后有极小的复用窗口；后代持有管道时，读端线程可能在 2 秒后脱离。
-- `/Library`、Homebrew 和 `/` 的读基线较宽；`sysctl-read` 仍允许 `kern.proc*` 之外的名称。
-- 沙箱不放行 `~/.cargo/config.toml` 或 `Xcode.app`。无依赖 crate 在本机可用 `CARGO_HOME="$TMPDIR/cargo" DEVELOPER_DIR=/Library/Developer/CommandLineTools cargo test` 跑通，但这不是默认放行，依赖缓存、网络和工具链差异仍受策略限制。
+- `sysctl-read` 仍允许 `kern.proc*` 之外的名称；`kern.proc*` 与 process-info 限制只阻止读取其他进程的环境。
+- 整机可读后，凭据清单之外的秘密仍可读：写在 `~/.cargo/config.toml`、`~/.gitconfig` 里的令牌、项目外 `.env`、未受 TCC 保护的浏览器配置目录都不在清单内；终端已有的“文稿”“桌面”等 TCC 授权同样适用于命令。
+- `.git` 保护只覆盖工作区根目录的 `.git`：只锁 hooks、config、modules、worktrees 与 `.git` 本身；嵌套仓库不受保护。命令仍能改写 objects、refs、index 和 logs，可以破坏仓库内容，但不能借此在沙箱外执行代码。`.git` 指向工作区外（链接工作树）时，沙箱内的 git 写操作全部失败；子模块操作和 `git config`、`git remote add` 等改配置的操作同样失败。
+- `network = "open"` 下需要凭据的操作（SSH 方式的 git、私有 registry）因读不到凭据而失败；命令能列出 `/private/var/run` 找到 ssh-agent 的 socket，但不能连它。
+- 绑定命令工具时探针会依次跑 Roots 和 Host 两种策略，启动时间因此增加；探测失败仍然关闭整个工具。
 
 ## 限额
 

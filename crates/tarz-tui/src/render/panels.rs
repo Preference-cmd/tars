@@ -459,7 +459,7 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
             network,
         } => {
             let text = format!(
-                "Working directory: {}\nTimeout: {timeout_secs}s\nNetwork: {network}\nWorkspace: writable; .git read-only; home unreadable\n\n$ {}",
+                "Working directory: {}\nTimeout: {timeout_secs}s\nNetwork: {network}\nWorkspace: writable; .git hooks and config read-only; credentials unreadable\n\n$ {}",
                 tarz_core::permission::escape_untrusted_text(workdir),
                 tarz_core::permission::escape_untrusted_text(command),
             );

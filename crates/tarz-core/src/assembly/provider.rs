@@ -22,15 +22,36 @@ pub(crate) enum AssemblyError {
     CommandUnavailable(String),
 }
 
+/// Host resources an assembly uses, plus the store path a command must not read.
+pub(crate) struct SessionResources {
+    pub(crate) tools: Arc<ToolResources>,
+    pub(crate) storage: Option<std::path::PathBuf>,
+}
+
+impl SessionResources {
+    pub(crate) fn new(tools: Arc<ToolResources>) -> Self {
+        Self {
+            tools,
+            storage: None,
+        }
+    }
+
+    pub(crate) fn with_storage(mut self, storage: Option<std::path::PathBuf>) -> Self {
+        self.storage = storage;
+        self
+    }
+}
+
 pub(crate) fn assemble(
     definition: &SessionDefinition,
     conversation_id: ConversationId,
     context: Context,
-    resources: Arc<ToolResources>,
+    resources: SessionResources,
     current_mode: crate::permission::PermissionMode,
     mcp: Option<Arc<crate::mcp::McpRuntime>>,
     allow_unavailable_command: bool,
 ) -> Result<Session, AssemblyError> {
+    let SessionResources { tools, storage } = resources;
     definition.validate()?;
     let command_settings = definition.effective_command_settings();
     let definition_command_settings = command_settings.unwrap_or_default();
@@ -45,7 +66,7 @@ pub(crate) fn assemble(
         let workspace =
             Workspace::open(root).map_err(|error| AssemblyError::Workspace(Arc::new(error)))?;
         if let Some(settings) = command_settings {
-            let command = crate::tools::CommandRuntime::bind(root, settings)
+            let command = crate::tools::CommandRuntime::bind(root, settings, storage)
                 .map_err(|error| AssemblyError::CommandUnavailable(error.to_string()))?;
             if !allow_unavailable_command && let Some(reason) = command.unavailable_platform() {
                 return Err(AssemblyError::CommandUnavailable(reason));
@@ -57,7 +78,7 @@ pub(crate) fn assemble(
                 workspace,
                 definition.tool_limits.clone(),
                 definition.write_limits.unwrap_or_default(),
-                resources,
+                tools.clone(),
                 settings,
                 Some(command),
             ))
@@ -66,7 +87,7 @@ pub(crate) fn assemble(
                 workspace,
                 definition.tool_limits.clone(),
                 definition.write_limits.unwrap_or_default(),
-                resources,
+                tools,
             ))
         }
     };

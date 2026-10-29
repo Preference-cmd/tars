@@ -177,7 +177,11 @@ async fn assembled(
         definition,
         conversation_id,
         context,
-        host.tool_resources.clone(),
+        crate::assembly::SessionResources::new(host.tool_resources.clone()).with_storage(
+            host.store
+                .as_ref()
+                .map(|store| store.directory().to_path_buf()),
+        ),
         current_mode,
         mcp.clone(),
         allow_unavailable_command,

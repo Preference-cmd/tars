@@ -46,7 +46,7 @@ fn invalid_definition_is_rejected_before_credential_resolution() {
             &definition,
             "id".into(),
             Context::default(),
-            crate::tools::ToolResources::new(16),
+            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)),
             crate::permission::PermissionMode::Ask,
             None,
             true,
@@ -62,7 +62,7 @@ fn missing_credentials_report_only_a_sanitized_resolution_error() {
         &definition,
         "id".into(),
         Context::default(),
-        crate::tools::ToolResources::new(16),
+        crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)),
         crate::permission::PermissionMode::Ask,
         None,
         true,
@@ -139,7 +139,7 @@ fn unavailable_workspace_is_rejected_before_credentials_or_model_access() {
             &definition,
             "id".into(),
             Context::default(),
-            crate::tools::ToolResources::new(16),
+            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)),
             crate::permission::PermissionMode::Ask,
             None,
             true,
@@ -191,7 +191,7 @@ fn unsupported_platform_rejects_enabled_workspace_but_still_assembles_empty_cata
     chosen.workspace_root = Some(std::env::current_dir().unwrap());
     chosen.tools = vec![crate::definition::WorkspaceTool::ReadFile];
     assert!(matches!(
-        assemble(&chosen, "id".into(), Context::default(), crate::tools::ToolResources::new(16), crate::permission::PermissionMode::Ask, true),
+        assemble(&chosen, "id".into(), Context::default(), crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)), crate::permission::PermissionMode::Ask, None, true),
         Err(AssemblyError::Workspace(error)) if matches!(&*error, crate::workspace::WorkspaceError::UnsupportedPlatform)
     ));
     chosen.tools.clear();
@@ -200,7 +200,7 @@ fn unsupported_platform_rejects_enabled_workspace_but_still_assembles_empty_cata
             &chosen,
             "id".into(),
             Context::default(),
-            crate::tools::ToolResources::new(16),
+            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)),
             crate::permission::PermissionMode::Ask,
             None,
             true,
@@ -223,7 +223,7 @@ fn command_runtime_is_allowed_on_reopen_but_not_on_create_without_a_backend() {
             &chosen,
             "id".into(),
             Context::default(),
-            crate::tools::ToolResources::new(16),
+            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)),
             crate::permission::PermissionMode::Ask,
             None,
             false,
@@ -235,7 +235,7 @@ fn command_runtime_is_allowed_on_reopen_but_not_on_create_without_a_backend() {
             &chosen,
             "id".into(),
             Context::default(),
-            crate::tools::ToolResources::new(16),
+            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)),
             crate::permission::PermissionMode::Ask,
             None,
             true,

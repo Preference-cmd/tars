@@ -15,6 +15,7 @@
 //! capability.
 
 mod backend;
+mod credentials;
 mod policy;
 mod process;
 #[cfg(target_os = "macos")]
@@ -27,10 +28,15 @@ pub use backend::{
     BackendId, BackendReport, Capability, Launch, Limitation, Sandbox, SandboxError,
     SandboxUnavailable, SandboxedCommand,
 };
-pub use policy::{NetworkAccess, SandboxPolicy, SandboxPolicyError};
+pub use policy::{NetworkAccess, ReadScope, SandboxPolicy, SandboxPolicyError};
 pub use process::ProcessTree;
 pub(crate) use process::exit_status_code;
 pub use status::SandboxStatus;
+
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) fn open_with_home(home: std::path::PathBuf) -> Result<Sandbox, SandboxUnavailable> {
+    Sandbox::open_with(Box::new(seatbelt::SeatbeltBackend::with_home(home)))
+}
 
 #[cfg(test)]
 mod status_tests;

@@ -191,7 +191,9 @@ async fn command_panel_shows_the_command_workdir_timeout_and_network_then_denies
     assert!(view.contains("Timeout: 30s"), "{view}");
     assert!(view.contains("Network: none"), "{view}");
     assert!(
-        view.contains("Workspace: writable; .git read-only; home unreadable"),
+        view.contains(
+            "Workspace: writable; .git hooks and config read-only; credentials unreadable"
+        ),
         "{view}"
     );
     assert!(view.contains("$ printf denied > denied.txt"), "{view}");

@@ -124,6 +124,23 @@ fn read_only_subpath_keeps_the_lexical_entry_when_a_symlink_leaves_the_root() {
 }
 
 #[test]
+fn policy_rejects_relative_components_even_under_an_absolute_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    let policy = SandboxPolicy::new(vec![root.clone()], vec![root.clone()]).unwrap();
+    let denied = root.join("missing/../secret");
+    assert!(matches!(
+        policy.with_denied_path(&denied),
+        Err(SandboxPolicyError::RelativeComponent(_))
+    ));
+    assert!(matches!(
+        SandboxPolicy::new(vec![root.join("missing/../root")], Vec::new()),
+        Err(SandboxPolicyError::RelativeComponent(_))
+    ));
+}
+
+#[test]
 fn policy_has_no_backend_vocabulary() {
     let (_directory, policy) = policy();
     let debug = format!("{policy:?}");
@@ -362,6 +379,7 @@ mod seatbelt {
     use tokio::io::AsyncReadExt;
 
     const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+    const DNS_SOCKET: &str = "/private/var/run/mDNSResponder";
 
     struct RunOutput {
         status: ExitStatus,
@@ -592,6 +610,17 @@ mod seatbelt {
             .env("TMPDIR", canonical(private_tmp).as_os_str())
     }
 
+    fn unix_launch(socket: &Path, workspace: &Path, private_tmp: &Path, home: &Path) -> Launch {
+        Launch::new("/usr/bin/nc")
+            .args(["-U", "-w", "1"])
+            .arg(socket)
+            .current_dir(canonical(workspace))
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("HOME", home.as_os_str())
+            .env("LANG", "C")
+            .env("TMPDIR", canonical(private_tmp).as_os_str())
+    }
+
     #[test]
     fn probe_reports_the_seatbelt_backend() {
         let sandbox = open_sandbox();
@@ -720,7 +749,7 @@ echo git-missing-denied
     }
 
     #[tokio::test]
-    async fn credential_files_stay_denied_under_the_toolchain_allow() {
+    async fn cargo_config_is_readable_while_credentials_stay_denied() {
         let base = tempfile::tempdir().unwrap();
         let workspace = base.path().join("workspace");
         let private_tmp = base.path().join("private-tmp");
@@ -728,7 +757,7 @@ echo git-missing-denied
         std::fs::create_dir(&workspace).unwrap();
         std::fs::create_dir(&private_tmp).unwrap();
         std::fs::create_dir_all(home.join(".cargo")).unwrap();
-        std::fs::write(home.join(".cargo/config.toml"), "TOKEN\n").unwrap();
+        std::fs::write(home.join(".cargo/config.toml"), "PROBE-CONFIG\n").unwrap();
         std::fs::write(home.join(".cargo/credentials.toml"), "TOKEN\n").unwrap();
 
         let backend = super::super::seatbelt::SeatbeltBackend::with_home(home.clone());
@@ -736,7 +765,7 @@ echo git-missing-denied
             Sandbox::open_with(Box::new(backend)).expect("a fake home must not break the probe");
         let policy = base_policy(&workspace, &private_tmp);
         let script = r#"set -u
-if cat "$HOME/.cargo/config.toml" >/dev/null 2>&1; then echo config-leaked; exit 1; fi
+if ! grep -q PROBE-CONFIG "$HOME/.cargo/config.toml" 2>/dev/null; then echo config-unreadable; exit 1; fi
 if cat "$HOME/.cargo/credentials.toml" >/dev/null 2>&1; then echo credentials-leaked; exit 2; fi
 echo credential-denied
 "#;
@@ -762,10 +791,10 @@ echo credential-denied
         let (_policy_directory, policy) = policy();
         let profile = backend.profile(&policy).unwrap();
         let allow = profile
-            .rfind("(allow file-read* (subpath \"")
+            .rfind("(allow file-read*")
             .expect("profile has a read allow");
         let deny = profile
-            .rfind("(deny file-read* (literal \"")
+            .find("(deny file-read* file-write* (subpath")
             .expect("profile has a credential deny");
         assert!(deny > allow, "a later allow could re-open a credential");
     }
@@ -1221,6 +1250,493 @@ sleep 60;
         );
     }
 
+    /// The `/dev/tty` denial can only be observed when the sandboxed process
+    /// has a controlling terminal. Run under `script(1)` so this test does not
+    /// pass just because the host has no tty:
+    /// `script -q /dev/null cargo test -p tarz-core dev_tty -- --ignored`.
+    #[tokio::test]
+    #[ignore = "requires a controlling terminal; run under script(1)"]
+    async fn dev_tty_is_denied_with_a_controlling_terminal() {
+        let host_can_open = std::process::Command::new("/bin/sh")
+            .args(["-c", ": < /dev/tty"])
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(
+            host_can_open,
+            "run this test under script(1) so /dev/tty exists"
+        );
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        let policy = base_policy(&workspace, &private_tmp).with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+if /usr/bin/head -c 0 /dev/tty >/dev/null 2>&1; then echo dev-tty-open; exit 1; fi
+echo dev-tty-denied
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("dev-tty-denied"));
+    }
+
+    #[tokio::test]
+    async fn host_read_scope_reads_outside_and_denies_credentials_devices_and_storage() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let outside = base.path().join("outside");
+        let home = base.path().join("home");
+        let storage = base.path().join("storage/sessions");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir_all(home.join(".cargo")).unwrap();
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(home.join(".aws")).unwrap();
+        std::fs::create_dir_all(&storage).unwrap();
+        std::fs::write(outside.join("visible"), "OUTSIDE-OK\n").unwrap();
+        std::fs::write(home.join(".cargo/config.toml"), "PROBE-CONFIG\n").unwrap();
+        std::fs::write(home.join(".cargo/credentials.toml"), "PROBE-CANARY\n").unwrap();
+        std::fs::write(home.join(".ssh/id_ed25519"), "PROBE-CANARY\n").unwrap();
+        std::fs::write(home.join(".aws/credentials"), "PROBE-CANARY\n").unwrap();
+        std::fs::write(home.join(".zsh_history"), "PROBE-CANARY\n").unwrap();
+        std::fs::write(storage.join("record.json"), "STORAGE-SECRET\n").unwrap();
+
+        let backend = super::super::seatbelt::SeatbeltBackend::with_home(home.clone());
+        let sandbox =
+            Sandbox::open_with(Box::new(backend)).expect("a fake home must not break the probe");
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_read_scope(ReadScope::Host)
+            .with_denied_path(&storage)
+            .unwrap()
+            .with_denied_path(outside.join("blocked"))
+            .unwrap();
+        let script = r#"set -u
+outside=$1
+home=$2
+storage=$3
+if ! grep -q OUTSIDE-OK "$outside/visible" 2>/dev/null; then echo outside-unreadable; exit 1; fi
+if ! grep -q PROBE-CONFIG "$home/.cargo/config.toml" 2>/dev/null; then echo config-unreadable; exit 2; fi
+for path in \
+  "$home/.cargo/credentials.toml" \
+  "$home/.ssh/id_ed25519" \
+  "$home/.aws/credentials" \
+  "$home/.zsh_history"; do
+  if grep -q PROBE-CANARY "$path" 2>/dev/null; then echo credential-leaked; exit 3; fi
+done
+if /usr/bin/head -c 0 /dev/tty >/dev/null 2>&1; then echo dev-tty-open; exit 4; fi
+if ! cat /dev/null >/dev/null 2>&1; then echo dev-null-unreadable; exit 5; fi
+/bin/dd if=/dev/zero of=/dev/null bs=1 count=1 2>/dev/null || exit 8
+/usr/bin/head -c 1 /dev/urandom >/dev/null 2>&1 || exit 9
+/usr/bin/head -c 1 /dev/random >/dev/null 2>&1 || exit 10
+if grep -q STORAGE-SECRET "$storage/record.json" 2>/dev/null; then echo storage-leaked; exit 6; fi
+if printf x > "$storage/new" 2>/dev/null; then echo storage-write-allowed; exit 7; fi
+if mkdir "$outside/blocked" 2>/dev/null; then echo missing-denied-created; exit 11; fi
+if printf x > "$outside/blocked/x" 2>/dev/null; then echo missing-denied-written; exit 12; fi
+echo host-read-ok
+"#;
+        let launch = bash_launch(
+            script,
+            &workspace,
+            &private_tmp,
+            &home,
+            &[&outside, &home, &storage],
+        );
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("host-read-ok"));
+        assert!(!output.stdout.contains("PROBE-CANARY"));
+        assert!(!output.stdout.contains("STORAGE-SECRET"));
+        assert!(!storage.join("new").exists());
+    }
+
+    #[tokio::test]
+    async fn roots_read_scope_does_not_read_outside_files() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let outside = base.path().join("outside");
+        let home = base.path().join("home");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(outside.join("visible"), "OUTSIDE-OK\n").unwrap();
+        let policy = base_policy(&workspace, &private_tmp);
+        assert_eq!(policy.read_scope(), ReadScope::Roots);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+if cat "$1/visible" >/dev/null 2>&1; then echo outside-readable; exit 1; fi
+echo roots-ok
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&outside]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("roots-ok"));
+    }
+
+    #[tokio::test]
+    async fn git_metadata_protection_keeps_objects_refs_and_index_writable() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        for directory in [
+            ".git/hooks",
+            ".git/objects",
+            ".git/refs",
+            ".git/modules/sub",
+            ".git/worktrees/wt",
+        ] {
+            std::fs::create_dir_all(workspace.join(directory)).unwrap();
+        }
+        std::fs::write(workspace.join(".git/config"), "original\n").unwrap();
+        std::fs::write(workspace.join(".git/config.worktree"), "original\n").unwrap();
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_git_metadata_protection(&workspace)
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+printf x > "$ws/.git/objects/x" || exit 1
+printf x > "$ws/.git/refs/x" || exit 2
+printf x > "$ws/.git/index" || exit 3
+if printf x > "$ws/.git/hooks/pre-commit" 2>/dev/null; then exit 4; fi
+if printf x > "$ws/.git/config" 2>/dev/null; then exit 5; fi
+if printf x > "$ws/.git/config.worktree" 2>/dev/null; then exit 6; fi
+if printf x > "$ws/.git/modules/sub/hooks/pre-commit" 2>/dev/null; then exit 7; fi
+if printf x > "$ws/.git/worktrees/wt/config.worktree" 2>/dev/null; then exit 9; fi
+if mv "$ws/.git" "$ws/.git-moved" 2>/dev/null; then exit 8; fi
+echo git-protection-ok
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("git-protection-ok"));
+        assert!(!workspace.join(".git/hooks/pre-commit").exists());
+        assert!(!workspace.join(".git-moved").exists());
+        assert!(workspace.join(".git/objects/x").exists());
+        assert!(workspace.join(".git/refs/x").exists());
+        assert!(workspace.join(".git/index").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".git/config")).unwrap(),
+            "original\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".git/config.worktree")).unwrap(),
+            "original\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn git_metadata_symlink_targets_are_read_only() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(workspace.join(".git")).unwrap();
+        std::fs::create_dir(workspace.join(".githooks")).unwrap();
+        std::fs::write(workspace.join("gitconfig-real"), "original\n").unwrap();
+        std::os::unix::fs::symlink(workspace.join(".githooks"), workspace.join(".git/hooks"))
+            .unwrap();
+        std::os::unix::fs::symlink(
+            workspace.join("gitconfig-real"),
+            workspace.join(".git/config"),
+        )
+        .unwrap();
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_git_metadata_protection(&workspace)
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+if printf x > "$ws/.githooks/pre-commit" 2>/dev/null; then exit 1; fi
+if printf x > "$ws/.git/hooks/pre-commit" 2>/dev/null; then exit 2; fi
+if printf x > "$ws/gitconfig-real" 2>/dev/null; then exit 3; fi
+if printf x > "$ws/.git/config" 2>/dev/null; then exit 4; fi
+echo symlink-protected
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("symlink-protected"));
+        assert!(!workspace.join(".githooks/pre-commit").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("gitconfig-real")).unwrap(),
+            "original\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn credentials_stay_denied_when_the_workspace_is_home() {
+        let base = tempfile::tempdir().unwrap();
+        let home = base.path().join("home");
+        let private_tmp = base.path().join("private-tmp");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::write(home.join(".ssh/id_ed25519"), "TOP-SECRET\n").unwrap();
+        let backend = super::super::seatbelt::SeatbeltBackend::with_home(home.clone());
+        let sandbox =
+            Sandbox::open_with(Box::new(backend)).expect("a fake home must not break the probe");
+        let policy = base_policy(&home, &private_tmp).with_read_scope(ReadScope::Host);
+
+        let script = r#"set -u
+ws=$1
+if grep -q TOP-SECRET "$ws/.ssh/id_ed25519" 2>/dev/null; then echo credential-readable; exit 1; fi
+if printf pwn > "$ws/.ssh/id_ed25519" 2>/dev/null; then echo credential-writable; exit 2; fi
+echo credential-denied
+"#;
+        let launch = bash_launch(script, &home, &private_tmp, &home, &[&home]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("credential-denied"));
+        assert_eq!(
+            std::fs::read_to_string(home.join(".ssh/id_ed25519")).unwrap(),
+            "TOP-SECRET\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_git_entry_cannot_be_created() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_git_metadata_protection(&workspace)
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+if mkdir "$ws/.git" 2>/dev/null; then exit 1; fi
+if printf x > "$ws/.git" 2>/dev/null; then exit 2; fi
+echo missing-git-protected
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("missing-git-protected"));
+        assert!(!workspace.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn a_git_file_entry_cannot_be_written_renamed_or_deleted() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(workspace.join(".git"), "gitdir: /tmp/example\n").unwrap();
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_git_metadata_protection(&workspace)
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+if printf x > "$ws/.git" 2>/dev/null; then exit 1; fi
+if mv "$ws/.git" "$ws/moved" 2>/dev/null; then exit 2; fi
+if rm "$ws/.git" 2>/dev/null; then exit 3; fi
+echo git-file-protected
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("git-file-protected"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".git")).unwrap(),
+            "gitdir: /tmp/example\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_entry_cannot_be_deleted_or_renamed() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(workspace.join(".git")).unwrap();
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_git_metadata_protection(&workspace)
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+if rmdir "$ws/.git" 2>/dev/null; then exit 1; fi
+if mv "$ws/.git" "$ws/.git-moved" 2>/dev/null; then exit 2; fi
+echo git-entry-protected
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("git-entry-protected"));
+        assert!(workspace.join(".git").is_dir());
+        assert!(!workspace.join(".git-moved").exists());
+    }
+
+    #[tokio::test]
+    async fn open_network_allows_the_dns_socket_but_not_other_unix_sockets() {
+        let sandbox = open_sandbox();
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        let agent = base.path().join("agent.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&agent).unwrap();
+        assert!(
+            Path::new(DNS_SOCKET).exists(),
+            "the macOS DNS socket is missing: {DNS_SOCKET}"
+        );
+
+        let closed = base_policy(&workspace, &private_tmp);
+        let closed_dns = run(
+            &sandbox,
+            &closed,
+            unix_launch(Path::new(DNS_SOCKET), &workspace, &private_tmp, &home),
+        )
+        .await;
+        assert!(
+            !closed_dns.status.success(),
+            "the DNS socket was reachable under network = none"
+        );
+        let closed_agent = run(
+            &sandbox,
+            &closed,
+            unix_launch(&agent, &workspace, &private_tmp, &home),
+        )
+        .await;
+        assert!(
+            !closed_agent.status.success(),
+            "a unix socket was reachable under network = none"
+        );
+
+        let open = base_policy(&workspace, &private_tmp).with_network(NetworkAccess::Open);
+        let open_dns = run(
+            &sandbox,
+            &open,
+            unix_launch(Path::new(DNS_SOCKET), &workspace, &private_tmp, &home),
+        )
+        .await;
+        assert!(
+            open_dns.status.success(),
+            "the DNS socket was denied under network = open: stdout={} stderr={}",
+            open_dns.stdout,
+            open_dns.stderr
+        );
+        let open_agent = run(
+            &sandbox,
+            &open,
+            unix_launch(&agent, &workspace, &private_tmp, &home),
+        )
+        .await;
+        assert!(
+            !open_agent.status.success(),
+            "a non-DNS unix socket was reachable under network = open"
+        );
+    }
+
+    #[test]
+    fn probe_fails_when_credential_denials_are_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = super::super::seatbelt::SeatbeltBackend::with_home(directory.path())
+            .without_credential_denials();
+        let error = backend.probe().unwrap_err();
+        assert!(
+            error
+                .reason
+                .contains("roots probe failed with exit status: 18"),
+            "{}",
+            error.reason
+        );
+        assert!(!error.reason.contains("PROBE-CANARY"));
+    }
+
+    #[test]
+    fn probe_fails_without_a_home_directory() {
+        let backend = super::super::seatbelt::SeatbeltBackend::without_home();
+        let error = backend.probe().unwrap_err();
+        assert!(error.reason.contains("HOME is not set"), "{}", error.reason);
+    }
+
     fn compile_sysctl_probe(directory: &Path) -> PathBuf {
         let source = directory.join("sysctl_probe.c");
         let binary = directory.join("sysctl_probe");
@@ -1343,8 +1859,13 @@ int main(int argc, char **argv) {
         assert!(profile.starts_with("(version 1)\n(deny default)"));
         assert!(profile.contains("(allow signal (target same-sandbox))"));
         assert!(profile.contains("quote\\\"and\\\\back"));
-        assert!(profile.contains("(allow network-outbound)"));
-        assert!(!profile.contains("/dev/tty"));
+        assert!(profile.contains("(allow network-outbound (remote ip))"));
+        assert!(
+            profile
+                .contains("(remote unix-socket (path-literal \"/private/var/run/mDNSResponder\"))")
+        );
+        assert!(!profile.contains("(allow network-outbound)\n"));
+        assert!(profile.contains("(deny file-read* (subpath \"/dev\"))"));
         assert!(profile.contains("(literal \"/dev/null\")"));
         assert!(profile.contains("(subpath \"/Library/Keychains\")"));
         assert!(profile.contains("(subpath \"/Library/Preferences/SystemConfiguration\")"));

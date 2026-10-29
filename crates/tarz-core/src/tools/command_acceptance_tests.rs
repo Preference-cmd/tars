@@ -42,8 +42,17 @@ fn settings(network: CommandNetwork) -> CommandSettings {
 }
 
 fn bound_tool(root: &Path, network: CommandNetwork, calls: &[ToolCallContext]) -> Arc<dyn Tool> {
-    let runtime = CommandRuntime::bind(root, settings(network))
+    let runtime = CommandRuntime::bind(root, settings(network), None)
         .expect("the macOS Seatbelt backend must probe successfully");
+    bind_runtime(root, network, runtime, calls)
+}
+
+fn bind_runtime(
+    root: &Path,
+    network: CommandNetwork,
+    runtime: Arc<CommandRuntime>,
+    calls: &[ToolCallContext],
+) -> Arc<dyn Tool> {
     let workspace = Workspace::open(&root.canonicalize().unwrap()).unwrap();
     let shared = WorkspaceTools::with_command(
         workspace,
@@ -472,14 +481,94 @@ async fn dropping_the_command_future_kills_the_group() {
 }
 
 #[tokio::test]
+async fn host_read_scope_denies_credentials_and_the_session_store_through_the_tool() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("workspace");
+    let outside = base.path().join("outside");
+    let home = base.path().join("home");
+    let storage = base.path().join("store/sessions");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::create_dir_all(home.join(".cargo")).unwrap();
+    std::fs::create_dir_all(home.join(".ssh")).unwrap();
+    std::fs::create_dir_all(home.join(".aws")).unwrap();
+    std::fs::create_dir_all(&storage).unwrap();
+    std::fs::write(outside.join("visible"), "OUTSIDE-OK\n").unwrap();
+    std::fs::write(home.join(".cargo/config.toml"), "PROBE-CONFIG\n").unwrap();
+    std::fs::write(home.join(".cargo/credentials.toml"), "PROBE-CANARY\n").unwrap();
+    std::fs::write(home.join(".ssh/id_ed25519"), "PROBE-CANARY\n").unwrap();
+    std::fs::write(home.join(".aws/credentials"), "PROBE-CANARY\n").unwrap();
+    std::fs::write(home.join(".zsh_history"), "PROBE-CANARY\n").unwrap();
+    std::fs::write(storage.join("record.json"), "STORAGE-SECRET\n").unwrap();
+
+    let sandbox = crate::sandbox::open_with_home(home.clone())
+        .expect("the synthetic home must support the seatbelt probe");
+    let runtime = CommandRuntime::bind_with_sandbox(
+        &root,
+        settings(CommandNetwork::None),
+        Ok(sandbox),
+        Some(storage.clone()),
+    )
+    .unwrap();
+    let command = format!(
+        r#"set -u
+if ! grep -q OUTSIDE-OK '{outside}/visible' 2>/dev/null; then echo outside-unreadable; exit 1; fi
+if ! grep -q PROBE-CONFIG '{home}/.cargo/config.toml' 2>/dev/null; then echo config-unreadable; exit 2; fi
+for path in '{home}/.cargo/credentials.toml' '{home}/.ssh/id_ed25519' '{home}/.aws/credentials' '{home}/.zsh_history'; do
+  if grep -q PROBE-CANARY "$path" 2>/dev/null; then echo credential-leaked; exit 3; fi
+done
+if /usr/bin/head -c 0 /dev/tty >/dev/null 2>&1; then echo dev-tty-open; exit 4; fi
+if grep -q STORAGE-SECRET '{storage}/record.json' 2>/dev/null; then echo storage-leaked; exit 5; fi
+if printf x > '{storage}/new' 2>/dev/null; then echo storage-write-allowed; exit 6; fi
+if printf x > '{outside}/escape' 2>/dev/null; then echo outside-write-allowed; exit 7; fi
+printf ok > inside.txt || exit 8
+echo host-tool-ok
+"#,
+        outside = outside.display(),
+        home = home.display(),
+        storage = storage.display(),
+    );
+    let invocation = call(json!({ "command": command }));
+    let tool = bind_runtime(
+        &root,
+        CommandNetwork::None,
+        runtime,
+        std::slice::from_ref(&invocation),
+    );
+    let result = execute(&tool, &invocation, &control(Duration::from_secs(10))).await;
+    assert_eq!(result.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        result.output.content["exit_code"], 0,
+        "{}",
+        result.output.content["output"]
+    );
+    assert!(
+        result.output.content["output"]
+            .as_str()
+            .unwrap()
+            .contains("host-tool-ok")
+    );
+    assert!(!outside.join("escape").exists());
+    assert!(!storage.join("new").exists());
+    assert_eq!(
+        std::fs::read_to_string(storage.join("record.json")).unwrap(),
+        "STORAGE-SECRET\n"
+    );
+}
+
+#[tokio::test]
 async fn a_failed_probe_rejects_every_tool_call_without_launching() {
     let directory = tempfile::tempdir().unwrap();
     let backend = RecordingBackend::unavailable();
     let launches = backend.calls();
     let error = Sandbox::open_with(Box::new(backend)).unwrap_err();
-    let runtime =
-        CommandRuntime::bind_with_sandbox(directory.path(), CommandSettings::default(), Err(error))
-            .unwrap();
+    let runtime = CommandRuntime::bind_with_sandbox(
+        directory.path(),
+        CommandSettings::default(),
+        Err(error),
+        None,
+    )
+    .unwrap();
     let workspace = Workspace::open(&directory.path().canonicalize().unwrap()).unwrap();
     let shared = WorkspaceTools::with_command(
         workspace,

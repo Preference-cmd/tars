@@ -77,7 +77,7 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
             )?;
             writeln!(
                 writer,
-                "Timeout: {timeout_secs}s · Network: {network} · workspace writable, .git read-only, home unreadable"
+                "Timeout: {timeout_secs}s · Network: {network} · workspace writable, .git hooks and config read-only, credentials unreadable"
             )?;
             writeln!(writer, "$ {}", escape_untrusted_text(command))?;
             writer.flush()?;
@@ -466,7 +466,8 @@ mod tests {
         assert!(output.contains("Working directory: src"));
         assert!(output.contains("Timeout: 30s"));
         assert!(output.contains("Network: none"));
-        assert!(output.contains(".git read-only"));
+        assert!(output.contains(".git hooks and config read-only"));
+        assert!(output.contains("credentials unreadable"));
         assert!(output.contains("$ cargo test"));
         assert!(output.contains("Allow this command? [y/n]"));
     }

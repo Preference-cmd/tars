@@ -1,8 +1,8 @@
 use super::parameters::CommandParams;
 use crate::definition::{CommandNetwork, CommandSettings};
 use crate::sandbox::{
-    BackendId, Launch, NetworkAccess, Sandbox, SandboxPolicy, SandboxStatus, SandboxUnavailable,
-    exit_status_code,
+    BackendId, Launch, NetworkAccess, ReadScope, Sandbox, SandboxPolicy, SandboxStatus,
+    SandboxUnavailable, exit_status_code,
 };
 use crate::workspace::Workspace;
 use causa::kernel::{CallControl, ToolResultStatus};
@@ -69,6 +69,7 @@ pub(crate) struct CommandRuntime {
     sandbox: Result<Arc<Sandbox>, SandboxUnavailable>,
     root: PathBuf,
     temp: PathBuf,
+    storage: Option<PathBuf>,
     _temp_dir: tempfile::TempDir,
     gate: Arc<Semaphore>,
 }
@@ -77,10 +78,11 @@ impl CommandRuntime {
     pub(crate) fn bind(
         workspace_root: &Path,
         settings: CommandSettings,
+        storage: Option<PathBuf>,
     ) -> Result<Arc<Self>, CommandBindError> {
         let root = std::fs::canonicalize(workspace_root).map_err(CommandBindError::Workspace)?;
         let sandbox = Sandbox::open();
-        Self::build(root, settings, sandbox)
+        Self::build(root, settings, sandbox, storage)
     }
 
     #[cfg(test)]
@@ -88,24 +90,31 @@ impl CommandRuntime {
         workspace_root: &Path,
         settings: CommandSettings,
         sandbox: Result<Sandbox, SandboxUnavailable>,
+        storage: Option<PathBuf>,
     ) -> Result<Arc<Self>, CommandBindError> {
         let root = std::fs::canonicalize(workspace_root).map_err(CommandBindError::Workspace)?;
-        Self::build(root, settings, sandbox)
+        Self::build(root, settings, sandbox, storage)
     }
 
     fn build(
         root: PathBuf,
         settings: CommandSettings,
         sandbox: Result<Sandbox, SandboxUnavailable>,
+        storage: Option<PathBuf>,
     ) -> Result<Arc<Self>, CommandBindError> {
         let sandbox = sandbox.map(Arc::new);
         let temp_dir = tempfile::tempdir().map_err(CommandBindError::Temporary)?;
         let temp = std::fs::canonicalize(temp_dir.path()).map_err(CommandBindError::Temporary)?;
+        let storage = storage.map(|path| {
+            let absolute = std::path::absolute(&path).unwrap_or(path);
+            std::fs::canonicalize(&absolute).unwrap_or(absolute)
+        });
         Ok(Arc::new(Self {
             settings,
             sandbox,
             root,
             temp,
+            storage,
             _temp_dir: temp_dir,
             gate: Arc::new(Semaphore::new(1)),
         }))
@@ -139,10 +148,22 @@ impl CommandRuntime {
             CommandNetwork::None => NetworkAccess::None,
             CommandNetwork::Open => NetworkAccess::Open,
         };
-        SandboxPolicy::new(roots.to_vec(), roots.to_vec())
-            .and_then(|policy| policy.with_read_only_subpath(self.root.join(".git")))
-            .map(|policy| policy.with_network(network))
-            .map_err(|error| error.to_string())
+        let mut policy = SandboxPolicy::new(roots.to_vec(), roots.to_vec())
+            .and_then(|policy| policy.with_git_metadata_protection(&self.root))
+            .map_err(|error| error.to_string())?
+            .with_read_scope(ReadScope::Host)
+            .with_network(network);
+        // Records of other sessions may contain pasted secrets; the current
+        // store stays unreadable unless it overlaps a writable root.
+        if let Some(storage) = &self.storage
+            && !overlaps(storage, &self.root)
+            && !overlaps(storage, &self.temp)
+        {
+            policy = policy
+                .with_denied_path(storage)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(policy)
     }
 
     pub(crate) fn check(&self, params: &CommandParams) -> Result<PreparedCommand, String> {
@@ -351,6 +372,10 @@ fn rejected(message: impl Into<String>) -> CommandExecution {
     }
 }
 
+fn overlaps(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
 fn failed(message: impl Into<String>) -> CommandExecution {
     CommandExecution {
         status: ToolResultStatus::Failed,
@@ -435,7 +460,7 @@ mod tests {
 
     fn runtime() -> (tempfile::TempDir, Arc<CommandRuntime>) {
         let root = tempfile::tempdir().unwrap();
-        let runtime = CommandRuntime::bind(root.path(), CommandSettings::default()).unwrap();
+        let runtime = CommandRuntime::bind(root.path(), CommandSettings::default(), None).unwrap();
         (root, runtime)
     }
 
@@ -460,6 +485,7 @@ mod tests {
             directory.path(),
             CommandSettings::default(),
             Err(error),
+            None,
         )
         .unwrap();
         let error = runtime.check(&params("true", None)).unwrap_err();
@@ -629,6 +655,29 @@ mod tests {
         assert_eq!(result.status, ToolResultStatus::Succeeded);
         assert_ne!(result.content["exit_code"], 0);
         assert!(!outside.exists());
+    }
+
+    #[test]
+    fn storage_denial_is_skipped_only_when_it_overlaps_a_writable_root() {
+        let root = tempfile::tempdir().unwrap();
+        let inside = root.path().join("store/sessions");
+        std::fs::create_dir_all(&inside).unwrap();
+        let runtime =
+            CommandRuntime::bind(root.path(), CommandSettings::default(), Some(inside)).unwrap();
+        assert!(runtime.policy().unwrap().denied_paths.is_empty());
+
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().join("sessions");
+        std::fs::create_dir(&outside).unwrap();
+        let runtime = CommandRuntime::bind(
+            root.path(),
+            CommandSettings::default(),
+            Some(outside.clone()),
+        )
+        .unwrap();
+        let policy = runtime.policy().unwrap();
+        assert_eq!(policy.read_scope(), ReadScope::Host);
+        assert_eq!(policy.denied_paths, vec![outside.canonicalize().unwrap()]);
     }
 
     #[test]
