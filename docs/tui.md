@@ -2,6 +2,8 @@
 
 `tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；已接通工作区工具（包括写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换）；MCP 通过 `mcp.json` 配置与表单选择、定义快照和运行期工具已接通，打开会话后状态行提示未启动的服务器和被跳过的工具，重开时若保存的 full-access 被降为 ask 也会提示，MCP 调用按权限模式支持执行、确认与拒绝；没有 GUI 或安装分发；命令经内置 `run_command` 执行，详见[工作区工具](workspace-tools.md)与[命令工具提案](../.agents/pipelines/proposals/feature/2026-10-27-sandboxed-shell-command.md)。构建与依赖基线见[当前实现](README.md)。
 
+命令确认面板显示完整命令、工作目录、期限、网络策略和“工作区可写、`.git` 只读、home 不可读”；`/status` 增加 `Commands: ...`，显示沙箱后端和各能力维度（不可用时显示原因）。新建表单在 Tools 包含 `run_command` 时显示只读的 `Command: network ... · timeout ...` 行；它不是输入字段，不能编辑。禁用命令工具后不再显示该行。
+
 ```sh
 cargo build -p tarz-tui --locked
 ./target/debug/tarz-tui --config /path/to/config.toml

@@ -6,6 +6,8 @@ Tarz 的目的是验证并改进 Causa，应用是验证的载体，见 [README 
 
 2026-10-27：`tarz-core::sandbox` 已提供平台无关策略、后端能力报告、进程树与 macOS Seatbelt 后端；探针验证文件、网络、信号与凭据边界。该层已接入 `run_command`（macOS；权限类别、定义/配置和修复清单已接通，Linux/Windows 失败关闭），完整文档和真实使用仍待第 3 步。
 
+2026-10-28：命令工具的状态显示已接通：TUI `/status` 显示沙箱后端与各能力维度，打开提示显示不可用，CLI `session create` 打印完整状态、运行命令时打印简短状态；TUI 确认面板和新建表单的只读 command 摘要已覆盖。工具级文件、网络、信号、超时/取消/Drop 与修复采纳/不重跑测试通过。SC12 的真实模型 `cargo test` 因沙箱拒绝 `~/.cargo/config.toml` 与 Xcode SDK 挂起，未放宽策略；cargo 的本地 workaround 和沙箱残余见[工作区工具](workspace-tools.md#命令工具)。
+
 ## 代码结构
 
 | 路径 | 当前职责 |
