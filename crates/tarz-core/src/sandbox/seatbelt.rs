@@ -519,6 +519,24 @@ impl SandboxBackend for SeatbeltBackend {
             Box::new(ProcessGroupControl),
         ))
     }
+
+    fn unconfined(&self, launch: Launch) -> Result<SandboxedCommand, SandboxError> {
+        launch.validate()?;
+        let mut command = tokio::process::Command::new(launch.program());
+        command.args(launch.launch_args());
+        if let Some(directory) = launch.working_directory() {
+            command.current_dir(directory);
+        }
+        command.env_clear();
+        for (name, value) in launch.environment() {
+            command.env(name, value);
+        }
+        command.process_group(0);
+        Ok(SandboxedCommand::new(
+            command,
+            Box::new(ProcessGroupControl),
+        ))
+    }
 }
 
 fn push_rules<P: AsRef<Path>>(

@@ -390,11 +390,28 @@ fn approval_max_scroll(entry: &super::Entry) -> usize {
                 .lines()
                 .count()
         }
-        tarz_core::permission::ApprovalSubject::Command { command, .. } => {
-            tarz_core::permission::escape_untrusted_text(command)
+        tarz_core::permission::ApprovalSubject::Command {
+            command,
+            outside_sandbox,
+            justification,
+            ..
+        } => {
+            let command_lines = tarz_core::permission::escape_untrusted_text(command)
                 .lines()
-                .count()
-                + 5
+                .count();
+            if *outside_sandbox {
+                let justification_lines = justification
+                    .as_deref()
+                    .map(|text| {
+                        tarz_core::permission::escape_untrusted_text(text)
+                            .lines()
+                            .count()
+                    })
+                    .unwrap_or(1);
+                command_lines + 4 + justification_lines
+            } else {
+                command_lines + 5
+            }
         }
         tarz_core::permission::ApprovalSubject::McpCall { arguments, .. } => {
             tarz_core::permission::escape_untrusted_text(arguments)

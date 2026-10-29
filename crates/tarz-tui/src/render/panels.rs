@@ -352,6 +352,16 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
                 req.mode,
             )
         }
+        tarz_core::permission::ApprovalSubject::Command {
+            outside_sandbox: true,
+            ..
+        } => {
+            format!(
+                "{} wants to run a command outside the sandbox (permission mode: {})",
+                tarz_core::permission::escape_untrusted_text(&req.tool_name),
+                req.mode,
+            )
+        }
         tarz_core::permission::ApprovalSubject::Command { .. } => {
             format!(
                 "{} wants to run a command (permission mode: {})",
@@ -457,12 +467,25 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
             workdir,
             timeout_secs,
             network,
+            outside_sandbox,
+            justification,
         } => {
-            let text = format!(
-                "Working directory: {}\nTimeout: {timeout_secs}s\nNetwork: {network}\nWorkspace: writable; .git hooks and config read-only; credentials unreadable\n\n$ {}",
-                tarz_core::permission::escape_untrusted_text(workdir),
-                tarz_core::permission::escape_untrusted_text(command),
-            );
+            let text = if *outside_sandbox {
+                format!(
+                    "NOT in the sandbox: full disk read/write, network and credentials are available\nJustification: {}\nWorking directory: {}\nTimeout: {timeout_secs}s\n\n$ {}",
+                    tarz_core::permission::escape_untrusted_text(
+                        justification.as_deref().unwrap_or("(none)")
+                    ),
+                    tarz_core::permission::escape_untrusted_text(workdir),
+                    tarz_core::permission::escape_untrusted_text(command),
+                )
+            } else {
+                format!(
+                    "Working directory: {}\nTimeout: {timeout_secs}s\nNetwork: {network}\nWorkspace: writable; .git hooks and config read-only; credentials unreadable\n\n$ {}",
+                    tarz_core::permission::escape_untrusted_text(workdir),
+                    tarz_core::permission::escape_untrusted_text(command),
+                )
+            };
             let lines: Vec<&str> = text.lines().collect();
             let scroll = entry
                 .approval_scroll
@@ -471,7 +494,14 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
                 .iter()
                 .skip(scroll)
                 .take(body_height)
-                .map(|&line| Line::from(line))
+                .map(|&line| {
+                    let style = if *outside_sandbox && line.starts_with("NOT in the sandbox") {
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    Line::styled(line, style)
+                })
                 .collect();
             frame.render_widget(Paragraph::new(visible).block(block), regions[1]);
         }

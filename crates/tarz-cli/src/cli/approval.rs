@@ -63,22 +63,48 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
             workdir,
             timeout_secs,
             network,
+            outside_sandbox,
+            justification,
         } => {
-            writeln!(
-                writer,
-                "Tarz: {} wants to run a command (permission mode: {})",
-                escape_untrusted_text(tool_name),
-                mode,
-            )?;
-            writeln!(
-                writer,
-                "Working directory: {}",
-                escape_untrusted_text(workdir)
-            )?;
-            writeln!(
-                writer,
-                "Timeout: {timeout_secs}s · Network: {network} · workspace writable, .git hooks and config read-only, credentials unreadable"
-            )?;
+            if *outside_sandbox {
+                writeln!(
+                    writer,
+                    "Tarz: {} wants to run a command outside the sandbox (permission mode: {})",
+                    escape_untrusted_text(tool_name),
+                    mode,
+                )?;
+                writeln!(
+                    writer,
+                    "NOT in the sandbox: full disk read/write, network and credentials are available"
+                )?;
+                writeln!(
+                    writer,
+                    "Justification: {}",
+                    escape_untrusted_text(justification.as_deref().unwrap_or("(none)"))
+                )?;
+                writeln!(
+                    writer,
+                    "Working directory: {}",
+                    escape_untrusted_text(workdir)
+                )?;
+                writeln!(writer, "Timeout: {timeout_secs}s")?;
+            } else {
+                writeln!(
+                    writer,
+                    "Tarz: {} wants to run a command (permission mode: {})",
+                    escape_untrusted_text(tool_name),
+                    mode,
+                )?;
+                writeln!(
+                    writer,
+                    "Working directory: {}",
+                    escape_untrusted_text(workdir)
+                )?;
+                writeln!(
+                    writer,
+                    "Timeout: {timeout_secs}s · Network: {network} · workspace writable, .git hooks and config read-only, credentials unreadable"
+                )?;
+            }
             writeln!(writer, "$ {}", escape_untrusted_text(command))?;
             writer.flush()?;
         }
@@ -103,6 +129,10 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
 
     let prompt_text = match subject {
         ApprovalSubject::FileWrite { .. } => "Allow this write? [y/n] ",
+        ApprovalSubject::Command {
+            outside_sandbox: true,
+            ..
+        } => "Allow this command outside the sandbox? [y/n] ",
         ApprovalSubject::Command { .. } => "Allow this command? [y/n] ",
         ApprovalSubject::McpCall { .. } => "Allow this tool call? [y/n] ",
     };
@@ -446,6 +476,8 @@ mod tests {
             workdir: "src".into(),
             timeout_secs: 30,
             network: CommandNetwork::None,
+            outside_sandbox: false,
+            justification: None,
         };
         let mut reader = Cursor::new(b"y\n");
         let mut writer = Vec::new();
@@ -470,6 +502,41 @@ mod tests {
         assert!(output.contains("credentials unreadable"));
         assert!(output.contains("$ cargo test"));
         assert!(output.contains("Allow this command? [y/n]"));
+    }
+
+    #[test]
+    fn outside_command_displays_the_warning_and_justification() {
+        let subject = ApprovalSubject::Command {
+            command: "cargo test".into(),
+            workdir: "src".into(),
+            timeout_secs: 30,
+            network: CommandNetwork::None,
+            outside_sandbox: true,
+            justification: Some("the sandbox blocks the user cargo cache".into()),
+        };
+        let mut reader = Cursor::new(b"y\n");
+        let mut writer = Vec::new();
+        let prompt_open = AtomicBool::new(false);
+        let cancelled = AtomicBool::new(false);
+        let decision = ask_approval(
+            "run_command",
+            PermissionMode::Ask,
+            &subject,
+            &mut reader,
+            &mut writer,
+            &prompt_open,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(decision, ApprovalDecision::Allow);
+        let output = String::from_utf8(writer).unwrap();
+        assert!(output.contains("outside the sandbox"));
+        assert!(output.contains("NOT in the sandbox"));
+        assert!(output.contains("Justification: the sandbox blocks the user cargo cache"));
+        assert!(output.contains("Working directory: src"));
+        assert!(output.contains("$ cargo test"));
+        assert!(output.contains("Allow this command outside the sandbox? [y/n]"));
+        assert!(!output.contains("Network: none"));
     }
 
     #[test]

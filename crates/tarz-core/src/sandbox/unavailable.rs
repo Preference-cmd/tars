@@ -35,4 +35,8 @@ impl SandboxBackend for UnavailableBackend {
     ) -> Result<SandboxedCommand, SandboxError> {
         Err(self.unavailable().into())
     }
+
+    fn unconfined(&self, _launch: Launch) -> Result<SandboxedCommand, SandboxError> {
+        Err(self.unavailable().into())
+    }
 }

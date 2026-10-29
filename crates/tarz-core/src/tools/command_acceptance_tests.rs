@@ -556,6 +556,113 @@ echo host-tool-ok
     );
 }
 
+fn git_available() -> bool {
+    Command::new("/usr/bin/git")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[tokio::test]
+async fn git_operations_work_while_metadata_stays_protected() {
+    assert!(
+        git_available(),
+        "the macOS acceptance suite requires /usr/bin/git"
+    );
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let status = Command::new("/usr/bin/git")
+        .args(["init", "-q"])
+        .arg(&root)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git init failed");
+    std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+    let hook = root.join(".git/hooks/pre-commit");
+    std::fs::write(&hook, "#!/bin/sh\necho hook-ran\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(&hook).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&hook, permissions).unwrap();
+    std::fs::create_dir_all(root.join(".git/modules/x/hooks")).unwrap();
+    let config_before = std::fs::read_to_string(root.join(".git/config")).unwrap();
+
+    let script = r#"set -u
+git -c user.name=tarz -c user.email=tarz@example.invalid add tracked.txt || exit 10
+git -c user.name=tarz -c user.email=tarz@example.invalid commit -m one 2>&1 | grep -q hook-ran || exit 11
+git checkout -b feature >/dev/null 2>&1 || exit 12
+printf two >> tracked.txt
+git -c user.name=tarz -c user.email=tarz@example.invalid stash >/dev/null 2>&1 || exit 13
+if printf pwn > .git/hooks/pre-commit 2>/dev/null; then exit 14; fi
+if printf pwn > .git/config 2>/dev/null; then exit 15; fi
+if git config core.hooksPath /tmp/x 2>/dev/null; then exit 16; fi
+if printf pwn > .git/modules/x/hooks/y 2>/dev/null; then exit 17; fi
+if printf pwn > .git/modules/x/config 2>/dev/null; then exit 19; fi
+if mv .git moved 2>/dev/null; then exit 18; fi
+echo git-ok
+"#;
+    let invocation = call(json!({ "command": script }));
+    let tool = bound_tool(
+        &root,
+        CommandNetwork::None,
+        std::slice::from_ref(&invocation),
+    );
+    let result = execute(&tool, &invocation, &control(Duration::from_secs(15))).await;
+    assert_eq!(result.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        result.output.content["exit_code"], 0,
+        "{}",
+        result.output.content["output"]
+    );
+    assert!(
+        result.output.content["output"]
+            .as_str()
+            .unwrap()
+            .contains("git-ok")
+    );
+
+    let log = Command::new("/usr/bin/git")
+        .args(["-C", root.to_str().unwrap(), "log", "--oneline"])
+        .output()
+        .unwrap();
+    assert!(log.status.success());
+    assert!(String::from_utf8_lossy(&log.stdout).contains("one"));
+    assert_eq!(
+        std::fs::read_to_string(&hook).unwrap(),
+        "#!/bin/sh\necho hook-ran\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".git/config")).unwrap(),
+        config_before
+    );
+    assert!(root.join(".git").is_dir());
+    assert!(!root.join("moved").exists());
+}
+
+#[tokio::test]
+async fn git_init_is_blocked_in_a_fresh_workspace() {
+    assert!(
+        git_available(),
+        "the macOS acceptance suite requires /usr/bin/git"
+    );
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let invocation = call(json!({ "command": "/usr/bin/git init -q" }));
+    let tool = bound_tool(
+        &root,
+        CommandNetwork::None,
+        std::slice::from_ref(&invocation),
+    );
+    let result = execute(&tool, &invocation, &control(Duration::from_secs(10))).await;
+    assert_eq!(result.status, ToolResultStatus::Succeeded);
+    assert_ne!(result.output.content["exit_code"], 0);
+    assert!(!root.join(".git").exists());
+}
+
 #[tokio::test]
 async fn a_failed_probe_rejects_every_tool_call_without_launching() {
     let directory = tempfile::tempdir().unwrap();
@@ -578,9 +685,16 @@ async fn a_failed_probe_rejects_every_tool_call_without_launching() {
         CommandSettings::default(),
         Some(runtime),
     );
+    let outside = call(json!({
+        "command": "printf third > third.txt",
+        "outside_sandbox": true,
+        "justification": "needs to write outside the workspace"
+    }));
+    shared.outside_sandbox_grants().grant(outside.call_block_id);
     let calls = vec![
         call(json!({"command": "printf first > first.txt"})),
         call(json!({"command": "printf second > second.txt"})),
+        outside,
     ];
     let report = reporter(&calls);
     let tool = shared
@@ -601,5 +715,6 @@ async fn a_failed_probe_rejects_every_tool_call_without_launching() {
     );
     assert!(!directory.path().join("first.txt").exists());
     assert!(!directory.path().join("second.txt").exists());
+    assert!(!directory.path().join("third.txt").exists());
     report.drain().await;
 }

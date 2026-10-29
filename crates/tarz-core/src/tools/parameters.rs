@@ -53,6 +53,35 @@ pub(crate) struct CommandParams {
     pub command: String,
     pub workdir: Option<String>,
     pub timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub outside_sandbox: Option<bool>,
+    #[serde(default)]
+    pub justification: Option<String>,
+}
+
+/// Whether a call asks for execution outside the sandbox.
+///
+/// A value that is neither a boolean nor null is treated as a request for the
+/// stricter outside class; parameter decoding rejects it afterwards.
+pub(crate) fn requests_outside_sandbox(input: &serde_json::Value) -> bool {
+    let Some(object) = input.as_object() else {
+        return true;
+    };
+    match object.get("outside_sandbox") {
+        Some(serde_json::Value::Bool(value)) => *value,
+        // A present non-boolean value, including null, is malformed and takes
+        // the stricter class; decoding rejects it before execution.
+        Some(_) => true,
+        None => false,
+    }
+}
+
+impl CommandParams {
+    /// The justification when it is present and valid for an outside run.
+    pub(crate) fn outside_justification(&self) -> Option<&str> {
+        let text = self.justification.as_deref()?;
+        (!text.trim().is_empty() && text.len() <= 1024 && !text.contains('\0')).then_some(text)
+    }
 }
 
 #[derive(Clone)]
@@ -82,7 +111,13 @@ impl Params {
             WorkspaceTool::SearchText => &["path", "query", "max_matches"],
             WorkspaceTool::WriteFile => &["path", "content"],
             WorkspaceTool::EditFile => &["path", "edits"],
-            WorkspaceTool::RunCommand => &["command", "workdir", "timeout_secs"],
+            WorkspaceTool::RunCommand => &[
+                "command",
+                "workdir",
+                "timeout_secs",
+                "outside_sandbox",
+                "justification",
+            ],
         };
         if object.len() > allowed.len() || object.keys().any(|key| !allowed.contains(&key.as_str()))
         {
@@ -105,10 +140,17 @@ impl Params {
                 "workdir" if value.as_str().is_none() => {
                     return Err(Cow::Borrowed("workdir must be a string"));
                 }
+                "justification" if value.as_str().is_none() => {
+                    return Err(Cow::Borrowed("justification must be a string"));
+                }
+                "outside_sandbox" if !matches!(value, serde_json::Value::Bool(_)) => {
+                    return Err(Cow::Borrowed("outside_sandbox must be a boolean"));
+                }
                 "edits" if value.as_array().is_none() => {
                     return Err(Cow::Borrowed("edits must be an array"));
                 }
-                "path" | "query" | "content" | "edits" | "command" | "workdir" => {}
+                "path" | "query" | "content" | "edits" | "command" | "workdir"
+                | "justification" | "outside_sandbox" => {}
                 _ if value.as_u64().is_none() => {
                     return Err(Cow::Borrowed("limits must be positive integers"));
                 }
@@ -200,6 +242,19 @@ impl Params {
                 }) {
                     return Err(Cow::Borrowed(
                         "timeout_secs exceeds the configured command bound",
+                    ));
+                }
+                if let Some(text) = p.justification.as_deref()
+                    && (text.len() > 1024 || text.contains('\0'))
+                {
+                    return Err(Cow::Borrowed(
+                        "justification must be at most 1 KiB without NUL",
+                    ));
+                }
+                if p.outside_sandbox == Some(true) && p.outside_justification().is_none() {
+                    return Err(Cow::Borrowed(
+                        "outside_sandbox requires a nonempty justification of at most 1 KiB \
+                         without NUL",
                     ));
                 }
             }

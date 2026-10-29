@@ -8,6 +8,7 @@ pub(crate) mod parameters;
 pub(crate) mod resources;
 
 pub(crate) use command::CommandRuntime;
+pub(crate) use command::OutsideSandboxGrants;
 
 #[cfg(test)]
 pub use diff::DiffSummary;

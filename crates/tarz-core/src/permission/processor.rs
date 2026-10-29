@@ -27,6 +27,8 @@ pub enum ToolPermissionClass {
     BuiltinWrite,
     /// Built-in sandboxed command tool.
     BuiltinCommand,
+    /// Built-in command tool requested to run outside the sandbox.
+    CommandOutsideSandbox,
     /// MCP tool requiring confirmation: prompt approval, or writes approval without read-only or with destructive.
     McpPrompt,
     /// MCP tool configured with approve approval.
@@ -51,6 +53,7 @@ pub(crate) fn decide(mode: PermissionMode, category: ToolPermissionClass) -> Per
             ToolPermissionClass::KnownReadOnly => PermissionVerdict::Execute,
             ToolPermissionClass::BuiltinWrite
             | ToolPermissionClass::BuiltinCommand
+            | ToolPermissionClass::CommandOutsideSandbox
             | ToolPermissionClass::McpPrompt
             | ToolPermissionClass::McpApprove => PermissionVerdict::Reject,
         },
@@ -60,13 +63,15 @@ pub(crate) fn decide(mode: PermissionMode, category: ToolPermissionClass) -> Per
             }
             ToolPermissionClass::BuiltinWrite
             | ToolPermissionClass::BuiltinCommand
+            | ToolPermissionClass::CommandOutsideSandbox
             | ToolPermissionClass::McpPrompt => PermissionVerdict::Ask,
         },
         PermissionMode::AcceptEdits => match category {
             ToolPermissionClass::KnownReadOnly
             | ToolPermissionClass::BuiltinWrite
+            | ToolPermissionClass::BuiltinCommand
             | ToolPermissionClass::McpApprove => PermissionVerdict::Execute,
-            ToolPermissionClass::BuiltinCommand | ToolPermissionClass::McpPrompt => {
+            ToolPermissionClass::CommandOutsideSandbox | ToolPermissionClass::McpPrompt => {
                 PermissionVerdict::Ask
             }
         },
@@ -98,6 +103,9 @@ pub enum PermissionDecisionKind {
     ModeRefused,
     /// Write call rejected because no prepared write record was found.
     Unprepared,
+    /// Outside-sandbox call rejected because its parameters could not be
+    /// decoded for permission handling.
+    UnpreparedOutsideSandbox,
     /// Call rejected because no confirmation route was available.
     NoConfirmationRoute,
     /// Call rejected because the tool is unknown or unavailable.
@@ -115,6 +123,7 @@ pub(crate) struct PermissionProcessor {
             std::collections::HashMap<causa::kernel::BlockId, crate::tools::PreparedWrite>,
         >,
     >,
+    grants: Arc<crate::tools::OutsideSandboxGrants>,
 }
 
 impl PermissionProcessor {
@@ -128,6 +137,7 @@ impl PermissionProcessor {
                 std::collections::HashMap<causa::kernel::BlockId, crate::tools::PreparedWrite>,
             >,
         >,
+        grants: Arc<crate::tools::OutsideSandboxGrants>,
     ) -> Self {
         Self {
             work,
@@ -135,6 +145,7 @@ impl PermissionProcessor {
             hub,
             command_settings,
             prepared,
+            grants,
         }
     }
 }
@@ -150,6 +161,8 @@ impl ToolBatchProcessor for PermissionProcessor {
             turn_id: ctx.turn_id.clone(),
             round_id: ctx.round_id,
         };
+        // Grants belong to one batch and never outlive a cancelled call.
+        self.grants.clear();
 
         let view = ctx
             .data::<PermissionView>()
@@ -172,7 +185,7 @@ impl ToolBatchProcessor for PermissionProcessor {
 
             let (mode, revision) = view.get();
 
-            let Some(category) = view.classify_tool(&tool_name) else {
+            let Some(category) = view.classify_call(&tool_name, &call.input.arguments) else {
                 self.reporter.record_permission_decision(
                     &call,
                     &invocation_id,
@@ -196,6 +209,9 @@ impl ToolBatchProcessor for PermissionProcessor {
             let verdict = decide(mode, category);
             match verdict {
                 PermissionVerdict::Execute => {
+                    if category == ToolPermissionClass::CommandOutsideSandbox {
+                        self.grants.grant(call_block_id);
+                    }
                     self.reporter.record_permission_decision(
                         &call,
                         &invocation_id,
@@ -224,6 +240,10 @@ impl ToolBatchProcessor for PermissionProcessor {
                         }
                         ToolPermissionClass::BuiltinCommand => format!(
                             "the current permission mode '{mode}' does not allow this command"
+                        ),
+                        ToolPermissionClass::CommandOutsideSandbox => format!(
+                            "the current permission mode '{mode}' does not allow running a \
+                             command outside the sandbox"
                         ),
                         _ => format!(
                             "the current permission mode '{mode}' does not allow this MCP tool call"
@@ -273,7 +293,9 @@ impl ToolBatchProcessor for PermissionProcessor {
                                 false,
                             )
                         }
-                        ToolPermissionClass::BuiltinCommand => {
+                        ToolPermissionClass::BuiltinCommand
+                        | ToolPermissionClass::CommandOutsideSandbox => {
+                            let outside = category == ToolPermissionClass::CommandOutsideSandbox;
                             let decoded = crate::tools::parameters::Params::decode(
                                 WorkspaceTool::RunCommand,
                                 &call.input.arguments,
@@ -291,7 +313,11 @@ impl ToolBatchProcessor for PermissionProcessor {
                                     PermissionDecision {
                                         mode,
                                         revision,
-                                        kind: PermissionDecisionKind::Unprepared,
+                                        kind: if outside {
+                                            PermissionDecisionKind::UnpreparedOutsideSandbox
+                                        } else {
+                                            PermissionDecisionKind::Unprepared
+                                        },
                                     },
                                 );
                                 resolve_call(
@@ -312,6 +338,8 @@ impl ToolBatchProcessor for PermissionProcessor {
                                         .timeout_secs
                                         .unwrap_or(self.command_settings.default_timeout_secs),
                                     network: self.command_settings.network,
+                                    outside_sandbox: outside,
+                                    justification: params.justification,
                                 },
                                 false,
                                 true,
@@ -401,6 +429,9 @@ impl ToolBatchProcessor for PermissionProcessor {
 
                     match reply_res {
                         Ok(ApprovalDecision::Allow) => {
+                            if category == ToolPermissionClass::CommandOutsideSandbox {
+                                self.grants.grant(call_block_id);
+                            }
                             self.reporter.record_permission_decision(
                                 &call,
                                 &invocation_id,
@@ -421,7 +452,16 @@ impl ToolBatchProcessor for PermissionProcessor {
                                     kind: PermissionDecisionKind::AskedAndDenied,
                                 },
                             );
-                            let msg = if is_command {
+                            let msg = if category == ToolPermissionClass::CommandOutsideSandbox {
+                                match reason {
+                                    Some(r) => format!(
+                                        "user declined this command outside the sandbox: {r}"
+                                    ),
+                                    None => {
+                                        "user declined this command outside the sandbox".to_string()
+                                    }
+                                }
+                            } else if is_command {
                                 match reason {
                                     Some(r) => format!("user declined this command: {r}"),
                                     None => "user declined this command".to_string(),

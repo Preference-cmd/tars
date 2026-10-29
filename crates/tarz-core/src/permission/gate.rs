@@ -46,7 +46,10 @@ impl ToolBatchProcessor for ModeGateProcessor {
         for entry in batch.results_mut() {
             let call = entry.call().clone();
             let tool_name = &call.input.tool_name;
-            if view.classify_tool(tool_name).is_none() {
+            if view
+                .classify_call(tool_name, &call.input.arguments)
+                .is_none()
+            {
                 self.reporter.record_permission_decision(
                     &call,
                     &invocation_id,
@@ -81,7 +84,7 @@ impl ToolBatchProcessor for ModeGateProcessor {
 
             let (mode, revision) = view.get();
 
-            let Some(category) = view.classify_tool(&tool_name) else {
+            let Some(category) = view.classify_call(&tool_name, &call.input.arguments) else {
                 self.reporter.record_permission_decision(
                     &call,
                     &invocation_id,
@@ -122,6 +125,10 @@ impl ToolBatchProcessor for ModeGateProcessor {
                         }
                         ToolPermissionClass::BuiltinCommand => format!(
                             "the current permission mode '{mode}' does not allow this command"
+                        ),
+                        ToolPermissionClass::CommandOutsideSandbox => format!(
+                            "the current permission mode '{mode}' does not allow running a \
+                             command outside the sandbox"
                         ),
                         _ => format!(
                             "the current permission mode '{mode}' does not allow this MCP tool call"

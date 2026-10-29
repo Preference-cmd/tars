@@ -81,6 +81,22 @@ impl PermissionView {
         self.get().1
     }
 
+    /// Classify a tool call by name and arguments.
+    ///
+    /// The gate and the permission processor both use this so a per-call
+    /// outside-sandbox request cannot be classified differently in the two
+    /// places.
+    pub(crate) fn classify_call(
+        &self,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Option<ToolPermissionClass> {
+        if name == "run_command" && crate::tools::parameters::requests_outside_sandbox(arguments) {
+            return Some(ToolPermissionClass::CommandOutsideSandbox);
+        }
+        self.classify_tool(name)
+    }
+
     /// Classify a tool by name, checking built-in workspace tools first,
     /// then the registered MCP tools.
     pub(crate) fn classify_tool(&self, name: &str) -> Option<ToolPermissionClass> {

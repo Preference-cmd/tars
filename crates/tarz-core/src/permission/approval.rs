@@ -56,7 +56,7 @@ pub enum ApprovalSubject {
         /// Unified diff showing the proposed changes.
         diff: String,
     },
-    /// Sandboxed shell command requiring confirmation.
+    /// Shell command requiring confirmation.
     Command {
         /// Command text as provided by the model.
         command: String,
@@ -66,6 +66,10 @@ pub enum ApprovalSubject {
         timeout_secs: u64,
         /// Network policy for this command.
         network: CommandNetwork,
+        /// Whether the command would run outside the sandbox.
+        outside_sandbox: bool,
+        /// The model's reason for requesting an outside run.
+        justification: Option<String>,
     },
     /// MCP tool call requiring confirmation.
     McpCall {

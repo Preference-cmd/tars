@@ -5,9 +5,9 @@ use crate::sandbox::{
     SandboxUnavailable, exit_status_code,
 };
 use crate::workspace::Workspace;
-use causa::kernel::{CallControl, ToolResultStatus};
+use causa::kernel::{BlockId, CallControl, ToolResultStatus};
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -54,7 +54,47 @@ pub(crate) struct PreparedCommand {
     pub(crate) workdir: PathBuf,
     pub(crate) timeout_secs: u64,
     pub(crate) policy: SandboxPolicy,
+    pub(crate) outside_sandbox: bool,
 }
+
+/// Per-call permission to run one command outside the sandbox.
+///
+/// The permission processor issues a grant only after it has applied the mode
+/// table and any confirmation. The command tool consumes it; a call that
+/// bypasses the processor finds no grant and is rejected instead of falling
+/// back to a sandboxed or bare launch.
+#[derive(Default)]
+pub(crate) struct OutsideSandboxGrants {
+    granted: Mutex<HashSet<BlockId>>,
+}
+
+impl OutsideSandboxGrants {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub(crate) fn grant(&self, call: BlockId) {
+        self.granted
+            .lock()
+            .expect("command grant lock")
+            .insert(call);
+    }
+
+    pub(crate) fn take(&self, call: BlockId) -> Option<OutsideSandboxGrant> {
+        self.granted
+            .lock()
+            .expect("command grant lock")
+            .remove(&call)
+            .then_some(OutsideSandboxGrant(()))
+    }
+
+    pub(crate) fn clear(&self) {
+        self.granted.lock().expect("command grant lock").clear();
+    }
+}
+
+/// Proof that one call was granted outside-sandbox execution.
+pub(crate) struct OutsideSandboxGrant(());
 
 /// The result of one command attempt, including bounded output.
 pub(crate) struct CommandExecution {
@@ -176,18 +216,28 @@ impl CommandRuntime {
                 self.settings.max_timeout_secs
             ));
         }
+        let outside_sandbox = params.outside_sandbox == Some(true);
+        if outside_sandbox && params.outside_justification().is_none() {
+            return Err(
+                "outside_sandbox requires a nonempty justification of at most 1 KiB without NUL"
+                    .into(),
+            );
+        }
         let workdir = self.resolve_workdir(params.workdir.as_deref())?;
         let sandbox = self.sandbox.as_ref().map_err(|error| error.to_string())?;
         let policy = self.policy()?;
-        sandbox
-            .report()
-            .check(&policy)
-            .map_err(|error| error.to_string())?;
+        if !outside_sandbox {
+            sandbox
+                .report()
+                .check(&policy)
+                .map_err(|error| error.to_string())?;
+        }
         Ok(PreparedCommand {
             command: params.command.clone(),
             workdir,
             timeout_secs,
             policy,
+            outside_sandbox,
         })
     }
 
@@ -220,10 +270,14 @@ impl CommandRuntime {
     pub(crate) async fn run(
         &self,
         prepared: PreparedCommand,
+        grant: Option<OutsideSandboxGrant>,
         _permit: OwnedSemaphorePermit,
         control: &CallControl,
         max_output_bytes: usize,
     ) -> CommandExecution {
+        if prepared.outside_sandbox && grant.is_none() {
+            return rejected("outside-sandbox execution was not granted");
+        }
         let sandbox = match &self.sandbox {
             Ok(sandbox) => sandbox,
             Err(error) => return rejected(error.to_string()),
@@ -241,7 +295,12 @@ impl CommandRuntime {
             .env("TMPDIR", self.temp.as_os_str())
             .env("TERM", "dumb")
             .env("NO_COLOR", "1");
-        let mut wrapped = match sandbox.wrap(&prepared.policy, launch) {
+        let wrapped = if prepared.outside_sandbox {
+            sandbox.unconfined(launch)
+        } else {
+            sandbox.wrap(&prepared.policy, launch)
+        };
+        let mut wrapped = match wrapped {
             Ok(command) => command,
             Err(error) => return rejected(error.to_string()),
         };
@@ -324,6 +383,9 @@ impl CommandRuntime {
         });
         if let Some(signal) = signal {
             content["signal"] = json!(signal);
+        }
+        if prepared.outside_sandbox {
+            content["outside_sandbox"] = json!(true);
         }
         let status = match stopped {
             Some(stop) => {
@@ -497,6 +559,8 @@ mod tests {
             command: command.into(),
             workdir: None,
             timeout_secs,
+            outside_sandbox: None,
+            justification: None,
         }
     }
 
@@ -515,7 +579,7 @@ mod tests {
         let command_control = outer.with_timeout(timeout);
         let permit = runtime.acquire(&command_control).await.unwrap();
         runtime
-            .run(prepared, permit, &command_control, max_output_bytes)
+            .run(prepared, None, permit, &command_control, max_output_bytes)
             .await
     }
 
@@ -681,6 +745,56 @@ mod tests {
     }
 
     #[test]
+    fn outside_justification_bounds_are_enforced_by_decoding() {
+        use crate::definition::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
+        use serde_json::json;
+
+        let decode = |outside: bool, justification: Option<String>| {
+            crate::tools::parameters::Params::decode(
+                WorkspaceTool::RunCommand,
+                &json!({
+                    "command": "true",
+                    "outside_sandbox": outside,
+                    "justification": justification
+                }),
+                &WorkspaceToolLimits::default(),
+                &WriteToolLimits::default(),
+                CommandSettings::default(),
+            )
+        };
+        assert!(decode(true, Some("x".repeat(1024))).is_ok());
+        assert!(decode(true, Some("x".repeat(1025))).is_err());
+        assert!(decode(true, Some("中".repeat(341))).is_ok());
+        assert!(decode(true, Some("中".repeat(342))).is_err());
+        assert!(decode(true, Some("  ".into())).is_err());
+        assert!(decode(true, Some("a\0b".into())).is_err());
+        assert!(decode(true, None).is_err());
+        assert!(decode(false, Some("x".repeat(1025))).is_err());
+        assert!(decode(false, Some("a\0b".into())).is_err());
+    }
+
+    #[test]
+    fn an_outside_request_needs_a_justification_before_execution() {
+        let (_root, runtime) = runtime();
+        let without = CommandParams {
+            command: "true".into(),
+            workdir: None,
+            timeout_secs: None,
+            outside_sandbox: Some(true),
+            justification: None,
+        };
+        let error = runtime.check(&without).unwrap_err();
+        assert!(error.contains("justification"), "{error}");
+
+        let with = CommandParams {
+            justification: Some("the sandbox blocks a needed path".into()),
+            ..without
+        };
+        let prepared = runtime.check(&with).unwrap();
+        assert!(prepared.outside_sandbox);
+    }
+
+    #[test]
     fn timeout_above_the_session_bound_is_rejected() {
         let (_root, runtime) = runtime();
         let error = runtime.check(&params("true", Some(601))).unwrap_err();
@@ -695,6 +809,8 @@ mod tests {
                 command: "pwd".into(),
                 workdir: Some("../".into()),
                 timeout_secs: None,
+                outside_sandbox: None,
+                justification: None,
             })
             .unwrap_err();
         assert!(error.contains("bounded relative path"));

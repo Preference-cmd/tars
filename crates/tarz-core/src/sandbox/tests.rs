@@ -281,6 +281,17 @@ fn sandbox_fails_closed_when_the_probe_fails() {
     assert!(calls.lock().unwrap().is_empty());
 }
 
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn unavailable_backend_rejects_unconfined_launches() {
+    use super::backend::SandboxBackend;
+    let backend = super::unavailable::UnavailableBackend::new();
+    let error = backend
+        .unconfined(Launch::new("/bin/true"))
+        .expect_err("an unavailable backend must not launch unconfined");
+    assert!(matches!(error, SandboxError::Unavailable(_)));
+}
+
 #[test]
 fn recording_backend_wraps_and_records_the_policy() {
     let (_directory, policy) = policy();

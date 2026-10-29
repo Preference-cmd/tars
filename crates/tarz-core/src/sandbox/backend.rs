@@ -393,6 +393,17 @@ impl Sandbox {
         launch.validate()?;
         self.backend.wrap(policy, launch)
     }
+
+    /// Build one process without isolation, but with the same process-tree
+    /// control as a wrapped launch.
+    ///
+    /// This never falls back to a bare spawn: a backend that cannot provide it
+    /// returns an error, so a platform without a sandbox also has no
+    /// unconfined launch.
+    pub fn unconfined(&self, launch: Launch) -> Result<SandboxedCommand, SandboxError> {
+        launch.validate()?;
+        self.backend.unconfined(launch)
+    }
 }
 
 pub(crate) trait SandboxBackend: Send + Sync {
@@ -403,6 +414,7 @@ pub(crate) trait SandboxBackend: Send + Sync {
         policy: &SandboxPolicy,
         launch: Launch,
     ) -> Result<SandboxedCommand, SandboxError>;
+    fn unconfined(&self, launch: Launch) -> Result<SandboxedCommand, SandboxError>;
 }
 
 pub(crate) fn platform_backend() -> Box<dyn SandboxBackend> {

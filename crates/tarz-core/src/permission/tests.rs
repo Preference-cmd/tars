@@ -1088,6 +1088,7 @@ async fn unprepared_write_in_ask_mode_records_unprepared_decision() {
         hub,
         crate::definition::CommandSettings::default(),
         prepared_empty,
+        crate::tools::OutsideSandboxGrants::new(),
     );
 
     let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
@@ -1763,112 +1764,66 @@ async fn wm01_wm02_precheck_negative_cases_and_directory_creation_through_chain(
 }
 
 #[test]
-fn wm17_decide_20_cells_exhaustive() {
+fn wm17_decide_24_cells_exhaustive() {
     use crate::permission::{PermissionMode, PermissionVerdict, ToolPermissionClass, decide};
 
-    assert_eq!(
-        decide(PermissionMode::ReadOnly, ToolPermissionClass::KnownReadOnly),
-        PermissionVerdict::Execute
-    );
-    assert_eq!(
-        decide(PermissionMode::ReadOnly, ToolPermissionClass::BuiltinWrite),
-        PermissionVerdict::Reject
-    );
-    assert_eq!(
-        decide(
-            PermissionMode::ReadOnly,
-            ToolPermissionClass::BuiltinCommand
-        ),
-        PermissionVerdict::Reject
-    );
-    assert_eq!(
-        decide(PermissionMode::ReadOnly, ToolPermissionClass::McpPrompt),
-        PermissionVerdict::Reject
-    );
-    assert_eq!(
-        decide(PermissionMode::ReadOnly, ToolPermissionClass::McpApprove),
-        PermissionVerdict::Reject
-    );
+    use PermissionMode::{AcceptEdits, Ask, FullAccess, ReadOnly};
+    use PermissionVerdict::{Ask as AskUser, Execute, Reject};
+    use ToolPermissionClass::{
+        BuiltinCommand, BuiltinWrite, CommandOutsideSandbox, KnownReadOnly, McpApprove, McpPrompt,
+    };
 
-    assert_eq!(
-        decide(PermissionMode::Ask, ToolPermissionClass::KnownReadOnly),
-        PermissionVerdict::Execute
-    );
-    assert_eq!(
-        decide(PermissionMode::Ask, ToolPermissionClass::BuiltinWrite),
-        PermissionVerdict::Ask
-    );
-    assert_eq!(
-        decide(PermissionMode::Ask, ToolPermissionClass::BuiltinCommand),
-        PermissionVerdict::Ask
-    );
-    assert_eq!(
-        decide(PermissionMode::Ask, ToolPermissionClass::McpPrompt),
-        PermissionVerdict::Ask
-    );
-    assert_eq!(
-        decide(PermissionMode::Ask, ToolPermissionClass::McpApprove),
-        PermissionVerdict::Execute
-    );
+    let cells = [
+        (ReadOnly, KnownReadOnly, Execute),
+        (ReadOnly, BuiltinWrite, Reject),
+        (ReadOnly, BuiltinCommand, Reject),
+        (ReadOnly, CommandOutsideSandbox, Reject),
+        (ReadOnly, McpPrompt, Reject),
+        (ReadOnly, McpApprove, Reject),
+        (Ask, KnownReadOnly, Execute),
+        (Ask, BuiltinWrite, AskUser),
+        (Ask, BuiltinCommand, AskUser),
+        (Ask, CommandOutsideSandbox, AskUser),
+        (Ask, McpPrompt, AskUser),
+        (Ask, McpApprove, Execute),
+        (AcceptEdits, KnownReadOnly, Execute),
+        (AcceptEdits, BuiltinWrite, Execute),
+        (AcceptEdits, BuiltinCommand, Execute),
+        (AcceptEdits, CommandOutsideSandbox, AskUser),
+        (AcceptEdits, McpPrompt, AskUser),
+        (AcceptEdits, McpApprove, Execute),
+        (FullAccess, KnownReadOnly, Execute),
+        (FullAccess, BuiltinWrite, Execute),
+        (FullAccess, BuiltinCommand, Execute),
+        (FullAccess, CommandOutsideSandbox, Execute),
+        (FullAccess, McpPrompt, Execute),
+        (FullAccess, McpApprove, Execute),
+    ];
+    for (mode, class, expected) in cells {
+        assert_eq!(
+            decide(mode, class),
+            expected,
+            "mode {mode:?}, class {class:?}"
+        );
+    }
+}
 
-    assert_eq!(
-        decide(
-            PermissionMode::AcceptEdits,
-            ToolPermissionClass::KnownReadOnly
-        ),
-        PermissionVerdict::Execute
-    );
-    assert_eq!(
-        decide(
-            PermissionMode::AcceptEdits,
-            ToolPermissionClass::BuiltinWrite
-        ),
-        PermissionVerdict::Execute
-    );
-    assert_eq!(
-        decide(
-            PermissionMode::AcceptEdits,
-            ToolPermissionClass::BuiltinCommand
-        ),
-        PermissionVerdict::Ask
-    );
-    assert_eq!(
-        decide(PermissionMode::AcceptEdits, ToolPermissionClass::McpPrompt),
-        PermissionVerdict::Ask
-    );
-    assert_eq!(
-        decide(PermissionMode::AcceptEdits, ToolPermissionClass::McpApprove),
-        PermissionVerdict::Execute
-    );
+#[test]
+fn malformed_run_command_arguments_take_the_outside_class() {
+    use crate::permission::ToolPermissionClass;
 
+    let view = crate::permission::PermissionHub::new(PermissionMode::Ask).view();
     assert_eq!(
-        decide(
-            PermissionMode::FullAccess,
-            ToolPermissionClass::KnownReadOnly
-        ),
-        PermissionVerdict::Execute
+        view.classify_call("run_command", &json!("not an object")),
+        Some(ToolPermissionClass::CommandOutsideSandbox)
     );
     assert_eq!(
-        decide(
-            PermissionMode::FullAccess,
-            ToolPermissionClass::BuiltinWrite
-        ),
-        PermissionVerdict::Execute
+        view.classify_call("run_command", &json!({"outside_sandbox": null})),
+        Some(ToolPermissionClass::CommandOutsideSandbox)
     );
     assert_eq!(
-        decide(
-            PermissionMode::FullAccess,
-            ToolPermissionClass::BuiltinCommand
-        ),
-        PermissionVerdict::Execute
-    );
-    assert_eq!(
-        decide(PermissionMode::FullAccess, ToolPermissionClass::McpPrompt),
-        PermissionVerdict::Execute
-    );
-    assert_eq!(
-        decide(PermissionMode::FullAccess, ToolPermissionClass::McpApprove),
-        PermissionVerdict::Execute
+        view.classify_call("run_command", &json!({"command": "true"})),
+        Some(ToolPermissionClass::BuiltinCommand)
     );
 }
 
@@ -2117,6 +2072,7 @@ async fn command_ask_allows_and_denies_with_the_command_subject() {
             workdir,
             timeout_secs,
             network,
+            ..
         } = &allow.subject
         else {
             panic!("expected Command subject")
@@ -2544,8 +2500,435 @@ async fn command_settings_survive_save_and_reopen() {
 }
 
 #[cfg(target_os = "macos")]
+fn call_command_outside(command: &str, justification: &str) -> ScriptedToolCall {
+    call_command(json!({
+        "command": command,
+        "outside_sandbox": true,
+        "justification": justification
+    }))
+}
+
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn command_accept_edits_still_asks() {
+async fn command_outside_sandbox_full_access_runs_and_clears_environment() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = root
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("tarz-outside-{}.txt", uuid::Uuid::now_v7()));
+    let script = format!("{{ printf 'outside\\n'; env; }} > '{}'", outside.display());
+    let replies = vec![
+        Reply::Calls(vec![call_command_outside(
+            &script,
+            "the sandbox blocks a path outside the workspace",
+        )]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    session
+        .set_permission_mode(PermissionMode::FullAccess)
+        .unwrap();
+    let work = submit(&session, "outside command");
+    let observation = finish(&session, &work).await;
+    assert_eq!(
+        observation.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        observation.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::DirectExecution
+    );
+    let content = command_result(&session, &observation, 0);
+    assert_eq!(content["exit_code"], 0);
+    assert_eq!(content["outside_sandbox"], true);
+    let written = std::fs::read_to_string(&outside).unwrap();
+    assert!(written.starts_with("outside\n"));
+    assert!(!written.contains("CARGO_"), "{written}");
+    assert!(!written.contains("SSH_AUTH_SOCK"), "{written}");
+    assert!(written.contains("TMPDIR="), "{written}");
+    std::fs::remove_file(&outside).unwrap();
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_outside_sandbox_ask_allows_and_denies_with_the_subject() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().parent().unwrap();
+    let allowed = parent.join(format!("tarz-outside-allow-{}", uuid::Uuid::now_v7()));
+    let denied = parent.join(format!("tarz-outside-deny-{}", uuid::Uuid::now_v7()));
+    let replies = vec![
+        Reply::Calls(vec![call_command_outside(
+            &format!("printf allow > '{}'", allowed.display()),
+            "needs to write outside the workspace",
+        )]),
+        Reply::Answer,
+        Reply::Calls(vec![call_command_outside(
+            &format!("printf deny > '{}'", denied.display()),
+            "needs to write outside the workspace",
+        )]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    let mut rx = session.connect_approvals();
+    let approvals = tokio::spawn(async move {
+        for allow in [true, false] {
+            let request = rx.recv().await.expect("outside command request");
+            let ApprovalSubject::Command {
+                outside_sandbox,
+                justification,
+                command,
+                ..
+            } = &request.subject
+            else {
+                panic!("expected Command subject")
+            };
+            assert!(*outside_sandbox);
+            assert_eq!(
+                justification.as_deref(),
+                Some("needs to write outside the workspace")
+            );
+            assert!(command.contains("printf"));
+            request
+                .reply
+                .send(if allow {
+                    ApprovalDecision::Allow
+                } else {
+                    ApprovalDecision::Deny {
+                        reason: Some("user policy".into()),
+                    }
+                })
+                .unwrap();
+        }
+    });
+    let allow_work = submit(&session, "allow outside command");
+    let allow_obs = finish(&session, &allow_work).await;
+    let deny_work = submit(&session, "deny outside command");
+    let deny_obs = finish(&session, &deny_work).await;
+    approvals.await.unwrap();
+
+    assert_eq!(
+        allow_obs.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        allow_obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndAllowed
+    );
+    assert_eq!(
+        command_result(&session, &allow_obs, 0)["outside_sandbox"],
+        true
+    );
+    assert!(allowed.exists());
+    assert_eq!(
+        deny_obs.tools.calls[0].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    assert_eq!(
+        deny_obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndDenied
+    );
+    assert!(
+        tool_result_error(&session, deny_obs.tools.calls[0].call_block_id)
+            .contains("outside the sandbox")
+    );
+    assert!(!denied.exists());
+    std::fs::remove_file(&allowed).unwrap();
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_outside_sandbox_accept_edits_asks_and_allows_with_a_route() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = root
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("tarz-outside-accept-{}", uuid::Uuid::now_v7()));
+    let replies = vec![
+        Reply::Calls(vec![call_command_outside(
+            &format!("printf allow > '{}'", outside.display()),
+            "needs to write outside the workspace",
+        )]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    session
+        .set_permission_mode(PermissionMode::AcceptEdits)
+        .unwrap();
+    let mut rx = session.connect_approvals();
+    let approval = tokio::spawn(async move {
+        let request = rx.recv().await.expect("outside command approval");
+        let ApprovalSubject::Command {
+            outside_sandbox, ..
+        } = &request.subject
+        else {
+            panic!("expected Command subject")
+        };
+        assert!(*outside_sandbox);
+        request.reply.send(ApprovalDecision::Allow).unwrap();
+    });
+    let work = submit(&session, "accept-edits outside command");
+    let observation = finish(&session, &work).await;
+    approval.await.unwrap();
+    assert_eq!(
+        observation.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        observation.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndAllowed
+    );
+    assert_eq!(
+        command_result(&session, &observation, 0)["outside_sandbox"],
+        true
+    );
+    assert!(outside.exists());
+    std::fs::remove_file(&outside).unwrap();
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_outside_sandbox_read_only_rejects_without_prompt() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = root
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("tarz-outside-readonly-{}", uuid::Uuid::now_v7()));
+    let replies = vec![
+        Reply::Calls(vec![call_command_outside(
+            &format!("printf x > '{}'", outside.display()),
+            "needs to write outside the workspace",
+        )]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let mut definition = command_definition(&fixture.endpoint, root.path());
+    definition.permission_mode = Some(PermissionMode::ReadOnly);
+    let session = host
+        .create(PreparedCreate::transient(definition, Context::default()))
+        .await
+        .unwrap();
+    let work = submit(&session, "read-only outside command");
+    let observation = finish(&session, &work).await;
+    assert_eq!(
+        observation.tools.calls[0].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    assert_eq!(
+        observation.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::ModeRefused
+    );
+    assert!(
+        tool_result_error(&session, observation.tools.calls[0].call_block_id)
+            .contains("outside the sandbox")
+    );
+    assert!(!outside.exists());
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_outside_sandbox_requires_a_valid_justification() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![call_command(json!({
+            "command": "printf x > missing.txt",
+            "outside_sandbox": true
+        }))]),
+        Reply::Answer,
+        Reply::Calls(vec![call_command(json!({
+            "command": "printf x > malformed.txt",
+            "outside_sandbox": "yes",
+            "justification": "reason"
+        }))]),
+        Reply::Answer,
+        Reply::Calls(vec![call_command(json!({
+            "command": "printf x > null.txt",
+            "outside_sandbox": null,
+            "justification": "reason"
+        }))]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    session
+        .set_permission_mode(PermissionMode::FullAccess)
+        .unwrap();
+    let missing_work = submit(&session, "missing justification");
+    let missing_obs = finish(&session, &missing_work).await;
+    let malformed_work = submit(&session, "malformed outside flag");
+    let malformed_obs = finish(&session, &malformed_work).await;
+    let null_work = submit(&session, "null outside flag");
+    let null_obs = finish(&session, &null_work).await;
+    assert_eq!(
+        missing_obs.tools.calls[0].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    assert!(
+        tool_result_error(&session, missing_obs.tools.calls[0].call_block_id)
+            .contains("justification")
+    );
+    for (label, observation, text) in [
+        (
+            "malformed",
+            &malformed_obs,
+            "outside_sandbox must be a boolean",
+        ),
+        ("null", &null_obs, "outside_sandbox must be a boolean"),
+    ] {
+        assert!(
+            !observation.tools.calls.is_empty(),
+            "{label} produced no tool call"
+        );
+        assert_eq!(
+            observation.tools.calls[0].status,
+            Some(ToolResultStatus::Rejected)
+        );
+        assert!(
+            tool_result_error(&session, observation.tools.calls[0].call_block_id).contains(text)
+        );
+    }
+    assert!(!root.path().join("missing.txt").exists());
+    assert!(!root.path().join("malformed.txt").exists());
+    assert!(!root.path().join("null.txt").exists());
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_outside_sandbox_accept_edits_without_a_route_rejects_only_the_outside_call() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = root
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("tarz-outside-batch-{}", uuid::Uuid::now_v7()));
+    let replies = vec![
+        Reply::Calls(vec![
+            call_command_outside(
+                &format!("printf x > '{}'", outside.display()),
+                "needs to write outside the workspace",
+            ),
+            call_command(json!({"command": "printf inside > inside.txt"})),
+        ]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    session
+        .set_permission_mode(PermissionMode::AcceptEdits)
+        .unwrap();
+    let work = submit(&session, "accept-edits outside batch");
+    let observation = finish(&session, &work).await;
+    assert_eq!(observation.tools.calls.len(), 2);
+    assert_eq!(
+        observation.tools.calls[0].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    assert_eq!(
+        observation.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::NoConfirmationRoute
+    );
+    assert_eq!(
+        observation.tools.calls[1].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        observation.tools.calls[1]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::DirectExecution
+    );
+    assert!(!outside.exists());
+    assert!(root.path().join("inside.txt").exists());
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_accept_edits_runs_sandboxed_commands() {
     let root = tempfile::tempdir().unwrap();
     let replies = vec![
         Reply::Calls(vec![call_command(
@@ -2565,15 +2948,8 @@ async fn command_accept_edits_still_asks() {
     session
         .set_permission_mode(PermissionMode::AcceptEdits)
         .unwrap();
-    let mut rx = session.connect_approvals();
-    let approval = tokio::spawn(async move {
-        let request = rx.recv().await.expect("command approval");
-        assert!(matches!(request.subject, ApprovalSubject::Command { .. }));
-        request.reply.send(ApprovalDecision::Allow).unwrap();
-    });
     let work = submit(&session, "accept-edits command");
     let observation = finish(&session, &work).await;
-    approval.await.unwrap();
     assert_eq!(
         observation.tools.calls[0].status,
         Some(ToolResultStatus::Succeeded)
@@ -2584,7 +2960,7 @@ async fn command_accept_edits_still_asks() {
             .as_ref()
             .unwrap()
             .kind,
-        PermissionDecisionKind::AskedAndAllowed
+        PermissionDecisionKind::DirectExecution
     );
     assert!(root.path().join("accepted.txt").exists());
     host.close(&session.target(), ClosePolicy::DiscardLocal)
@@ -2594,13 +2970,132 @@ async fn command_accept_edits_still_asks() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn command_cancel_repair_adopts_and_never_reruns() {
+async fn malformed_outside_flag_in_accept_edits_is_gated_as_outside() {
     let root = tempfile::tempdir().unwrap();
-    let storage = tempfile::tempdir().unwrap();
     let replies = vec![
         Reply::Calls(vec![call_command(json!({
-            "command": "printf x >> runs.txt; printf started > started.txt; sleep 30; printf done > done.txt"
+            "command": "printf x > bad.txt",
+            "outside_sandbox": "yes",
+            "justification": "reason"
         }))]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    session
+        .set_permission_mode(PermissionMode::AcceptEdits)
+        .unwrap();
+    let work = submit(&session, "malformed outside flag");
+    let observation = finish(&session, &work).await;
+    assert_eq!(
+        observation.tools.calls[0].status,
+        Some(ToolResultStatus::Rejected)
+    );
+    assert_eq!(
+        observation.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::NoConfirmationRoute
+    );
+    assert!(!root.path().join("bad.txt").exists());
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_accept_edits_runs_sandboxed_commands_with_open_network() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![call_command(
+            json!({"command": "printf yes > accepted-open.txt"}),
+        )]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let mut definition = command_definition(&fixture.endpoint, root.path());
+    definition.command = Some(crate::definition::CommandSettings {
+        network: crate::definition::CommandNetwork::Open,
+        ..crate::definition::CommandSettings::default()
+    });
+    let session = host
+        .create(PreparedCreate::transient(definition, Context::default()))
+        .await
+        .unwrap();
+    session
+        .set_permission_mode(PermissionMode::AcceptEdits)
+        .unwrap();
+    let work = submit(&session, "accept-edits command with open network");
+    let observation = finish(&session, &work).await;
+    assert_eq!(
+        observation.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    assert_eq!(
+        observation.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::DirectExecution
+    );
+    assert!(root.path().join("accepted-open.txt").exists());
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_cancel_repair_adopts_and_never_reruns() {
+    command_cancel_repair_case(false).await;
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outside_command_cancel_repair_warns_and_never_reruns() {
+    command_cancel_repair_case(true).await;
+}
+
+#[cfg(target_os = "macos")]
+async fn command_cancel_repair_case(outside: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let marker = root
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("tarz-outside-repair-{}", uuid::Uuid::now_v7()));
+    let marker_write = if outside {
+        format!("printf outside > '{}';", marker.display())
+    } else {
+        String::new()
+    };
+    let command = format!(
+        "printf x >> runs.txt; {marker_write} printf started > started.txt; sleep 30; printf done > done.txt"
+    );
+    let arguments = if outside {
+        json!({
+            "command": &command,
+            "outside_sandbox": true,
+            "justification": "needs to run outside the workspace"
+        })
+    } else {
+        json!({ "command": &command })
+    };
+    let replies = vec![
+        Reply::Calls(vec![call_command(arguments)]),
         // The only model reply after the interrupted turn belongs to the new
         // input; it must not ask for another command.
         Reply::Answer,
@@ -2709,6 +3204,15 @@ async fn command_cancel_repair_adopts_and_never_reruns() {
     );
     assert!(!root.path().join("done.txt").exists(), "the command reran");
     assert!(root.path().join("started.txt").exists());
+    if outside {
+        assert!(
+            marker.exists(),
+            "the interrupted command did not run outside the sandbox"
+        );
+        std::fs::remove_file(&marker).unwrap();
+    } else {
+        assert!(!marker.exists(), "a sandboxed command wrote outside");
+    }
     host.close(&session.target(), ClosePolicy::Save)
         .await
         .unwrap();

@@ -148,6 +148,9 @@ pub(crate) fn assemble(
     let test_intermediate_capture = test_intermediate.clone();
     #[cfg(test)]
     let tools_for_session = workspace_tools.clone();
+    let outside_sandbox_grants = workspace_tools
+        .as_ref()
+        .map(|tools| tools.outside_sandbox_grants());
 
     let session = Session::new_with_tools(
         conversation_id,
@@ -194,6 +197,9 @@ pub(crate) fn assemble(
                     approvals.clone(),
                     definition_command_settings,
                     prepared_writes,
+                    outside_sandbox_grants
+                        .clone()
+                        .unwrap_or_else(crate::tools::OutsideSandboxGrants::new),
                 )));
             }
             let mcp = mcp_for_work.clone();

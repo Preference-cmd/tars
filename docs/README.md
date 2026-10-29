@@ -8,7 +8,7 @@ Tarz 的目的是验证并改进 Causa，应用是验证的载体，见 [README 
 
 2026-10-28：命令工具的状态显示已接通：TUI `/status` 显示沙箱后端与各能力维度，打开提示显示不可用，CLI `session create` 打印完整状态、运行命令时打印简短状态；TUI 确认面板和新建表单的只读 command 摘要已覆盖。工具级文件、网络、信号、超时/取消/Drop 与修复采纳/不重跑测试通过。SC12 的真实模型 `cargo test` 因沙箱拒绝 `~/.cargo/config.toml` 与 Xcode SDK 挂起，未放宽策略；cargo 的本地 workaround 和沙箱残余见[工作区工具](workspace-tools.md#命令工具)。
 
-2026-10-29：命令沙箱改为整机只读，凭据位置与当前存储目录仍拒绝读写，`/dev` 只放行四个设备；`.git` 从整棵只读收紧为 hooks/config/modules/worktrees 只读且入口不可创建、删除或改名，objects/refs/index 恢复可写；`network = "open"` 收紧为 IP 出站加系统 DNS socket。探针分别验证 Roots 与 Host 两种读范围。命令工具的 `accept-edits` 自动运行与按调用请求的沙箱外运行仍在实施中。[工作区工具](workspace-tools.md#命令工具)已同步。
+2026-10-29：命令沙箱改为整机只读，凭据位置与当前存储目录仍拒绝读写，`/dev` 只放行四个设备；`.git` 从整棵只读收紧为 hooks/config/modules/worktrees 只读且入口不可创建、删除或改名，objects/refs/index 恢复可写；`network = "open"` 收紧为 IP 出站加系统 DNS socket。探针分别验证 Roots 与 Host 两种读范围。同日第 5 步：`accept-edits` 下沙箱内命令直接执行；单条命令可带理由请求沙箱外运行（`read-only` 拒绝，`ask`/`accept-edits` 询问，`full-access` 直接执行），执行层按调用许可核对后经后端 `unconfined` 启动；`.git` 只锁 hooks、config、modules、worktrees 与入口。SC02、SC17、SC18 已勾选。[工作区工具](workspace-tools.md#命令工具)已同步。
 
 ## 代码结构
 

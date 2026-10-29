@@ -207,6 +207,104 @@ async fn command_panel_shows_the_command_workdir_timeout_and_network_then_denies
 
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_panel_shows_outside_sandbox_warning_and_justification() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let responses = vec![
+        wire::tool(
+            "openai-chat",
+            "run_command",
+            json!({
+                "command": "printf denied > outside.txt",
+                "outside_sandbox": true,
+                "justification": "needs the user cargo cache"
+            }),
+            "call_command_outside_deny",
+        ),
+        wire::answer_with_text("openai-chat", "command declined"),
+    ];
+    let fixture = wire::Fixture::with_responses("openai-chat", responses);
+    let mut app = app(dir.path());
+    create_command_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+
+    app.entries[0].editor.insert_str("run the outside command");
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |a| {
+        !a.entries[a.selected].approval_queue.is_empty()
+    })
+    .await;
+
+    let view = screen(&app);
+    assert!(
+        view.contains("run_command wants to run a command outside the sandbox"),
+        "{view}"
+    );
+    assert!(view.contains("NOT in the sandbox"), "{view}");
+    assert!(
+        view.contains("Justification: needs the user cargo cache"),
+        "{view}"
+    );
+    assert!(!view.contains("Network: none"), "{view}");
+    assert!(view.contains("$ printf denied > outside.txt"), "{view}");
+
+    advance_past_approval_window(&mut app);
+    app.event(key(KeyCode::Char('n')));
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
+    assert!(!workspace.join("outside.txt").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn command_panel_scrolls_a_multiline_outside_justification() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    let justification = (0..60)
+        .map(|index| format!("reason {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let responses = vec![
+        wire::tool(
+            "openai-chat",
+            "run_command",
+            json!({
+                "command": "printf denied > outside.txt",
+                "outside_sandbox": true,
+                "justification": justification
+            }),
+            "call_command_outside_scroll",
+        ),
+        wire::answer_with_text("openai-chat", "command declined"),
+    ];
+    let fixture = wire::Fixture::with_responses("openai-chat", responses);
+    let mut app = app(dir.path());
+    create_command_session(&mut app, &fixture.endpoint, &workspace, "ask").await;
+
+    app.entries[0].editor.insert_str("run the outside command");
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |a| {
+        !a.entries[a.selected].approval_queue.is_empty()
+    })
+    .await;
+    for _ in 0..80 {
+        app.event(key(KeyCode::PageDown));
+    }
+    let view = screen(&app);
+    assert!(view.contains("$ printf denied > outside.txt"), "{view}");
+
+    advance_past_approval_window(&mut app);
+    app.event(key(KeyCode::Char('n')));
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |a| a.entries[a.selected].execution == "Completed").await;
+    assert!(!workspace.join("outside.txt").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_panel_allows_the_exact_command_with_y() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().join("workspace");

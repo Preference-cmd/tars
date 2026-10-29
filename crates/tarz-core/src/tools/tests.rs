@@ -781,6 +781,15 @@ fn run_command_definition_and_hints_declare_the_sandbox() {
         definition.parameters["properties"]["timeout_secs"]["maximum"],
         600
     );
+    assert_eq!(
+        definition.parameters["properties"]["outside_sandbox"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        definition.parameters["properties"]["justification"]["maxLength"],
+        1024
+    );
+    assert!(definition.description.contains("outside_sandbox"));
     let hints = tool.hints();
     assert_eq!(hints.read_only, Some(false));
     assert_eq!(hints.destructive, Some(true));
@@ -788,10 +797,13 @@ fn run_command_definition_and_hints_declare_the_sandbox() {
 }
 
 type RecordedLaunches = Arc<std::sync::Mutex<Vec<(SandboxPolicy, Launch)>>>;
+type RecordedUnconfined = Arc<std::sync::Mutex<Vec<Launch>>>;
 
 /// A command runtime over the recording backend, which performs no isolation,
-/// so the recorded launches show whether a process launch was attempted.
-fn recording_command_runtime(root: &std::path::Path) -> (Arc<CommandRuntime>, RecordedLaunches) {
+/// so the recorded launches show whether and how a process launch was attempted.
+fn recording_command_runtime(
+    root: &std::path::Path,
+) -> (Arc<CommandRuntime>, RecordedLaunches, RecordedUnconfined) {
     let backend = RecordingBackend::available(BackendReport::new(
         BackendId::RECORDING,
         Capability::Full,
@@ -801,17 +813,122 @@ fn recording_command_runtime(root: &std::path::Path) -> (Arc<CommandRuntime>, Re
         Capability::Partial(Limitation::ProcessGroupEscape),
     ));
     let launches = backend.calls();
+    let unconfined = backend.unconfined_calls();
     let sandbox = Sandbox::open_with(Box::new(backend)).unwrap();
     let runtime =
         CommandRuntime::bind_with_sandbox(root, CommandSettings::default(), Ok(sandbox), None)
             .unwrap();
-    (runtime, launches)
+    (runtime, launches, unconfined)
+}
+
+#[tokio::test]
+async fn outside_command_without_a_grant_is_rejected_without_launching() {
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, launches, unconfined) = recording_command_runtime(dir.path());
+    let workspace = Workspace::open(&dir.path().canonicalize().unwrap()).unwrap();
+    let shared = WorkspaceTools::with_command(
+        workspace,
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+        CommandSettings::default(),
+        Some(runtime),
+    );
+    let call = call(
+        "run_command",
+        json!({
+            "command": "printf ran > ran.txt",
+            "outside_sandbox": true,
+            "justification": "needs to write outside the workspace"
+        }),
+    );
+    let report = reporter(std::slice::from_ref(&call));
+    let tool = shared
+        .bind_for_test(&[WorkspaceTool::RunCommand], report)
+        .pop()
+        .unwrap();
+    let output = tool.execute(&call, &control(), None).await;
+    assert_eq!(output.status, ToolResultStatus::Rejected);
+    assert!(
+        output.output.content["error"]
+            .as_str()
+            .unwrap()
+            .contains("not granted"),
+        "{}",
+        output.output.content
+    );
+    assert!(
+        launches.lock().unwrap().is_empty(),
+        "a bypassed outside call must not be wrapped"
+    );
+    assert!(
+        unconfined.lock().unwrap().is_empty(),
+        "a bypassed outside call must not launch unconfined"
+    );
+    assert!(!dir.path().join("ran.txt").exists());
+}
+
+#[tokio::test]
+async fn granted_outside_command_uses_the_unconfined_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, launches, unconfined) = recording_command_runtime(dir.path());
+    let workspace = Workspace::open(&dir.path().canonicalize().unwrap()).unwrap();
+    let shared = WorkspaceTools::with_command(
+        workspace,
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+        CommandSettings::default(),
+        Some(runtime),
+    );
+    let call = call(
+        "run_command",
+        json!({
+            "command": "printf ran > ran.txt",
+            "outside_sandbox": true,
+            "justification": "needs to write outside the workspace"
+        }),
+    );
+    shared.outside_sandbox_grants().grant(call.call_block_id);
+    let report = reporter(std::slice::from_ref(&call));
+    let tool = shared
+        .bind_for_test(&[WorkspaceTool::RunCommand], report)
+        .pop()
+        .unwrap();
+    let output = tool.execute(&call, &control(), None).await;
+    assert_eq!(output.status, ToolResultStatus::Succeeded);
+    assert_eq!(output.output.content["exit_code"], 0);
+    assert_eq!(output.output.content["outside_sandbox"], true);
+    assert!(
+        launches.lock().unwrap().is_empty(),
+        "a granted outside call must not be wrapped"
+    );
+    let unconfined = unconfined.lock().unwrap();
+    assert_eq!(unconfined.len(), 1);
+    for (name, _) in unconfined[0].environment() {
+        assert!(
+            ["PATH", "HOME", "LANG", "TMPDIR", "TERM", "NO_COLOR"]
+                .contains(&name.to_str().unwrap()),
+            "unexpected environment variable {name:?}"
+        );
+    }
+    assert!(
+        unconfined[0]
+            .environment()
+            .iter()
+            .any(|(name, _)| name == "TMPDIR")
+    );
+    drop(unconfined);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("ran.txt")).unwrap(),
+        "ran"
+    );
 }
 
 #[tokio::test]
 async fn queued_command_that_never_starts_is_rejected_without_launching() {
     let dir = tempfile::tempdir().unwrap();
-    let (runtime, launches) = recording_command_runtime(dir.path());
+    let (runtime, launches, _unconfined) = recording_command_runtime(dir.path());
     // Hold the session's only command permit, as a running command would, so
     // this call has to queue and then time out before it can start.
     let permit = runtime.acquire(&control()).await.unwrap();
@@ -877,7 +994,7 @@ async fn queued_command_that_never_starts_is_rejected_without_launching() {
 #[tokio::test]
 async fn cancelled_queued_command_is_rejected_without_launching() {
     let dir = tempfile::tempdir().unwrap();
-    let (runtime, launches) = recording_command_runtime(dir.path());
+    let (runtime, launches, _unconfined) = recording_command_runtime(dir.path());
     // Hold the session's only permit so acquire cannot succeed; the
     // pre-cancelled token then takes the biased cancellation branch.
     let permit = runtime.acquire(&control()).await.unwrap();
