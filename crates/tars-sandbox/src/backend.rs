@@ -18,8 +18,9 @@ impl BackendId {
     pub const SEATBELT: Self = Self::new("seatbelt");
     /// The placeholder used when a platform has no backend.
     pub const UNAVAILABLE: Self = Self::new("unavailable");
-    #[cfg(test)]
-    pub(crate) const RECORDING: Self = Self::new("recording");
+    /// The recording backend used by tests and the `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
+    pub const RECORDING: Self = Self::new("recording");
 
     /// Return the stable name.
     pub const fn as_str(self) -> &'static str {
@@ -100,8 +101,13 @@ pub struct BackendReport {
 }
 
 impl BackendReport {
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-    pub(crate) fn new(
+    /// Build a capability report for an injected backend.
+    ///
+    /// This belongs to the `test-support` seam: a test backend has no
+    /// platform probe to produce a report with. Normal builds construct
+    /// reports from the platform backend instead.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new(
         backend: BackendId,
         file_read: Capability,
         file_write: Capability,
@@ -119,7 +125,14 @@ impl BackendReport {
         }
     }
 
-    pub(crate) fn check(&self, policy: &SandboxPolicy) -> Result<(), SandboxUnavailable> {
+    /// Check that this report can enforce `policy`.
+    ///
+    /// This is the same check [`Sandbox::wrap`] performs before asking a
+    /// backend to wrap a launch. The command tool runs it earlier so an
+    /// unenforceable policy is rejected before the user is asked to approve a
+    /// call. Only a partial descendant-lifecycle capability is accepted;
+    /// every other partial or unsupported dimension is rejected.
+    pub fn check(&self, policy: &SandboxPolicy) -> Result<(), SandboxUnavailable> {
         self.require(&self.file_read, "file read", false)?;
         self.require(&self.file_write, "file write", false)?;
         match policy.network() {
@@ -359,8 +372,12 @@ impl Sandbox {
         Self::from_backend(platform_backend())
     }
 
-    #[cfg(test)]
-    pub(crate) fn open_with(backend: Box<dyn SandboxBackend>) -> Result<Self, SandboxUnavailable> {
+    /// Open a sandbox over an injected backend instead of the platform one.
+    ///
+    /// This is the backend-injection seam of the `test-support` feature; the
+    /// injected backend is still probed and its report is checked as usual.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_with(backend: Box<dyn SandboxBackend>) -> Result<Self, SandboxUnavailable> {
         Self::from_backend(backend)
     }
 
@@ -405,14 +422,27 @@ impl Sandbox {
     }
 }
 
-pub(crate) trait SandboxBackend: Send + Sync {
+/// A platform backend that probes its capabilities and wraps launches.
+///
+/// Production selects exactly one backend per platform. The `test-support`
+/// feature re-exports this trait so tests can inject a recording backend; it
+/// is not a stable interface.
+pub trait SandboxBackend: Send + Sync {
+    /// The stable name of this backend.
     fn id(&self) -> BackendId;
+
+    /// Probe the backend and report what it can enforce.
     fn probe(&self) -> Result<BackendReport, SandboxUnavailable>;
+
+    /// Wrap one launch in the backend's isolation for the given policy.
     fn wrap(
         &self,
         policy: &SandboxPolicy,
         launch: Launch,
     ) -> Result<SandboxedCommand, SandboxError>;
+
+    /// Build one process without isolation but with this backend's process
+    /// tree control.
     fn unconfined(&self, launch: Launch) -> Result<SandboxedCommand, SandboxError>;
 }
 

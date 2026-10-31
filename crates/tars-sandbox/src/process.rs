@@ -48,7 +48,7 @@ impl ProcessTree {
         }
     }
 
-    #[cfg(all(test, not(unix)))]
+    #[cfg(all(any(test, feature = "test-support"), not(unix)))]
     pub(crate) fn inactive(child: Child) -> Self {
         Self {
             child,
@@ -187,10 +187,10 @@ impl TreeSignaller for ProcessGroupSignaller {
     }
 }
 
-#[cfg(all(test, not(unix)))]
+#[cfg(all(any(test, feature = "test-support"), not(unix)))]
 pub(crate) struct RecordingControl;
 
-#[cfg(all(test, not(unix)))]
+#[cfg(all(any(test, feature = "test-support"), not(unix)))]
 impl TreeControl for RecordingControl {
     fn attach(&self, child: Child) -> io::Result<ProcessTree> {
         Ok(ProcessTree::inactive(child))
@@ -198,7 +198,11 @@ impl TreeControl for RecordingControl {
 }
 
 /// Report a signal as a shell does: exit code `128 + signal`, plus the signal.
-pub(crate) fn exit_status_code(status: ExitStatus) -> (Option<i32>, Option<i32>) {
+///
+/// This splits one process exit into the shell-visible exit code and, on
+/// Unix, the terminating signal. A normal exit reports its code and `None`;
+/// a signalled process reports `128 + signal` and the signal number.
+pub fn exit_status_code(status: ExitStatus) -> (Option<i32>, Option<i32>) {
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;

@@ -1,7 +1,6 @@
 use super::execute::TestGate;
 use super::{CommandRuntime, ToolResources, WorkspaceTools};
 use crate::definition::{CommandSettings, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
-use crate::sandbox::test_support::RecordingBackend;
 use crate::sandbox::{
     BackendId, BackendReport, Capability, Launch, Limitation, Sandbox, SandboxPolicy,
 };
@@ -14,6 +13,7 @@ use causa::kernel::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tars_sandbox::test_support::{RecordingBackend, launch_environment};
 use tokio_util::sync::CancellationToken;
 
 fn call(name: &str, arguments: Value) -> ToolCallContext {
@@ -905,7 +905,7 @@ async fn granted_outside_command_uses_the_unconfined_launch() {
     );
     let unconfined = unconfined.lock().unwrap();
     assert_eq!(unconfined.len(), 1);
-    for (name, _) in unconfined[0].environment() {
+    for (name, _) in launch_environment(&unconfined[0]) {
         assert!(
             ["PATH", "HOME", "LANG", "TMPDIR", "TERM", "NO_COLOR"]
                 .contains(&name.to_str().unwrap()),
@@ -913,8 +913,7 @@ async fn granted_outside_command_uses_the_unconfined_launch() {
         );
     }
     assert!(
-        unconfined[0]
-            .environment()
+        launch_environment(&unconfined[0])
             .iter()
             .any(|(name, _)| name == "TMPDIR")
     );

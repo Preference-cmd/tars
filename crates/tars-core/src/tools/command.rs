@@ -485,6 +485,7 @@ mod tests {
     use crate::definition::CommandSettings;
     use causa::kernel::{CallControl, ToolResultStatus};
     use std::time::{Duration, Instant};
+    use tars_sandbox::test_support::denied_paths;
     use tokio_util::sync::CancellationToken;
 
     fn runtime() -> (tempfile::TempDir, Arc<CommandRuntime>) {
@@ -507,7 +508,7 @@ mod tests {
     fn a_failed_probe_rejects_every_command() {
         let directory = tempfile::tempdir().unwrap();
         let error = Sandbox::open_with(Box::new(
-            crate::sandbox::test_support::RecordingBackend::unavailable(),
+            tars_sandbox::test_support::RecordingBackend::unavailable(),
         ))
         .unwrap_err();
         let runtime = CommandRuntime::bind_with_sandbox(
@@ -695,7 +696,7 @@ mod tests {
         std::fs::create_dir_all(&inside).unwrap();
         let runtime =
             CommandRuntime::bind(root.path(), CommandSettings::default(), Some(inside)).unwrap();
-        assert!(runtime.policy().unwrap().denied_paths.is_empty());
+        assert!(denied_paths(&runtime.policy().unwrap()).is_empty());
 
         let elsewhere = tempfile::tempdir().unwrap();
         let outside = elsewhere.path().join("sessions");
@@ -708,7 +709,10 @@ mod tests {
         .unwrap();
         let policy = runtime.policy().unwrap();
         assert_eq!(policy.read_scope(), ReadScope::Host);
-        assert_eq!(policy.denied_paths, vec![outside.canonicalize().unwrap()]);
+        assert_eq!(
+            denied_paths(&policy).to_vec(),
+            vec![outside.canonicalize().unwrap()]
+        );
     }
 
     #[test]

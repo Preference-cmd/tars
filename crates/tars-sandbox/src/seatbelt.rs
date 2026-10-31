@@ -90,11 +90,12 @@ impl SeatbeltBackend {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_home(home: impl Into<PathBuf>) -> Self {
         Self {
             executable: PathBuf::from(SANDBOX_EXEC),
             home: Some(home.into()),
+            #[cfg(test)]
             omit_credential_denials: false,
         }
     }
@@ -484,14 +485,14 @@ impl SandboxBackend for SeatbeltBackend {
 
     fn probe(&self) -> Result<BackendReport, SandboxUnavailable> {
         self.run_probe()?;
-        Ok(BackendReport::new(
-            BackendId::SEATBELT,
-            Capability::Full,
-            Capability::Full,
-            Capability::Full,
-            Capability::Full,
-            Capability::Partial(Limitation::ProcessGroupEscape),
-        ))
+        Ok(BackendReport {
+            backend: BackendId::SEATBELT,
+            file_read: Capability::Full,
+            file_write: Capability::Full,
+            network: Capability::Full,
+            signal_isolation: Capability::Full,
+            descendant_lifecycle: Capability::Partial(Limitation::ProcessGroupEscape),
+        })
     }
 
     fn wrap(

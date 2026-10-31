@@ -1,5 +1,5 @@
 use super::support::*;
-use crate::sandbox::{BackendId, SandboxStatus, SandboxUnavailable};
+use crate::sandbox::{BackendId, SandboxStatus};
 
 /// Display-only coverage: the unavailable status is injected at the fixture
 /// seam. The available status is propagated by real assembly in
@@ -30,12 +30,12 @@ async fn managed_session_reports_an_injected_unavailable_command_status() {
             },
             definition.session_config(),
         );
-        Ok(
-            session.with_command_status(SandboxStatus::Unavailable(SandboxUnavailable::new(
+        Ok(session.with_command_status(SandboxStatus::Unavailable(
+            tars_sandbox::test_support::unavailable(
                 BackendId::UNAVAILABLE,
                 "no backend for this platform",
-            ))),
-        )
+            ),
+        )))
     }));
 
     let session = host

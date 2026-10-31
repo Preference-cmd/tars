@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/tars-core", "crates/tars-cli", "crates/tars-tui"]
+members = ["crates/tars-core", "crates/tars-cli", "crates/tars-tui", "crates/tars-sandbox"]
 default-members = ["crates/tars-cli"]
 
 [workspace.package]

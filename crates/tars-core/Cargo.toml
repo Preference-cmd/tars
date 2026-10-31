@@ -7,6 +7,7 @@ publish.workspace = true
 description = "Shared internal application core for TARS"
 
 [dependencies]
+tars-sandbox = { path = "../tars-sandbox" }
 causa.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -25,6 +26,9 @@ similar.workspace = true
 rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]
+# Test seams (backend injection) live behind this feature; normal builds of
+# tars-core do not enable it.
+tars-sandbox = { path = "../tars-sandbox", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "io-std", "io-util"] }
 # Test-only MCP server fixture; normal code uses Causa's client adapter.
 rmcp = { version = "3.6", features = ["server", "transport-async-rw"] }

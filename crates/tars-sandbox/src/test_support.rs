@@ -1,22 +1,34 @@
+//! Test-only sandbox seams.
+//!
+//! This module is not a stable interface. It is compiled for this package's
+//! own tests and with the `test-support` Cargo feature, which `tars-core`
+//! enables from `[dev-dependencies]`; normal and release builds do not
+//! include it. An injected backend performs no isolation, so tests observe
+//! policy checks and launch attempts instead.
+
 use super::backend::{
-    BackendId, BackendReport, Launch, SandboxBackend, SandboxError, SandboxUnavailable,
-    SandboxedCommand,
+    BackendId, BackendReport, Launch, SandboxError, SandboxUnavailable, SandboxedCommand,
 };
 use super::policy::SandboxPolicy;
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-/// A test-only backend that records launches and performs no isolation.
+pub use super::backend::SandboxBackend;
+
+/// A backend that records launches and performs no isolation.
 ///
 /// On Unix it attaches a real process group so command tests can exercise
 /// termination; elsewhere the tree is inert. Production cannot select it.
-pub(crate) struct RecordingBackend {
+pub struct RecordingBackend {
     report: Result<BackendReport, SandboxUnavailable>,
     calls: Arc<Mutex<Vec<(SandboxPolicy, Launch)>>>,
     unconfined: Arc<Mutex<Vec<Launch>>>,
 }
 
 impl RecordingBackend {
-    pub(crate) fn available(report: BackendReport) -> Self {
+    /// A backend whose probe reports `report`.
+    pub fn available(report: BackendReport) -> Self {
         Self {
             report: Ok(report),
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -24,7 +36,8 @@ impl RecordingBackend {
         }
     }
 
-    pub(crate) fn unavailable() -> Self {
+    /// A backend whose probe fails, for fail-closed tests.
+    pub fn unavailable() -> Self {
         Self {
             report: Err(SandboxUnavailable::new(
                 BackendId::RECORDING,
@@ -35,11 +48,13 @@ impl RecordingBackend {
         }
     }
 
-    pub(crate) fn calls(&self) -> Arc<Mutex<Vec<(SandboxPolicy, Launch)>>> {
+    /// The wrapped launches recorded so far, with the policy checked for each.
+    pub fn calls(&self) -> Arc<Mutex<Vec<(SandboxPolicy, Launch)>>> {
         self.calls.clone()
     }
 
-    pub(crate) fn unconfined_calls(&self) -> Arc<Mutex<Vec<Launch>>> {
+    /// The unconfined launches recorded so far.
+    pub fn unconfined_calls(&self) -> Arc<Mutex<Vec<Launch>>> {
         self.unconfined.clone()
     }
 }
@@ -97,4 +112,35 @@ impl SandboxBackend for RecordingBackend {
         self.unconfined.lock().unwrap().push(launch.clone());
         Ok(SandboxedCommand::new(command(&launch), control()))
     }
+}
+
+/// Build an unavailable error for injected test fixtures.
+///
+/// `tars-core` assembly tests need an unavailable status without a real
+/// failed probe; production code receives these errors from backend probes.
+pub fn unavailable(backend: BackendId, reason: impl Into<String>) -> SandboxUnavailable {
+    SandboxUnavailable::new(backend, reason)
+}
+
+/// The paths a policy denies for both reads and writes.
+///
+/// This is a view for `tars-core` tests that assert on the policy the command
+/// tool builds; production code has no accessor.
+pub fn denied_paths(policy: &SandboxPolicy) -> &[PathBuf] {
+    &policy.denied_paths
+}
+
+/// The environment variables a launch request applies after clearing the
+/// inherited environment.
+pub fn launch_environment(launch: &Launch) -> &[(OsString, OsString)] {
+    launch.environment()
+}
+
+/// Open the macOS Seatbelt backend with an explicit home directory.
+///
+/// The probe resolves credential denials under `home`, so a test can keep its
+/// canaries in a temporary directory instead of the real home.
+#[cfg(target_os = "macos")]
+pub fn open_with_home(home: PathBuf) -> Result<super::Sandbox, SandboxUnavailable> {
+    super::Sandbox::open_with(Box::new(super::seatbelt::SeatbeltBackend::with_home(home)))
 }

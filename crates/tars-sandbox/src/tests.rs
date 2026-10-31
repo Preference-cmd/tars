@@ -286,10 +286,13 @@ fn sandbox_fails_closed_when_the_probe_fails() {
 fn unavailable_backend_rejects_unconfined_launches() {
     use super::backend::SandboxBackend;
     let backend = super::unavailable::UnavailableBackend::new();
-    let error = backend
-        .unconfined(Launch::new("/bin/true"))
-        .expect_err("an unavailable backend must not launch unconfined");
-    assert!(matches!(error, SandboxError::Unavailable(_)));
+    // Match the error instead of expect_err: SandboxedCommand deliberately has
+    // no Debug bound, and this test must also compile for non-macOS targets.
+    let result = backend.unconfined(Launch::new("/bin/true"));
+    assert!(
+        matches!(result, Err(SandboxError::Unavailable(_))),
+        "an unavailable backend must not launch unconfined"
+    );
 }
 
 #[test]
@@ -379,8 +382,8 @@ fn unsupported_platforms_fail_closed_through_the_public_entry() {
 #[cfg(target_os = "macos")]
 mod seatbelt {
     use super::*;
-    use crate::sandbox::ProcessTree;
-    use crate::sandbox::backend::SandboxBackend;
+    use crate::ProcessTree;
+    use crate::backend::SandboxBackend;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
     use std::process::{ExitStatus, Stdio};

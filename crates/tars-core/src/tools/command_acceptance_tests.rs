@@ -3,7 +3,7 @@
 //! These tests drive the tool, not `CommandRuntime` directly, so the parameter,
 //! permission-free execution path and output payload are exercised together.
 //! Credential denial and the `setsid` group-escape residual are already proven
-//! once in `crate::sandbox::tests`; this module does not repeat them. `HOME`
+//! once in `tars_sandbox::tests`; this module does not repeat them. `HOME`
 //! stays the test process's home on purpose: a synthetic HOME would test the
 //! Seatbelt helper rather than the tool contract.
 //!
@@ -16,7 +16,6 @@ use crate::definition::{
     CommandNetwork, CommandSettings, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
 };
 use crate::sandbox::Sandbox;
-use crate::sandbox::test_support::RecordingBackend;
 use crate::session::{ToolReporter, WorkRef};
 use crate::workspace::Workspace;
 use causa::kernel::{
@@ -32,6 +31,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use tars_sandbox::test_support::RecordingBackend;
 use tokio_util::sync::CancellationToken;
 
 fn settings(network: CommandNetwork) -> CommandSettings {
@@ -518,7 +518,7 @@ async fn host_read_scope_denies_credentials_and_the_session_store_through_the_to
     std::fs::write(home.join(".zsh_history"), "PROBE-CANARY\n").unwrap();
     std::fs::write(storage.join("record.json"), "STORAGE-SECRET\n").unwrap();
 
-    let sandbox = crate::sandbox::open_with_home(home.clone())
+    let sandbox = tars_sandbox::test_support::open_with_home(home.clone())
         .expect("the synthetic home must support the seatbelt probe");
     let runtime = CommandRuntime::bind_with_sandbox(
         &root,

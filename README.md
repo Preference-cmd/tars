@@ -79,7 +79,7 @@ printf '继续分析材料' | ./target/release/tars run --provider openai-respon
 
 ## 项目入口
 
-根目录是 Cargo workspace；`crates/tars-core/` 提供共享应用核心与配置，`crates/tars-cli/` 提供 `tars`，`crates/tars-tui/` 提供 `tars-tui` 原型。默认 `cargo run/build` 仍选择 CLI；TUI 使用 `cargo run -p tars-tui -- --config /path/to/config.toml`，全部构建用 `cargo build --workspace --locked`。入口各自单向依赖核心，所有包 `publish = false`。Causa 以 crates.io 上发布的 `causa = "0.1"` 接入，启用 runtime 与 providers，具体版本由 Cargo.lock 固定；构建不再需要同级目录的 Causa checkout。独立分发另行处理。
+根目录是 Cargo workspace；`crates/tars-core/` 提供共享应用核心与配置，`crates/tars-sandbox/` 提供平台沙箱策略、后端与进程控制，`crates/tars-cli/` 提供 `tars`，`crates/tars-tui/` 提供 `tars-tui` 原型。默认 `cargo run/build` 仍选择 CLI；TUI 使用 `cargo run -p tars-tui -- --config /path/to/config.toml`，全部构建用 `cargo build --workspace --locked`。入口各自单向依赖核心，`tars-core` 单向依赖库包 `tars-sandbox` 并以 `pub use tars_sandbox as sandbox` 保留 `tars_core::sandbox` 路径，CLI/TUI 不直接依赖它；所有包 `publish = false`。Causa 以 crates.io 上发布的 `causa = "0.1"` 接入，启用 runtime 与 providers，具体版本由 Cargo.lock 固定；构建不再需要同级目录的 Causa checkout。独立分发另行处理。
 
 CLI/TUI 共用 [TOML 配置](docs/configuration.md)，支持全局默认路径、`TARS_CONFIG`、`--config` 和命名模型预设；显式参数优先。可从 [config.example.toml](config.example.toml) 开始填写；MCP 服务器定义见 [mcp.example.json](mcp.example.json) 和[配置说明](docs/configuration.md#mcp-服务器)。已有会话重开不受全局模型预设变更影响。
 

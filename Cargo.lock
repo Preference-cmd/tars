@@ -2115,6 +2115,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "tars-sandbox",
  "tempfile",
  "thiserror",
  "tokio",
@@ -2122,6 +2123,16 @@ dependencies = [
  "toml",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "tars-sandbox"
+version = "0.0.0"
+dependencies = [
+ "rustix",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

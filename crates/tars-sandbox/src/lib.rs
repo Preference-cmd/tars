@@ -13,6 +13,13 @@
 //! period. A descendant that starts a new session or process group can leave
 //! the group; that residual is reported as a partial descendant-lifecycle
 //! capability.
+//!
+//! This package is a TARS-internal library. It depends on neither Causa nor
+//! `tars-core`, and `tars-core` re-exports it as `sandbox` so the existing
+//! `tars_core::sandbox` paths keep working. The `test-support` feature adds
+//! explicit test seams; normal and release builds do not include them.
+#![deny(unsafe_code)]
+#![deny(missing_docs)]
 
 mod backend;
 mod credentials;
@@ -29,18 +36,13 @@ pub use backend::{
     SandboxUnavailable, SandboxedCommand,
 };
 pub use policy::{NetworkAccess, ReadScope, SandboxPolicy, SandboxPolicyError};
-pub use process::ProcessTree;
-pub(crate) use process::exit_status_code;
+pub use process::{ProcessTree, exit_status_code};
 pub use status::SandboxStatus;
 
-#[cfg(all(test, target_os = "macos"))]
-pub(crate) fn open_with_home(home: std::path::PathBuf) -> Result<Sandbox, SandboxUnavailable> {
-    Sandbox::open_with(Box::new(seatbelt::SeatbeltBackend::with_home(home)))
-}
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 #[cfg(test)]
 mod status_tests;
-#[cfg(test)]
-pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
