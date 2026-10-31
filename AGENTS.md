@@ -1,8 +1,8 @@
-# AGENTS.md — Tarz
+# AGENTS.md — TARS
 
-Tarz is the validation project for Causa: a real agent application that
+TARS is the validation project for Causa: a real agent application that
 exercises Causa's public contracts and feeds what it finds back into Causa.
-Validation comes first; the application is how it is done. Tarz ships as an
+Validation comes first; the application is how it is done. TARS ships as an
 application, not a crates.io library or a public Rust SDK. All Cargo packages
 must remain `publish = false`.
 
@@ -15,17 +15,17 @@ must remain `publish = false`.
   facade and the published crates.io release, under real conditions:
   persistent sessions, continuation after a cancel, workspace tools with
   write confirmation, and live runs on the three wire protocols.
-- **Improve.** For each problem found, decide whether it belongs to Tarz,
+- **Improve.** For each problem found, decide whether it belongs to TARS,
   Causa or their integration. A Causa change is made in the Causa repository
-  under its rules and released there; Tarz then adopts it by upgrading the
+  under its rules and released there; TARS then adopts it by upgrading the
   dependency and reruns the checks that found the problem.
-- **Order work by what it validates.** Tarz has to be usable, because only
+- **Order work by what it validates.** TARS has to be usable, because only
   real use produces evidence. Prefer work that exercises Causa; work that only
   serves distribution (install channels, GUI, more platforms) comes later.
-- **Keep the layers apart.** Do not move Tarz policy into Causa. Ask Causa for
+- **Keep the layers apart.** Do not move TARS policy into Causa. Ask Causa for
   the general fact or channel a host needs and keep the vocabulary and the
-  decision in Tarz: Tarz's permission modes stay here, while Causa carries
-  only tool hints and per-run host data. A passing Tarz test is evidence for
+  decision in TARS: TARS's permission modes stay here, while Causa carries
+  only tool hints and per-run host data. A passing TARS test is evidence for
   that integration, not proof of a Causa guarantee.
 
 ## Read by task
@@ -35,10 +35,10 @@ must remain `publish = false`.
 | Build, run, or inspect available commands | [README.md](README.md) |
 | Change code or run checks | [Current implementation](docs/README.md) |
 | Trace session ownership, assembly, or execution | [Session lifecycle](docs/session-lifecycle.md) |
-| Change interrupted-session continuation or material repair | [Session continuation](docs/session-continuation.md), `tarz-core::application::repair` |
-| Change workspace tool access, limits or status | [Workspace tools](docs/workspace-tools.md), `tarz-core::workspace`, `tarz-core::tools`, `session::ToolReporter` |
-| Change shared TOML configuration | [Configuration](docs/configuration.md), `tarz-core::config` |
-| Run or change the terminal prototype | [TUI prototype](docs/tui.md), `crates/tarz-tui/` |
+| Change interrupted-session continuation or material repair | [Session continuation](docs/session-continuation.md), `tars-core::application::repair` |
+| Change workspace tool access, limits or status | [Workspace tools](docs/workspace-tools.md), `tars-core::workspace`, `tars-core::tools`, `session::ToolReporter` |
+| Change shared TOML configuration | [Configuration](docs/configuration.md), `tars-core::config` |
+| Run or change the terminal prototype | [TUI prototype](docs/tui.md), `crates/tars-tui/` |
 | Plan a change or inspect acceptance status | [Local design index](.agents/README.md) |
 | Follow Direct/Noted or proposal lifecycle rules | [Workflow](.agents/pipelines/WORKFLOW.md) |
 
@@ -62,12 +62,12 @@ features change; keep one authoritative acceptance list per proposal scope.
 ## Architecture and conventions
 
 - Keep Cargo packages under `crates/`, inheriting workspace metadata.
-  `tarz-core` owns shared behavior and configuration; `tarz-cli` owns the `tarz`
-  binary; `tarz-tui` owns the experimental terminal consumer and `tarz-tui` binary.
+  `tars-core` owns shared behavior and configuration; `tars-cli` owns the `tars`
+  binary; `tars-tui` owns the experimental terminal consumer and `tars-tui` binary.
   Add other entry crates only with real consumers, never placeholder UI packages.
 - Use Causa's public facade from the published crates.io release pinned in
   `Cargo.toml` and `Cargo.lock`. Do not include or copy Causa sources, and do
-  not switch to a path or git dependency without the user's say-so. Tarz owns
+  not switch to a path or git dependency without the user's say-so. TARS owns
   sessions, assembly, application policy and persistence; Causa supplies
   material contracts and individual runs.
 - Keep shared application behavior independent of CLI/TUI/GUI presentation.

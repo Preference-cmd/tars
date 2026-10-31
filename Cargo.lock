@@ -2091,20 +2091,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "tarz-cli"
+name = "tars-cli"
 version = "0.0.0"
 dependencies = [
  "async-trait",
  "causa",
  "serde_json",
- "tarz-core",
+ "tars-core",
  "tempfile",
  "tokio",
  "tokio-util",
 ]
 
 [[package]]
-name = "tarz-core"
+name = "tars-core"
 version = "0.0.0"
 dependencies = [
  "async-trait",
@@ -2125,7 +2125,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tarz-tui"
+name = "tars-tui"
 version = "0.0.0"
 dependencies = [
  "causa",
@@ -2134,7 +2134,7 @@ dependencies = [
  "ratatui",
  "ratatui-textarea",
  "serde_json",
- "tarz-core",
+ "tars-core",
  "tempfile",
  "tokio",
  "unicode-segmentation",

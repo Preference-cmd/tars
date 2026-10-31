@@ -27,7 +27,7 @@ max_tool_calls = 64
 # workspace_root = "../my-project"
 # tools = ["list_directory", "read_file", "search_text", "write_file", "edit_file", "run_command"]
 # Add "write_file" and "edit_file" to enable workspace writes; ask mode confirms each write.
-# MCP servers are defined in mcp.json next to this file (or in TARZ_MCP_CONFIG).
+# MCP servers are defined in mcp.json next to this file (or in TARS_MCP_CONFIG).
 # Select them by id; omitted or empty selects none.
 # mcp = ["git"]
 

@@ -1,10 +1,10 @@
 # 当前实现
 
-Tarz 的目的是验证并改进 Causa，应用是验证的载体，见 [README 的“目的”](../README.md#目的)。本页只记录当前实现。
+TARS 的目的是验证并改进 Causa，应用是验证的载体，见 [README 的“目的”](../README.md#目的)。本页只记录当前实现。
 
-2026-10-26：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tarz session create/run/list` 可保存并跨进程重开同一会话；`tarz run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tarz-tui` 已接通会话、输入、临时流式正文预览、结果、取消及保存恢复；工作区工具（三个只读工具与 `write_file`/`edit_file`）与可靠状态已接通；写入前先读后改，`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；四种权限模式可在运行中切换并随记录保存，`tarz-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。MCP 通过独立的 `mcp.json` 配置（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和内置 MCP 客户端的工具调用已接通，MCP 调用按 `mcp.json` 的 `approval` 设置和当前权限模式执行、确认（终端或 TUI 确认面板）或拒绝；GUI、父子 Agent、安装和发布也仍在后续范围。
+2026-10-26：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tars session create/run/list` 可保存并跨进程重开同一会话；`tars run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tars-tui` 已接通会话、输入、临时流式正文预览、结果、取消及保存恢复；工作区工具（三个只读工具与 `write_file`/`edit_file`）与可靠状态已接通；写入前先读后改，`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；四种权限模式可在运行中切换并随记录保存，`tars-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。MCP 通过独立的 `mcp.json` 配置（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和内置 MCP 客户端的工具调用已接通，MCP 调用按 `mcp.json` 的 `approval` 设置和当前权限模式执行、确认（终端或 TUI 确认面板）或拒绝；GUI、父子 Agent、安装和发布也仍在后续范围。
 
-2026-10-27：`tarz-core::sandbox` 已提供平台无关策略、后端能力报告、进程树与 macOS Seatbelt 后端；探针验证文件、网络、信号与凭据边界。该层已接入 `run_command`（macOS；权限类别、定义/配置和修复清单已接通，Linux/Windows 失败关闭），完整文档和真实使用仍待第 3 步。
+2026-10-27：`tars-core::sandbox` 已提供平台无关策略、后端能力报告、进程树与 macOS Seatbelt 后端；探针验证文件、网络、信号与凭据边界。该层已接入 `run_command`（macOS；权限类别、定义/配置和修复清单已接通，Linux/Windows 失败关闭），完整文档和真实使用仍待第 3 步。
 
 2026-10-28：命令工具的状态显示已接通：TUI `/status` 显示沙箱后端与各能力维度，打开提示显示不可用，CLI `session create` 打印完整状态、运行命令时打印简短状态；TUI 确认面板和新建表单的只读 command 摘要已覆盖。工具级文件、网络、信号、超时/取消/Drop 与修复采纳/不重跑测试通过。SC12 的真实模型 `cargo test` 因沙箱拒绝 `~/.cargo/config.toml` 与 Xcode SDK 挂起，未放宽策略；cargo 的本地 workaround 和沙箱残余见[工作区工具](workspace-tools.md#命令工具)。
 
@@ -14,22 +14,22 @@ Tarz 的目的是验证并改进 Causa，应用是验证的载体，见 [README 
 
 | 路径 | 当前职责 |
 | --- | --- |
-| `crates/tarz-core/src/application/` | 活动目录、opening/关闭监督、实例视图、保存门禁与版本编辑 |
-| `crates/tarz-core/src/definition/` | 可序列化的固定定义与纯校验 |
-| `crates/tarz-core/src/config/` | 共享 TOML 加载、路径、命名模型预设与新定义默认值 |
-| `crates/tarz-core/src/workspace/`、`tools/` | 固定根目录句柄、工作区工具（三个只读、两个写入和一个命令工具）、有界扫描与受监督文件任务 |
-| `crates/tarz-core/src/sandbox/` | 平台无关沙箱策略、后端能力报告、进程树与 macOS Seatbelt 后端；由 `run_command` 使用 |
-| `crates/tarz-core/src/mcp/` | 会话的 MCP 服务器：启动与关闭、子进程环境、工具过滤、结果上限与状态 |
-| `crates/tarz-core/src/assembly/` | 打开时解析凭据、装配 gateway/runner 与固定执行选项 |
-| `crates/tarz-core/src/session/` | 单会话 owner/handle、原工作受理、监督、去重、可靠结果与有界临时观察 |
-| `crates/tarz-core/src/store/` | 私有 JSON 后端、活动期文件锁、提交与确认 |
-| `crates/tarz-core/src/material/` | 显式 Context 文件导入/导出、引用校验 |
-| `crates/tarz-cli/src/cli/` | 命令参数、信号、展示、恢复文件与退出码 |
-| `crates/tarz-cli/src/demo/` | 脚本模型和本地工具的底层 Session 演示 |
-| `crates/tarz-tui/src/` | 单列对话、命令/会话选择、输入适配、流式预览与实际材料呈现 |
-| `crates/tarz-core/tests/`、`crates/tarz-cli/tests/` | 核心契约消费者、真实 CLI 与本地 HTTP 测试 |
+| `crates/tars-core/src/application/` | 活动目录、opening/关闭监督、实例视图、保存门禁与版本编辑 |
+| `crates/tars-core/src/definition/` | 可序列化的固定定义与纯校验 |
+| `crates/tars-core/src/config/` | 共享 TOML 加载、路径、命名模型预设与新定义默认值 |
+| `crates/tars-core/src/workspace/`、`tools/` | 固定根目录句柄、工作区工具（三个只读、两个写入和一个命令工具）、有界扫描与受监督文件任务 |
+| `crates/tars-core/src/sandbox/` | 平台无关沙箱策略、后端能力报告、进程树与 macOS Seatbelt 后端；由 `run_command` 使用 |
+| `crates/tars-core/src/mcp/` | 会话的 MCP 服务器：启动与关闭、子进程环境、工具过滤、结果上限与状态 |
+| `crates/tars-core/src/assembly/` | 打开时解析凭据、装配 gateway/runner 与固定执行选项 |
+| `crates/tars-core/src/session/` | 单会话 owner/handle、原工作受理、监督、去重、可靠结果与有界临时观察 |
+| `crates/tars-core/src/store/` | 私有 JSON 后端、活动期文件锁、提交与确认 |
+| `crates/tars-core/src/material/` | 显式 Context 文件导入/导出、引用校验 |
+| `crates/tars-cli/src/cli/` | 命令参数、信号、展示、恢复文件与退出码 |
+| `crates/tars-cli/src/demo/` | 脚本模型和本地工具的底层 Session 演示 |
+| `crates/tars-tui/src/` | 单列对话、命令/会话选择、输入适配、流式预览与实际材料呈现 |
+| `crates/tars-core/tests/`、`crates/tars-cli/tests/` | 核心契约消费者、真实 CLI 与本地 HTTP 测试 |
 
-workspace 包含 `tarz-core`、`tarz-cli` 和 `tarz-tui`，均为 `publish=false`，binary 为 `tarz` 和 `tarz-tui`。CLI/TUI 只向下依赖核心和 Causa（另直接使用 `BlockId` 等事实词汇），核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。以公开 facade 消费 crates.io 上发布的 `causa 0.1`，具体版本由 Cargo.lock 固定，构建不需要同级 Causa checkout。没有源码 include 或复制。独立 CI/分发是后续交付步骤。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
+workspace 包含 `tars-core`、`tars-cli` 和 `tars-tui`，均为 `publish=false`，binary 为 `tars` 和 `tars-tui`。CLI/TUI 只向下依赖核心和 Causa（另直接使用 `BlockId` 等事实词汇），核心没有入口/UI/信号依赖；内部 lib 不承诺第三方 SDK。以公开 facade 消费 crates.io 上发布的 `causa 0.1`，具体版本由 Cargo.lock 固定，构建不需要同级 Causa checkout。没有源码 include 或复制。独立 CI/分发是后续交付步骤。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
 
 完整行为见 [Session 运行机制](session-lifecycle.md)，使用方法见 [README](../README.md)，逐项验收与本机证据见 [专项提案](../.agents/pipelines/archives/architecture/2026-10-03-session-structure-and-storage.md)和[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
 
@@ -59,11 +59,11 @@ TUI 每 50 ms 最多处理 128 项，多个视图轮转；只保留当前工作�
 
 `close(Save)` 等待取消、材料交还和保存；保存失败保持 owner/锁，可重试。`DiscardLocal` 等待在途 worker/I/O 停止并确认原待提交操作后放弃本地内容，不撤销已落盘记录。CloseOutcome 返回已提交、未提交、未尝试或仍无法确认的事实，后者保留原错误。最后一个 host 被丢弃会请求受监督的 DiscardLocal 清理；正常等待收尾仍要求 Tokio runtime 存活，强退不保证未保存材料可恢复。
 
-CLI 持久运行在成功、失败和受控中断后等待保存。保存等待期间第一次 Ctrl-C 在 stderr 提示，第二次停止等待并按保存失败路径导出实际 Context、以错误退出。保存失败按已选择的行为：导出实际 Context 到随机且不覆盖现有文件的 `tarz-recovery-<uuid>.json`，然后错误退出；导出失败独立报告。临时运行只在显式 `--save` 时导出。
+CLI 持久运行在成功、失败和受控中断后等待保存。保存等待期间第一次 Ctrl-C 在 stderr 提示，第二次停止等待并按保存失败路径导出实际 Context、以错误退出。保存失败按已选择的行为：导出实际 Context 到随机且不覆盖现有文件的 `tars-recovery-<uuid>.json`，然后错误退出；导出失败独立报告。临时运行只在显式 `--save` 时导出。
 
 ## 后端与资源边界
 
-本机存储目录由 `--store DIR` 或共享 TOML 的 `store` 明确指定，没有自动生成的存储默认路径。记录位于 `DIR/sessions/<uuid>.json`，格式 `tarz-session-v2`；`workspace_root`、`tools`、`tool_limits` 必须存在，写入限额、初始/当前权限模式和 MCP 快照可省略，省略时按默认写入限额、`ask` 和没有服务器读取。v1 不自动升级；`session export-materials` 可离线导出经校验的实际 Context，再显式采用新定义创建会话。固定定义、Context、ConversationId、revision 和 last_commit_id 同次写入；初始 revision 为 1。凭据配置只保存环境变量名。用户材料本身按原样保存。
+本机存储目录由 `--store DIR` 或共享 TOML 的 `store` 明确指定，没有自动生成的存储默认路径。记录位于 `DIR/sessions/<uuid>.json`，格式 `tars-session-v2`；`workspace_root`、`tools`、`tool_limits` 必须存在，写入限额、初始/当前权限模式和 MCP 快照可省略，省略时按默认写入限额、`ask` 和没有服务器读取。v1 不自动升级；`session export-materials` 可离线导出经校验的实际 Context，再显式采用新定义创建会话。固定定义、Context、ConversationId、revision 和 last_commit_id 同次写入；初始 revision 为 1。凭据配置只保存环境变量名。用户材料本身按原样保存。
 
 稳定的 `<uuid>.lock` 文件与可替换记录分离，OS 排他锁从读取前持有至本地 worker/I/O 停止。占用、不支持或 I/O 错误均拒绝，不降级为无锁。提交校验基线与完整内容，经同目录临时文件、内容刷新和原子替换；确认不明时保持原操作。list 忽略锁和临时文件，逐记录报告损坏与活动状态；列表不是全目录原子快照。
 
@@ -80,11 +80,11 @@ cargo fmt --all --check
 cargo clippy --workspace --locked --all-targets -- -D warnings
 cargo test --workspace --locked
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --locked --no-deps
-cargo build -p tarz-core --locked
+cargo build -p tars-core --locked
 cargo build --workspace --locked --release
-./target/release/tarz session --help
-./target/release/tarz-tui --help
-./target/release/tarz demo
+./target/release/tars session --help
+./target/release/tars-tui --help
+./target/release/tars demo
 node scripts/verify-proposals.mjs --links
 cargo deny check   # 安全公告、许可证、来源；规则在 deny.toml
 ```

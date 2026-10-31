@@ -13,21 +13,21 @@ CLI 参数 → SessionDefinition + 初始 Context → PreparedCreate
   → 发布绑定本次 SessionTarget 的 ManagedSession
 ```
 
-[Host](../crates/tarz-core/src/application/host.rs)在持有目录锁时登记并启动监督任务，同 ID 并发调用连接同一实例。create 的 ConversationId 和初始 commit_id 由同步 PreparedCreate 固定；等待者离开不改变它们。读取/装配失败且任务停止后移除 opening；初始提交失败则保留可 lookup 的 InitializationBlocked 与原操作，不发布可提交视图。
+[Host](../crates/tars-core/src/application/host.rs)在持有目录锁时登记并启动监督任务，同 ID 并发调用连接同一实例。create 的 ConversationId 和初始 commit_id 由同步 PreparedCreate 固定；等待者离开不改变它们。读取/装配失败且任务停止后移除 opening；初始提交失败则保留可 lookup 的 InitializationBlocked 与原操作，不发布可提交视图。
 
-[Definition](../crates/tarz-core/src/definition/types.rs)是可保存的数据；[assembly](../crates/tarz-core/src/assembly/provider.rs)才解析环境引用。定义在活动实例中固定，重开重新解析同一引用，连接不捕获某次 WorkRef。每工作仍获得对应身份、控制和固定策略的选项。构造和重开不发模型请求。
+[Definition](../crates/tars-core/src/definition/types.rs)是可保存的数据；[assembly](../crates/tars-core/src/assembly/provider.rs)才解析环境引用。定义在活动实例中固定，重开重新解析同一引用，连接不捕获某次 WorkRef。每工作仍获得对应身份、控制和固定策略的选项。构造和重开不发模型请求。
 
 ## 2. 受理与执行
 
-[ManagedSession::submit](../crates/tarz-core/src/application/managed.rs)先借用底层唯一请求键表比较完整参数，再检查生命周期和保存门禁。保留键同参返回原回执，异参 Conflict；新键拒绝返还原请求。新工作受理与 host active 槽登记在同一应用门禁内，worker 即使先完成也不能让 T2 越过保存。
+[ManagedSession::submit](../crates/tars-core/src/application/managed.rs)先借用底层唯一请求键表比较完整参数，再检查生命周期和保存门禁。保留键同参返回原回执，异参 Conflict；新键拒绝返还原请求。新工作受理与 host active 槽登记在同一应用门禁内，worker 即使先完成也不能让 T2 越过保存。
 
-底层 [SessionHandle](../crates/tarz-core/src/session/handle.rs)分配 TurnId，原子追加输入，保存原请求副本，并移交 Context 给 worker。每实例最多一个活动工作，无后台提交队列。工作期限从受理起覆盖逐工作装配和执行；不覆盖 opening、stdin 和磁盘 I/O。
+底层 [SessionHandle](../crates/tars-core/src/session/handle.rs)分配 TurnId，原子追加输入，保存原请求副本，并移交 Context 给 worker。每实例最多一个活动工作，无后台提交队列。工作期限从受理起覆盖逐工作装配和执行；不覆盖 opening、stdin 和磁盘 I/O。
 
-[Worker](../crates/tarz-core/src/session/worker.rs)检查控制，调用逐工作装配，再交给 Causa 公开 facade 的 `TurnRunner::run_streaming`。Causa 处理一次工作中的模型/工具循环，返回真实 Context、typed TurnResult 和未提交 ToolBatch；它不拥有 Tarz 目录、文件或工作历史。产品装配默认空工具目录，可按固定定义绑定六个内置工作区工具（三个只读、两个写入和一个命令工具；命令工具的平台限制见[工作区工具](workspace-tools.md)）。根资源在实例内共享，工具包装和 ToolReporter 按 WorkRef 新建。旧 Context 中的工具材料不会触发旧工具重跑。
+[Worker](../crates/tars-core/src/session/worker.rs)检查控制，调用逐工作装配，再交给 Causa 公开 facade 的 `TurnRunner::run_streaming`。Causa 处理一次工作中的模型/工具循环，返回真实 Context、typed TurnResult 和未提交 ToolBatch；它不拥有 TARS 目录、文件或工作历史。产品装配默认空工具目录，可按固定定义绑定六个内置工作区工具（三个只读、两个写入和一个命令工具；命令工具的平台限制见[工作区工具](workspace-tools.md)）。根资源在实例内共享，工具包装和 ToolReporter 按 WorkRef 新建。旧 Context 中的工具材料不会触发旧工具重跑。
 
 ## 3. Finished 与 Saved
 
-底层 supervisor 在正常和异常路径均等待该工作的受监督文件闭包实际退出，冻结可靠工具状态，然后归还材料及批次并发布原 `Arc<WorkResult>`。工具 future 的丢弃会请求停止操作，不能代替真实任务回收。host 的[独立监督路径](../crates/tarz-core/src/application/supervisor.rs)等到真实材料可用，推进 MaterialVersion，并固定本次不可变保存操作。
+底层 supervisor 在正常和异常路径均等待该工作的受监督文件闭包实际退出，冻结可靠工具状态，然后归还材料及批次并发布原 `Arc<WorkResult>`。工具 future 的丢弃会请求停止操作，不能代替真实任务回收。host 的[独立监督路径](../crates/tars-core/src/application/supervisor.rs)等到真实材料可用，推进 MaterialVersion，并固定本次不可变保存操作。
 
 ```text
 submit → Dirty → 原 WorkResult::Finished → 固定返回材料 → Saving
@@ -45,7 +45,7 @@ submit → Dirty → 原 WorkResult::Finished → 固定返回材料 → Saving
 
 ## 4. JSON 提交与确认
 
-[Store](../crates/tarz-core/src/store/json.rs)是 core 内部具体后端。记录格式 `tarz-session-v2` 保存 ConversationId、revision、last_commit_id、definition、context；只接受规范 UUID 文件名，不把任意输入拼为路径。定义中的 workspace_root、tools、tool_limits 必须完整存在；写入限额、初始/当前权限模式和 MCP 快照可省略，省略时按默认值读取。旧 v1 明确拒绝，离线材料导出见[工作区工具](workspace-tools.md)。工作表、请求键、执行结果、未提交批次、任务与连接不序列化。Causa 把工具结果状态和 artifact 类别的序列化形式改为 snake_case 之后，读取已存 Context 的三条路径（会话记录、材料文件、`export-materials`）都经过 [`material::vocabulary`](../crates/tarz-core/src/material/vocabulary.rs)：它在解码前把这两个字段的旧写法改成现行写法，对现行数据不做改动，所以不升记录格式；下一次写入即为现行写法。Causa 0.0.5 把消息角色改为 block 自身的事实后，同一处还把旧的 `{"shape":"parts","value":[..]}` 改写为 `{"shape":"message","value":{"role":..,"parts":[..]}}`。角色沿用旧渲染器从 `meta.source` 推断的结果：缺失或 `"assistant"` 为 `assistant`，`"system"` 为 `system`，其余为 `user`；唯一例外是 Tarz 的材料修复说明（来源 `application:tarz:material-repair`）读为 `system`，与现在写入时一致。
+[Store](../crates/tars-core/src/store/json.rs)是 core 内部具体后端。记录格式 `tars-session-v2` 保存 ConversationId、revision、last_commit_id、definition、context；只接受规范 UUID 文件名，不把任意输入拼为路径。定义中的 workspace_root、tools、tool_limits 必须完整存在；写入限额、初始/当前权限模式和 MCP 快照可省略，省略时按默认值读取。旧 v1 明确拒绝，离线材料导出见[工作区工具](workspace-tools.md)。工作表、请求键、执行结果、未提交批次、任务与连接不序列化。Causa 把工具结果状态和 artifact 类别的序列化形式改为 snake_case 之后，读取已存 Context 的三条路径（会话记录、材料文件、`export-materials`）都经过 [`material::vocabulary`](../crates/tars-core/src/material/vocabulary.rs)：它在解码前把这两个字段的旧写法改成现行写法，对现行数据不做改动，所以不升记录格式；下一次写入即为现行写法。Causa 0.0.5 把消息角色改为 block 自身的事实后，同一处还把旧的 `{"shape":"parts","value":[..]}` 改写为 `{"shape":"message","value":{"role":..,"parts":[..]}}`。角色沿用旧渲染器从 `meta.source` 推断的结果：缺失或 `"assistant"` 为 `assistant`，`"system"` 为 `system`，其余为 `user`；唯一例外是 TARS 的材料修复说明（来源 `application:tars:material-repair`）读为 `system`，与现在写入时一致。
 
 writer 持有稳定锁文件；每个在途 blocking 操作也持有它。提交先读最新版本：同 commit_id 必须完整内容相同；否则要求基线一致。写临时文件、同步后替换最终 JSON。回应丢失后读取确认原 commit；完整旧基线和持续同一写访问才可证明尚未提交。记录已推进或不可读时保留冲突/无法确认，不生成新身份或强行覆盖。
 
@@ -67,7 +67,7 @@ owner/worker 异常会隔离新工作，等待可确认的任务停止，保留�
 
 CLI 在保存失败时保留原执行 status/text，另输出 save_error；按用户选择导出随机不覆盖的恢复 Context，再以 1 退出。recovery_error、close_error 和 close_outcome 单列；恢复文件包含实际返回材料，不包含原工作表或未提交内容。Ctrl-C 取消工作后仍等待交还和保存；保存等待期间第二次 Ctrl-C 会停止等待、导出实际 Context 并以错误退出。
 
-`tarz run` 创建 transient host，仍支持原 `--load/--save`：导入获得新 ConversationId，只有显式 `--save` 导出 Context，报告与退出码保持。低层 offline demo 是独立 fixture，用来观察单会话契约。
+`tars run` 创建 transient host，仍支持原 `--load/--save`：导入获得新 ConversationId，只有显式 `--save` 导出 Context，报告与退出码保持。低层 offline demo 是独立 fixture，用来观察单会话契约。
 
 
 ## 临时流式观察

@@ -1,14 +1,14 @@
 # TUI 原型
 
-`tarz-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；已接通工作区工具（包括写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换）；MCP 通过 `mcp.json` 配置与表单选择、定义快照和运行期工具已接通，打开会话后状态行提示未启动的服务器和被跳过的工具，重开时若保存的 full-access 被降为 ask 也会提示，MCP 调用按权限模式支持执行、确认与拒绝；没有 GUI 或安装分发；命令经内置 `run_command` 执行，详见[工作区工具](workspace-tools.md)与[命令工具提案](../.agents/pipelines/proposals/feature/2026-10-27-sandboxed-shell-command.md)。构建与依赖基线见[当前实现](README.md)。
+`tars-tui` 是 Ratatui + Crossterm 的原生终端消费者，共享 `SessionHost` 与 [TOML 配置](configuration.md)。目前是开发原型：会话创建/打开、当前材料、临时流式正文、最终结果、多行输入、取消、保存及恢复操作已接通；已接通工作区工具（包括写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换）；MCP 通过 `mcp.json` 配置与表单选择、定义快照和运行期工具已接通，打开会话后状态行提示未启动的服务器和被跳过的工具，重开时若保存的 full-access 被降为 ask 也会提示，MCP 调用按权限模式支持执行、确认与拒绝；没有 GUI 或安装分发；命令经内置 `run_command` 执行，详见[工作区工具](workspace-tools.md)与[命令工具提案](../.agents/pipelines/proposals/feature/2026-10-27-sandboxed-shell-command.md)。构建与依赖基线见[当前实现](README.md)。
 
 命令确认面板显示完整命令、工作目录、期限、网络策略和“工作区可写、`.git` 钩子与配置只读、凭据不可读”；沙箱外请求改为醒目的“不在沙箱内：可读写整机、可联网、可读凭据”并显示模型理由。`/status` 增加 `Commands: ...`，显示沙箱后端和各能力维度（不可用时显示原因）。新建表单在 Tools 包含 `run_command` 时显示只读的 `Command: network ... · timeout ...` 行；它不是输入字段，不能编辑。禁用命令工具后不再显示该行。
 
 ```sh
-cargo build -p tarz-tui --locked
-./target/debug/tarz-tui --config /path/to/config.toml
+cargo build -p tars-tui --locked
+./target/debug/tars-tui --config /path/to/config.toml
 # 不使用全局配置，从新建表单填写模型：
-./target/debug/tarz-tui --no-config --store ./tarz-data
+./target/debug/tars-tui --no-config --store ./tars-data
 ```
 
 stdin 和 stdout 都必须是交互终端。至少 30×12；低于该尺寸时整屏只显示缩放提示。有待确认请求时需要至少 30×19 才显示面板并接受允许/拒绝键；更小时同样只显示缩放提示，Esc 或 Ctrl-C 仍取消本轮。矮窗口表单一次显示当前字段，Tab 切换。新建会话需要 provider/model 和可解析的凭据环境变量，创建本身不调用模型；表单还包括 Workspace、Tools、初始权限模式和 MCP 服务器字段。F3 重开已存会话时采用原固定定义，不套用新的全局模型预设。
@@ -34,13 +34,13 @@ stdin 和 stdout 都必须是交互终端。至少 30×12；低于该尺寸时�
 | 重试原保存 / 导出实际材料 | Ctrl-R / Ctrl-E |
 | 放弃本地未确认内容并关闭 | Ctrl-D，再明确 y 确认；n 或 Esc 取消 |
 
-界面采用单列对话布局：顶部是 Tarz、模型和会话信息，正文以 `❯ You` 和 `●` 区分输入与其他材料，输入区只有上下分隔线，随内容增高至最多 6 行，并受终端高度限制。背景和主文字沿用终端配色，暖橙色突出选择，灰色用于辅助信息，黄色用于错误和确认。没有常驻侧栏，宽窄终端采用相同结构；退出/放弃使用独立确认视图。
+界面采用单列对话布局：顶部是 TARS、模型和会话信息，正文以 `❯ You` 和 `●` 区分输入与其他材料，输入区只有上下分隔线，随内容增高至最多 6 行，并受终端高度限制。背景和主文字沿用终端配色，暖橙色突出选择，灰色用于辅助信息，黄色用于错误和确认。没有常驻侧栏，宽窄终端采用相同结构；退出/放弃使用独立确认视图。
 
 命令菜单包含 `/new`、`/sessions`、`/mode`、`/help`、`/status`、`/tools`、`/repair`、`/open`、`/cancel`、`/retry`、`/export`、`/close`、`/discard` 和 `/quit`。菜单出现期间输入只用于筛选；需要在正文输入以 `/` 开头的文本时可以粘贴。`/status` 显示打开时的详情快照，再次打开可刷新。F2–F7 和保存恢复快捷键在主视图可用；菜单内按键用于菜单操作，Ctrl-Q 仍可发起退出。
 
 会话各自保留未提交草稿。切换视图和重绘不取消工作、不重复提交；粘贴只插入文本，控制字符会被过滤，粘贴 `/quit` 等字符串也不会执行命令。Enter 在本轮改为发送；换行请使用 Ctrl-J。Ctrl-Q/关闭遇到草稿先确认；未提交草稿不属于自动保存的 Context。执行和保存状态分别显示，Completed 不等于 Saved。历史材料按内容显示，不恢复旧工作表或执行旧工具。
 
-保存失败时保留 owner 和写锁，并暂停退出；可以修复目录后 Ctrl-R，或 Ctrl-E 导出至配置的恢复目录（默认当前目录），再选择下一步。导出生成 `tarz-recovery-<uuid>.json`，不覆盖已有文件；导出失败独立报告。超过 64 MiB 的恢复文件仍完整写出，但会明确提示当前版本无法直接导入。Ctrl-D 不撤销已落盘记录，关闭报告保留原提交是否已应用/未应用/未尝试/仍无法确认的事实。
+保存失败时保留 owner 和写锁，并暂停退出；可以修复目录后 Ctrl-R，或 Ctrl-E 导出至配置的恢复目录（默认当前目录），再选择下一步。导出生成 `tars-recovery-<uuid>.json`，不覆盖已有文件；导出失败独立报告。超过 64 MiB 的恢复文件仍完整写出，但会明确提示当前版本无法直接导入。Ctrl-D 不撤销已落盘记录，关闭报告保留原提交是否已应用/未应用/未尝试/仍无法确认的事实。
 
 中断后有未配对声明时，发送会保留草稿并提示 F7。材料面板先等原工作收尾，显示有界诊断与原批次摘要；`a` 或 `r` 只生成预览，Enter 才应用并等待保存，Esc 返回草稿；新预览到达后 0.5 秒内忽略 Enter 及其他面板按键（Esc 与滚动仍生效），提示变暗。预览中 F4 切换会话会释放计划；迟到结果不能覆盖新面板。原工作仍保持 Cancelled/TimedOut，另行发送草稿才创建新工作。重开不能找回原批次，但可使用移除模式；详见[中断后继续](session-continuation.md)。
 
