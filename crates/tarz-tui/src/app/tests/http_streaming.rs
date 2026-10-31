@@ -91,7 +91,12 @@ impl Fixture {
         let captured = requests.clone();
         let (release, gate) = oneshot::channel();
         let task = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut socket = loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                if is_post(&socket).await {
+                    break socket;
+                }
+            };
             let request = read_request(&mut socket).await;
             captured.lock().unwrap().push(request);
             if socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await.is_err() { return; }

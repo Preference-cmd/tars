@@ -571,10 +571,11 @@ mod seatbelt {
             let handle = std::thread::spawn(move || {
                 while !stop_for_thread.load(Ordering::SeqCst) {
                     match listener.accept() {
-                        Ok((_stream, _)) => {
+                        Ok((stream, _)) if carries_marker(&stream) => {
                             accepted_for_thread.store(true, Ordering::SeqCst);
                             break;
                         }
+                        Ok(_) => continue,
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(10));
                         }
@@ -604,6 +605,20 @@ mod seatbelt {
         }
     }
 
+    /// Sent by the sandboxed client so a listener can tell its connection
+    /// from other local programs that connect to new ports.
+    const MARKER: &[u8] = b"tarz-sandbox-probe";
+
+    fn carries_marker(stream: &std::net::TcpStream) -> bool {
+        let mut received = [0; MARKER.len()];
+        stream.set_nonblocking(false).is_ok()
+            && stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .is_ok()
+            && std::io::Read::read_exact(&mut &*stream, &mut received).is_ok()
+            && received == MARKER
+    }
+
     fn nc_launch(
         host: &str,
         port: u16,
@@ -612,8 +627,15 @@ mod seatbelt {
         home: &Path,
     ) -> Launch {
         let port = port.to_string();
-        Launch::new("/usr/bin/nc")
-            .args(["-z", "-w", "1", host, port.as_str()])
+        let marker = std::str::from_utf8(MARKER).unwrap();
+        Launch::new("/bin/sh")
+            .args([
+                "-c",
+                "printf '%s' \"$0\" | /usr/bin/nc -w 1 \"$1\" \"$2\"",
+                marker,
+                host,
+                port.as_str(),
+            ])
             .current_dir(canonical(workspace))
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
             .env("HOME", home.as_os_str())

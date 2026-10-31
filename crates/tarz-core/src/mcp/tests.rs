@@ -2232,6 +2232,19 @@ async fn missing_env_variable_fails_startup_and_required_server_prevents_session
     assert!(msg.contains("not set"));
 }
 
+async fn starts_with_post(socket: &tokio::net::TcpStream) -> bool {
+    const PREFIX: &[u8] = b"POST ";
+    let mut head = [0; PREFIX.len()];
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), socket.peek(&mut head)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => return false,
+            Ok(Ok(n)) if head[..n] != PREFIX[..n] => return false,
+            Ok(Ok(n)) if n == PREFIX.len() => return true,
+            Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(1)).await,
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn http_server_headers_are_expanded_and_sent_over_network() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2242,7 +2255,16 @@ async fn http_server_headers_are_expanded_and_sent_over_network() {
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
-        if let Ok((mut socket, _)) = listener.accept().await {
+        // Other local programs may connect to a new port; the MCP client's
+        // first request is a POST.
+        let mut accepted = None;
+        while let Ok((socket, _)) = listener.accept().await {
+            if starts_with_post(&socket).await {
+                accepted = Some(socket);
+                break;
+            }
+        }
+        if let Some(mut socket) = accepted {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let mut buf = vec![0u8; 4096];
             let n = socket.read(&mut buf).await.unwrap_or(0);

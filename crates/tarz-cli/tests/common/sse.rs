@@ -1,6 +1,8 @@
 //! Text-only wire fixtures for actual CLI HTTP consumers.
 
 use serde_json::{Value, json};
+use std::net::{TcpListener, TcpStream};
+use std::time::Duration;
 
 pub fn reply(status: u16, body: Value) -> (&'static str, String) {
     if !(200..300).contains(&status) {
@@ -42,4 +44,38 @@ pub fn reply(status: u16, body: Value) -> (&'static str, String) {
 
 fn event(value: Value) -> String {
     format!("data: {value}\n\n")
+}
+
+/// Whether an accepted connection comes from the client under test. Other
+/// local programs, such as an editor that scans new ports, may connect to a
+/// fixture as well; only the client's requests start with `POST `.
+pub fn is_post(socket: &TcpStream) -> bool {
+    const PREFIX: &[u8] = b"POST ";
+    if socket.set_nonblocking(false).is_err()
+        || socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .is_err()
+    {
+        return false;
+    }
+    let mut head = [0; PREFIX.len()];
+    loop {
+        match socket.peek(&mut head) {
+            Ok(0) | Err(_) => return false,
+            Ok(n) if head[..n] != PREFIX[..n] => return false,
+            Ok(n) if n == PREFIX.len() => return true,
+            Ok(_) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
+/// Accepts the next connection from the client under test, dropping any
+/// other local connection instead of letting it take a scripted reply.
+pub fn accept_post(listener: &TcpListener) -> std::io::Result<TcpStream> {
+    loop {
+        let (socket, _) = listener.accept()?;
+        if is_post(&socket) {
+            return Ok(socket);
+        }
+    }
 }

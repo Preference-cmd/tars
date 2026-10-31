@@ -2,7 +2,7 @@
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -151,7 +151,8 @@ impl Fixture {
                         return;
                     }
                     match listener.accept() {
-                        Ok((socket, _)) => break socket,
+                        Ok((socket, _)) if is_post(&socket) => break socket,
+                        Ok(_) => continue,
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(5))
                         }
@@ -232,6 +233,42 @@ impl Drop for Fixture {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(task) = self.task.take() {
             task.join().unwrap();
+        }
+    }
+}
+
+/// Whether an accepted connection comes from the client under test. Other
+/// local programs, such as an editor that scans new ports, may connect to a
+/// fixture as well; only the client's requests start with `POST `.
+#[allow(dead_code)]
+pub fn is_post(socket: &TcpStream) -> bool {
+    const PREFIX: &[u8] = b"POST ";
+    if socket.set_nonblocking(false).is_err()
+        || socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .is_err()
+    {
+        return false;
+    }
+    let mut head = [0; PREFIX.len()];
+    loop {
+        match socket.peek(&mut head) {
+            Ok(0) | Err(_) => return false,
+            Ok(n) if head[..n] != PREFIX[..n] => return false,
+            Ok(n) if n == PREFIX.len() => return true,
+            Ok(_) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
+/// Accepts the next connection from the client under test, dropping any
+/// other local connection instead of letting it take a scripted reply.
+#[allow(dead_code)]
+pub fn accept_post(listener: &TcpListener) -> std::io::Result<TcpStream> {
+    loop {
+        let (socket, _) = listener.accept()?;
+        if is_post(&socket) {
+            return Ok(socket);
         }
     }
 }

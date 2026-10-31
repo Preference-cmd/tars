@@ -36,7 +36,7 @@ fn serve(provider: &str, script: Vec<Reply>) -> (String, Arc<Mutex<Vec<Value>>>)
     let captured = requests.clone();
     std::thread::spawn(move || {
         for reply in script {
-            let Ok((mut socket, _)) = listener.accept() else {
+            let Ok(mut socket) = tools::accept_post(&listener) else {
                 return;
             };
             socket

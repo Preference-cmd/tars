@@ -421,7 +421,7 @@ fn accepted_http_socket_waits_for_delayed_request_bytes() {
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while fixture.accepted.load(Ordering::SeqCst) == 0 {
+    while fixture.connected.load(Ordering::SeqCst) == 0 {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(1));
     }

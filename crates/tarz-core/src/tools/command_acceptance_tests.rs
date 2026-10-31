@@ -24,7 +24,7 @@ use causa::kernel::{
     ToolResultPayload, ToolResultStatus, TurnId,
 };
 use serde_json::json;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
@@ -238,6 +238,21 @@ struct Listener {
     handle: Option<JoinHandle<bool>>,
 }
 
+/// Requested by the sandboxed client so a listener can tell its connection
+/// from other local programs that connect to new ports.
+const PROBE_PATH: &str = "/tarz-sandbox-probe";
+
+fn requests_probe(stream: &std::net::TcpStream) -> bool {
+    let expected = format!("GET {PROBE_PATH} ");
+    let mut head = vec![0; expected.len()];
+    stream.set_nonblocking(false).is_ok()
+        && stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .is_ok()
+        && (&*stream).read_exact(&mut head).is_ok()
+        && head == expected.as_bytes()
+}
+
 impl Listener {
     fn start() -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -249,7 +264,9 @@ impl Listener {
             while !stopped.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
-                        stream.set_nonblocking(false).unwrap();
+                        if !requests_probe(&stream) {
+                            continue;
+                        }
                         stream
                             .set_write_timeout(Some(Duration::from_secs(2)))
                             .unwrap();
@@ -293,7 +310,7 @@ async fn network_none_denies_loopback_and_dns_while_open_allows_loopback() {
     let closed_calls = [
         call(json!({
             "command": format!(
-                "/usr/bin/curl -sS --max-time 2 http://127.0.0.1:{}/",
+                "/usr/bin/curl -sS --max-time 2 http://127.0.0.1:{}{PROBE_PATH}",
                 closed_listener.port
             ),
             "timeout_secs": 10
@@ -343,7 +360,7 @@ async fn network_none_denies_loopback_and_dns_while_open_allows_loopback() {
     let open_listener = Listener::start();
     let open_call = call(json!({
         "command": format!(
-            "/usr/bin/curl -sS --max-time 2 http://127.0.0.1:{}/",
+            "/usr/bin/curl -sS --max-time 2 http://127.0.0.1:{}{PROBE_PATH}",
             open_listener.port
         ),
         "timeout_secs": 10

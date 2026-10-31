@@ -13,7 +13,7 @@ fn server(status: u16, body: Value, delay: Duration) -> (String, mpsc::Receiver<
     let endpoint = format!("http://{}/fixture", listener.local_addr().unwrap());
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = sse::accept_post(&listener).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();

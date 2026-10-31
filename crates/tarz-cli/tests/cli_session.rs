@@ -101,7 +101,7 @@ impl Fixture {
         let (responses, response_rx) = mpsc::channel::<(u16, Value)>();
         std::thread::spawn(move || {
             for _ in 0..count {
-                let (mut socket, _) = listener.accept().unwrap();
+                let mut socket = sse::accept_post(&listener).unwrap();
                 let request = read_request(&mut socket);
                 if request_tx.send(request).is_err() {
                     return;

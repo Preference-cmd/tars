@@ -110,6 +110,9 @@ impl Server {
                         continue;
                     },
                 };
+                if !is_post(&socket).await {
+                    continue;
+                }
                 let captured = captured.clone();
                 let barrier = barrier.clone();
                 children.spawn(async move {
@@ -167,5 +170,21 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+/// Whether an accepted connection comes from the client under test. Other
+/// local programs, such as an editor that scans new ports, may connect to a
+/// fixture as well; only the client's requests start with `POST `.
+pub async fn is_post(socket: &tokio::net::TcpStream) -> bool {
+    const PREFIX: &[u8] = b"POST ";
+    let mut head = [0; PREFIX.len()];
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), socket.peek(&mut head)).await {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => return false,
+            Ok(Ok(n)) if head[..n] != PREFIX[..n] => return false,
+            Ok(Ok(n)) if n == PREFIX.len() => return true,
+            Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(1)).await,
+        }
     }
 }

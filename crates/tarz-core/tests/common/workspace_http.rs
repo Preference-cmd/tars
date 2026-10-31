@@ -2,7 +2,7 @@
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -143,7 +143,11 @@ fn body(provider: &str, reply: Reply, index: usize) -> String {
 pub struct Fixture {
     pub endpoint: String,
     pub requests: Arc<Mutex<Vec<Value>>>,
+    /// Connections from the client under test.
     pub accepted: Arc<AtomicUsize>,
+    /// Every accepted connection, counted before the fixture waits for its
+    /// first bytes; other local programs may add to it.
+    pub connected: Arc<AtomicUsize>,
     release: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     task: Option<std::thread::JoinHandle<()>>,
@@ -163,6 +167,8 @@ impl Fixture {
         let captured = requests.clone();
         let accepted = Arc::new(AtomicUsize::new(0));
         let accepted_count = accepted.clone();
+        let connected = Arc::new(AtomicUsize::new(0));
+        let connected_count = connected.clone();
         let release = Arc::new(AtomicBool::new(false));
         let gate = release.clone();
         let stop = Arc::new(AtomicBool::new(false));
@@ -176,7 +182,12 @@ impl Fixture {
                         return;
                     }
                     match listener.accept() {
-                        Ok((socket, _)) => break socket,
+                        Ok((socket, _)) => {
+                            connected_count.fetch_add(1, Ordering::SeqCst);
+                            if is_post(&socket) {
+                                break socket;
+                            }
+                        }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(2))
                         }
@@ -249,6 +260,7 @@ impl Fixture {
             endpoint,
             requests,
             accepted,
+            connected,
             release,
             stop,
             task: Some(task),
@@ -277,6 +289,29 @@ impl Drop for Fixture {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(task) = self.task.take() {
             task.join().unwrap();
+        }
+    }
+}
+
+/// Whether an accepted connection comes from the client under test. Other
+/// local programs, such as an editor that scans new ports, may connect to a
+/// fixture as well; only the client's requests start with `POST `.
+fn is_post(socket: &TcpStream) -> bool {
+    const PREFIX: &[u8] = b"POST ";
+    if socket.set_nonblocking(false).is_err()
+        || socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .is_err()
+    {
+        return false;
+    }
+    let mut head = [0; PREFIX.len()];
+    loop {
+        match socket.peek(&mut head) {
+            Ok(0) | Err(_) => return false,
+            Ok(n) if head[..n] != PREFIX[..n] => return false,
+            Ok(n) if n == PREFIX.len() => return true,
+            Ok(_) => std::thread::sleep(Duration::from_millis(1)),
         }
     }
 }
