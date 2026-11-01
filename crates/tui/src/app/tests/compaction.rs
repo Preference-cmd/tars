@@ -250,9 +250,10 @@ async fn automatic_compaction_inside_a_work_keeps_the_old_conversation_visible()
         "this request is long enough to trigger compaction ".repeat(100),
     ));
     app.event(ctrl('s'));
-    // The summary call is a non-streaming request; the main request follows.
-    until(&mut app, |_| server.requests.lock().unwrap().len() == 1).await;
-    until(&mut app, |_| server.requests.lock().unwrap().len() == 2).await;
+    // The summary call is a non-streaming request and answers immediately; the
+    // streaming main request follows it. Waiting for the exact intermediate
+    // count would race with the second request, so wait until both were read.
+    until(&mut app, |_| server.requests.lock().unwrap().len() >= 2).await;
     server.release.add_permits(1);
     until(&mut app, |app| app.entries[0].execution == "Completed").await;
 
