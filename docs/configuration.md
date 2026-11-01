@@ -18,6 +18,9 @@ store = "data"
 recovery_dir = "."
 default_profile = "work"
 
+# [external_tools]
+# rg = "managed"               # managed | system | an absolute path
+
 [profiles.work]
 provider = "openai-chat"
 model = "your-model-id"
@@ -94,7 +97,21 @@ The replaced material is written to `<store>/sessions/<conversation id>.history/
 
 The record format name stays `tars-session-v2`; the new fields are appended, so a version that does not know them cannot read a compacted record. This is accepted before 0.1.
 
-## MCP servers
+## External tools (search)
+
+The built-in `search_text` runs the external `rg` executable. `[external_tools] rg` selects where it comes from; it is a top-level table, not a preset field, and applies to every entry point of the process:
+
+| Value | Meaning | Check |
+| --- | --- | --- |
+| `managed` (default) | The pinned ripgrep 15.2.0 installed by TARS under `$XDG_DATA_HOME/tars/tools/ripgrep-15.2.0-<target>/rg`, falling back to `~/.local/share/tars/tools/...` | SHA-256 of the installed executable compiled into TARS; a mismatch means unavailable |
+| `system` | The first `rg` found on `PATH` when TARS starts, resolved once to an absolute path | Version recorded; a major version below 14 is unavailable |
+| an absolute path | That executable | Must exist; its version is recorded |
+
+Resolution happens once per process and is cached; session binding uses the resolved absolute path and never re-resolves behind the caller's back. A managed file that fails its check, a missing file, an old `system` version or an unreadable path all make search unavailable with a short reason; no source falls back to the others. A configured absolute path is trusted as given, so it is not version-checked the way `system` is.
+
+Only `tars tools install rg` (or the TUI startup consent) downloads anything, and only for the managed source: HTTPS only, restricted to `github.com` and GitHub release asset hosts including redirects, at most 10 MiB and 120 seconds, proxies from the environment, hash verified before extraction, only the single `rg` entry extracted from the `.tar.gz` with link and path escapes rejected, mode 0755, atomic rename, and one `rg --version` after installation. Any failure leaves nothing at the final path. `[external_tools] rg = "system"` or an absolute path disables the managed installation and `tars tools install rg` refuses with a notice; switch the source back to `managed` to install.
+
+
 
 MCP servers are defined in a separate `mcp.json`, kept apart from `config.toml`: common `mcpServers` JSON fragments can be pasted directly, and `config.toml` only stores the preset selection. See [mcp.example.json](../mcp.example.json) for a complete example.
 
@@ -173,6 +190,6 @@ A single result is at most 64 KiB after serialization; larger content is convert
 
 ## Workspace and built-in tools
 
-A preset may add `workspace_root = "../project"` and `tools`. The built-in tools are `list_directory`, `read_file`, `search_text`, `write_file`, `edit_file` and `run_command`; tools default to empty, and enabling tools requires a root directory. `run_command` also takes the optional `[profiles.NAME.command]` table: `network` (`none`/`open`, default `none`), `default_timeout_secs` (default 120) and `max_timeout_secs` (default 600, hard limit 600); the command-line counterpart is `--command-network`, and the other two come from the preset. CLI `run` and `session create` accept `--workspace DIR --tools NAME,NAME`; an explicit `--tools ''` clears the preset. The TUI new-session form fills Workspace, Tools, initial permission mode and MCP selection from the preset, and changes affect only this new session; when the current Tools include `run_command`, an additional read-only command summary line is shown and cannot be edited. Reopening still uses the original definition and accepts no tool overrides.
+A preset may add `workspace_root = "../project"` and `tools`. The built-in tools are `list_directory`, `read_file`, `search_text`, `write_file`, `edit_file` and `run_command`; tools default to empty, and enabling tools requires a root directory. `search_text` also requires a platform sandbox backend and a ready `rg`; see [External tools](#external-tools-search) for the source selection. `run_command` also takes the optional `[profiles.NAME.command]` table: `network` (`none`/`open`, default `none`), `default_timeout_secs` (default 120) and `max_timeout_secs` (default 600, hard limit 600); the command-line counterpart is `--command-network`, and the other two come from the preset. CLI `run` and `session create` accept `--workspace DIR --tools NAME,NAME`; an explicit `--tools ''` clears the preset. The TUI new-session form fills Workspace, Tools, initial permission mode and MCP selection from the preset, and changes affect only this new session; when the current Tools include `run_command`, an additional read-only command summary line is shown and cannot be edited. Reopening still uses the original definition and accepts no tool overrides.
 
 A relative workspace likewise uses the configuration directory/CLI cwd base, but is canonicalized to a physical absolute directory and checked for existence when first resolved; after saving, reopening does not resolve aliases again. Unknown/duplicate tools, a missing root or exceeded limits are rejected. `[profiles.NAME.tool_limits]` can lower `max_concurrent_operations`, `call_timeout_secs`, `max_output_bytes`, `max_directory_entries`, `max_file_scan_bytes`, `max_search_files`, `max_search_depth`, `max_search_scan_bytes` and `max_search_matches` individually; `[profiles.NAME.write_limits]` controls `max_edit_file_bytes`, `max_write_bytes` and `max_edit_segments`. Omitted fields use the defaults, and the persistent definition saves the complete effective values. Values, paths and confirmation boundaries are in [Workspace tools](workspace-tools.md).
