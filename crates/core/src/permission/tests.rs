@@ -2540,7 +2540,8 @@ async fn command_tool_creation_fails_on_unsupported_platform() {
             Context::default(),
         ))
         .await
-        .expect_err("run_command must fail closed on unsupported platforms");
+        .err()
+        .expect("run_command must fail closed on unsupported platforms");
     assert!(error.to_string().contains("command"));
 }
 

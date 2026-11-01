@@ -22,6 +22,7 @@
 #![deny(missing_docs)]
 
 mod backend;
+#[cfg(target_os = "macos")]
 mod credentials;
 mod policy;
 mod process;
