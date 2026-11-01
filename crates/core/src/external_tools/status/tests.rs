@@ -29,9 +29,14 @@ fn tool_environment(data_home: &Path, path: &Path) -> ToolEnvironment {
 fn tool_source_parses_the_three_configured_forms() {
     assert_eq!(ToolSource::parse("managed"), Ok(ToolSource::Managed));
     assert_eq!(ToolSource::parse(" system "), Ok(ToolSource::System));
+    // A platform-absolute path; a Unix literal such as `/opt/tools/rg` is not
+    // absolute on Windows. Forward slashes keep the same text on both systems.
+    let absolute = std::env::temp_dir().join("tars-tool-source-rg");
+    let absolute_text = absolute.to_string_lossy().replace('\\', "/");
+    let absolute_path = PathBuf::from(&absolute_text);
     assert_eq!(
-        ToolSource::parse("/opt/tools/rg"),
-        Ok(ToolSource::Path(PathBuf::from("/opt/tools/rg")))
+        ToolSource::parse(&absolute_text),
+        Ok(ToolSource::Path(absolute_path.clone()))
     );
     for invalid in ["", "Managed", "rg", "./rg", "~/bin/rg"] {
         assert_eq!(
@@ -42,39 +47,47 @@ fn tool_source_parses_the_three_configured_forms() {
     }
     assert_eq!(ToolSource::Managed.kind(), "managed");
     assert_eq!(ToolSource::System.kind(), "system");
-    assert_eq!(ToolSource::Path(PathBuf::from("/x")).kind(), "path");
-    assert_eq!(ToolSource::Path(PathBuf::from("/x")).to_string(), "/x");
+    assert_eq!(ToolSource::Path(absolute_path.clone()).kind(), "path");
+    assert_eq!(ToolSource::Path(absolute_path).to_string(), absolute_text);
 }
 
 #[test]
 fn managed_path_uses_an_absolute_xdg_data_home_or_the_home_fallback() {
-    let xdg = Path::new("/data");
+    // Build the expected paths natively: `/data` is not absolute on Windows,
+    // `$HOME`-style paths are not portable, and the executable name is
+    // `rg.exe` there (RG_BINARY).
+    let xdg = std::env::temp_dir().join("tars-managed-xdg");
+    let home = std::env::temp_dir().join("tars-managed-home");
     let environment = ToolEnvironment {
-        data_home: Some(xdg.to_owned()),
-        home: Some(PathBuf::from("/home/user")),
+        data_home: Some(xdg.clone()),
+        home: Some(home.clone()),
         path: None,
         proxy: None,
         no_proxy: None,
     };
     assert_eq!(
         managed_path(&environment, "aarch64-apple-darwin").unwrap(),
-        PathBuf::from(format!(
-            "/data/tars/tools/ripgrep-{RIPGREP_VERSION}-aarch64-apple-darwin/rg"
-        ))
+        xdg.join("tars")
+            .join("tools")
+            .join(format!("ripgrep-{RIPGREP_VERSION}-aarch64-apple-darwin"))
+            .join(RG_BINARY)
     );
 
     let fallback = ToolEnvironment {
         data_home: Some(PathBuf::from("relative-is-ignored")),
-        home: Some(PathBuf::from("/home/user")),
+        home: Some(home.clone()),
         path: None,
         proxy: None,
         no_proxy: None,
     };
     assert_eq!(
         managed_path(&fallback, "x86_64-apple-darwin").unwrap(),
-        PathBuf::from(format!(
-            "/home/user/.local/share/tars/tools/ripgrep-{RIPGREP_VERSION}-x86_64-apple-darwin/rg"
-        ))
+        home.join(".local")
+            .join("share")
+            .join("tars")
+            .join("tools")
+            .join(format!("ripgrep-{RIPGREP_VERSION}-x86_64-apple-darwin"))
+            .join(RG_BINARY)
     );
 
     let nowhere = ToolEnvironment::default();
@@ -320,7 +333,11 @@ fn configured_sources_resolve_through_the_shared_configuration() {
         assert!(!tools.rg().is_ready());
     }
 
-    let config = config_with(Some("/definitely/absent/rg"));
+    // A configured path must be absolute; build it from the real temporary
+    // directory so the value is valid on Windows too.
+    let absent = std::env::temp_dir().join("tars-absent-rg");
+    let absent_text = absent.to_string_lossy().replace('\\', "/");
+    let config = config_with(Some(&absent_text));
     let tools = ExternalTools::resolve_with(
         &config,
         &ToolEnvironment {
@@ -330,7 +347,7 @@ fn configured_sources_resolve_through_the_shared_configuration() {
     );
     assert_eq!(
         tools.rg().source,
-        ToolSource::Path("/definitely/absent/rg".into())
+        ToolSource::Path(PathBuf::from(&absent_text))
     );
     assert!(!tools.rg().is_ready());
 }

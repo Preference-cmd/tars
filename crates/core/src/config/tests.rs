@@ -1096,9 +1096,21 @@ fn external_tools_section_selects_the_ripgrep_source_and_defaults_to_managed() {
     let config = Config::load(ConfigSource::File(path.clone())).unwrap();
     assert_eq!(config.ripgrep_source(), &ToolSource::System);
 
-    std::fs::write(&path, "version = 1\n[external_tools]\nrg = \"/opt/rg\"\n").unwrap();
+    // Platform-absolute path: `/opt/rg` is not absolute on Windows. The path is
+    // built from the real temporary directory and written with forward slashes
+    // so the TOML basic string needs no escaping.
+    let absolute = std::env::temp_dir().join("tars-config-rg");
+    let absolute_text = absolute.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        &path,
+        format!("version = 1\n[external_tools]\nrg = \"{absolute_text}\"\n"),
+    )
+    .unwrap();
     let config = Config::load(ConfigSource::File(path.clone())).unwrap();
-    assert_eq!(config.ripgrep_source(), &ToolSource::Path("/opt/rg".into()));
+    assert_eq!(
+        config.ripgrep_source(),
+        &ToolSource::Path(std::path::PathBuf::from(&absolute_text))
+    );
 
     std::fs::write(&path, "version = 1\n[external_tools]\n").unwrap();
     let config = Config::load(ConfigSource::File(path.clone())).unwrap();

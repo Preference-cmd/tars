@@ -279,6 +279,10 @@ fn command_creation_without_a_backend_names_the_build_platform() {
     );
 }
 
+/// Unix-only: assembly opens a real workspace, and workspace tools have no
+/// implementation on other platforms. The platform-naming creation test above
+/// runs on every non-macOS platform because command binding fails first there.
+#[cfg(unix)]
 #[test]
 fn a_failed_probe_binds_the_session_with_an_unavailable_status() {
     let directory = tempfile::tempdir().unwrap();

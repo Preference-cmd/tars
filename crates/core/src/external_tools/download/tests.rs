@@ -17,6 +17,14 @@ mod fixture;
 
 const TEST_TARGET: &str = "test-target";
 
+/// Executable file name the extractor looks for; `rg.exe` on Windows.
+const RG_BINARY: &str = super::super::status::RG_BINARY;
+
+/// Archive entry path of the fixture executable (platform file name).
+fn rg_entry(directory: &str) -> String {
+    format!("{directory}/{RG_BINARY}")
+}
+
 fn digest(bytes: &[u8]) -> String {
     super::hex_digest(&Sha256::digest(bytes))
 }
@@ -39,7 +47,7 @@ fn destination(directory: &Path) -> PathBuf {
         .join("tars")
         .join("tools")
         .join(format!("ripgrep-{RIPGREP_VERSION}-{TEST_TARGET}"))
-        .join("rg")
+        .join(RG_BINARY)
 }
 
 fn error_chain(error: &dyn std::error::Error) -> String {
@@ -79,7 +87,7 @@ async fn success_installs_atomically_and_runs_version() {
     let script = b"#!/bin/sh\necho \"ripgrep 15.2.0\"\n";
     let archive = tar_gz(&[
         Entry::Dir("ripgrep-15.2.0-test-target/"),
-        Entry::File("ripgrep-15.2.0-test-target/rg", script),
+        Entry::File(&rg_entry("ripgrep-15.2.0-test-target"), script),
         Entry::File("ripgrep-15.2.0-test-target/README.md", b"ignored"),
     ]);
     let served = archive.clone();
@@ -115,7 +123,7 @@ async fn success_installs_atomically_and_runs_version() {
 #[tokio::test]
 async fn hash_mismatch_leaves_nothing_at_the_final_path() {
     let archive = tar_gz(&[Entry::File(
-        "ripgrep-15.2.0-test-target/rg",
+        &rg_entry("ripgrep-15.2.0-test-target"),
         b"not the expected executable",
     )]);
     let served = archive.clone();
@@ -144,7 +152,10 @@ async fn redirect_to_a_disallowed_host_is_rejected_before_the_second_request() {
     let fixture = start(handler).await;
     let directory = tempfile::tempdir().unwrap();
     let destination = destination(directory.path());
-    let archive = tar_gz(&[Entry::File("ripgrep-15.2.0-test-target/rg", b"unused")]);
+    let archive = tar_gz(&[Entry::File(
+        &rg_entry("ripgrep-15.2.0-test-target"),
+        b"unused",
+    )]);
 
     let error = install(&source(&fixture, "/redirect-bad", &archive), &destination)
         .await
@@ -176,7 +187,7 @@ async fn redirect_to_an_allowed_host_is_followed() {
     let directory = tempfile::tempdir().unwrap();
     let destination = destination(directory.path());
     let archive = tar_gz(&[Entry::File(
-        "ripgrep-15.2.0-test-target/rg",
+        &rg_entry("ripgrep-15.2.0-test-target"),
         b"expected bytes",
     )]);
     let mut source = source(&fixture, "/redirect-ok", &archive);
@@ -196,11 +207,11 @@ async fn archives_with_escaping_paths_are_rejected() {
     for archive in [
         tar_gz(&[
             Entry::File("ripgrep-15.2.0-test-target/../escape", b"escape"),
-            Entry::File("ripgrep-15.2.0-test-target/rg", b"unused"),
+            Entry::File(&rg_entry("ripgrep-15.2.0-test-target"), b"unused"),
         ]),
         tar_gz(&[
             Entry::File("/tmp/tars-escape", b"escape"),
-            Entry::File("ripgrep-15.2.0-test-target/rg", b"unused"),
+            Entry::File(&rg_entry("ripgrep-15.2.0-test-target"), b"unused"),
         ]),
     ] {
         let served = archive.clone();
@@ -224,11 +235,11 @@ async fn archives_with_escaping_paths_are_rejected() {
 async fn archives_with_link_entries_are_rejected() {
     for archive in [
         tar_gz(&[
-            Entry::File("ripgrep-15.2.0-test-target/rg", b"unused"),
+            Entry::File(&rg_entry("ripgrep-15.2.0-test-target"), b"unused"),
             Entry::Symlink("ripgrep-15.2.0-test-target/rg-link", "/etc/passwd"),
         ]),
         tar_gz(&[
-            Entry::File("ripgrep-15.2.0-test-target/rg", b"unused"),
+            Entry::File(&rg_entry("ripgrep-15.2.0-test-target"), b"unused"),
             Entry::HardLink("ripgrep-15.2.0-test-target/rg-hard", "rg"),
         ]),
     ] {
@@ -261,8 +272,8 @@ async fn archives_missing_or_duplicating_the_executable_are_rejected() {
         ),
         (
             tar_gz(&[
-                Entry::File("ripgrep-15.2.0-test-target/rg", b"first"),
-                Entry::File("ripgrep-15.2.0-test-target/second/rg", b"second"),
+                Entry::File(&rg_entry("ripgrep-15.2.0-test-target"), b"first"),
+                Entry::File(&rg_entry("ripgrep-15.2.0-test-target/second"), b"second"),
             ]),
             false,
         ),
@@ -331,7 +342,7 @@ async fn streaming_body_over_the_cap_is_rejected() {
 #[tokio::test]
 async fn interrupted_download_leaves_nothing_at_the_final_path() {
     let archive = tar_gz(&[Entry::File(
-        "ripgrep-15.2.0-test-target/rg",
+        &rg_entry("ripgrep-15.2.0-test-target"),
         b"truncated before the end",
     )]);
     let partial = archive[..archive.len() / 2].to_vec();
@@ -377,7 +388,7 @@ async fn non_https_urls_are_rejected() {
 #[tokio::test]
 async fn an_executable_that_does_not_match_its_pinned_hash_is_rejected() {
     let archive = tar_gz(&[Entry::File(
-        "ripgrep-15.2.0-test-target/rg",
+        &rg_entry("ripgrep-15.2.0-test-target"),
         b"archive is genuine but the executable pin is wrong",
     )]);
     let served = archive.clone();
@@ -400,7 +411,7 @@ async fn an_executable_that_does_not_match_its_pinned_hash_is_rejected() {
 #[tokio::test]
 async fn an_installed_executable_that_cannot_run_is_removed_again() {
     let script = b"#!/bin/sh\nexit 7\n";
-    let archive = tar_gz(&[Entry::File("ripgrep-15.2.0-test-target/rg", script)]);
+    let archive = tar_gz(&[Entry::File(&rg_entry("ripgrep-15.2.0-test-target"), script)]);
     let served = archive.clone();
     let handler: Handler = Arc::new(move |_, _| Reply::ok(served.clone()));
     let fixture = start(handler).await;
@@ -484,7 +495,7 @@ async fn install_refuses_to_guess_a_data_directory() {
 async fn install_reports_a_missing_platform_archive() {
     let config = Config::load(ConfigSource::Disabled).unwrap();
     let environment = ToolEnvironment {
-        data_home: Some(PathBuf::from("/tmp")),
+        data_home: Some(std::env::temp_dir()),
         ..ToolEnvironment::default()
     };
     let error = install_managed_rg_with(&config, &environment)

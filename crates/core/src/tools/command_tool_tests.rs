@@ -572,7 +572,10 @@ fn the_generated_policy_holds_canonical_absolute_paths_and_no_backend_vocabulary
             assert!(
                 path.components().all(|component| matches!(
                     component,
-                    Component::RootDir | Component::Normal(_)
+                    // Windows canonicalization returns a `\\?\C:\...` verbatim
+                    // path; its drive/UNC prefix is not a relative component.
+                    // Only `.` and `..` are relative components.
+                    Component::Prefix(_) | Component::RootDir | Component::Normal(_)
                 )),
                 "policy path contains a relative component: {path:?}"
             );

@@ -1,11 +1,5 @@
 use super::support::*;
-use crate::definition::{CommandSettings, WorkspaceTool};
 use crate::sandbox::{BackendId, SandboxStatus};
-use causa::kernel::{
-    BlockId, CallControl, InvocationId, RoundId, ToolBatch, ToolCallContext, ToolCallPayload,
-    ToolResultStatus, TurnId,
-};
-use tokio_util::sync::CancellationToken;
 
 /// Display-only coverage: the unavailable status is injected at the fixture
 /// seam, so this covers only the `ManagedSession` accessor and the display
@@ -59,8 +53,20 @@ async fn managed_session_reports_an_injected_unavailable_command_status() {
 /// A failed probe bound through the real assembly path leaves the session open
 /// with an unavailable command status, and every bound call is Rejected with
 /// the probe reason before a process can start.
+///
+/// Unix-only: it binds a real workspace, and workspace tools have no
+/// implementation on other platforms. The cross-platform failed-probe tool test
+/// uses a recording workspace and lives in `tools::command_tool_tests`.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_probe_binds_an_unavailable_session_and_rejects_every_call() {
+    use crate::definition::{CommandSettings, WorkspaceTool};
+    use causa::kernel::{
+        BlockId, CallControl, InvocationId, RoundId, ToolBatch, ToolCallContext, ToolCallPayload,
+        ToolResultStatus, TurnId,
+    };
+    use tokio_util::sync::CancellationToken;
+
     let directory = tempfile::tempdir().unwrap();
     let workspace = directory.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
