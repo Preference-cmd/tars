@@ -67,7 +67,14 @@ These paths are verified by local HTTP fixtures and real process tests without l
 ./target/release/tars session run "$SESSION_ID" --store ./tars-data \
   --input 'Continue this session' --json
 ./target/release/tars session list --store ./tars-data --json
+
+# Inspect or manage a long session's replaced material
+./target/release/tars session show "$SESSION_ID" --store ./tars-data --json
+./target/release/tars session compact "$SESSION_ID" --store ./tars-data
+./target/release/tars session history "$SESSION_ID" --store ./tars-data --last 3
 ```
+
+Set `--context-window N` (the model's token window) and `--auto-compact on|off|PERCENT` when creating a session, or put `context_window`, `auto_compact` and `compact_threshold` in a preset, to let TARS replace a Context that approaches the window with a model-written working brief. The replaced conversation is kept as read-only history segments next to the record, which `session history` reads in order (`--json` prints one segment document per line) and which the TUI shows above the current conversation. `session compact` performs the replacement manually; `session show` reports the current estimate, the settings, the segment count and retained-work occupancy. Material export, recovery exports and `--load` always contain the current Context only. Details are in [Configuration](docs/configuration.md#long-session-compaction) and [Current implementation](docs/README.md#compaction-and-history).
 
 `--store` is given by an argument or the shared configuration. Records keep the frozen definition and the latest Context; reopening preserves the ConversationId and BlockIds but does not restore old work, request keys or uncommitted output. Environment-variable credentials are resolved again on every open; the record stores only the variable reference. The definition defaults to a 120-second deadline, 256 retained works, 10 model calls and 64 tool declarations; see `tars session --help` for details.
 
