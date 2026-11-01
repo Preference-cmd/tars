@@ -63,7 +63,7 @@ An owner/worker fault isolates new work, waits for confirmable task stops and ke
 
 ## 6. CLI consumers
 
-`session create` only creates and confirms the initial record. `session run ID` reopens the saved definition, submits new work, waits for the independent save result and then closes; provider/model cannot be overridden transiently. `session list` needs no credential resolution. All of them require an explicit `--store`.
+`session create` only creates and confirms the initial record. `session run ID` reopens the saved definition, submits new work, waits for the independent save result and then closes; provider/model cannot be overridden transiently. `session compact ID` compacts manually through the session's model and waits for the save; `session history ID` reads the ordered history index and one segment at a time (`--json` emits one document per line), so memory holds one segment plus the current Context; `session show ID` reports the record facts including context usage and retained-work occupancy. `session list` needs no credential resolution. All of them require an explicit `--store`.
 
 On save failure the CLI keeps the original execution status/text and additionally outputs save_error; according to the user's choice it exports a random, non-overwriting recovery Context and then exits 1. recovery_error, close_error and close_outcome are reported separately; a recovery file contains the actually returned materials, not the original work table or uncommitted content. After Ctrl-C cancels the work it still waits for the return and save; a second Ctrl-C during the save wait stops waiting, exports the actual Context and exits with an error.
 
