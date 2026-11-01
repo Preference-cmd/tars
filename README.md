@@ -95,3 +95,7 @@ CLI/TUI 共用 [TOML 配置](docs/configuration.md)，支持全局默认路径�
 Causa 负责 Context 和单次执行；TARS 负责会话、工作受理、依赖装配及应用交互。
 
 开发流程资料 `.agents/` 和辅助 `scripts/` 留在本机、Git 忽略；设计与验收链接供本地开发使用，不随应用分发。
+
+## 许可证
+
+本项目以 [MIT 许可证](LICENSE) 发布。
