@@ -87,6 +87,7 @@ impl App {
         entry.requested_material_version = None;
         entry.material_retry_after = None;
         entry.repair_job = None;
+        entry.clear_history();
         entry.refreshing = false;
         entry.wrapping = false;
         entry.execution = "No work in this instance".into();
@@ -292,6 +293,7 @@ impl App {
                         .is_none_or(|retry| tokio::time::Instant::now() >= retry)
                     && !entry.refreshing
                     && entry.busy != Some("closing")
+                    && entry.busy != Some("compacting")
                     && self.jobs.len() < super::state::MAX_JOBS
                 {
                     entry.refreshing = true;
@@ -312,6 +314,7 @@ impl App {
                                 Ok((
                                     snapshot.version,
                                     Arc::new(Transcript::from_context(&snapshot.context)),
+                                    session.history(),
                                 ))
                             })
                             .await
@@ -322,16 +325,30 @@ impl App {
                 }
             }
         }
+        self.poll_history();
+        let mut wrap_job = None;
         if let Some(entry) = self.entries.get_mut(self.selected)
-            && entry.rows.as_ref().is_none_or(|r| {
-                r.width != self.view_width || !Arc::ptr_eq(&r.transcript, &entry.transcript)
-            })
             && !entry.wrapping
             && self.jobs.len() < super::state::MAX_JOBS
         {
-            entry.wrapping = true;
-            let key = entry.key.clone();
-            let transcript = entry.transcript.clone();
+            let width = self.view_width;
+            let history = entry.history.display();
+            let current_stale = entry.rows.as_ref().is_none_or(|rows| {
+                rows.width != width || !Arc::ptr_eq(&rows.transcript, &entry.transcript)
+            });
+            let history_stale = match (&entry.history_rows, &history) {
+                (None, None) => false,
+                (Some(rows), Some(display)) => {
+                    rows.width != width || !Arc::ptr_eq(&rows.transcript, display)
+                }
+                _ => true,
+            };
+            if current_stale || history_stale {
+                entry.wrapping = true;
+                wrap_job = Some((entry.key.clone(), entry.transcript.clone(), history));
+            }
+        }
+        if let Some((key, transcript, history)) = wrap_job {
             let width = self.view_width;
             self.spawn_job(
                 Some(key.clone()),
@@ -340,7 +357,15 @@ impl App {
                     let rows = super::jobs::blocking(move || Rows::wrap(transcript, width))
                         .await
                         .expect("pure text layout");
-                    Message::Wrapped(key, rows)
+                    let history_rows = match history {
+                        Some(history) => Some(
+                            super::jobs::blocking(move || Rows::wrap(history, width))
+                                .await
+                                .expect("pure text layout"),
+                        ),
+                        None => None,
+                    };
+                    Message::Wrapped(key, rows, history_rows)
                 },
             );
         }
@@ -357,6 +382,131 @@ impl App {
                 .all(|e| self.host.lookup(&e.id().into()).is_none())
                 && self.jobs.is_empty();
         }
+    }
+
+    /// Read one more history segment when the screen is not full or the user
+    /// scrolled to the top of the loaded conversation.
+    fn poll_history(&mut self) {
+        if self.jobs.len() >= super::state::MAX_JOBS {
+            return;
+        }
+        let viewport_height = self.viewport_height;
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            return;
+        };
+        if entry.session.is_none() || entry.rows.is_none() || entry.wrapping {
+            return;
+        }
+        if entry.history.loading() {
+            return;
+        }
+        // Wait until the rows on screen match the cached history display, so a
+        // fill-screen decision never runs ahead of a pending re-wrap.
+        let display = entry.history.display();
+        let history_ready = match (&display, &entry.history_rows) {
+            (None, None) => true,
+            (Some(display), Some(rows)) => {
+                Arc::ptr_eq(&rows.transcript, display) && rows.width == self.view_width
+            }
+            _ => false,
+        };
+        if !history_ready {
+            return;
+        }
+        let fill_screen = entry.scroll.is_none() && entry.conversation_len() < viewport_height;
+        let anchor_wanted = entry.history.wants_earlier() && entry.history.has_loaded();
+        let Some(read) = entry.history.next_read(fill_screen) else {
+            return;
+        };
+        if read.earlier && anchor_wanted {
+            entry.history_anchor = Some(entry.scroll);
+        }
+        let Some(session) = entry.session.clone() else {
+            entry.history.cancel_read();
+            return;
+        };
+        let key = entry.key.clone();
+        #[cfg(test)]
+        {
+            entry.segment_reads += 1;
+        }
+        let segment = read.segment;
+        super::jobs::spawn_job(
+            &mut self.jobs,
+            Some(key.clone()),
+            super::jobs::JobKind::HistoryRead,
+            async move {
+                let id = segment.clone();
+                let result = super::jobs::blocking(move || {
+                    session
+                        .read_history_segment(&id)
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .unwrap_or_else(|error| Err(error.to_string()));
+                Message::HistoryLoaded(key, segment, result)
+            },
+        );
+    }
+
+    /// Replace the current materials with a model-written summary, as a job.
+    pub(super) fn compact(&mut self) {
+        if !self.capacity() {
+            return;
+        }
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            self.notice = "Open a session first to compact its context".into();
+            return;
+        };
+        if entry.busy.is_some() {
+            entry.notice = "Wait for the current session operation".into();
+            return;
+        }
+        let Some(session) = entry.session.clone() else {
+            entry.notice = "Open a session first to compact its context".into();
+            return;
+        };
+        if session.status().active_work.is_some() {
+            entry.notice =
+                "Cannot compact the context while a work is running; cancel it first".into();
+            return;
+        }
+        entry.busy = Some("compacting");
+        entry.notice = "Compacting the context; the replaced conversation stays on screen".into();
+        let key = entry.key.clone();
+        self.spawn_job(
+            Some(key.clone()),
+            super::jobs::JobKind::Compact,
+            async move {
+                let result = match session.compact().await {
+                    Ok(outcome) => {
+                        let reader = session.clone();
+                        super::jobs::blocking(move || {
+                            let snapshot = reader.read_materials().map_err(|e| e.to_string())?;
+                            Ok(super::jobs::CompactedReload {
+                                outcome,
+                                version: snapshot.version,
+                                transcript: Arc::new(Transcript::from_context(&snapshot.context)),
+                                history: reader.history(),
+                            })
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(e.to_string()))
+                    }
+                    Err(error) => {
+                        let hint =
+                            if matches!(error, tars_core::application::ApplicationError::Repair(_))
+                            {
+                                " · F7 / /repair"
+                            } else {
+                                ""
+                            };
+                        Err(format!("{error}{hint}"))
+                    }
+                };
+                Message::Compacted(key, result)
+            },
+        );
     }
 
     pub async fn emergency_close(&mut self) -> Vec<String> {

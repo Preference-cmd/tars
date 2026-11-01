@@ -342,6 +342,7 @@ impl App {
                 KeyCode::PageUp | KeyCode::PageDown => {
                     if let Some(entry) = self.entries.get_mut(self.selected) {
                         let viewport = entry.viewport(self.viewport_height);
+                        let at_top = viewport.start == 0;
                         let end = viewport.end;
                         let offset = viewport.start;
                         let page = viewport.page;
@@ -351,6 +352,9 @@ impl App {
                             let next = (offset + page).min(end);
                             (next < end).then_some(next)
                         };
+                        if key.code == KeyCode::PageUp && at_top {
+                            entry.request_earlier_history();
+                        }
                     }
                 }
                 _ => {

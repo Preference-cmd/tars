@@ -4,7 +4,16 @@ use std::sync::Arc;
 use tars_core::application::{
     ApplicationError, CloseOutcome, ManagedSession, MaterialVersion, SaveStatus, SessionListing,
 };
+use tars_core::compact::{CompactionOutcome, HistorySegment, HistorySegmentDocument};
 use tars_core::session::{ModelFailure, WorkRef, WorkResult};
+
+/// Materials and history reloaded after one explicit compaction.
+pub(super) struct CompactedReload {
+    pub(super) outcome: CompactionOutcome,
+    pub(super) version: MaterialVersion,
+    pub(super) transcript: Arc<Transcript>,
+    pub(super) history: Vec<HistorySegment>,
+}
 
 pub(super) enum Message {
     RepairInspected(
@@ -36,8 +45,13 @@ pub(super) enum Message {
             String,
         >,
     ),
-    Materials(Key, Result<(MaterialVersion, Arc<Transcript>), String>),
-    Wrapped(Key, Rows),
+    Materials(
+        Key,
+        Result<(MaterialVersion, Arc<Transcript>, Vec<HistorySegment>), String>,
+    ),
+    HistoryLoaded(Key, String, Result<HistorySegmentDocument, String>),
+    Compacted(Key, Result<CompactedReload, String>),
+    Wrapped(Key, Rows, Option<Rows>),
     Retried(Key, Result<SaveStatus, ApplicationError>),
     Exported(Key, Result<(String, bool), String>),
     Closed(Key, Result<CloseOutcome, ApplicationError>),
@@ -54,6 +68,8 @@ pub(super) enum JobKind {
     Retry,
     Export,
     Materials,
+    HistoryRead,
+    Compact,
     Wrapping,
     Repair(causa::kernel::BlockId),
 }
@@ -305,8 +321,18 @@ impl App {
             Message::Materials(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     entry.refreshing = false;
+                    // A late material read for an instance that already closed
+                    // must not rebuild a conversation view with no session.
+                    if entry.session.is_none() {
+                        return;
+                    }
                     match result {
-                        Ok((version, transcript)) => {
+                        Ok((version, transcript, history)) => {
+                            // A segment produced by a live compaction replaced
+                            // exactly the conversation that is on screen, so its
+                            // rows are adopted instead of being read again.
+                            let previous = entry.transcript.clone();
+                            entry.history.refresh(history, Some(previous));
                             entry.material_version = Some(version);
                             entry.material_retry_after = None;
                             entry.transcript = transcript;
@@ -326,12 +352,77 @@ impl App {
                     }
                 }
             }
-            Message::Wrapped(key, rows) => {
+            Message::HistoryLoaded(key, segment, result) => {
+                if let Some(entry) = self.entry_mut(&key) {
+                    match result {
+                        Ok(document) => entry.history.insert_loaded(document),
+                        Err(_) => entry.history.mark_unreadable(&segment),
+                    }
+                }
+            }
+            Message::Compacted(key, result) => {
+                if let Some(entry) = self.entry_mut(&key) {
+                    entry.busy = None;
+                    match result {
+                        Ok(reload) => {
+                            let outcome = reload.outcome;
+                            entry.history.note_hint(
+                                outcome.segment.id.clone(),
+                                outcome.trigger,
+                                outcome.estimate_before,
+                                outcome.estimate_after,
+                            );
+                            let previous = entry.transcript.clone();
+                            entry.history.refresh(reload.history, Some(previous));
+                            entry.material_version = Some(reload.version.clone());
+                            entry.requested_material_version = Some(reload.version);
+                            entry.material_retry_after = None;
+                            entry.transcript = reload.transcript;
+                            entry.rows = None;
+                            entry.history_anchor = None;
+                            entry.notice = format!(
+                                "Compacted ({}, {} → {} tokens); the replaced conversation remains above",
+                                outcome.trigger.name(),
+                                super::history::estimate_label(outcome.estimate_before),
+                                super::history::estimate_label(outcome.estimate_after),
+                            );
+                        }
+                        Err(error) => entry.notice = format!("Compaction failed: {error}"),
+                    }
+                }
+            }
+            Message::Wrapped(key, rows, history_rows) => {
                 let width = self.view_width;
                 if let Some(entry) = self.entry_mut(&key) {
                     entry.wrapping = false;
                     if Arc::ptr_eq(&rows.transcript, &entry.transcript) && rows.width == width {
                         entry.rows = Some(rows);
+                    }
+                    let previous = entry
+                        .history_rows
+                        .as_ref()
+                        .map_or(0, |rows| rows.ranges.len());
+                    match history_rows {
+                        Some(history_rows) => {
+                            let current = entry.history.display();
+                            if current.as_ref().is_some_and(|display| {
+                                Arc::ptr_eq(&history_rows.transcript, display)
+                            }) && history_rows.width == width
+                            {
+                                let added = history_rows.ranges.len().saturating_sub(previous);
+                                entry.history_rows = Some(history_rows);
+                                if added > 0
+                                    && let Some(anchor) = entry.history_anchor.take()
+                                    && entry.scroll == anchor
+                                    && let Some(scroll) = anchor
+                                {
+                                    // Keep the rows being read in place; the
+                                    // regenerated header may scroll away.
+                                    entry.scroll = Some(scroll.saturating_add(added));
+                                }
+                            }
+                        }
+                        None => entry.history_rows = None,
                     }
                 }
             }
@@ -370,6 +461,7 @@ impl App {
                             entry.work = None;
                             entry.execution = "No work in this instance".into();
                             entry.clear_progress();
+                            entry.clear_history();
                             entry.tools = super::tool_progress::ToolView::default();
                             entry.editor = crate::input::editor();
                             entry.status = "Closed; F3 to reopen".into();
@@ -429,6 +521,14 @@ impl App {
                             entry.material_retry_after = Some(
                                 tokio::time::Instant::now() + std::time::Duration::from_secs(1),
                             );
+                            entry.notice = message.clone();
+                        }
+                        JobKind::HistoryRead => {
+                            entry.history.cancel_read();
+                            entry.notice = message.clone();
+                        }
+                        JobKind::Compact => {
+                            clear_busy(entry, "compacting");
                             entry.notice = message.clone();
                         }
                         JobKind::Wrapping => {

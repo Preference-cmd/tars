@@ -18,3 +18,5 @@ mod tools;
 
 mod approval;
 mod command;
+mod compaction;
+mod history;

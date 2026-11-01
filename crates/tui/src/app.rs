@@ -3,6 +3,7 @@ mod actions;
 pub(crate) mod clock;
 mod commands;
 mod events;
+pub(crate) mod history;
 mod jobs;
 mod progress;
 mod repair;

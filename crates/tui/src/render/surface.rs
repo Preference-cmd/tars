@@ -140,7 +140,12 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         return;
     }
     if let Some(entry) = entry {
-        let history = entry.rows.as_ref().map_or(0, |rows| rows.ranges.len());
+        let history = entry
+            .history_rows
+            .as_ref()
+            .map_or(0, |rows| rows.ranges.len());
+        let current = entry.rows.as_ref().map_or(0, |rows| rows.ranges.len());
+        let committed = history + current;
         let height = usize::from(regions[1].height);
         let viewport = entry.viewport(height);
         let start = viewport.start;
@@ -150,7 +155,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             // At minimum terminal height, retain both the temporary label and
             // the latest text instead of spending the sole row on a heading.
             let label = entry.preview.compact_label();
-            let text = entry.preview.line(start.saturating_sub(history));
+            let text = entry.preview.line(start.saturating_sub(committed));
             let space = usize::from(regions[1].width).saturating_sub(label.width());
             let mut tail = text.len();
             let mut cells = 0;
@@ -199,20 +204,19 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                 break;
             }
             if index < history {
-                let rows = entry.rows.as_ref().unwrap();
+                let rows = entry.history_rows.as_ref().unwrap();
                 let text = &rows.transcript.text[rows.ranges[index].clone()];
-                let style = if text.starts_with("❯ ") {
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::styled(text, style));
-            } else if index >= history + entry.preview.line_count() {
-                if let Some(text) = tool_lines.get(index - history - entry.preview.line_count()) {
+                lines.push(Line::styled(text, conversation_style(text)));
+            } else if index < committed {
+                let rows = entry.rows.as_ref().unwrap();
+                let text = &rows.transcript.text[rows.ranges[index - history].clone()];
+                lines.push(Line::styled(text, conversation_style(text)));
+            } else if index >= committed + entry.preview.line_count() {
+                if let Some(text) = tool_lines.get(index - committed - entry.preview.line_count()) {
                     lines.push(Line::styled(text.clone(), Style::default().fg(MUTED)));
                 }
             } else {
-                let offset = index - history;
+                let offset = index - committed;
                 let text = entry.preview.line(offset);
                 let style = if offset == 0 {
                     Style::default().fg(MUTED)
@@ -226,6 +230,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         }
         frame.render_widget(Paragraph::new(lines), regions[1]);
         if entry.transcript.text.is_empty()
+            && entry.history.is_empty()
             && !entry.preview.is_active()
             && entry.tools.calls.is_empty()
         {
@@ -281,6 +286,48 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         );
     }
 }
+/// One row of committed conversation, styled by what the row is.
+fn conversation_style(text: &str) -> Style {
+    if text.starts_with("❯ ") {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else if text.starts_with("── ")
+        || text.starts_with("↑ ")
+        || text.starts_with("loading earlier conversation")
+        || text.starts_with("this history segment cannot be read")
+        || text.starts_with("start of conversation")
+        || text.starts_with("● Context summary")
+    {
+        Style::default().fg(MUTED)
+    } else {
+        Style::default()
+    }
+}
+
+/// Footer estimate from `ManagedSession::context_usage`: a percentage of a
+/// known window, or a token estimate when the window is unknown, plus an
+/// `auto off` marker while automatic compaction is disabled.
+pub(super) fn context_label(usage: Option<tars_core::application::ContextUsage>) -> Option<String> {
+    let usage = usage?;
+    let mut label = match usage.context_window {
+        Some(window) if window > 0 => {
+            let percent = (u128::from(usage.estimate_tokens) * 100 + u128::from(window) / 2)
+                / u128::from(window);
+            format!(
+                "ctx {percent}% / {}",
+                crate::app::history::window_label(window)
+            )
+        }
+        _ => format!(
+            "ctx {}",
+            crate::app::history::estimate_label(usage.estimate_tokens)
+        ),
+    };
+    if !usage.auto_compact {
+        label.push_str(" · auto off");
+    }
+    Some(label)
+}
+
 fn welcome(frame: &mut Frame<'_>, area: Rect, open: bool) {
     frame.render_widget(
         Paragraph::new(vec![
@@ -379,6 +426,19 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             };
             spans.push(Span::styled(mode.to_string(), mode_style));
         }
+        let usage = e.session.as_ref().and_then(|s| s.context_usage());
+        if let Some(label) = context_label(usage) {
+            let over = usage.is_some_and(|usage| {
+                usage
+                    .context_window
+                    .is_some_and(|window| usage.estimate_tokens >= window)
+            });
+            spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
+            spans.push(Span::styled(
+                label,
+                Style::default().fg(if over { Color::Yellow } else { MUTED }),
+            ));
+        }
         frame.render_widget(Paragraph::new(Line::from(spans)), sections[1]);
     } else {
         frame.render_widget(
@@ -448,4 +508,35 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .style(Style::default().fg(if warning { Color::Yellow } else { MUTED })),
         sections[2],
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::context_label;
+    use tars_core::application::ContextUsage;
+
+    #[test]
+    fn context_label_reports_percent_estimate_and_auto_off() {
+        let usage = ContextUsage {
+            estimate_tokens: 126_000,
+            context_window: Some(200_000),
+            auto_compact: true,
+            compact_threshold: 70,
+        };
+        assert_eq!(context_label(Some(usage)).unwrap(), "ctx 63% / 200k");
+        let unknown = ContextUsage {
+            context_window: None,
+            ..usage
+        };
+        assert_eq!(context_label(Some(unknown)).unwrap(), "ctx ~126k");
+        let off = ContextUsage {
+            auto_compact: false,
+            ..usage
+        };
+        assert_eq!(
+            context_label(Some(off)).unwrap(),
+            "ctx 63% / 200k · auto off"
+        );
+        assert_eq!(context_label(None), None);
+    }
 }

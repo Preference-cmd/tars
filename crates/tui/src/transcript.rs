@@ -8,20 +8,56 @@ use unicode_width::UnicodeWidthStr;
 pub(crate) struct Transcript {
     pub text: String,
     pub tool_details: Vec<String>,
+    /// Full text of the current Context's summary block, when it has one.
+    ///
+    /// The current material collapses that block to one row; the panel opened
+    /// by `/summary` reads this raw copy instead of the rendered rows.
+    pub summary: Option<String>,
 }
 
 impl Transcript {
     pub fn from_context(context: &Context) -> Self {
+        Self::build(context, true)
+    }
+
+    /// History segments keep their own summary expanded: they are archived
+    /// conversation, not the current material the model continues from.
+    pub fn from_history_context(context: &Context) -> Self {
+        Self::build(context, false)
+    }
+
+    fn build(context: &Context, collapse_summary: bool) -> Self {
         let mut text = String::new();
         let mut tool_details = Vec::new();
+        let mut summary_text = None;
         for block in context.blocks() {
             // The offered tool set is configuration the runner records, not
             // conversation; it has no transcript entry.
             if matches!(block.content(), BlockContent::ToolChange(_)) {
                 continue;
             }
+            let is_summary =
+                block.meta().source.as_deref() == Some(tars_core::compact::SUMMARY_SOURCE);
+            if is_summary && let BlockContent::Message { parts, .. } = block.content() {
+                let mut body = String::new();
+                for part in parts {
+                    if let ContentPart::Text(value) = part {
+                        body.push_str(&value.0);
+                    }
+                }
+                if summary_text.is_none() {
+                    summary_text = Some(body);
+                }
+                if collapse_summary {
+                    text.push_str(
+                        "● Context summary · collapsed · /summary shows the full text\n\n",
+                    );
+                    continue;
+                }
+            }
             match block.meta().source.as_deref() {
                 Some("user") => text.push_str("❯ You\n"),
+                Some(_) if is_summary => text.push_str("● Context summary\n"),
                 Some(source) => {
                     text.push_str("● ");
                     text.push_str(source);
@@ -76,7 +112,11 @@ impl Transcript {
         // The same escaping as confirmation panels keeps bidi controls and line
         // separators visible without changing ordinary text or newlines.
         let text = tars_core::permission::escape_untrusted_text(&text).replace('\t', "    ");
-        Self { text, tool_details }
+        Self {
+            text,
+            tool_details,
+            summary: summary_text,
+        }
     }
 }
 

@@ -136,6 +136,14 @@ pub(crate) struct Entry {
     pub transcript: Arc<Transcript>,
     pub preview: crate::preview::Preview,
     pub(crate) tools: super::tool_progress::ToolView,
+    /// Ordered history segments before the current Context, lazily loaded.
+    pub(crate) history: super::history::HistoryView,
+    /// Wrapped rows of the loaded history display.
+    pub(crate) history_rows: Option<Rows>,
+    /// Scroll position to restore after an earlier segment is inserted above.
+    pub(super) history_anchor: Option<Option<usize>>,
+    #[cfg(test)]
+    pub(super) segment_reads: usize,
     pub(super) progress: Option<super::progress::ProgressFeed>,
     pub rows: Option<Rows>,
     pub scroll: Option<usize>,
@@ -168,6 +176,11 @@ impl Entry {
             transcript: Arc::new(Transcript::default()),
             preview: crate::preview::Preview::default(),
             tools: super::tool_progress::ToolView::default(),
+            history: super::history::HistoryView::new(),
+            history_rows: None,
+            history_anchor: None,
+            #[cfg(test)]
+            segment_reads: 0,
             progress: None,
             rows: None,
             scroll: None,

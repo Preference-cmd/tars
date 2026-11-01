@@ -146,10 +146,48 @@ impl Server {
                         }
                         data.extend_from_slice(&chunk[..count]);
                     }
-                    captured.lock().unwrap().push(
-                        serde_json::from_slice(&data[header_end..header_end + content_len])
-                            .unwrap(),
-                    );
+                    let request: Value = serde_json::from_slice(
+                        &data[header_end..header_end + content_len],
+                    )
+                    .unwrap();
+                    // Work runs stream their model text. A compaction summary
+                    // call uses the non-streaming gateway, so it receives one
+                    // complete JSON answer instead.
+                    let streaming = request
+                        .get("stream")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    captured.lock().unwrap().push(request);
+                    if !streaming {
+                        let body = serde_json::json!({
+                            "id": "fixture",
+                            "object": "chat.completion",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "fixture summary: continue the task",
+                                },
+                                "finish_reason": "stop",
+                            }],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2,
+                            },
+                        })
+                        .to_string();
+                        let _ = socket
+                            .write_all(
+                                format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
+                                )
+                                .as_bytes(),
+                            )
+                            .await;
+                        return;
+                    }
                     let prefix = r#"data: {"id":"fixture","choices":[{"index":0,"delta":{"content":"你好，terminal 👩‍💻"},"finish_reason":null}]}"#.to_owned() + "\n\n";
                     let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await;
                     let _ = socket.write_all(format!("{:x}\r\n{prefix}\r\n", prefix.len()).as_bytes()).await;
@@ -187,4 +225,161 @@ pub async fn is_post(socket: &tokio::net::TcpStream) -> bool {
             Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(1)).await,
         }
     }
+}
+
+/// A definition with no tools, no workspace and no model calls: fixtures only
+/// need the session record and the compaction runtime.
+pub(super) fn history_definition(
+    context_window: Option<u64>,
+) -> tars_core::definition::SessionDefinition {
+    tars_core::definition::SessionDefinition {
+        provider: tars_core::definition::Provider::OpenAiChat,
+        model: "fixture-model".into(),
+        endpoint: None,
+        credential: tars_core::definition::CredentialRef::Environment("PATH".into()),
+        work_timeout_secs: Some(120),
+        retained_work_capacity: 8,
+        max_model_rounds: 1,
+        max_tool_calls: 1,
+        max_tokens: None,
+        reasoning_effort: None,
+        extra_body: Default::default(),
+        max_model_attempts: None,
+        render_options: Default::default(),
+        workspace_root: None,
+        tools: Vec::new(),
+        tool_limits: Default::default(),
+        write_limits: None,
+        permission_mode: None,
+        command: None,
+        mcp_servers: Vec::new(),
+        context_window,
+        auto_compact: true,
+        compact_threshold: 70,
+    }
+}
+
+/// One text Context block with a deterministic estimate.
+pub(super) fn text_context(text: &str) -> causa::kernel::Context {
+    causa::kernel::Context::from_blocks(vec![tars_core::application::text_input(text)]).unwrap()
+}
+
+/// Write a saved session record plus one history segment file per replaced
+/// Context, using the same on-disk formats the session store reads.
+pub(super) fn write_history_session(
+    store: &std::path::Path,
+    current: &causa::kernel::Context,
+    segments: &[causa::kernel::Context],
+) -> String {
+    let conversation_id = causa::runtime::new_block_id().0.to_string();
+    let sessions = store.join("sessions");
+    let history = sessions.join(format!("{conversation_id}.history"));
+    std::fs::create_dir_all(&history).unwrap();
+    let mut entries = Vec::new();
+    for (position, context) in segments.iter().enumerate() {
+        let segment_id = causa::runtime::new_block_id().0.to_string();
+        let summary_block_id = serde_json::to_value(causa::runtime::new_block_id()).unwrap();
+        let estimate_before = 100_000 + 10_000 * u64::try_from(position).unwrap();
+        let estimate_after = 5_000 + 1_000 * u64::try_from(position).unwrap();
+        entries.push(serde_json::json!({
+            "id": segment_id,
+            "created_at_ms": 1u64,
+            "trigger": "auto",
+            "blocks": context.blocks().len(),
+            "summary_block_id": summary_block_id,
+        }));
+        let document = serde_json::json!({
+            "format": "tars-history-v1",
+            "conversation_id": conversation_id,
+            "segment_id": segment_id,
+            "created_at_ms": 1u64,
+            "trigger": "auto",
+            "estimate_before": estimate_before,
+            "estimate_after": estimate_after,
+            "summary_block_id": summary_block_id,
+            "context": serde_json::to_value(context).unwrap(),
+        });
+        std::fs::write(
+            history.join(format!("{segment_id}.json")),
+            serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+    }
+    let record = serde_json::json!({
+        "format": "tars-session-v2",
+        "conversation_id": conversation_id,
+        "revision": 1u64,
+        "last_commit_id": causa::runtime::new_block_id().0.to_string(),
+        "definition": serde_json::to_value(history_definition(None)).unwrap(),
+        "context": serde_json::to_value(current).unwrap(),
+        "history": entries,
+    });
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(
+        sessions.join(format!("{conversation_id}.json")),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    conversation_id
+}
+
+/// Delete one segment file by index, leaving the record still listing it.
+pub(super) fn delete_history_segment(store: &std::path::Path, conversation_id: &str, index: usize) {
+    let sessions = store.join("sessions");
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(sessions.join(format!("{conversation_id}.json"))).unwrap(),
+    )
+    .unwrap();
+    let segment_id = record["history"][index]["id"].as_str().unwrap();
+    std::fs::remove_file(
+        sessions
+            .join(format!("{conversation_id}.history"))
+            .join(format!("{segment_id}.json")),
+    )
+    .unwrap();
+}
+
+/// Open a stored session into a fresh view at the standard test size.
+pub(super) async fn open_in_view(app: &mut super::super::App, id: &str) {
+    let session = app.host.open(id.into()).await.unwrap();
+    let mut entry = crate::app::Entry::new(id.to_owned(), "fixture-model".into());
+    entry.session = Some(session);
+    app.entries.push(entry);
+    app.selected = 0;
+    set_view_size(app);
+    until(app, |app| {
+        app.entries[0].rows.is_some() && app.entries[0].material_version.is_some()
+    })
+    .await;
+}
+
+/// Create a session from one definition and show it in a fresh view.
+pub(super) async fn create_in_view(
+    app: &mut super::super::App,
+    definition: tars_core::definition::SessionDefinition,
+    context: causa::kernel::Context,
+) {
+    let session = app
+        .host
+        .create(tars_core::application::PreparedCreate::persistent(
+            definition, context,
+        ))
+        .await
+        .unwrap();
+    let id = session.target().conversation_id().as_str().to_owned();
+    let mut entry = crate::app::Entry::new(id, "fixture-model".into());
+    entry.session = Some(session);
+    app.entries.push(entry);
+    app.selected = 0;
+    set_view_size(app);
+    until(app, |app| {
+        app.entries[0].rows.is_some() && app.entries[0].material_version.is_some()
+    })
+    .await;
+}
+
+fn set_view_size(app: &mut super::super::App) {
+    app.view_width = crate::render::transcript_width(100);
+    app.view_height = 50;
+    app.viewport_height = crate::render::conversation_height(50, 100, app);
 }

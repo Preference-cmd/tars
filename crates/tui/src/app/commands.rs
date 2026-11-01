@@ -27,6 +27,12 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("new", "Create a session with model settings"),
     ("sessions", "Find and open a saved or active session"),
     ("mode", "Show or change the permission mode"),
+    ("compact", "Replace the current context with a summary now"),
+    (
+        "auto_compact",
+        "Show or change automatic compaction: on | off | PERCENT",
+    ),
+    ("summary", "Show the current context summary in full"),
     ("help", "Keyboard shortcuts and session behavior"),
     ("tools", "Expand recorded tool calls and complete results"),
     (
@@ -46,7 +52,7 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
 pub(crate) fn matching_commands(query: &str) -> Vec<usize> {
     let clean = query.trim_start_matches('/').trim().to_lowercase();
     let word = clean.split_whitespace().next().unwrap_or("");
-    COMMANDS
+    let mut matches: Vec<usize> = COMMANDS
         .iter()
         .enumerate()
         .filter_map(|(i, (name, _))| {
@@ -56,7 +62,11 @@ pub(crate) fn matching_commands(query: &str) -> Vec<usize> {
                 None
             }
         })
-        .collect()
+        .collect();
+    // One command name may contain another (`compact` / `auto_compact`); the
+    // exact name must win so a typed argument cannot select the longer one.
+    matches.sort_by_key(|&index| COMMANDS[index].0 != word);
+    matches
 }
 
 impl App {
@@ -149,17 +159,28 @@ impl App {
                     }
                 }
             }
+            "auto_compact" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("auto_compact").unwrap_or("").trim();
+                self.auto_compact(arg);
+            }
+            "compact" => self.compact(),
+            "summary" => self.show_summary(),
             "help" => self.panel = Some(Panel::Info {
                 title: "Keyboard shortcuts".into(), scroll: 0,
                 lines: ["Enter / Ctrl-S   Send input", "Ctrl-J / Alt-Enter   New line",
                     "Shift-Tab   Cycle mode (ask -> accept-edits -> read-only)",
                     "/mode [name]   Show or change the permission mode",
+                    "/auto_compact [on|off|PERCENT]   Compaction switch and threshold",
+                    "/compact   Summarize and replace the current context now",
+                    "/summary   Show the current context summary in full",
                     "Enter / y allow · n deny (optional reason)   Confirmation panel",
                     "Esc / Ctrl-C   Interrupt work", "/ or F1   Commands; Esc returns",
                     "F2 new · F3 open · F4 next · F5 refresh", "F6 / /tools   Expand complete recorded tool results", "F7 / /repair   Preview and apply material repair", "PageUp / PageDown   Read conversation",
                     "Ctrl-Z undo · Ctrl-Y redo", "Ctrl-W close · Ctrl-Q save and quit",
                     "Ctrl-R retry save · Ctrl-E export", "Ctrl-D discard with confirmation", "",
                     "Switching views keeps work and drafts. Saved sessions restore materials, not old work records.",
+                    "Compaction replaces the context with a model-written summary; older conversation loads as you scroll up.",
                     "Use /status for full configuration, save state and error details."].into_iter().map(str::to_owned).collect(),
             }),
             "tools" => self.show_tools(),
@@ -177,6 +198,16 @@ impl App {
                     {
                         lines.push(format!("Commands: {status}"));
                     }
+                    if let Some(capacity) = entry
+                        .session
+                        .as_ref()
+                        .and_then(|session| session.work_capacity())
+                    {
+                        lines.push(format!(
+                            "Works: {} / {}",
+                            capacity.used, capacity.capacity
+                        ));
+                    }
                 }
                 lines.push(self.notice.clone());
                 self.panel = Some(Panel::Info { title: "Session details".into(), lines, scroll: 0 });
@@ -191,6 +222,97 @@ impl App {
             _ => unreachable!("commands are a closed local set"),
         }
     }
+    /// `/auto_compact`: report the running settings, or change the switch or
+    /// the trigger percentage. Only this session changes; shared TOML is never
+    /// rewritten from here.
+    fn auto_compact(&mut self, arg: &str) {
+        let Some(session) = self
+            .entries
+            .get(self.selected)
+            .and_then(|entry| entry.session.clone())
+        else {
+            self.notice = "Open a session first to change automatic compaction".into();
+            return;
+        };
+        let Some(settings) = session.compaction_settings() else {
+            self.notice =
+                "This session does not keep compaction history; automatic compaction is unavailable"
+                    .into();
+            return;
+        };
+        let hint = if settings.context_window.is_none() {
+            " · set `context_window` in the shared TOML profile or when creating the session"
+        } else {
+            ""
+        };
+        match arg {
+            "" => {
+                let usage = session.context_usage();
+                self.panel = Some(Panel::Info {
+                    title: "Automatic compaction".into(),
+                    lines: auto_compact_lines(&settings, usage),
+                    scroll: 0,
+                });
+            }
+            "on" | "off" => {
+                let enable = arg == "on";
+                match session.set_auto_compact(enable) {
+                    Ok(()) => {
+                        self.notice = format!(
+                            "Automatic compaction: {}{hint}",
+                            if enable { "on" } else { "off" }
+                        );
+                    }
+                    Err(error) => {
+                        self.notice = format!("Failed to change automatic compaction: {error}");
+                    }
+                }
+            }
+            _ => match arg.parse::<u8>() {
+                Ok(threshold) if (10..=95).contains(&threshold) => {
+                    let result = session
+                        .set_compact_threshold(threshold)
+                        .and_then(|()| session.set_auto_compact(true));
+                    match result {
+                        Ok(()) => {
+                            self.notice = format!("Automatic compaction: on at {threshold}%{hint}");
+                        }
+                        Err(error) => {
+                            self.notice = format!("Failed to change automatic compaction: {error}");
+                        }
+                    }
+                }
+                _ => {
+                    self.notice =
+                        "Automatic compaction: use on, off, or a percentage between 10 and 95; settings unchanged"
+                            .into();
+                }
+            },
+        }
+        self.dirty = true;
+    }
+
+    /// `/summary`: the current Context's summary block, full text.
+    fn show_summary(&mut self) {
+        let summary = self
+            .entries
+            .get(self.selected)
+            .and_then(|entry| entry.transcript.summary.clone());
+        let Some(summary) = summary else {
+            self.notice = "No context summary in the current materials".into();
+            return;
+        };
+        let lines = summary
+            .lines()
+            .map(|line| tars_core::permission::escape_untrusted_text(line).replace('\t', "    "))
+            .collect();
+        self.panel = Some(Panel::Info {
+            title: "Context summary · full text".into(),
+            lines,
+            scroll: 0,
+        });
+    }
+
     pub(super) fn show_tools(&mut self) {
         let mut lines = Vec::new();
         if let Some(entry) = self.entries.get(self.selected) {
@@ -301,4 +423,48 @@ impl App {
         }
         self.panel = Some(panel);
     }
+}
+
+/// Lines for the `/auto_compact` report: running switch, threshold, frozen
+/// window and the current estimate, plus how to make automatic compaction
+/// possible when the session has no window.
+fn auto_compact_lines(
+    settings: &tars_core::application::CompactionSettings,
+    usage: Option<tars_core::application::ContextUsage>,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "Switch: {}",
+            if settings.auto_compact { "on" } else { "off" }
+        ),
+        format!(
+            "Threshold: {}% of the context window",
+            settings.compact_threshold
+        ),
+        match settings.context_window {
+            Some(window) => format!(
+                "Context window: {window} tokens ({})",
+                crate::app::history::window_label(window)
+            ),
+            None => "Context window: unknown".into(),
+        },
+        match usage {
+            Some(usage) => format!(
+                "Current estimate: {} tokens ({})",
+                usage.estimate_tokens,
+                crate::app::history::estimate_label(usage.estimate_tokens)
+            ),
+            None => "Current estimate: unavailable".into(),
+        },
+    ];
+    if settings.context_window.is_none() {
+        lines.push(String::new());
+        lines.push("Automatic compaction does not run without a context window.".into());
+        lines.push(
+            "Set `context_window` in the shared TOML profile or when creating the session.".into(),
+        );
+    }
+    lines.push(String::new());
+    lines.push("/auto_compact on | off | PERCENT (10-95)".into());
+    lines
 }

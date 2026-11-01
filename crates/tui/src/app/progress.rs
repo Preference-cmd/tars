@@ -44,9 +44,24 @@ impl Entry {
             }
             return;
         }
-        if matches!(event.update, ProgressUpdate::Compaction(_)) {
-            // Compaction progress is advisory and does not refresh the model
-            // preview; the TUI's own compaction view is P2 work.
+        if let ProgressUpdate::Compaction(update) = &event.update {
+            // Advisory only: a finished attempt still needs the reloaded index
+            // before its segment can be displayed, but its estimates describe
+            // the segment adopted from the rows already on screen.
+            if let tars_core::compact::CompactionProgress::Finished {
+                trigger,
+                estimate_before,
+                estimate_after,
+                segment,
+            } = update
+            {
+                self.history.note_hint(
+                    segment.clone(),
+                    *trigger,
+                    *estimate_before,
+                    *estimate_after,
+                );
+            }
             return;
         }
         if let Some(current) = &self.preview.invocation
@@ -70,10 +85,10 @@ impl Entry {
     }
     pub fn viewport(&self, height: usize) -> ConversationViewport {
         let total = self.conversation_len();
-        let history = self.rows.as_ref().map_or(0, |rows| rows.ranges.len());
+        let committed = self.committed_rows();
         let base_end = total.saturating_sub(height);
         let headings = 1 + usize::from(self.preview.warning().is_some());
-        let sticky_at = |start| self.preview.is_active() && start > history;
+        let sticky_at = |start| self.preview.is_active() && start > committed;
         // A one-row viewport combines label and tail text in the same row.
         // Short viewports reserve at most height-1 rows to retain body text.
         let reserve = |start| {
@@ -94,10 +109,16 @@ impl Entry {
             page: height.saturating_sub(reserved).saturating_sub(1).max(1),
         }
     }
+    /// Rows of the loaded history and the current Context, before the preview.
+    pub fn committed_rows(&self) -> usize {
+        self.history_rows
+            .as_ref()
+            .map_or(0, |rows| rows.ranges.len())
+            + self.rows.as_ref().map_or(0, |rows| rows.ranges.len())
+    }
+
     pub fn conversation_len(&self) -> usize {
-        self.rows.as_ref().map_or(0, |rows| rows.ranges.len())
-            + self.preview.line_count()
-            + self.tools.lines().len()
+        self.committed_rows() + self.preview.line_count() + self.tools.lines().len()
     }
 }
 impl App {
