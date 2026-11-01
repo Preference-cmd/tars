@@ -1,8 +1,12 @@
-use super::support::{app, ctrl, key, until};
+use super::support::app;
+#[cfg(target_os = "macos")]
+use super::support::{ctrl, key, until};
 use crate::{input::Form, render};
+#[cfg(target_os = "macos")]
 use crossterm::event::KeyCode;
 use ratatui::{Terminal, backend::TestBackend};
 use ratatui_textarea::TextArea;
+#[cfg(target_os = "macos")]
 use serde_json::json;
 use std::sync::Arc;
 use tars_core::config::Config;
