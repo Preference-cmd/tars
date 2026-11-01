@@ -13,7 +13,7 @@ use tars_core::definition::{
 #[cfg(target_os = "macos")]
 use super::support::advance_past_approval_window;
 #[cfg(target_os = "macos")]
-use super::tools::wire;
+use super::wire;
 
 fn screen(app: &crate::app::App) -> String {
     let mut terminal = Terminal::new(TestBackend::new(100, 50)).unwrap();

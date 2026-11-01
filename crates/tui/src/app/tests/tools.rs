@@ -1,4 +1,5 @@
 use super::support::{app, ctrl, key, until};
+use super::wire;
 use crate::{app::state::Entry, input::Form, render};
 use causa::kernel::{InvocationId, RoundId, ToolResultStatus, TurnId};
 use crossterm::event::{Event, KeyCode};
@@ -9,8 +10,6 @@ use tars_core::session::{
     ProgressUpdate, ToolPhase, ToolProgress, ToolProgressSnapshot, WorkProgress, WorkRef,
 };
 use tokio::sync::broadcast;
-#[path = "../../../../cli/tests/common/tools.rs"]
-pub(super) mod wire;
 
 fn screen(app: &crate::app::App) -> String {
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();

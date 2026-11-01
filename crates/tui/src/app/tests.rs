@@ -4,6 +4,10 @@ mod input;
 mod measurements;
 mod support;
 
+#[path = "../../../cli/tests/common/tools.rs"]
+#[allow(dead_code)] // Shared HTTP and tool reply fixture for several test modules.
+mod wire;
+
 mod navigation;
 
 mod repair;

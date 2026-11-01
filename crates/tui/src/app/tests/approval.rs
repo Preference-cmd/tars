@@ -1,4 +1,5 @@
 use super::support::{advance_past_approval_window, app, ctrl, key, until};
+use super::wire;
 use crate::{input::Form, render};
 use crossterm::event::{Event, KeyCode};
 use ratatui::{Terminal, backend::TestBackend, style::Modifier};
@@ -9,8 +10,6 @@ use tars_core::{
     definition::WriteToolLimits,
     permission::PermissionMode,
 };
-
-use super::tools::wire;
 
 fn screen(app: &crate::app::App) -> String {
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();

@@ -25,8 +25,13 @@ impl FileVersion {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hasher::write(&mut hasher, content);
         let hash = std::hash::Hasher::finish(&hasher);
+        // `st_dev` is 32-bit on macOS and already 64-bit on Linux.
+        #[cfg(target_os = "macos")]
+        let dev = stat.st_dev as u64;
+        #[cfg(not(target_os = "macos"))]
+        let dev = stat.st_dev;
         Self {
-            dev: stat.st_dev as u64,
+            dev,
             ino: stat.st_ino,
             size: stat.st_size as u64,
             mtime_secs: stat.st_mtime,
