@@ -144,6 +144,53 @@ impl ModelGateway for ToolThenDone {
     }
 }
 
+/// Round 0 asks for the fixture tool and waits for release; later rounds finish.
+struct ControlledRoundGateway {
+    main_calls: AtomicUsize,
+    summary_calls: Arc<AtomicUsize>,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl ModelGateway for ControlledRoundGateway {
+    async fn invoke(
+        &self,
+        request: &ModelRequest,
+        _: &CallControl,
+    ) -> Result<ModelOutput, ModelInvokeError> {
+        if is_summary(request) {
+            self.summary_calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(summary_output("Goal: continue with the fixture tool."));
+        }
+        let call = self.main_calls.fetch_add(1, Ordering::SeqCst);
+        let mut output = if call == 0 {
+            self.entered.notify_one();
+            self.release.notified().await;
+            ModelOutput::new(
+                ModelResponse {
+                    items: vec![causa::kernel::ModelItem::tool_call(
+                        causa::kernel::ToolCallDraft::new(
+                            "alpha",
+                            serde_json::json!({"input": "fixture"}),
+                        ),
+                    )],
+                },
+                ModelStopReason::ToolUse,
+            )
+        } else {
+            ModelOutput::new(
+                ModelResponse {
+                    items: vec![causa::kernel::ModelItem::text("done")],
+                },
+                ModelStopReason::EndTurn,
+            )
+        };
+        output.usage = Some(causa::kernel::ModelUsage::new(100, 10));
+        Ok(output)
+    }
+}
+
 struct AlphaTool;
 
 #[async_trait::async_trait]
@@ -605,4 +652,70 @@ fn summary_block_has_a_fixed_prefix_and_provenance() {
         }
         _ => panic!("summary is a message"),
     }
+}
+
+#[tokio::test]
+async fn disabling_automatic_compaction_during_a_work_applies_to_the_next_round() {
+    let directory = tempfile::tempdir().unwrap();
+    let summary_calls = Arc::new(AtomicUsize::new(0));
+    let gateway = Arc::new(ControlledRoundGateway {
+        main_calls: AtomicUsize::new(0),
+        summary_calls: summary_calls.clone(),
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    });
+    let tracker = Arc::new(UsageTracker::default());
+    let (mut session, runtime) = build_session(
+        directory.path(),
+        definition(Some(1_000), None),
+        Context::new(),
+        gateway.clone(),
+        tracker,
+    );
+    let handle = session.handle();
+    let receipt = handle
+        .submit(SubmitRequest {
+            request_key: "runtime-change".into(),
+            blocks: vec![ContextBlock::text(
+                BlockId::new(uuid::Uuid::now_v7()),
+                Role::User,
+                "run the fixture tool",
+            )],
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), gateway.entered.notified())
+        .await
+        .unwrap();
+    // The next round would otherwise cross the threshold because of the tool
+    // result; the running switch changed while the work was active.
+    runtime.set_auto_compact(false);
+    gateway.release.notify_one();
+    let observation = handle
+        .wait(&receipt.work, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(matches!(observation.state, WorkState::Finished(_)));
+    assert_eq!(summary_calls.load(Ordering::SeqCst), 0);
+    assert!(
+        session
+            .with_context(|context| context.blocks().len())
+            .unwrap()
+            > 2
+    );
+
+    // Enabling it again and completing another round compacts as expected.
+    runtime.set_auto_compact(true);
+    let receipt = handle
+        .submit(SubmitRequest {
+            request_key: "after-change".into(),
+            blocks: vec![big_block(1_200), big_block(1_200), big_block(1_200)],
+        })
+        .unwrap();
+    let observation = handle
+        .wait(&receipt.work, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(matches!(observation.state, WorkState::Finished(_)));
+    assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
+    session.shutdown().await;
 }
