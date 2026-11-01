@@ -1,56 +1,56 @@
-# 中断后的材料处理与继续
+# Material handling and continuation after interruption
 
-取消或期限结束后，工具声明可能已进入 Context，而实际结果仍保留在原工作的未提交批次中。TARS 会在接受新输入前检查配对；有未配对声明时返还原输入，不追加材料或登记新工作。相同请求键与参数的既有工作回放仍优先。完整配对的 UnknownOutcome 可以继续使用。
+After a cancellation or deadline, tool declarations may already have entered Context while the actual result remains in the original work's uncommitted batch. TARS checks pairing before accepting new input; when unpaired declarations exist the original input is returned without appending materials or registering new work. Replay of an existing work with the same request key and arguments still takes precedence. A fully paired UnknownOutcome can continue to be used.
 
-材料处理属于 TARS 的共享 application 层，CLI/TUI 使用同一套检查和保存门禁。整个流程是检查、预览、显式应用、保存，再由用户发送新输入；不恢复旧 future、不执行旧声明，也不更改原工作终态。
+Material handling belongs to TARS's shared application layer, and CLI/TUI use the same checks and save gate. The whole flow is inspect, preview, apply explicitly, save, and then the user sends new input; it never restores old futures, executes old declarations or changes the original work's terminal state.
 
-## 两种处理方式
+## Two handling options
 
-| 选择 | 条件与结果 |
+| Choice | Conditions and result |
 | --- | --- |
-| 采纳原结果 | 同一打开实例仍保有原批次；来源必须是正式内置工具装配的受控取消或期限。保留原结果 BlockId、status、output 和 notes，按声明顺序纳入材料；移除剩余无结果声明。 |
-| 移除未配对声明 | 只移除没有对应结果的声明，不补造结果。重开后没有原批次也可使用。既有完整交换和其他材料保持不变。 |
-| 保持原材料 | 关闭预览即可；检查和预览不编辑、不领取批次，也不请求模型或工具。 |
+| Accept the original result | The same open instance still holds the original batch; the source must be a controlled cancellation or deadline of a formally assembled built-in tool. Keeps the original result's BlockId, status, output and notes, includes them into the materials in declaration order, and removes the remaining result-less declarations. |
+| Remove unpaired declarations | Removes only declarations without a corresponding result and never fabricates a result. Available after reopening even without the original batch. Existing complete exchanges and other materials stay unchanged. |
+| Keep the original materials | Merely close the preview; inspection and preview never edit, claim the batch, or request a model or tool. |
 
-移除声明只表示从后续请求材料中排除它，不能证明操作从未发生。采纳 UnknownOutcome 仍保留未知状态。新工作不重跑历史声明，但模型可以在新响应中提出新的调用。
+Removing a declaration only means excluding it from the materials of subsequent requests; it never proves the operation did not happen. Accepting an UnknownOutcome keeps the unknown state. New work never reruns historical declarations, but the model may propose new calls in a new response.
 
-采纳支持材料尾部的单个未完成交换，以及固定的六个内置工具来源（list_directory、read_file、search_text、write_file、edit_file、run_command）。含 MCP 或其他非内置调用的批次不做采纳，只能移除未配对声明，因为外部服务器一侧的取消不受本应用控制。采纳 UnknownOutcome 状态的写入调用或移除未配对写入声明时，会标出可能已写入提示，提醒用户在继续前重新读取对应文件；外部调用的未知结果或被移除的声明会标出外部副作用提示，提醒用户检查对应服务器的状态。采纳 `run_command` 的 UnknownOutcome、TimedOut 或 Cancelled 结果时，会标出“命令可能已执行”提示，提醒用户检查工作区（沙箱外运行同样）；Rejected 结果（包括排队期间未启动的命令）可以照常采纳，但不触发该提示。取消时仍在排队的命令没有启动进程，但可能以 UnknownOutcome 结算并触发该提示；这是保守边界，不代表命令真的执行过。移除未配对的 `run_command` 声明时同样提示。应用修复并保存后，新工作只执行模型新提出的调用；历史命令不会重跑。自定义装配、处理器失败、结果拒绝、提交碰撞、复杂中间交换与不支持的媒体/资产均拒绝自动采纳；孤立结果、重复结果或歧义 wire ID 会显示具体诊断。处理器正常给出的 Rejected 结果（预检、模式拒绝、用户拒绝、没有确认途径）是批次里的普通结果，在受控取消或期限下可以被采纳。Context 已丢失的异常工作只能报告故障，不能从旧磁盘内容制造本次返回材料。
+Accepting supports the single unfinished exchange at the tail of the materials, and the fixed six built-in tool sources (list_directory, read_file, search_text, write_file, edit_file, run_command). A batch containing MCP or other non-built-in calls cannot be accepted and can only have its unpaired declarations removed, because cancellation on the external server side is outside this application's control. Accepting an UnknownOutcome write call or removing an unpaired write declaration marks the possible-write notice and reminds the user to read the corresponding file again before continuing; an unknown outer-call result or a removed outer declaration marks the external-side-effect notice and reminds the user to check the corresponding server's state. Accepting an UnknownOutcome, TimedOut or Cancelled `run_command` result marks a "command may have executed" notice and reminds the user to check the workspace (also for sandbox-outside runs); Rejected results (including commands not started while queued) can be accepted as usual without that notice. A command that was still queued when cancelled started no process but may settle as UnknownOutcome and trigger the notice; this is a conservative boundary and does not mean the command really executed. Removing an unpaired `run_command` declaration shows the same notice. After applying the repair and saving, new work runs only the calls the model proposes anew; historical commands are never rerun. Automatic acceptance is refused for custom assembly, handler failures, rejected results, commit collisions, complex intermediate exchanges and unsupported media/assets; orphan results, duplicate results or ambiguous wire IDs show a specific diagnosis. Rejected results normally returned by a handler (precheck, mode rejection, user rejection, no confirmation channel) are ordinary results in the batch and can be accepted under a controlled cancellation or deadline. An abnormal work whose Context has been lost can only report the fault and cannot manufacture the materials returned by this run from old disk content.
 
-保留 blocks 的 ID、内容、元数据和顺序不变。候选在合法交换之后加入一条 `application:tars:material-repair` 说明，列明移除声明与采纳结果的 IDs 和非执行含义。该说明属于应用材料，以 `system` 角色写入，三种协议都在原位置把它渲染为 system 消息，模型不会把它当作用户发言。候选必须通过 Context 身份校验及所选协议的 Causa 公开纯渲染入口；本地结构校验不保证线上服务接受全部请求参数。
+Retained blocks keep their IDs, content, metadata and order unchanged. The candidate appends an `application:tars:material-repair` note after the valid exchange, listing the IDs of removed declarations and accepted results and the non-execution meaning. This note is application material, written with the `system` role, and all three protocols render it in place as a system message so the model never treats it as a user turn. The candidate must pass Context identity validation and the selected protocol's public pure-rendering entry point in Causa; local structural validation does not guarantee that the live service accepts every request argument.
 
 ## TUI
 
-1. 等原工作收尾后，用 F7 或 `/repair` 打开材料面板；提前打开会等待原工作和保存，不请求取消。
-2. 查看诊断与原结果摘要。按 `a` 预览采纳原结果，或 `r` 预览移除未配对声明。
-3. 检查拟移除/采纳的身份，Enter 应用该预览并等待保存。
-4. Esc 返回保留的草稿，显式发送才创建新工作。原 Cancelled/TimedOut 状态保持。
+1. After the original work settles, open the material panel with F7 or `/repair`; opening it early waits for the original work and saving without requesting cancellation.
+2. Inspect the diagnosis and original result summary. Press `a` to preview accepting the original result, or `r` to preview removing unpaired declarations.
+3. Check the identities to be removed/accepted, and press Enter to apply that preview and wait for saving.
+4. Esc returns to the kept draft; new work is created only when sent explicitly. The original Cancelled/TimedOut state is kept.
 
-Esc 或 F4 切换会话会释放当前预览；已开始的应用/保存继续受监督。F7 刷新会丢弃旧预览。保存失败时 Ctrl-R 重试同一提交，Ctrl-E 导出实际当前 Context。查看或关闭面板不会领取原批次。每实例最多一个材料处理任务，整个 UI 最多持有一个候选；重绘和 resize 只读取缓存的摘要行。
+Switching sessions with Esc or F4 releases the current preview; an already-started apply/save continues under supervision. Refreshing with F7 discards the old preview. On save failure, Ctrl-R retries the same commit and Ctrl-E exports the actual current Context. Viewing or closing the panel never claims the original batch. Each instance has at most one material-handling task, and the whole UI holds at most one candidate; redrawing and resizing only read cached summary lines.
 
 ## CLI
 
 ```sh
-# 默认 dry-run；读取保存定义与持久 revision，展示候选，不改变记录
+# Dry-run by default; reads the saved definition and persistent revision, shows the candidate and changes nothing
 tars session repair "$SESSION_ID" --store ./tars-data --json
 
-# N 必须来自上面的预览；写锁内再次验证持久 revision
+# N must come from the preview above; the persistent revision is validated again under the write lock
 tars session repair "$SESSION_ID" --store ./tars-data \
   --apply --expected-revision N --json
 
-# 修复并保存后，另行提交新工作
-tars session run "$SESSION_ID" --store ./tars-data --input '继续分析'
+# After repairing and saving, submit new work separately
+tars session run "$SESSION_ID" --store ./tars-data --input 'Continue analyzing'
 ```
 
-`--dry-run` 可显式给出；与 `--apply` 互斥。apply 必须带正整数 `--expected-revision`，版本不符就拒绝。命令沿用保存定义，仍需能解析其凭据引用和工作区；检查、计划和应用本身不发送模型请求。
+`--dry-run` may be given explicitly and is mutually exclusive with `--apply`. apply requires a positive integer `--expected-revision` and refuses when the revision does not match. The command uses the saved definition and still needs to resolve its credential reference and workspace; inspection, planning and applying themselves send no model request.
 
-独立进程无法找回上个实例的未提交批次，因此 CLI 只提供移除模式。JSON 分开报告 diagnosis、plan、applied、saved、revision 及保存/导出/关闭错误。无需修复时返回 `not_needed`，不生成新修订。保存失败时导出已经应用的实际 Context，确认关闭结果并以 1 退出；原错误与确认事实分别保留。文本模式展示最多 128 个声明 ID，可用 JSON 获取有界结构化摘要。
+A separate process cannot recover the previous instance's uncommitted batch, so the CLI offers only the removal mode. JSON reports diagnosis, plan, applied, saved, revision and save/export/close errors separately. When no repair is needed it returns `not_needed` and creates no new revision. On save failure it exports the actual Context already applied, confirms the close outcome and exits 1; the original error and the confirmed facts are retained separately. Text mode shows at most 128 declaration IDs, and JSON provides a bounded structured summary.
 
-## 核心与保留边界
+## Core and retention boundaries
 
-`ManagedSession::inspect_repair(work)` 返回版本及有界诊断，`plan_repair(RepairMode)` 返回不可改写的候选，`apply_repair(&plan)` 原子应用同一候选。计划绑定打开实例、材料 generation 和批次领取/forget 的修订；材料变化、重新打开、成功 take/forget、重复应用均使旧计划失效。Busy、Closing、Faulted 和未确认保存拒绝应用；持久应用后必须等待 `wait_saved`，重试保存不再执行编辑。
+`ManagedSession::inspect_repair(work)` returns the revision and a bounded diagnosis, `plan_repair(RepairMode)` returns a candidate that cannot be rewritten, and `apply_repair(&plan)` atomically applies that same candidate. A plan is bound to the open instance, the material generation and the batch claim/forget revision; material changes, reopening, a successful take/forget and repeated application all invalidate an old plan. Busy, Closing, Faulted and unconfirmed saves refuse application; after a persistent apply, `wait_saved` must be awaited, and retrying the save never executes the edit again.
 
-检查与预览不消费原 U；应用后也不自动 take/forget。原批次仍表示旧执行交还时的事实，只在原 owner 的既定保留期内存在。Store、Context 导出和恢复文件均不额外保存原 U、工作表或请求键。采纳进入 Context 的结果按普通材料保存；仅保留在 U 的结果在重开后不可查询。
+Inspection and preview do not consume the original U; applying also never takes/forgets automatically. The original batch still represents the facts from when the old execution returned and exists only for the original owner's defined retention period. The Store, Context export and recovery files never additionally save the original U, work tables or request keys. Results accepted into Context are saved as ordinary materials; results kept only in U cannot be queried after reopening.
 
-新输入准入使用线性配对扫描，不在同步输入路径完整渲染请求。检查已有工具历史与构建候选时才调用所选协议渲染器；复制、构建候选和渲染在 TUI 后台任务进行。展示最多 128 项诊断/身份/结果，每条诊断最多 512 bytes、原结果 JSON 摘要最多 1024 bytes，总数保留；候选和说明仍包含完整身份清单。
+New-input admission uses a linear pairing scan and does not fully render the request on the synchronous input path. The selected protocol renderer is called only when inspecting existing tool history and building the candidate; copying, candidate construction and rendering happen in a TUI background task. Displays show at most 128 diagnoses/identities/results, each diagnosis at most 512 bytes and each original-result JSON summary at most 1024 bytes, while totals are preserved; the candidate and note still contain the complete identity list.
 
-计划持有完整材料副本，应用和保存还需要额外副本。Store 的 64 MiB 上限是文件限制，不是内存预算。本机 macOS debug 单次样本：约 9.1 MiB 材料、8200 blocks，扫描 0.42 ms、复制 1.83 ms、候选 10.44 ms、独立渲染 5.30 ms、应用 4.28 ms、保存等待 466.79 ms，进程峰值 RSS 147.8 MiB。释放计划不代表分配器立即归还 OS 页面；没有 CPU cache 指标或最大规模吞吐保证。原始样本、三协议消费者、终端和故障证据见[实施记录](../.agents/reviews/2026-10-05-session-continuation/README.md)。
+A plan holds a complete copy of the materials, and applying and saving need additional copies. The Store's 64 MiB limit is a file limit, not a memory budget. A single local macOS debug sample: about 9.1 MiB of materials with 8200 blocks, scan 0.42 ms, copy 1.83 ms, candidate 10.44 ms, independent render 5.30 ms, apply 4.28 ms, save wait 466.79 ms, process peak RSS 147.8 MiB. Releasing a plan does not mean the allocator immediately returns OS pages; there are no CPU cache metrics or maximum-scale throughput guarantees. The raw samples, three-protocol consumers, terminal and fault evidence live in the local review records (not in this repository).

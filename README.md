@@ -1,28 +1,28 @@
 # TARS
 
-TARS 是 Causa 的验证项目：用一个真实的 Agent 应用检验 Causa 的公开契约，再把使用中发现的问题反馈给 Causa，推动它改进。验证为主，应用是实现验证的载体。TARS 以可安装、可运行的程序交付，不发布到 crates.io。
+TARS is the validation project for Causa: a real agent application that exercises Causa's public contracts and feeds the problems found in use back into Causa to drive improvements. Validation comes first; the application is the vehicle for it. TARS ships as an installable, runnable program and is not published to crates.io.
 
-## 目的
+## Purpose
 
-- **验证。** Causa 只提供上下文材料的契约和单次执行，会话、保存、工具策略和界面都留给宿主。TARS 就是这样一个宿主，在真实条件下使用这些契约：持久会话、取消后继续、工作区工具与写入确认，以及在三种协议的真实端点上运行。它要回答的是：这些契约放进真实应用里够不够用、行为对不对。
-- **改进。** 发现的问题先判断属于 TARS、Causa 还是两者的接线。属于 Causa 的，在 Causa 仓库按它的规则修改并发布，TARS 再升级依赖接入，并重跑发现问题的那项检查。例如 Causa 0.0.7 的 Chat 输出上限字段来自 TARS 的真实端点测试，0.1.2 的工具提示与处理器数据来自 TARS 的写入工具设计。
-- **应用是载体。** TARS 是能实际使用的 CLI 和 TUI 应用，因为只有真实使用才能产生有效的证据。安排工作时，优先做能检验 Causa 的能力；只为分发服务的工作（安装渠道、GUI、更多平台）排在后面。
+- **Validate.** Causa provides only the contracts for context materials and single-run execution; sessions, saving, tool policy and the interface are left to the host. TARS is such a host and uses those contracts under real conditions: persistent sessions, continuation after a cancel, workspace tools with write confirmation, and live runs against real endpoints of the three wire protocols. It answers whether those contracts are sufficient and behave correctly inside a real application.
+- **Improve.** For each problem found, first decide whether it belongs to TARS, Causa, or their wiring. Causa problems are fixed in the Causa repository under its rules and released there; TARS then upgrades the dependency and reruns the check that found the problem. For example, the Chat output-limit field in Causa 0.0.7 came from TARS's real-endpoint tests, and the tool hints and handler data in 0.1.2 came from TARS's write-tool design.
+- **The application is the vehicle.** TARS is a CLI and TUI application that can actually be used, because only real use produces valid evidence. When ordering work, prefer work that exercises Causa; work that only serves distribution (install channels, GUI, more platforms) comes later.
 
-边界：
+Boundaries:
 
-- TARS 只经 Causa 的公开 facade 使用 crates.io 上已发布的版本，不复制或引入 Causa 源码，所以验证的就是外部用户实际拿到的东西。
-- 改进 Causa 时不把 TARS 自己的策略放进去。例如权限模式归 TARS，Causa 只携带工具声明的提示和每轮的宿主数据，模式的词汇和决定仍由 TARS 定。
-- TARS 的测试通过，只说明这一处接线可行，不能代替 Causa 自己的测试。
+- TARS uses Causa only through its public facade at the version published on crates.io; it does not copy or vendor Causa sources, so what is validated is exactly what external users get.
+- When improving Causa, do not put TARS policy into it. For example, permission modes belong to TARS; Causa carries only tool hints and per-round host data, while TARS keeps the vocabulary and the decision.
+- A passing TARS test only shows that this particular wiring works; it does not replace Causa's own tests.
 
-## 当前状态
+## Current status
 
-当前已实现单会话工作闭环，并提供离线 CLI 演示：原子提交、同键重放、逐工作装配、取消与结果观察、材料编辑及保存/导入。演示使用脚本模型和真实本地工具，经过 Session 与 Causa runner 执行，不需要凭据或网络。
+A single-session work loop is implemented, along with an offline CLI demo: atomic submission, same-key replay, per-work assembly, cancellation and result observation, and material editing with save/import. The demo uses a scripted model and real local tools, runs through Session and the Causa runner, and needs no credentials or network.
 
-`tars run` 支持真实 provider 的单次文本执行、JSON 输出、取消/期限和显式材料保存；`tars session create/run/list` 通过共享 SessionHost 自动保存固定定义与最新材料，并可重开同一会话。`tars-tui` 提供原生终端原型与临时流式正文预览，两端共用 TOML 配置，并可显式选择工作区和工作区工具。MCP 独立配置文件 `mcp.json`（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和运行期工具已接通（只接通工具，不含 resources/prompts/sampling），MCP 调用按 `mcp.json` 的 `approval` 设置和当前权限模式执行、确认（终端或 TUI 确认面板）或拒绝，真实第三方 MCP 服务验证待补；内置 `run_command` 在 macOS Seatbelt 沙箱中执行（默认无网络，工作区可写、`.git` 钩子与配置只读、凭据位置不可读写），单条命令可带理由请求在沙箱外运行，按权限模式询问或直接执行；TUI `/status` 与 CLI `session create` 显示沙箱后端和能力，Linux/Windows 暂无该工具；GUI、父子 Agent 和安装渠道尚未实现；CLI 与 TUI 可以写入文件：`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问文件写入，命令的沙箱外请求在 `accept-edits` 下仍询问；`tars-tui` 已接通写入确认面板、命令确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。当前开发版本为 `0.0.0`，尚无公开发布。
+`tars run` supports single text execution against a real provider, JSON output, cancellation/deadline and explicit material saving. `tars session create/run/list` automatically save the frozen definition and the latest materials through the shared SessionHost, and can reopen the same session. `tars-tui` provides a native terminal prototype with temporary streaming text preview; both ends share the TOML configuration and can explicitly choose the workspace and workspace tools. The standalone MCP configuration file `mcp.json` (with `${VAR}` expansion and literal-secret checks), preset/CLI/TUI selection, definition snapshots and runtime tools are wired (tools only; no resources/prompts/sampling). MCP calls run, ask (in the terminal or the TUI confirmation panel) or are rejected according to the `approval` setting in `mcp.json` and the current permission mode; verification against real third-party MCP servers is still pending. The built-in `run_command` runs in the macOS Seatbelt sandbox (no network by default, writable workspace, read-only `.git` hooks and config, unreadable/unwritable credential locations); a single command can request to run outside the sandbox with a reason and is asked or allowed according to the permission mode. The TUI `/status` and CLI `session create` display the sandbox backend and capabilities; this tool is not available on Linux/Windows yet. GUI, parent/child agents and install channels are not implemented. CLI and TUI can write files: `ask` confirms in the terminal/confirmation panel and refuses in non-terminal contexts; `accept-edits` and `full-access` do not ask for file writes, while sandbox-outside requests for commands still ask under `accept-edits`. `tars-tui` has the write confirmation panel, command confirmation panel, `/mode` command and `Shift-Tab` mode switching wired. The current development version is `0.0.0`, with no public release yet.
 
-## 本地构建与运行
+## Build and run locally
 
-使用 Rust 1.96.0（由 `rust-toolchain.toml` 固定）：
+Rust 1.96.0 is used (pinned by `rust-toolchain.toml`):
 
 ```sh
 cargo build --locked
@@ -33,66 +33,66 @@ cargo build --locked --release
 ./target/release/tars demo
 ```
 
-Windows 使用 `target\release\tars.exe`。不带参数显示帮助；参数错误返回退出码 2，执行或文件错误返回 1。演示运行时 Ctrl-C 请求取消当前工作并等待收尾。
+On Windows use `target\release\tars.exe`. No arguments prints help; argument errors exit with code 2, execution or file errors with 1. While the demo runs, Ctrl-C requests cancellation of the current work and waits for it to settle.
 
-`demo` 执行 T1、摘要编辑、精确重放、T2，再保存材料并创建新 Session 继续执行。默认使用临时文件，结束后清理；`--save` 将材料写到指定文件，原文件会被原子替换，父目录必须已存在。文件只包含 Context，导入保留 BlockId，但不会恢复旧工作、请求键或外部副作用。应用需自行保存所需历史；未保存而被删除的材料无法恢复。
+`demo` runs T1, summary editing, exact replay and T2, then saves materials and creates a new Session to continue execution. Temporary files are used by default and cleaned up afterwards; `--save` writes the materials to the given file, atomically replacing the original, and the parent directory must already exist. The file contains only Context; import preserves BlockIds but does not restore old work, request keys or external side effects. The application must save whatever history it needs; materials that are deleted without being saved cannot be recovered.
 
-## 单次模型执行
+## Single model execution
 
-先在当前 shell 设置 `OPENAI_API_KEY`（OpenAI 协议）或 `ANTHROPIC_API_KEY`（Anthropic），再显式指定模型 ID：
+First set `OPENAI_API_KEY` (OpenAI protocols) or `ANTHROPIC_API_KEY` (Anthropic) in the current shell, then specify the model ID explicitly:
 
 ```sh
-./target/release/tars run --provider openai-responses --model "$MODEL_ID" --input '解释这段设计' --save materials.json
-printf '继续分析材料' | ./target/release/tars run --provider openai-responses --model "$MODEL_ID" --stdin --load materials.json --save materials.json --json
+./target/release/tars run --provider openai-responses --model "$MODEL_ID" --input 'Explain this design' --save materials.json
+printf 'Continue analyzing the material' | ./target/release/tars run --provider openai-responses --model "$MODEL_ID" --stdin --load materials.json --save materials.json --json
 ```
 
-`MODEL_ID` 由你设置为服务端可用模型。协议选项为 `openai-chat`、`openai-responses`、`anthropic`；`--endpoint` 覆盖完整 URL（包括路径），`--api-key-env` 指定其他凭据环境变量名。凭据不会由配置层写入材料或结果报告。默认工具目录为空；使用 `--workspace DIR --tools list_directory,read_file,search_text,write_file,edit_file,run_command` 启用工作区工具能力，仍仅输出最终结果。`run_command` 默认在沙箱内启动 `/bin/bash -c`，命令超时默认 120 秒、最大 600 秒；`--command-network none|open` 选择默认拒绝或放行出站网络。命令可带 `outside_sandbox` 与理由请求在沙箱外运行，按权限模式确认或直接执行。写入已有文件前必须先 `read_file`；`--permission-mode` 设置初始权限模式，`ask` 在非终端直接拒绝写入。访问范围、确认、限额和旧记录导出见[工作区工具](docs/workspace-tools.md)。
+You set `MODEL_ID` to a model available on the server. Protocol options are `openai-chat`, `openai-responses` and `anthropic`; `--endpoint` overrides the full URL (including the path), and `--api-key-env` names another credential environment variable. Credentials are never written into materials or result reports by the configuration layer. The default tool catalog is empty; use `--workspace DIR --tools list_directory,read_file,search_text,write_file,edit_file,run_command` to enable workspace tool capabilities, while still printing only the final result. `run_command` launches `/bin/bash -c` inside the sandbox by default; the command timeout defaults to 120 seconds and can be at most 600 seconds. `--command-network none|open` selects whether outbound network is denied by default or allowed. A command can carry `outside_sandbox` and a reason to request running outside the sandbox, and is confirmed or executed directly according to the permission mode. Reading an existing file before writing is mandatory; `--permission-mode` sets the initial permission mode, and `ask` refuses writes directly in non-terminal contexts. See [Workspace tools](docs/workspace-tools.md) for access scope, confirmation, limits and legacy record export.
 
-输入必须二选一：`--input <text>` 或 `--stdin`（读到 EOF，UTF-8，不能全空白）。`--timeout-secs` 默认 120，范围 1–86400，从工作受理起覆盖装配和执行；不覆盖读取 stdin、加载或保存文件。
+Input must be exactly one of `--input <text>` or `--stdin` (read to EOF, UTF-8, not entirely whitespace). `--timeout-secs` defaults to 120 and accepts 1–86400, starting when the work is accepted and covering assembly and execution; it does not cover reading stdin, loading or saving files.
 
-普通模式 stdout 只有完成文本，诊断走 stderr。`--json` 输出 `status`、`text`、`conversation_id`、`work_id`、`saved` 和 `error`；status 为 `not_started`、`completed`、`failed`、`cancelled` 或 `timed_out`。模型调用失败或以不认识的停止值结束时另有 `error_kind`（`transient`、`timed_out`、`cancelled`、`invalid_request`、`unknown_outcome`、凭据被拒的 `credential_rejected`、模型或路径不存在的 `not_found`、其他拒绝的 `permanent`、服务已应答但响应无法读取的 `undecodable`、本版本不认识的失败类别 `unclassified`，或服务返回了本版本不认识的停止值时的 `unrecognized_stop`，此时 `error_detail` 是该停止值）和 `error_detail`（网关给出的原始说明，可能含服务端返回的文本），其余情况两者为 null；普通模式下 `error_detail` 以 `TARS: detail: …` 写入 stderr。参数错误只走 stderr。执行结果和文件结果分开：模型完成但保存失败时仍为 `completed`，同时 `saved=false`、`error` 非空且退出码为 1。判断命令整体成功应检查退出码。
+In normal mode stdout contains only the completion text, and diagnostics go to stderr. `--json` outputs `status`, `text`, `conversation_id`, `work_id`, `saved` and `error`; status is `not_started`, `completed`, `failed`, `cancelled` or `timed_out`. When a model call fails or ends with an unrecognized stop value, there are also `error_kind` and `error_detail`. `error_kind` is `transient`, `timed_out`, `cancelled`, `invalid_request`, `unknown_outcome`, `credential_rejected` for rejected credentials, `not_found` for a missing model or path, `permanent` for other rejections, `undecodable` when the service answered but the response could not be read, `unclassified` for a failure class unknown to this version, or `unrecognized_stop` when the service returned a stop value unknown to this version, in which case `error_detail` is that stop value. Otherwise `error_detail` is the raw message from the gateway, possibly containing server-provided text, and both fields are null when there is no such failure. In normal mode `error_detail` is written to stderr as `TARS: detail: …`. Argument errors go only to stderr. Execution and file results are separate: when the model completes but saving fails, the result is still `completed` with `saved=false`, non-empty `error` and exit code 1. Check the exit code to judge overall success.
 
-退出码：0 完成；1 配置、执行或文件失败；2 参数错误；124 工作期限；130 取消。Ctrl-C 在执行期间请求取消并等待真实材料交还；`--save` 在成功、执行失败或受控中断后保存当前材料，没有该选项则不自动保存。它不保存未提交输出或未提交工具批次，也不恢复旧工作或请求键。默认材料接口拒绝外部媒体/资产引用。
+Exit codes: 0 completed; 1 configuration, execution or file failure; 2 argument error; 124 work deadline; 130 cancelled. Ctrl-C during execution requests cancellation and waits for the real materials to be returned; `--save` saves the current materials after success, execution failure or controlled interruption, and without that option nothing is saved automatically. It does not save uncommitted output or uncommitted tool batches, nor does it restore old work or request keys. The default material interface rejects external media/asset references.
 
-这些路径由本地 HTTP fixture 和实际进程测试验证，不需要线上凭据；另已完成用户配置服务的最小请求、三工具往返和带确认写入的 BA09 三协议实测。线上样本不代替中断/竞态验证，公开安装尚未验收。
+These paths are verified by local HTTP fixtures and real process tests without live credentials; minimal requests against a user-configured service, three-tool round trips and the BA09 three-protocol run with confirmation-enabled writes have also been done. Live samples do not replace interruption/race verification, and public installation has not been accepted yet.
 
-## 保存并重开会话
+## Save and reopen a session
 
 ```sh
-# 首次创建，输出 ConversationId；创建本身不请求模型
+# First create, printing the ConversationId; creation itself does not call the model
 ./target/release/tars session create --store ./tars-data \
   --provider openai-chat --model "$MODEL_ID" --json
 
-# 使用输出的 ID；provider/model/期限沿用保存定义
+# Use the printed ID; provider/model/deadline come from the saved definition
 ./target/release/tars session run "$SESSION_ID" --store ./tars-data \
-  --input '继续这个会话' --json
+  --input 'Continue this session' --json
 ./target/release/tars session list --store ./tars-data --json
 ```
 
-`--store` 由参数或共享配置指定。记录保存固定定义和最新 Context；重开保持 ConversationId 与 BlockId，但不恢复旧工作、请求键或未提交输出。环境变量凭据在每次打开时重新解析，记录只保存变量引用。定义默认 120 秒期限、256 项保留工作、10 次模型调用和 64 个工具声明；详见 `tars session --help`。
+`--store` is given by an argument or the shared configuration. Records keep the frozen definition and the latest Context; reopening preserves the ConversationId and BlockIds but does not restore old work, request keys or uncommitted output. Environment-variable credentials are resolved again on every open; the record stores only the variable reference. The definition defaults to a 120-second deadline, 256 retained works, 10 model calls and 64 tool declarations; see `tars session --help` for details.
 
-`session run` 在执行成功、失败或取消后等待自动保存。JSON 分开返回执行 `status/text/execution_error/error_kind/error_detail` 与 `saved/revision/save_error`，并包含 `recovery_file/recovery_importable/recovery_error/close_error/close_outcome` 与 `save_wait_abandoned`。保存失败时导出当前材料到 `tars-recovery-<uuid>.json` 后以 1 退出；默认导出至当前目录，可用 `--recovery-dir` 指定已存在的目录。保存等待期间第一次 Ctrl-C 提示，第二次停止等待并按同一失败路径导出。导出失败单独报告，不能宣称材料已恢复。恢复文件可通过创建命令的 `--load` 导入为新会话；超过 64 MiB 时文件仍完整写出，但当前版本不能直接导入，结果会明确报告。关闭会确认原待保存操作；`close_outcome` 明确区分已提交、未提交与仍无法确认。若关闭时确认先前结果不明的提交，`saved/revision` 更新为已确认事实，原 `save_error` 和错误退出仍保留。
+`session run` waits for the automatic save after execution succeeds, fails or is cancelled. JSON returns execution fields `status/text/execution_error/error_kind/error_detail` separately from `saved/revision/save_error`, and also includes `recovery_file/recovery_importable/recovery_error/close_error/close_outcome` and `save_wait_abandoned`. When saving fails, the current materials are exported to `tars-recovery-<uuid>.json` and the command exits 1; the default export goes to the current directory, and `--recovery-dir` can name an existing directory. During the save wait, the first Ctrl-C prints a notice and the second stops waiting and exports through the same failure path. Export failure is reported separately and must not claim that materials were recovered. Recovery files can be imported as a new session with `--load` when creating; files over 64 MiB are still written completely but cannot be imported directly by this version, which the result reports explicitly. Closing confirms the original pending save; `close_outcome` distinguishes committed, uncommitted and still-unconfirmed. If closing confirms a commit whose earlier result was unknown, `saved/revision` updates to the confirmed fact while the original `save_error` and error exit remain.
 
-存储采用本机稳定文件锁：另一进程占用同一会话时明确拒绝。坏记录在列表中单列并使命令失败，不自动覆盖。单条记录最多 64 MiB；该大小不是进程内存预算。当前范围不包含掉电持久性、网络共享盘或跨主机写入，详情见[当前边界](docs/README.md)。
+Storage uses a local stable file lock: another process holding the same session is refused explicitly. Corrupt records are listed separately and make the command fail; they are not overwritten automatically. Each record is at most 64 MiB; this is not a process memory budget. The current scope excludes power-loss durability, network shares and cross-host writes; see [Current boundaries](docs/README.md) for details.
 
-取消后有未配对工具声明时，新输入会原样保留并提示处理材料。TUI 用 F7 或 `/repair` 预览采纳原结果或移除未配对声明，再 Enter 应用并保存。CLI 用 `session repair ID --store DIR --json` 查看，显式 `--apply --expected-revision N` 应用移除模式。处理不重跑旧工具，原工作状态保持；保存后另行发送新输入。条件、重开与原批次保留范围见[中断后继续](docs/session-continuation.md)。
+If a cancel leaves unpaired tool declarations, new input is preserved as-is with a prompt to handle the materials. In the TUI, F7 or `/repair` previews accepting the original result or removing the unpaired declaration, then Enter applies and saves. In the CLI, `session repair ID --store DIR --json` inspects it, and `--apply --expected-revision N` explicitly applies the removal mode. Repair does not rerun the old tool and the original work state is kept; after saving, send new input separately. Conditions, reopening and the retention scope of the original batch are described in [Continuation after interruption](docs/session-continuation.md).
 
-## 项目入口
+## Project layout
 
-根目录是 Cargo workspace，目录名省略 `tars-` 前缀：`crates/core/`（包 `tars-core`）提供共享应用核心与配置，`crates/sandbox/`（`tars-sandbox`）提供平台沙箱策略、后端与进程控制，`crates/cli/`（`tars-cli`）提供 `tars`，`crates/tui/`（`tars-tui`）提供 `tars-tui` 原型。默认 `cargo run/build` 仍选择 CLI；TUI 使用 `cargo run -p tars-tui -- --config /path/to/config.toml`，全部构建用 `cargo build --workspace --locked`。入口各自单向依赖核心，`tars-core` 单向依赖库包 `tars-sandbox` 并以 `pub use tars_sandbox as sandbox` 保留 `tars_core::sandbox` 路径，CLI/TUI 不直接依赖它；所有包 `publish = false`。Causa 以 crates.io 上发布的 `causa = "0.1"` 接入，启用 runtime 与 providers，具体版本由 Cargo.lock 固定；构建不再需要同级目录的 Causa checkout。独立分发另行处理。
+The root is a Cargo workspace whose directory names omit the `tars-` prefix: `crates/core/` (package `tars-core`) provides the shared application core and configuration, `crates/sandbox/` (`tars-sandbox`) provides the platform sandbox policy, backends and process control, `crates/cli/` (`tars-cli`) provides `tars`, and `crates/tui/` (`tars-tui`) provides the `tars-tui` prototype. Default `cargo run/build` still selects the CLI; the TUI is started with `cargo run -p tars-tui -- --config /path/to/config.toml`, and everything is built with `cargo build --workspace --locked`. Entry points depend one-way on the core; `tars-core` depends one-way on the library package `tars-sandbox` and keeps the `tars_core::sandbox` path through `pub use tars_sandbox as sandbox`, and CLI/TUI do not depend on it directly. All packages have `publish = false`. Causa is used through the crates.io release `causa = "0.1"` with the runtime and providers features enabled, and the exact version is fixed by Cargo.lock; builds no longer need a sibling Causa checkout. Standalone distribution is handled separately.
 
-CLI/TUI 共用 [TOML 配置](docs/configuration.md)，支持全局默认路径、`TARS_CONFIG`、`--config` 和命名模型预设；显式参数优先。可从 [config.example.toml](config.example.toml) 开始填写；MCP 服务器定义见 [mcp.example.json](mcp.example.json) 和[配置说明](docs/configuration.md#mcp-服务器)。已有会话重开不受全局模型预设变更影响。
+CLI and TUI share the [TOML configuration](docs/configuration.md) and support the global default path, `TARS_CONFIG`, `--config` and named model presets; explicit arguments take precedence. Start from [config.example.toml](config.example.toml); MCP server definitions are in [mcp.example.json](mcp.example.json) and [Configuration](docs/configuration.md#mcp-servers). Reopening an existing session is unaffected by changes to global model presets.
 
-- [当前结构、接口边界与检查](docs/README.md)
-- [共享配置说明](docs/configuration.md)
-- [工作区工具：读写、确认与记录迁移](docs/workspace-tools.md)
-- [中断后的材料处理与继续](docs/session-continuation.md)
-- [TUI 运行、按键与验证边界](docs/tui.md)
+- [Current structure, interface boundaries and checks](docs/README.md)
+- [Shared configuration](docs/configuration.md)
+- [Workspace tools: read/write, confirmation and record migration](docs/workspace-tools.md)
+- [Material handling and continuation after interruption](docs/session-continuation.md)
+- [TUI operation, keys and validation boundaries](docs/tui.md)
 
-Causa 负责 Context 和单次执行；TARS 负责会话、工作受理、依赖装配及应用交互。
+Causa owns Context and single-run execution; TARS owns sessions, work acceptance, dependency assembly and application interaction.
 
-开发流程资料 `.agents/` 和辅助 `scripts/` 留在本机、Git 忽略，不随应用分发。
+Development workflow material `.agents/` and helper `scripts/` stay on the local machine and are Git-ignored; they are not distributed with the application.
 
-## 许可证
+## License
 
-本项目以 [MIT 许可证](LICENSE) 发布。
+This project is released under the [MIT license](LICENSE).

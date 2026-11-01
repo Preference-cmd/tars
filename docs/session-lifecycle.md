@@ -1,77 +1,76 @@
-# Session 的组装与运行机制
+# Session assembly and execution
 
-本文说明 2026-10-05 的当前实现。设计与验收集中在 [Session 结构与存储提案](../.agents/pipelines/archives/architecture/2026-10-03-session-structure-and-storage.md)，本机测试和资源原始数据见[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
+This page describes the current implementation as of 2026-10-05. Design and acceptance live in the local proposal tree, and the local tests and raw resource data live in the local implementation records (neither is part of this repository).
 
-## 1. 创建和重开
+## 1. Creating and reopening
 
 ```text
-CLI 参数 → SessionDefinition + 初始 Context → PreparedCreate
-  → SessionHost 登记 opening + 启动独立监督
-  → 持久实例取得稳定文件锁 → 读取并校验最新完整记录
-  → assembly 解析一次凭据并冻结 gateway / runner / 执行选项
-  → 创建：确认初始 revision 1；重开：采用已有 revision
-  → 发布绑定本次 SessionTarget 的 ManagedSession
+CLI arguments → SessionDefinition + initial Context → PreparedCreate
+  → SessionHost registers opening + starts independent supervision
+  → persistent instance takes the stable file lock → reads and validates the latest complete record
+  → assembly resolves credentials once and freezes gateway / runner / execution options
+  → create: confirms initial revision 1; reopen: adopts the existing revision
+  → publishes a ManagedSession bound to this SessionTarget
 ```
 
-[Host](../crates/core/src/application/host.rs)在持有目录锁时登记并启动监督任务，同 ID 并发调用连接同一实例。create 的 ConversationId 和初始 commit_id 由同步 PreparedCreate 固定；等待者离开不改变它们。读取/装配失败且任务停止后移除 opening；初始提交失败则保留可 lookup 的 InitializationBlocked 与原操作，不发布可提交视图。
+[Host](../crates/core/src/application/host.rs) registers and starts the supervision task while holding the directory lock, and concurrent calls with the same ID connect to the same instance. The ConversationId and initial commit_id for create are frozen by the synchronous PreparedCreate; a waiting caller leaving does not change them. A read/assembly failure followed by the task stopping removes the opening; an initial commit failure keeps a lookup-able InitializationBlocked with the original operation and publishes no committable view.
 
-[Definition](../crates/core/src/definition/types.rs)是可保存的数据；[assembly](../crates/core/src/assembly/provider.rs)才解析环境引用。定义在活动实例中固定，重开重新解析同一引用，连接不捕获某次 WorkRef。每工作仍获得对应身份、控制和固定策略的选项。构造和重开不发模型请求。
+[Definition](../crates/core/src/definition/types.rs) is saveable data; only [assembly](../crates/core/src/assembly/provider.rs) resolves environment references. The definition is frozen in a live instance, and reopening resolves the same reference again; a connection never captures a particular WorkRef. Each work still receives options with its own identity, control and frozen policy. Construction and reopening send no model request.
 
-## 2. 受理与执行
+## 2. Acceptance and execution
 
-[ManagedSession::submit](../crates/core/src/application/managed.rs)先借用底层唯一请求键表比较完整参数，再检查生命周期和保存门禁。保留键同参返回原回执，异参 Conflict；新键拒绝返还原请求。新工作受理与 host active 槽登记在同一应用门禁内，worker 即使先完成也不能让 T2 越过保存。
+[ManagedSession::submit](../crates/core/src/application/managed.rs) first compares the complete arguments against the underlying unique request-key table, then checks the lifecycle and save gate. A retained key with the same arguments returns the original receipt, while different arguments return Conflict; a new key rejection returns the original request. New-work acceptance and the host active-slot registration happen inside the same application gate, so a worker that finishes first cannot let T2 pass the save.
 
-底层 [SessionHandle](../crates/core/src/session/handle.rs)分配 TurnId，原子追加输入，保存原请求副本，并移交 Context 给 worker。每实例最多一个活动工作，无后台提交队列。工作期限从受理起覆盖逐工作装配和执行；不覆盖 opening、stdin 和磁盘 I/O。
+The low-level [SessionHandle](../crates/core/src/session/handle.rs) allocates the TurnId, atomically appends the input, saves a copy of the original request and hands the Context to the worker. Each instance has at most one active work and no background submission queue. The work deadline starts at acceptance and covers per-work assembly and execution; it does not cover opening, stdin or disk I/O.
 
-[Worker](../crates/core/src/session/worker.rs)检查控制，调用逐工作装配，再交给 Causa 公开 facade 的 `TurnRunner::run_streaming`。Causa 处理一次工作中的模型/工具循环，返回真实 Context、typed TurnResult 和未提交 ToolBatch；它不拥有 TARS 目录、文件或工作历史。产品装配默认空工具目录，可按固定定义绑定六个内置工作区工具（三个只读、两个写入和一个命令工具；命令工具的平台限制见[工作区工具](workspace-tools.md)）。根资源在实例内共享，工具包装和 ToolReporter 按 WorkRef 新建。旧 Context 中的工具材料不会触发旧工具重跑。
+The [Worker](../crates/core/src/session/worker.rs) checks control, calls per-work assembly, and then hands off to the Causa public facade's `TurnRunner::run_streaming`. Causa handles the model/tool loop of one work and returns the actual Context, the typed TurnResult and the uncommitted ToolBatch; it does not own TARS directories, files or work history. Product assembly defaults to an empty tool catalog and can bind the six built-in workspace tools according to a frozen definition (three read-only, two write and one command tool; platform limits of the command tool are in [Workspace tools](workspace-tools.md)). Root resources are shared within an instance, while tool wrappers and the ToolReporter are created per WorkRef. Tool materials in an old Context never trigger a rerun of old tools.
 
-## 3. Finished 与 Saved
+## 3. Finished and Saved
 
-底层 supervisor 在正常和异常路径均等待该工作的受监督文件闭包实际退出，冻结可靠工具状态，然后归还材料及批次并发布原 `Arc<WorkResult>`。工具 future 的丢弃会请求停止操作，不能代替真实任务回收。host 的[独立监督路径](../crates/core/src/application/supervisor.rs)等到真实材料可用，推进 MaterialVersion，并固定本次不可变保存操作。
+The low-level supervisor waits on both normal and exceptional paths for that work's supervised file closures to actually exit, freezes the reliable tool state, then returns the materials and batch and publishes the original `Arc<WorkResult>`. Dropping a tool future requests that the operation stop but cannot replace real task reclamation. The host's [independent supervision path](../crates/core/src/application/supervisor.rs) waits until real materials are available, advances the MaterialVersion and fixes this immutable save operation.
 
 ```text
-submit → Dirty → 原 WorkResult::Finished → 固定返回材料 → Saving
-                                                       ├─ 确认 → Saved → 可受理 T2
-                                                       └─ 错误 → SaveBlocked
+submit → Dirty → original WorkResult::Finished → freeze returned materials → Saving
+                                                       ├─ confirmed → Saved → T2 can be accepted
+                                                       └─ error → SaveBlocked
                                                                     ↓ retry_save
-                                                               原提交确认/重试
+                                                               confirm/retry original commit
 ```
 
-保存 I/O 在有并发上限的 blocking 任务执行，不占同步协调锁。等待者、取消、重放和观察仍响应。Saved 是持久事实；Finished 只描述执行。保存失败不会把 Completed 改成执行失败；重试不重跑模型。临时实例保持 NotTracked，仍等材料交还后才解除活动门禁。
+Save I/O runs in blocking tasks with a concurrency limit and does not hold the synchronous coordination lock. Waiters, cancellation, replay and observation remain responsive. Saved is a persistent fact; Finished only describes execution. A failed save never turns Completed into an execution failure; retrying never reruns the model. A transient instance stays NotTracked and still releases the active gate only after the materials are returned.
 
-`read_materials` 返回带版本的实际空闲材料副本。`edit` 以该 MaterialVersion 为基线验证并一次替换全部 blocks，拒绝旧版本、旧实例、Busy 或未处理保存；合法持久编辑固定新快照并保存，不接受可重入的任意编辑回调。
+`read_materials` returns a copy of the actual idle materials with a version. `edit` validates against that MaterialVersion as the baseline and replaces all blocks in one step, rejecting old versions, old instances, Busy or unhandled saves; a valid persistent edit fixes a new snapshot and saves it, and arbitrary re-entrant edit callbacks are not accepted.
 
-中断后材料处理复用同一编辑/保存门禁：`inspect_repair` 只读检查，`plan_repair` 构建经过协议校验的不可改写候选，`apply_repair` 核对材料版本、打开实例及原批次可用性再一次提交。take/forget 会使既有计划失效。新键配对准入失败返还原输入且不登记工作，保留键回放仍优先。CLI/TUI 操作与原结果保留范围见[中断后继续](session-continuation.md)。
+Material handling after interruption reuses the same edit/save gate: `inspect_repair` inspects read-only, `plan_repair` builds a non-rewritable candidate that passed protocol validation, and `apply_repair` checks the material version, open instance and original batch availability and commits once. take/forget invalidate existing plans. New-key pairing admission failure returns the original input without registering work, and retained-key replay still takes precedence. CLI/TUI operations and the original-result retention scope are in [Continuation after interruption](session-continuation.md).
 
-## 4. JSON 提交与确认
+## 4. JSON commits and confirmation
 
-[Store](../crates/core/src/store/json.rs)是 core 内部具体后端。记录格式 `tars-session-v2` 保存 ConversationId、revision、last_commit_id、definition、context；只接受规范 UUID 文件名，不把任意输入拼为路径。定义中的 workspace_root、tools、tool_limits 必须完整存在；写入限额、初始/当前权限模式和 MCP 快照可省略，省略时按默认值读取。旧 v1 明确拒绝，离线材料导出见[工作区工具](workspace-tools.md)。工作表、请求键、执行结果、未提交批次、任务与连接不序列化。Causa 把工具结果状态和 artifact 类别的序列化形式改为 snake_case 之后，读取已存 Context 的三条路径（会话记录、材料文件、`export-materials`）都经过 [`material::vocabulary`](../crates/core/src/material/vocabulary.rs)：它在解码前把这两个字段的旧写法改成现行写法，对现行数据不做改动，所以不升记录格式；下一次写入即为现行写法。Causa 0.0.5 把消息角色改为 block 自身的事实后，同一处还把旧的 `{"shape":"parts","value":[..]}` 改写为 `{"shape":"message","value":{"role":..,"parts":[..]}}`。角色沿用旧渲染器从 `meta.source` 推断的结果：缺失或 `"assistant"` 为 `assistant`，`"system"` 为 `system`，其余为 `user`；唯一例外是 TARS 的材料修复说明（来源 `application:tars:material-repair`）读为 `system`，与现在写入时一致。
+[Store](../crates/core/src/store/json.rs) is the concrete backend inside the core. The `tars-session-v2` record format saves ConversationId, revision, last_commit_id, definition and context; it accepts only canonical UUID filenames and never concatenates arbitrary input into a path. The definition's workspace_root, tools and tool_limits must be present in full; write limits, initial/current permission mode and the MCP snapshot may be omitted and are read with defaults when absent. Old v1 is rejected explicitly; offline material export is described in [Workspace tools](workspace-tools.md). Work tables, request keys, execution results, uncommitted batches, tasks and connections are not serialized. After Causa changed the serialized form of tool result status and artifact category to snake_case, all three paths that read stored Context (session records, material files and `export-materials`) go through [`material::vocabulary`](../crates/core/src/material/vocabulary.rs): it rewrites the old spellings of those two fields to the current spellings before decoding and leaves current data untouched, so the record format is not bumped; the next write uses the current spellings. After Causa 0.0.5 made the message role a fact of the block itself, the same place also rewrites the old `{"shape":"parts","value":[..]}` to `{"shape":"message","value":{"role":..,"parts":[..]}}`. The role follows what the old renderer inferred from `meta.source`: missing or `"assistant"` becomes `assistant`, `"system"` becomes `system` and everything else becomes `user`; the only exception is TARS's material-repair note (source `application:tars:material-repair`), which reads as `system`, matching how it is written now.
 
-writer 持有稳定锁文件；每个在途 blocking 操作也持有它。提交先读最新版本：同 commit_id 必须完整内容相同；否则要求基线一致。写临时文件、同步后替换最终 JSON。回应丢失后读取确认原 commit；完整旧基线和持续同一写访问才可证明尚未提交。记录已推进或不可读时保留冲突/无法确认，不生成新身份或强行覆盖。
+The writer holds the stable lock file; every in-flight blocking operation also holds it. A commit first reads the latest revision: the same commit_id requires identical complete content, otherwise the baseline must match. It writes a temporary file, syncs it and then replaces the final JSON. When the response is lost, it reads to confirm the original commit; only a complete old baseline with continuous identical write access can prove that nothing was committed. When the record has advanced or is unreadable it keeps the conflict/unconfirmed state and never generates a new identity or force-overwrites.
 
-list 校验最终记录，独立报告坏 JSON、格式、身份、重复 BlockId、引用和锁错误，不回退默认定义或空会话。临时文件不出现在列表，清理要求对应写访问。锁文件不在关闭时删除；外部删除/替换锁文件不属于受支持的协调方式。
+list validates the final records and reports bad JSON, format, identity, duplicate BlockIds, references and lock errors separately, without falling back to a default definition or an empty session. Temporary files never appear in listings, and cleanup requires the corresponding write access. Lock files are not deleted on close; externally deleting/replacing a lock file is not a supported coordination method.
 
-## 5. 关闭、故障和批次
+## 5. Closing, faults and batches
 
-host 的 close 检查完整 SessionTarget，标记 Closing，关闭新受理并请求取消，等待真实 worker 和 I/O。Save 确认最新材料后释放；保存失败保留 owner/写访问，重试可继续关闭。DiscardLocal 也等在途写入停止，只确认原 pending commit 而不再写入。返回的 CloseOutcome 区分 Applied、NotApplied、NotSubmitted 和 Unresolved；无法确认会保留原结构化错误，不能把关闭当成记录不存在。它不回滚已提交记录。opening 也可用 lookup 的 target 关闭，原等待者不会获得可提交句柄；进行中不同策略请求拒绝，受阻且无在途操作时可明确改选 DiscardLocal。
+The host's close checks the complete SessionTarget, marks Closing, closes new acceptance and requests cancellation, then waits for the real worker and I/O. Save releases after confirming the latest materials; on save failure the owner/write access is kept and a retry can continue closing. DiscardLocal also waits for in-flight writes to stop and only confirms the original pending commit without writing again. The returned CloseOutcome distinguishes Applied, NotApplied, NotSubmitted and Unresolved; an unconfirmed outcome keeps the original structured error, and close must never be treated as the record not existing. It does not roll back committed records. An opening can also be closed through its lookup target, in which case the original waiter never receives a committable handle; conflicting policy requests in progress are refused, and a blocked close with no in-flight operation may explicitly switch to DiscardLocal.
 
-旧 ManagedSession 只能观察其保留事实，不会跟随 ConversationId 重定向。视图 Drop 不关闭 owner；最后一个外部 host Drop 请求监督清理，不能代替明确 await。运行时或进程退出不保证正常收尾。
+An old ManagedSession can only observe the facts it retained and never follows a redirected ConversationId. Dropping a view does not close the owner; dropping the last external host requests supervised cleanup and cannot replace an explicit await. Runtime or process exit does not guarantee a clean settling.
 
-owner/worker 异常会隔离新工作，等待可确认的任务停止，保留故障和锁直到明确处理。ContextUnavailable 如实报告，不把旧磁盘版本伪装成本次返回材料。操作系统句柄存活期间的本机文件锁没有租约到期；不支持外部撤销锁或跨主机共享执行。
+An owner/worker fault isolates new work, waits for confirmable task stops and keeps the fault and lock until it is explicitly handled. ContextUnavailable is reported truthfully, and an old disk version is never disguised as the materials returned by this run. The local file lock has no lease expiry while OS handles stay alive; external lock revocation and cross-host shared execution are not supported.
 
-`SessionHost::take_uncommitted_tool_batch(target, work)` 在同一协调边界从原 owner 一次取走原 U，无 await、复制或工具执行。观察结果的 Arc 不变。关联保存未处理时 forget 拒绝；forget 后释放请求键、终态和未领取批次，已有 Arc 仍有效。入口若需要 U 必须在最终关闭前领取；Store 不补存 U。
+`SessionHost::take_uncommitted_tool_batch(target, work)` takes the original U once from the original owner inside the same coordination boundary, with no await, copy or tool execution. Arcs of observed results stay unchanged. forget is refused while an associated save is unhandled; after forget the request keys, terminal states and unclaimed batches are released while existing Arcs remain valid. An entry point that needs U must claim it before the final close; the Store never saves U additionally.
 
-## 6. CLI 消费者
+## 6. CLI consumers
 
-`session create` 只创建并确认初始记录。`session run ID` 重开保存定义，提交新工作，等待独立保存结果后关闭；不能临时覆盖 provider/model。`session list` 无需解析凭据。它们均要求显式 `--store`。
+`session create` only creates and confirms the initial record. `session run ID` reopens the saved definition, submits new work, waits for the independent save result and then closes; provider/model cannot be overridden transiently. `session list` needs no credential resolution. All of them require an explicit `--store`.
 
-CLI 在保存失败时保留原执行 status/text，另输出 save_error；按用户选择导出随机不覆盖的恢复 Context，再以 1 退出。recovery_error、close_error 和 close_outcome 单列；恢复文件包含实际返回材料，不包含原工作表或未提交内容。Ctrl-C 取消工作后仍等待交还和保存；保存等待期间第二次 Ctrl-C 会停止等待、导出实际 Context 并以错误退出。
+On save failure the CLI keeps the original execution status/text and additionally outputs save_error; according to the user's choice it exports a random, non-overwriting recovery Context and then exits 1. recovery_error, close_error and close_outcome are reported separately; a recovery file contains the actually returned materials, not the original work table or uncommitted content. After Ctrl-C cancels the work it still waits for the return and save; a second Ctrl-C during the save wait stops waiting, exports the actual Context and exits with an error.
 
-`tars run` 创建 transient host，仍支持原 `--load/--save`：导入获得新 ConversationId，只有显式 `--save` 导出 Context，报告与退出码保持。低层 offline demo 是独立 fixture，用来观察单会话契约。
+`tars run` creates a transient host and still supports the original `--load/--save`: an import gets a new ConversationId, only an explicit `--save` exports Context, and the report and exit codes are unchanged. The low-level offline demo is a separate fixture used to observe the single-session contract.
 
+## Transient streaming observation
 
-## 临时流式观察
+`SessionHandle::subscribe_progress` and `ManagedSession::subscribe_progress` return this instance's broadcast receiver. Callers that need to observe new work subscribe before submit; each WorkProgress carries the WorkRef, InvocationId and ModelStarted, body Text or ModelOutputReady. Current limits, Lagged and truncation semantics are in [Current implementation](README.md#streaming-observation). The original `TurnRunOptions::observer` is composed with the call and never silently replaced.
 
-`SessionHandle::subscribe_progress` 与 `ManagedSession::subscribe_progress` 返回本实例的 broadcast receiver。需要观察新工作的调用方先订阅再 submit；每项 WorkProgress 携带 WorkRef、InvocationId，以及 ModelStarted、正文 Text 或 ModelOutputReady。当前限额、Lagged 和截断语义见[当前实现](README.md#流式观察)。原 `TurnRunOptions::observer` 被组合调用，不被静默替换。
-
-这些事件是可丢失的临时观察，无工作历史或重开恢复含义，也不是材料编辑指令。可靠 WorkResult 仍由原工作表保留；同步 observer 不等待 UI 消费。仅 Causa 返回的 Context 进入原保存流程，取消/EOF/error 前的文字碎片不被补成完整模型输出。模型输出已齐、工作已终结、材料已保存继续是不同事实。
+These events are losable transient observations with no work-history or reopen-recovery meaning, and they are not material-editing instructions. Reliable WorkResult is still kept by the original work table; the synchronous observer does not wait for UI consumption. Only the Context returned by Causa enters the original save flow; text fragments before cancellation/EOF/error are never padded into complete model output. Model output being complete, work being terminal, and materials being saved remain distinct facts.

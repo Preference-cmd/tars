@@ -1,81 +1,81 @@
-# 当前实现
+# Current implementation
 
-TARS 的目的是验证并改进 Causa，应用是验证的载体，见 [README 的“目的”](../README.md#目的)。本页只记录当前实现。
+TARS exists to validate and improve Causa; the application is the vehicle for validation, as described in [Purpose](../README.md#purpose). This page records only the current implementation.
 
-2026-10-26：共享 SessionHost、固定会话定义、JSON Store、托管保存与 CLI 已接通。`tars session create/run/list` 可保存并跨进程重开同一会话；`tars run` 使用同一 host 的临时模式。CLI 与 TUI 原型共用 TOML 配置，`tars-tui` 已接通会话、输入、临时流式正文预览、结果、取消及保存恢复；工作区工具（三个只读工具与 `write_file`/`edit_file`）与可靠状态已接通；写入前先读后改，`ask` 模式在终端/确认面板确认，非终端时拒绝；`accept-edits` 和 `full-access` 不询问；四种权限模式可在运行中切换并随记录保存，`tars-tui` 已接通写入确认面板、`/mode` 命令和 `Shift-Tab` 模式切换。MCP 通过独立的 `mcp.json` 配置（支持 `${VAR}` 展开与字面密钥检查）、预设/CLI/TUI 选择、定义快照和内置 MCP 客户端的工具调用已接通，MCP 调用按 `mcp.json` 的 `approval` 设置和当前权限模式执行、确认（终端或 TUI 确认面板）或拒绝；GUI、父子 Agent、安装和发布也仍在后续范围。
+2026-10-26: The shared SessionHost, frozen session definitions, the JSON Store, managed saving and the CLI are wired. `tars session create/run/list` can save a session and reopen the same session across processes; `tars run` uses the same host in transient mode. CLI and TUI prototype share the TOML configuration, and `tars-tui` has sessions, input, temporary streaming text preview, results, cancellation and save recovery wired; workspace tools (three read-only tools plus `write_file`/`edit_file`) and reliable status are wired; a write to an existing file must be preceded by a read, `ask` confirms in the terminal/confirmation panel and refuses in non-terminal contexts, while `accept-edits` and `full-access` do not ask; the four permission modes can be switched while running and are saved with the record, and `tars-tui` has the write confirmation panel, `/mode` command and `Shift-Tab` mode switching wired. MCP is wired through the standalone `mcp.json` configuration (with `${VAR}` expansion and literal-secret checks), preset/CLI/TUI selection, definition snapshots and tool calls through the built-in MCP client; MCP calls run, ask (in the terminal or the TUI confirmation panel) or are rejected according to the `approval` setting in `mcp.json` and the current permission mode. GUI, parent/child agents, installation and release remain in later scope.
 
-2026-10-27：沙箱模块已提供平台无关策略、后端能力报告、进程树与 macOS Seatbelt 后端；探针验证文件、网络、信号与凭据边界。该层已接入 `run_command`（macOS；权限类别、定义/配置和修复清单已接通，Linux/Windows 失败关闭），完整文档和真实使用仍待第 3 步。
+2026-10-27: The sandbox module provides platform-independent policy, backend capability reports, process trees and the macOS Seatbelt backend; probes verify file, network, signal and credential boundaries. The layer is wired into `run_command` (macOS; permission category, definition/configuration and repair list are wired, Linux/Windows fail closed); complete documentation and real use are still step 3.
 
-2026-10-28：命令工具的状态显示已接通：TUI `/status` 显示沙箱后端与各能力维度，打开提示显示不可用，CLI `session create` 打印完整状态、运行命令时打印简短状态；TUI 确认面板和新建表单的只读 command 摘要已覆盖。工具级文件、网络、信号、超时/取消/Drop 与修复采纳/不重跑测试通过。SC12 的真实模型 `cargo test` 因沙箱拒绝 `~/.cargo/config.toml` 与 Xcode SDK 挂起，未放宽策略；cargo 的本地 workaround 和沙箱残余见[工作区工具](workspace-tools.md#命令工具)。
+2026-10-28: Command tool status display is wired: the TUI `/status` shows the sandbox backend and each capability dimension, opening shows the notice when unavailable, and CLI `session create` prints the full status while running a command prints a short status; the TUI confirmation panel and the read-only command summary in the new-session form are covered. Tool-level file, network, signal, timeout/cancel/Drop tests and repair accept/never-rerun tests pass. The SC12 real-model `cargo test` hangs because the sandbox denies `~/.cargo/config.toml` and the Xcode SDK; the policy was not relaxed. The local cargo workaround and sandbox residuals are in [Workspace tools](workspace-tools.md#command-tool).
 
-2026-10-29：命令沙箱改为整机只读，凭据位置与当前存储目录仍拒绝读写，`/dev` 只放行四个设备；`.git` 从整棵只读收紧为 hooks/config/modules/worktrees 只读且入口不可创建、删除或改名，objects/refs/index 恢复可写；`network = "open"` 收紧为 IP 出站加系统 DNS socket。探针分别验证 Roots 与 Host 两种读范围。同日第 5 步：`accept-edits` 下沙箱内命令直接执行；单条命令可带理由请求沙箱外运行（`read-only` 拒绝，`ask`/`accept-edits` 询问，`full-access` 直接执行），执行层按调用许可核对后经后端 `unconfined` 启动；`.git` 只锁 hooks、config、modules、worktrees 与入口。SC02、SC17、SC18 已勾选。[工作区工具](workspace-tools.md#命令工具)已同步。
+2026-10-29: The command sandbox changed to whole-machine read-only, credential locations and the current store directory still deny reads and writes, and `/dev` allows only four devices; `.git` was tightened from the whole tree read-only to hooks/config/modules/worktrees read-only with the entry itself not creatable, deletable or renamable, while objects/refs/index are writable again; `network = "open"` was tightened to IP egress plus the system DNS socket. Probes verify the Roots and Host read scopes separately. Same day, step 5: under `accept-edits`, sandboxed commands execute directly; a single command can request running outside the sandbox with a reason (`read-only` rejects, `ask`/`accept-edits` ask, `full-access` executes directly), and the execution layer checks the call permission before starting it through the backend as `unconfined`; `.git` locks only hooks, config, modules, worktrees and the entry. SC02, SC17 and SC18 are checked. [Workspace tools](workspace-tools.md#command-tool) is synchronized.
 
-2026-10-31：沙箱层从 core 拆为独立库包 `crates/sandbox`，依赖只有 `tokio`、`thiserror`、`tempfile` 和 unix 上的 `rustix`，不依赖 Causa 或 `tars-core`；`tars-core` 依赖它并在 `lib.rs` 以 `pub use tars_sandbox as sandbox` 保留 `tars_core::sandbox` 公开路径，CLI/TUI 不直接依赖。`exit_status_code` 改为公开函数；后端注入、`RecordingBackend` 与指定主目录打开 Seatbelt 的函数移到 `test-support` feature（只由 `tars-core` 的 `[dev-dependencies]` 开启，普通/发布构建不包含）。沙箱单元测试随包移动，工作区测试总数不变。
+2026-10-31: The sandbox layer moved out of core into the standalone library package `crates/sandbox`, whose dependencies are only `tokio`, `thiserror`, `tempfile` and `rustix` on unix; it depends on neither Causa nor `tars-core`. `tars-core` depends on it and keeps the public `tars_core::sandbox` path in `lib.rs` through `pub use tars_sandbox as sandbox`; CLI/TUI do not depend on it directly. `exit_status_code` became a public function; backend injection, `RecordingBackend` and the function that opens Seatbelt with a given home directory moved into the `test-support` feature (enabled only by `tars-core`'s `[dev-dependencies]`; normal and release builds do not contain them). Sandbox unit tests moved with the package and the workspace test total is unchanged.
 
-## 代码结构
+## Code structure
 
-| 路径 | 当前职责 |
+| Path | Current responsibility |
 | --- | --- |
-| `crates/core/src/application/` | 活动目录、opening/关闭监督、实例视图、保存门禁与版本编辑 |
-| `crates/core/src/definition/` | 可序列化的固定定义与纯校验 |
-| `crates/core/src/config/` | 共享 TOML 加载、路径、命名模型预设与新定义默认值 |
-| `crates/core/src/workspace/`、`tools/` | 固定根目录句柄、工作区工具（三个只读、两个写入和一个命令工具）、有界扫描与受监督文件任务 |
-| `crates/sandbox/src/` | 平台无关沙箱策略、后端能力报告、进程树与 macOS Seatbelt 后端；独立库包，不依赖 Causa 和 `tars-core`，由 `tars-core` 的 `run_command` 使用 |
-| `crates/core/src/mcp/` | 会话的 MCP 服务器：启动与关闭、子进程环境、工具过滤、结果上限与状态 |
-| `crates/core/src/assembly/` | 打开时解析凭据、装配 gateway/runner 与固定执行选项 |
-| `crates/core/src/session/` | 单会话 owner/handle、原工作受理、监督、去重、可靠结果与有界临时观察 |
-| `crates/core/src/store/` | 私有 JSON 后端、活动期文件锁、提交与确认 |
-| `crates/core/src/material/` | 显式 Context 文件导入/导出、引用校验 |
-| `crates/cli/src/cli/` | 命令参数、信号、展示、恢复文件与退出码 |
-| `crates/cli/src/demo/` | 脚本模型和本地工具的底层 Session 演示 |
-| `crates/tui/src/` | 单列对话、命令/会话选择、输入适配、流式预览与实际材料呈现 |
-| `crates/core/tests/`、`crates/cli/tests/` | 核心契约消费者、真实 CLI 与本地 HTTP 测试 |
+| `crates/core/src/application/` | Active session registry, opening/close supervision, instance view, save gate and versioned editing |
+| `crates/core/src/definition/` | Serializable frozen definition and pure validation |
+| `crates/core/src/config/` | Shared TOML loading, paths, named model presets and defaults for new definitions |
+| `crates/core/src/workspace/`, `tools/` | Pinned root-directory handles, workspace tools (three read-only, two write and one command tool), bounded scanning and supervised file jobs |
+| `crates/sandbox/src/` | Platform-independent sandbox policy, backend capability reports, process trees and the macOS Seatbelt backend; a standalone library package that depends on neither Causa nor `tars-core` and is used by `tars-core`'s `run_command` |
+| `crates/core/src/mcp/` | A session's MCP servers: startup and shutdown, child-process environment, tool filtering, result limits and status |
+| `crates/core/src/assembly/` | Resolve credentials on open, assemble gateway/runner and frozen execution options |
+| `crates/core/src/session/` | Single-session owner/handle, original work acceptance, supervision, deduplication, reliable results and bounded transient observation |
+| `crates/core/src/store/` | Private JSON backend, file lock while active, commit and confirmation |
+| `crates/core/src/material/` | Explicit Context file import/export and reference validation |
+| `crates/cli/src/cli/` | Command arguments, signals, presentation, recovery files and exit codes |
+| `crates/cli/src/demo/` | A low-level Session demo with a scripted model and local tools |
+| `crates/tui/src/` | Single-column conversation, command/session selection, input adaptation, streaming preview and actual material presentation |
+| `crates/core/tests/`, `crates/cli/tests/` | Core contract consumers, real CLI and local HTTP tests |
 
-workspace 包含 `tars-core`、`tars-sandbox`、`tars-cli` 和 `tars-tui`，均为 `publish=false`，binary 为 `tars` 和 `tars-tui`；crate 目录名省略 `tars-` 前缀（`crates/core`、`crates/sandbox`、`crates/cli`、`crates/tui`），包名不变。CLI/TUI 只向下依赖核心和 Causa（另直接使用 `BlockId` 等事实词汇），核心没有入口/UI/信号依赖；`tars-core` 单向依赖库包 `tars-sandbox` 并以 `pub use tars_sandbox as sandbox` 保留 `tars_core::sandbox` 路径；内部 lib 不承诺第三方 SDK。以公开 facade 消费 crates.io 上发布的 `causa 0.1`，具体版本由 Cargo.lock 固定，构建不需要同级 Causa checkout。没有源码 include 或复制。独立 CI/分发是后续交付步骤。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
+The workspace contains `tars-core`, `tars-sandbox`, `tars-cli` and `tars-tui`, all with `publish=false`; the binaries are `tars` and `tars-tui`. Crate directory names omit the `tars-` prefix (`crates/core`, `crates/sandbox`, `crates/cli`, `crates/tui`) while package names stay unchanged. CLI/TUI depend only downward on the core and Causa (plus simple facts such as `BlockId`), and the core has no entry-point/UI/signal dependencies; `tars-core` depends one-way on the library package `tars-sandbox` and keeps the `tars_core::sandbox` path through `pub use tars_sandbox as sandbox`. The internal library makes no third-party SDK promise. It consumes the crates.io release `causa 0.1` through the public facade, with the exact version fixed by Cargo.lock, so builds need no sibling Causa checkout. No sources are included or copied. Independent CI/distribution is a later delivery step. Shared configuration and terminal boundaries are in [Configuration](configuration.md) and [TUI](tui.md).
 
-完整行为见 [Session 运行机制](session-lifecycle.md)，使用方法见 [README](../README.md)，逐项验收与本机证据见 [专项提案](../.agents/pipelines/archives/architecture/2026-10-03-session-structure-and-storage.md)和[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
+Full behavior is in [Session lifecycle](session-lifecycle.md); usage is in the [README](../README.md). Per-item acceptance and local evidence live in the local design tree (`.agents/…`), which is not part of this repository.
 
-## 共享应用入口
+## Shared application entry points
 
-`SessionHost` 独占活动目录与底层 Session owner。`PreparedCreate` 在异步前固定身份，`create/open` 登记后由独立任务监督；丢弃等待或 `ManagedSession` 视图不终止操作。`SessionTarget` 区分同一 ConversationId 的不同打开实例；旧 target 不会作用于重开的实例。
+`SessionHost` exclusively owns the active registry and the underlying Session owners. `PreparedCreate` freezes identity before the async step, and `create/open` are registered and supervised by an independent task; dropping a wait or the `ManagedSession` view does not terminate the operation. `SessionTarget` distinguishes different open instances of the same ConversationId; an old target never acts on a reopened instance.
 
-`ManagedSession` 提供 submit/observe/wait/cancel、subscribe_progress、状态、版本材料、原子 edit、wait_saved/retry_save 和 forget。视图不暴露底层 owner/handle。host 提供明确的 Save/DiscardLocal 关闭和原未提交 ToolBatch 的一次领取。调用方自行决定谁可使用 host；它不是用户身份认证系统。
+`ManagedSession` provides submit/observe/wait/cancel, subscribe_progress, status, versioned materials, atomic edit, wait_saved/retry_save and forget. The view does not expose the underlying owner/handle. The host provides explicit Save/DiscardLocal close and a single claim of the original uncommitted ToolBatch. Callers decide who may use the host; it is not a user authentication system.
 
-中断后继续通过 `inspect_repair/plan_repair/apply_repair` 显式处理材料。正式内置工具装配可采纳受控中断的原结果，重开无原批次时可移除未配对声明；新输入先经过配对准入，保存确认后才开始新工作。CLI `session repair` 与 TUI F7 共用此行为，完整条件、版本与保留边界见[中断后继续](session-continuation.md)。
+Continuation after interruption handles materials explicitly through `inspect_repair/plan_repair/apply_repair`. The built-in tool assembly can accept the original result of a controlled interruption, and reopening without the original batch can remove unpaired declarations; new input first passes pairing admission, and new work starts only after the save is confirmed. CLI `session repair` and the TUI F7 key share this behavior; the full conditions, versions and retention boundaries are in [Continuation after interruption](session-continuation.md).
 
-固定定义包含 provider、model、endpoint、凭据环境变量引用、工作期限、保留容量、模型/工具次数限制，以及工作区、工具选择、完整工具与写入限额、初始权限模式和 MCP 快照。打开时校验、解析一次并固定资源，创建和重开不调用模型。重开保留定义与 BlockId，但工作表、请求键、WorkRef、终态和未提交批次不恢复，不自动重跑旧工作。默认工具目录为空，可显式启用 list_directory/read_file/search_text/write_file/edit_file/run_command。边界及记录迁移见[工作区工具](workspace-tools.md)，本轮证据见[实施记录](../.agents/reviews/2026-10-04-workspace-tools/README.md)。
+The frozen definition contains provider, model, endpoint, credential environment-variable reference, work deadline, retained capacity, model/tool call limits, plus workspace, tool selection, complete tool and write limits, initial permission mode and MCP snapshot. On open it is validated, resolved once and pinned to resources; creation and reopening do not call the model. Reopening keeps the definition and BlockIds, but work tables, request keys, WorkRefs, terminal states and uncommitted batches are not restored, and old work is never rerun automatically. The default tool catalog is empty; list_directory/read_file/search_text/write_file/edit_file/run_command can be enabled explicitly. Boundaries and record migration are in [Workspace tools](workspace-tools.md); local evidence lives in the local review tree (not in this repository).
 
-低层 `session` 仍供核心与 fixture 消费者使用；产品 CLI 通过托管入口。其原去重、取消、typed 结果、批次和材料交还契约保留。
+The low-level `session` API is still used by the core and fixture consumers; the product CLI goes through the managed entry points. Its original contracts for deduplication, cancellation, typed results, batches and material return are unchanged.
 
-## 流式观察
+## Streaming observation
 
-Session worker 使用 `TurnRunner::run_streaming`，原装配 observer 仍按同步借用契约执行。CLI 继续等待并呈现最终结果；TUI 在 submit 前订阅 `ManagedSession::subscribe_progress`。事件按 WorkRef 和 InvocationId 归属，携带 ModelStarted、正文 Text、ModelOutputReady 和有界工具状态；工具状态还以声明 BlockId 区分。当前不展示 reasoning 或未完成工具参数。
+The Session worker uses `TurnRunner::run_streaming`, while the original assembly observer still follows the synchronous borrow contract. The CLI keeps waiting and presents the final result; the TUI subscribes to `ManagedSession::subscribe_progress` before submit. Events are attributed by WorkRef and InvocationId and carry ModelStarted, body Text, ModelOutputReady and bounded tool status; tool status is also distinguished by declared BlockId. Currently neither reasoning nor unfinished tool arguments are shown.
 
-通道属于一个打开实例，容量 128 项，每项正文最多 16 KiB，UTF-8 边界截断带 `truncated` 标记；无订阅者不复制正文。慢消费者收到 Tokio broadcast 的 Lagged，迟到订阅不回放历史；订阅/丢弃观察器不会取消工作或改变最终结果。调用方保留的事件 Arc 不计入通道容量。可靠终态仍走 observe/wait，与可丢失的临时预览分开。
+The channel belongs to one open instance, has a capacity of 128 items, each body at most 16 KiB, truncated on UTF-8 boundaries with a `truncated` marker; bodies are not copied when there is no subscriber. Slow consumers receive Tokio broadcast Lagged and late subscribers get no history replay; subscribing or dropping an observer never cancels work or changes the final result. Event Arcs retained by the caller do not count against the channel capacity. Reliable terminal states still go through observe/wait and are separate from the losable transient preview.
 
-TUI 每 50 ms 最多处理 128 项，多个视图轮转；只保留当前工作、当前模型轮的最多 256 KiB 正文，落后/超限明确提示。结束、失败、取消和关闭清除预览，正式对话从实际返回的 Context 更新。ModelOutputReady 仅表示模型交付完整输出，不表示已提交材料或保存成功。预览不进入 Store、材料导出或恢复文件。
+The TUI processes at most 128 items every 50 ms, cycling through views; it keeps at most 256 KiB of body for the current work and current model round, and explicitly reports falling behind or exceeding the limit. End, failure, cancellation and close clear the preview, and the real conversation updates from the Context actually returned. ModelOutputReady only means the model delivered complete output; it does not mean materials were committed or saved successfully. The preview never enters the Store, material export or recovery files.
 
-## 保存与关闭
+## Saving and closing
 
-执行终态和保存状态是独立事实。持久实例在 T1 受理后封锁新键和编辑，直到实际返回材料保存确认；同参保留键仍重放，异参仍 Conflict。Finished 可以早于 Saved。失败保留原结果与待提交快照，`retry_save` 确认/重试同一 commit，不调用模型。版本编辑先验证候选，拒绝时材料不变，成功后自动保存。
+Execution terminal state and save state are independent facts. A persistent instance blocks new keys and edits after T1 is accepted until the save of the actual returned materials is confirmed; replay with the same key still works, and a conflicting key still returns Conflict. Finished can precede Saved. On failure the original result and pending snapshot are kept, and `retry_save` confirms/retries the same commit without calling the model. Versioned editing validates the candidate first; materials are unchanged when it is rejected, and a success saves automatically.
 
-`close(Save)` 等待取消、材料交还和保存；保存失败保持 owner/锁，可重试。`DiscardLocal` 等待在途 worker/I/O 停止并确认原待提交操作后放弃本地内容，不撤销已落盘记录。CloseOutcome 返回已提交、未提交、未尝试或仍无法确认的事实，后者保留原错误。最后一个 host 被丢弃会请求受监督的 DiscardLocal 清理；正常等待收尾仍要求 Tokio runtime 存活，强退不保证未保存材料可恢复。
+`close(Save)` waits for cancellation, material return and saving; if saving fails, the owner/lock are kept and saving can be retried. `DiscardLocal` waits for in-flight workers/I/O to stop, confirms the original pending commit operation and then abandons the local content without undoing records already on disk. CloseOutcome returns the facts: committed, uncommitted, not attempted or still unconfirmable, the last keeping the original error. Dropping the last host requests a supervised DiscardLocal cleanup; normal wait-for-settling still requires the Tokio runtime to stay alive, and a hard exit does not guarantee unsaved materials can be recovered.
 
-CLI 持久运行在成功、失败和受控中断后等待保存。保存等待期间第一次 Ctrl-C 在 stderr 提示，第二次停止等待并按保存失败路径导出实际 Context、以错误退出。保存失败按已选择的行为：导出实际 Context 到随机且不覆盖现有文件的 `tars-recovery-<uuid>.json`，然后错误退出；导出失败独立报告。临时运行只在显式 `--save` 时导出。
+The CLI persistent run waits for the save after success, failure and controlled interruption. During the save wait, the first Ctrl-C prints a notice on stderr, and the second stops waiting, exports the actual Context through the save-failure path and exits with an error. On save failure it follows the selected behavior: export the actual Context to a random `tars-recovery-<uuid>.json` that never overwrites an existing file, then exit with an error; export failure is reported separately. Transient runs export only with an explicit `--save`.
 
-## 后端与资源边界
+## Backend and resource boundaries
 
-本机存储目录由 `--store DIR` 或共享 TOML 的 `store` 明确指定，没有自动生成的存储默认路径。记录位于 `DIR/sessions/<uuid>.json`，格式 `tars-session-v2`；`workspace_root`、`tools`、`tool_limits` 必须存在，写入限额、初始/当前权限模式和 MCP 快照可省略，省略时按默认写入限额、`ask` 和没有服务器读取。v1 不自动升级；`session export-materials` 可离线导出经校验的实际 Context，再显式采用新定义创建会话。固定定义、Context、ConversationId、revision 和 last_commit_id 同次写入；初始 revision 为 1。凭据配置只保存环境变量名。用户材料本身按原样保存。
+The local store directory is explicitly given by `--store DIR` or the shared TOML `store`; there is no automatically generated default store path. Records live at `DIR/sessions/<uuid>.json` in the `tars-session-v2` format; `workspace_root`, `tools` and `tool_limits` are required, while write limits, initial/current permission mode and the MCP snapshot may be omitted, in which case the default write limits, `ask` and no servers are read. v1 is not upgraded automatically; `session export-materials` can export the validated actual Context offline, and a new definition can then be used explicitly to create a session. The frozen definition, Context, ConversationId, revision and last_commit_id are written in one step; the initial revision is 1. Credential configuration stores only environment-variable names. User materials are saved as they are.
 
-稳定的 `<uuid>.lock` 文件与可替换记录分离，OS 排他锁从读取前持有至本地 worker/I/O 停止。占用、不支持或 I/O 错误均拒绝，不降级为无锁。提交校验基线与完整内容，经同目录临时文件、内容刷新和原子替换；确认不明时保持原操作。list 忽略锁和临时文件，逐记录报告损坏与活动状态；列表不是全目录原子快照。
+A stable `<uuid>.lock` file is separate from the replaceable record, and the OS exclusive lock is held from before reading until local worker/I/O stops. Busy, unsupported or I/O errors are all refused and never degrade to no lock. A commit validates the baseline and the full content, then uses a same-directory temporary file, content flush and atomic replacement; when confirmation is unclear the original operation is kept. list ignores locks and temporary files and reports corruption and active status per record; a listing is not an atomic snapshot of the whole directory.
 
-单份记录读取/序列化上限为 64 MiB；这是文件限制，不是内存预算。恢复导出不截断材料，超过该上限时仍完整写出，但在结果中明确报告当前版本无法直接导入。默认 host 最多 32 个 opening/活动/受阻/closing 槽、最多 4 个并发存储操作；每会话最多一个待确认提交。CLI 持久定义默认保留 256 项工作，临时定义为 1 项。容量用尽明确拒绝；无自动淘汰、卸载或工作历史归档。
+The read/serialize limit for one record is 64 MiB; this is a file limit, not a memory budget. Recovery export does not truncate materials: files above the limit are still written completely, but the result explicitly reports that the current version cannot import them directly. The default host has at most 32 opening/active/blocked/closing slots and at most 4 concurrent store operations; each session has at most one pending commit. The CLI persistent definition retains 256 works by default, and the transient definition retains 1. Exhausted capacity is refused explicitly; there is no automatic eviction, unloading or work-history archiving.
 
-保留成本包括当前 Context、创建时的原始材料、请求原输入、Arc 终态/未领取批次、待保存与基线副本、序列化缓冲，以及调用方持有的副本。关闭后仍持有的视图/观察也可能保留底层工作表和材料；活动槽上限不限制这些外部持有对象。list 需要完整校验每份记录；大量记录的扫描和内存仍随规模增长。观测样本中 4.2 KiB/1.13 MiB/9.06 MiB 材料场景峰值 RSS 约为 6.9/24.9/158.7 MiB；8 个同时活动的中型会话为 93.8 MiB。这是本机单次实验，不能外推吞吐保证，也未采集可靠 CPU cache 指标。原始规模、延迟、复制/序列化和字节计数见实施记录。
+Retention costs include the current Context, the original materials created at creation, the request's original input, terminal-state/unclaimed batch Arcs, pending and baseline copies, serialization buffers, and copies held by callers. Views/observers held after close may also retain the underlying work tables and materials; the active-slot limit does not bound these externally held objects. list must fully validate each record; scanning and memory still grow with the number of records. In sampled observations, peak RSS was about 6.9/24.9/158.7 MiB for 4.2 KiB/1.13 MiB/9.06 MiB material scenarios, and 93.8 MiB for 8 concurrently active medium sessions. This is a single local experiment and does not extrapolate to a throughput guarantee; reliable CPU cache metrics were not collected either. Raw sizes, latencies, copy/serialization and byte counts are in the local review records.
 
-默认拒绝外部媒体/artifact 引用。显式 material 扩展接口可交给调用方验证引用，但 Store 不自动复制资产。当前验证范围是本机进程中断后的完整旧/新记录；不承诺掉电后的目录项持久性、网络文件系统/同步盘跨主机执行或远程副作用 exactly-once。
+External media/artifact references are rejected by default. The explicit material extension interface can delegate reference validation to the caller, but the Store never copies assets automatically. The current verification scope is complete old/new records after a local process interruption; it does not promise directory-entry durability after power loss, network filesystem/sync-drive cross-host execution, or exactly-once remote side effects.
 
-## 本地检查
+## Local checks
 
 ```sh
 cargo fmt --all --check
@@ -88,10 +88,11 @@ cargo build --workspace --locked --release
 ./target/release/tars session --help
 ./target/release/tars-tui --help
 ./target/release/tars demo
+# Local checkout only (the scripts/ tree is not part of this repository):
 node scripts/verify-proposals.mjs --links
-cargo deny check   # 安全公告、许可证、来源；规则在 deny.toml
+cargo deny check   # security advisories, licenses, sources; policy in deny.toml
 ```
 
-测试使用本地 HTTP、脚本模型/工具、真实文件、进程和确定性屏障，无线上模型凭据。测试按平台拆分：通用用例在 Linux、macOS 与 Windows 都运行；工作区工具与 SIGINT 用例只在 Linux/macOS 编译，Seatbelt 命令用例只在 macOS 编译。工具访问实现仅开放 Linux/macOS，本轮实测为 macOS；Windows 无工具功能，各平台远端 CI 尚需各自平台证据。
+Tests use local HTTP, scripted models/tools, real files, processes and deterministic barriers, with no live model credentials. Tests are split by platform: common cases run on Linux, macOS and Windows; workspace-tool and SIGINT cases compile only on Linux/macOS, and Seatbelt command cases compile only on macOS. Tool access is implemented only on Linux/macOS, with this round verified on macOS; Windows has no tool capability, and remote CI on each platform still needs its own platform evidence.
 
-开发流程在 [.agents/pipelines/WORKFLOW.md](../.agents/pipelines/WORKFLOW.md)；`.agents/`、`scripts/` 和 `AGENTS.local.md` 留在本机，不强行加入版本库或应用分发。
+The local development workflow is in `.agents/pipelines/WORKFLOW.md`; `.agents/`, `scripts/` and `AGENTS.local.md` stay on the local machine and are not added to the repository or the application distribution.

@@ -1,139 +1,139 @@
-# 工作区工具
+# Workspace tools
 
-TARS 可以为新会话显式启用六个内置工具：只读的 `list_directory`、`read_file`、`search_text`，写入的 `write_file`、`edit_file`，以及在 macOS Seatbelt 沙箱内执行命令的 `run_command`。CLI/TUI 共用 core 的配置、实际工具和资源监督；模型往返仍由 Causa runner 执行。默认工具清单为空，仅设置工作区不会启用工具。
+TARS can explicitly enable six built-in tools for a new session: the read-only `list_directory`, `read_file` and `search_text`, the write tools `write_file` and `edit_file`, and `run_command`, which executes commands inside the macOS Seatbelt sandbox. CLI and TUI share the core's configuration, actual tools and resource supervision; model round trips are still executed by the Causa runner. The default tool catalog is empty, and merely setting a workspace enables no tools.
 
 ```sh
 tars run --provider openai-chat --model "$MODEL_ID" \
   --workspace . --tools list_directory,read_file,search_text \
-  --input '找出保存失败后的恢复路径，给出文件和行号'
+  --input 'Find the recovery path after a save failure and give the file and line numbers'
 tars session create --store ./data --provider openai-chat --model "$MODEL_ID" \
   --workspace . --tools list_directory,read_file,search_text,write_file,edit_file,run_command \
   --command-network none --permission-mode ask --json
 ```
 
-共享 TOML 预设中的 `workspace_root`、`tools`、`permission_mode` 和 `mcp` 会填入 `tars-tui` 新建表单；TUI 不提供这些启动参数。表单提供 Workspace、Tools、权限模式和 MCP 字段；`--tools ''` 或清空表单 Tools 字段禁用预设工具。当前 Tools 包含 `run_command` 时，表单还显示一行只读的 `command` 摘要（网络、默认期限和上限），不能编辑。保存的会话固定工作区、选择及完整限额；重开采用原定义，不随配置或 cwd 改变。缺失或不再满足访问规则的根目录会使打开失败，不会退回当前目录，也不发模型请求。
+The shared TOML preset's `workspace_root`, `tools`, `permission_mode` and `mcp` fill the `tars-tui` new-session form; the TUI does not offer these startup arguments. The form provides Workspace, Tools, permission mode and MCP fields; `--tools ''` or clearing the form's Tools field disables the preset tools. When the current Tools include `run_command`, the form also shows a read-only `command` summary line (network, default deadline and maximum), which cannot be edited. A saved session freezes the workspace, selection and complete limits; reopening uses the original definition and does not change with configuration or cwd. A missing root directory, or one that no longer satisfies the access rules, makes opening fail without falling back to the current directory and without sending a model request.
 
-`run_command` 默认在沙箱内启动 `/bin/bash -c`，默认无网络、工作区可写、`.git` 钩子与配置只读、凭据位置不可读写；沙箱内命令的确认面板显示完整命令、工作目录、期限和网络策略，沙箱外请求改为显示警告和理由。权限按四种模式处理：`read-only` 拒绝；`ask` 询问；`accept-edits` 直接执行沙箱内命令、仍询问沙箱外请求；`full-access` 两者都直接执行。单条命令可带理由请求在沙箱外运行，未请求时命令始终在沙箱内。Linux/Windows 暂不支持该工具。完整契约、沙箱范围、状态显示和残余见[命令工具](#命令工具)。
+`run_command` launches `/bin/bash -c` inside the sandbox by default, with no network, a writable workspace, read-only `.git` hooks and configuration, and unreadable/unwritable credential locations. The confirmation panel for sandboxed commands shows the full command, working directory, deadline and network policy, while a sandbox-outside request instead shows a warning and the justification. Permissions are handled according to the four modes: `read-only` rejects; `ask` asks; `accept-edits` executes sandboxed commands directly and still asks for sandbox-outside requests; `full-access` executes both directly. A single command can request running outside the sandbox with a justification, and without such a request the command always stays inside the sandbox. Linux/Windows do not support this tool yet. The complete contract, sandbox scope, status display and residuals are in [Command tool](#command-tool).
 
-## 文件访问
+## File access
 
-首次解析配置时把所选路径解析为物理绝对目录，TOML 相对路径以配置文件目录为基准，CLI 相对路径以解析时 cwd 为基准。打开实例从 `/` 逐段以目录句柄和 NOFOLLOW 打开保存路径，之后每段均相对已打开目录访问。Linux/macOS 提供该实现；本轮真实文件和终端证据来自 macOS，Linux 仍需独立平台验证。其他平台启用工具时明确拒绝，无工具会话仍可使用。
+When the configuration is first resolved, the selected path is resolved to a physical absolute directory; TOML relative paths are based on the configuration file's directory, and CLI relative paths are based on the cwd at resolution time. An opened instance opens store paths component by component from `/` using directory handles and NOFOLLOW, after which every component is accessed relative to an already opened directory. Linux/macOS provide this implementation; the real-file and terminal evidence from this round comes from macOS, and Linux still needs independent platform verification. Other platforms reject tool enablement explicitly, while sessions without tools remain usable.
 
-工具只接受非空相对路径，`.` 表示根目录；拒绝绝对路径、任何 `..`、反斜杠、NUL、超过 4096 bytes 的路径、符号链接、不同设备及特殊文件。文件以 NONBLOCK 打开后检查普通文件类型，避免被替换为 FIFO 后卡在打开阶段。目录列表可以呈现链接条目，但不跟随它。搜索跳过链接/特殊文件并报告不完整。
+Tools accept only non-empty relative paths, with `.` meaning the root directory; they reject absolute paths, any `..`, backslashes, NUL, paths over 4096 bytes, symbolic links, different devices and special files. Files are opened with NONBLOCK and then checked for a regular-file type, so being replaced by a FIFO cannot hang the open. A directory listing may show link entries but does not follow them. Search skips links/special files and reports incompleteness.
 
-实例绑定根目录句柄，路径被替换不会重定向当前实例；已打开子目录被移动后仍代表原资源。此机制不隔离同设备 bind mount 或硬链接，也不是进程 OS 沙箱。结果是某次读取的观察，不是跨文件一致快照。文件可在后续调用前变化，Store 保存已提交材料，不备份工作区。
+An instance is bound to the root directory handle, so replacing a path does not redirect the current instance; an opened subdirectory that is later moved still represents the original resource. This mechanism does not isolate same-device bind mounts or hard links, and it is not a process OS sandbox. A result is an observation from one read, not a cross-file consistent snapshot. Files can change before a later call; the Store saves committed materials and does not back up the workspace.
 
-写入与读取使用同一路径规则。`write_file` 可以在已有目录内新建文件，缺失的中间目录逐段以目录句柄创建；目标已存在时按“先读后改”检查。写入先在同一目录创建临时文件、同步，再用 `renameat` 覆盖；新建目标使用不覆盖语义，防止并发出现的文件被静默替换。已有文件的权限位尽量保留，读者只会看到旧内容或新内容。已有文件为 CRLF 时保持其换行风格。
+Writes and reads use the same path rules. `write_file` can create a new file inside an existing directory, creating missing intermediate directories component by component through directory handles; when the target already exists it follows the read-before-write check. A write first creates a temporary file in the same directory, syncs it, and then overwrites with `renameat`; a new target uses no-overwrite semantics so a concurrently appearing file is not silently replaced. Existing file permission bits are preserved where possible, and readers see either the old or the new content. When an existing file uses CRLF, its newline style is kept.
 
-## 输入与结果
+## Inputs and results
 
-| 工具 | 输入 | 输出 |
+| Tool | Input | Output |
 | --- | --- | --- |
-| `list_directory` | `path`，可选 `limit` | 单层 `entries`（名称/类型）、`truncated`、`limit_reason`；枚举顺序由文件系统决定 |
-| `read_file` | `path`，可选一基 `start_line`、`max_lines`（默认 200，最多 2000） | 请求起始行、实际 `end_line`（无返回行时为 null）、文本、扫描字节、截断原因 |
-| `search_text` | 目录 `path`、非空单行字面量 `query`（最多 1024 bytes，拒绝 CR/LF/NUL），可选 `max_matches` | 相对文件路径、一基行号、匹配附近片段、扫描文件/条目/字节数、跳过数量、最多 32 条问题及 `complete` |
-| `write_file` | `path`、`content` | `path`、`action`（`created` / `updated`）、`bytes_written`、`lines_added`、`lines_removed` |
-| `edit_file` | `path`、`edits`（每段 `old_text`、`new_text`） | 同上 |
+| `list_directory` | `path`, optional `limit` | One level of `entries` (name/type), `truncated`, `limit_reason`; enumeration order is filesystem-defined |
+| `read_file` | `path`, optional one-based `start_line` and `max_lines` (default 200, at most 2000) | Requested starting line, actual `end_line` (null when no lines are returned), text, scanned bytes, truncation reason |
+| `search_text` | Directory `path`, non-empty single-line literal `query` (at most 1024 bytes; CR/LF/NUL rejected), optional `max_matches` | Relative file paths, one-based line numbers, snippets near the match, scanned file/entry/byte counts, skipped count, at most 32 issues and `complete` |
+| `write_file` | `path`, `content` | `path`, `action` (`created` / `updated`), `bytes_written`, `lines_added`, `lines_removed` |
+| `edit_file` | `path`, `edits` (each with `old_text`, `new_text`) | Same as above |
 
-参数拒绝未知字段、错误类型、重复/禁用工具及越限值。schema 供模型参考，实际调用重新校验。非法参数与禁止访问为 Rejected；合法路径的不存在、普通 I/O、NUL 二进制或非法 UTF-8 为 Failed。到达扫描/输出上限可以是 Succeeded，但结果明确标记截断或不完整；不能据此断言未扫描区域没有匹配。搜索只处理 UTF-8 文本，不运行 shell 或正则程序。写入工具给模型的结果只有摘要，不回传 diff 或全文。
+Arguments reject unknown fields, wrong types, duplicate/disabled tools and out-of-limit values. The schema is a reference for the model, and actual calls are re-validated. Invalid arguments and forbidden access are Rejected; a missing path, ordinary I/O, NUL binary content or invalid UTF-8 on a valid path are Failed. Reaching a scan/output limit may be Succeeded while the result clearly marks truncation or incompleteness; it never proves that unscanned regions contain no match. Search only handles UTF-8 text and does not run a shell or regular-expression program. Write tools return only a summary to the model, never a diff or the full text.
 
-## 写入与先读后改
+## Writes and read-before-write
 
-`write_file` 接受 `path` 和 `content`，目标不存在时新建，已存在时整体覆盖。新建不需要先读；执行时目标已经出现但没读过，按“已存在但未读”拒绝。覆盖已有文件必须先 `read_file`，且当前版本与读取时一致。`content` 最多 `max_write_bytes`（默认 1 MiB），已有文件还要不超过 `max_edit_file_bytes`（默认 2 MiB）。已有文件为 CRLF 时，`content` 中单独的 LF 会写成 CRLF。
+`write_file` takes `path` and `content`; a missing target is created and an existing target is replaced wholesale. Creation needs no prior read; if the target appeared at execution time without having been read, the call is rejected as "exists but not read". Overwriting an existing file requires a prior `read_file` and the current version matching the read. `content` is at most `max_write_bytes` (default 1 MiB), and for an existing file it must also not exceed `max_edit_file_bytes` (default 2 MiB). When an existing file uses CRLF, a lone LF in `content` is written as CRLF.
 
-`edit_file` 接受 `path` 和 `edits: [{old_text, new_text}]`。每个 `old_text` 必须在原文件中恰好出现一次，各段不重叠；所有替换对照原文定位后一次生成新内容。只做精确匹配，不做模糊匹配，也不提供 `replace_all`。`old_text` 为空、与 `new_text` 相同、匹配不到、匹配多处或段落重叠都是 Rejected，不弹确认，文件不动；错误信息指出是 `edits[i]` 及原因，方便模型自己修正。单次最多 `max_edit_segments` 段（默认 32）。
+`edit_file` takes `path` and `edits: [{old_text, new_text}]`. Each `old_text` must occur exactly once in the original file, and segments must not overlap; all replacements are located against the original text and the new content is generated in one step. It performs only exact matching, never fuzzy matching, and offers no `replace_all`. An empty `old_text`, one equal to `new_text`, no match, multiple matches or overlapping segments are all Rejected without showing a confirmation and without touching the file; the error names `edits[i]` and the reason so the model can correct itself. A single call has at most `max_edit_segments` segments (default 32).
 
-打开中的实例维护一张观察表，记录 `read_file` 读过的文件及其版本（设备号、inode、大小、mtime、内容哈希）；部分读取也算读过。`edit_file` 以及覆盖已有文件的 `write_file`，目标必须在表里且当前版本与记录一致。没读过时返回 Rejected，提示先用 `read_file`；读后被外部改过时返回 Rejected，提示重新读取。本工具写入成功后用新版本更新观察表，所以连续编辑同一文件不需要重读。观察表不保存，重开会话后需要重新读取。
+An open instance keeps an observation table recording the files `read_file` has read and their versions (device id, inode, size, mtime, content hash); partial reads also count as read. `edit_file` and `write_file` over an existing file require the target to be in the table and the current version to match the record. A target that was never read returns Rejected with a hint to use `read_file`; a file changed externally after being read returns Rejected with a hint to read again. After a successful write the tool updates the observation table with the new version, so editing the same file repeatedly needs no re-read. The observation table is not saved; after reopening the session the file must be read again.
 
-确认面板显示完整 diff（3 行上下文）；`/tools` 面板展开的是工具参数和结果摘要，不含 diff。diff 只在打开中的实例里保留，不进入 Context，也不保存；重开后只能看到摘要。
+The confirmation panel shows the complete diff (3 lines of context); the `/tools` panel expands tool arguments and result summaries, without the diff. The diff is kept only in the open instance and never enters Context or is saved; after reopening only the summary is visible.
 
-## 确认与权限模式
+## Confirmation and permission modes
 
-这里的“权限模式”指 TARS 的 `permission_mode`，决定哪些调用需要确认。MCP 条目里的 `approval` 是另一个设置，只决定该服务器或工具默认是否询问；两者组合后才是最终行为，见[配置](configuration.md#mcp-服务器)。
+"Permission mode" here means TARS's `permission_mode`, which decides which calls need confirmation. The `approval` in an MCP entry is a separate setting that only decides whether that server or tool asks by default; the combination of the two determines the final behavior, see [Configuration](configuration.md#mcp-servers).
 
-| 模式 | 确知只读 | 内置写入 | 内置命令 | 沙箱外命令 | MCP 需询问 | MCP `approve` |
+| Mode | Known read-only | Built-in writes | Built-in command | Sandbox-outside command | MCP requiring prompt | MCP `approve` |
 | --- | --- | --- | --- | --- | --- | --- |
-| `read-only` | 执行 | 拒绝 | 拒绝 | 拒绝 | 拒绝 | 拒绝 |
-| `ask`（默认） | 执行 | 询问 | 询问 | 询问 | 询问 | 执行 |
-| `accept-edits` | 执行 | 执行 | 执行 | 询问 | 询问 | 执行 |
-| `full-access` | 执行 | 执行 | 执行 | 执行 | 执行 | 执行 |
+| `read-only` | executes | rejects | rejects | rejects | rejects | rejects |
+| `ask` (default) | executes | asks | asks | asks | asks | executes |
+| `accept-edits` | executes | executes | executes | asks | asks | executes |
+| `full-access` | executes | executes | executes | executes | executes | executes |
 
-“内置命令”指 `run_command`；“沙箱外命令”指同一次调用带 `outside_sandbox: true` 与理由。`accept-edits` 下沙箱内命令直接执行（不论 `network` 为 `none` 还是 `open`），沙箱外请求仍询问；`full-access` 下两者都直接执行。未请求沙箱外运行时，命令始终在沙箱内，`full-access` 也只跳过确认。
+"Built-in command" means `run_command`; "sandbox-outside command" means the same call with `outside_sandbox: true` and a justification. Under `accept-edits`, sandboxed commands execute directly (regardless of whether `network` is `none` or `open`), while sandbox-outside requests still ask; under `full-access`, both execute directly. Without a sandbox-outside request the command always stays inside the sandbox, and `full-access` only skips the confirmation.
 
-“确知只读”指三个内置只读工具，以及 `approval = "writes"` 下声明只读且没有声明破坏性的 MCP 工具。“MCP 需询问”指 `prompt` 档工具，以及 `writes` 档下没有声明只读或声明了破坏性的工具。`approve` 只回答“要不要问”，不说明工具没有副作用，所以 `read-only` 仍拒绝它。`writes` 采信服务器的只读声明；服务器把会写入的工具声明为只读时 TARS 无法识别，这是选择该档的代价。
+"Known read-only" means the three built-in read-only tools, plus MCP tools declared read-only without a destructive declaration under `approval = "writes"`. "MCP requiring prompt" means tools at the `prompt` level, plus tools at the `writes` level that are not declared read-only or are declared destructive. `approve` only answers "should this be asked?", not "the tool has no side effects", so `read-only` still rejects it. `writes` trusts the server's read-only declarations; TARS cannot detect a server that declares a writing tool as read-only, which is the cost of choosing that level.
 
-确认前的预检完成参数、路径、先读后改、edit 匹配和同批同路径去重，并生成统一 diff。预检失败的调用直接得到 Rejected，不打扰用户。同一批次里对同一路径有多个写入调用时，只处理第一个，其余 Rejected（“同一文件在一批里只能改一次”），也不询问；不同文件的写入照常并行。
+The precheck before confirmation covers arguments, paths, read-before-write, edit matching and same-batch/same-path deduplication, and generates a unified diff. Calls that fail the precheck receive Rejected directly without disturbing the user. When one batch contains multiple write calls for the same path, only the first is handled and the rest are Rejected ("a file can change only once per batch") without asking; writes to different files run in parallel as usual.
 
-- **允许本次**：执行时重新核对文件版本，与预检时一致才写入。不一致、目标已被删除或新建目标已被占用时结果为 Failed，文件不动。
-- **拒绝**：可以附一句理由。模型收到 Rejected（`user declined this write`）和理由；这是普通工具结果，本轮继续，文件不动。
-- 不提供“本会话内一直允许”。需要免确认时切换权限模式；弹窗本身只回答这一次。
+- **Allow this time**: file versions are re-checked at execution and the write happens only if they match the precheck. A mismatch, a deleted target or an occupied new target results in Failed and the file is untouched.
+- **Reject**: an optional one-sentence reason can be attached. The model receives Rejected (`user declined this write`) plus the reason; this is an ordinary tool result, the round continues and the file is untouched.
+- "Always allow for this session" is not offered. Switch the permission mode when confirmation-free operation is needed; the dialog itself answers only this one call.
 
-等待确认不计入单次工具的执行期限（默认 10 秒），但仍受工作剩余期限约束；期限到会取消本轮，调用记为未执行，文件不动。TUI `Esc` 或 CLI `Ctrl-C` 也会结束等待。
+Waiting for confirmation does not count against a single tool's execution deadline (default 10 seconds) but is still bounded by the remaining work deadline; when the deadline arrives the round is cancelled, the call is recorded as not executed and the file is untouched. TUI `Esc` or CLI `Ctrl-C` also ends the wait.
 
-- **CLI**：stdin 和 stderr 都是终端、且输入不是来自 `--stdin` 时，在 stderr 打印 diff 并读一行 `y`/`n`（也接受 `yes`/`no`）；拒绝时可再输入一句理由。stdout 的报告格式不变。不是终端时，`ask` 不阻塞，直接返回 Rejected（没有可用的确认途径），进程照常结束，文件不动。
-- **TUI**：确认面板显示工具名、路径和可滚动 diff；`Enter` / `y` 允许，`n` 拒绝并可输理由，`Esc` / `Ctrl-C` 取消本轮。防误触窗口和其他面板细节见 [TUI](tui.md)。
+- **CLI**: when stdin and stderr are both terminals and input does not come from `--stdin`, the diff is printed to stderr and one line of `y`/`n` is read (also `yes`/`no`); a rejection may be followed by a one-sentence reason. The stdout report format is unchanged. When not a terminal, `ask` does not block and returns Rejected immediately (no confirmation channel is available), the process ends normally and the file is untouched.
+- **TUI**: the confirmation panel shows the tool name, path and a scrollable diff; `Enter` / `y` allows, `n` rejects with an optional reason, and `Esc` / `Ctrl-C` cancels the round. The accidental-key guard window and other panel details are in [TUI](tui.md).
 
-建会话时用预设的 `permission_mode`、CLI `--permission-mode` 或 TUI 新建表单选择初始模式。运行中：
+The initial mode is chosen when creating a session through the preset `permission_mode`, CLI `--permission-mode` or the TUI new-session form. While running:
 
-- TUI 用 `/mode <name>` 切换；`Shift-Tab` 在 `read-only`、`ask`、`accept-edits` 之间循环。`full-access` 不在循环里，只能用 `/mode full-access` 进入。
-- CLI 的 `session run --permission-mode <name>` 改变并保存当前模式。
-- 切换只影响之后才做决定的调用，包括当前批次里还没轮到询问的调用；正在显示的确认仍要用户回答。
-- 当前模式随记录保存，重开时恢复；当前是 `full-access` 而初始模式不是时，重开得到 `ask`。
-- 模式切换不写入 Context，模型只从 Rejected 结果的正文得知当前模式不允许。
+- In the TUI, `/mode <name>` switches, and `Shift-Tab` cycles between `read-only`, `ask` and `accept-edits`. `full-access` is not in the cycle and can only be entered with `/mode full-access`.
+- CLI `session run --permission-mode <name>` changes and saves the current mode.
+- A switch affects only calls whose decision is made afterwards, including calls in the current batch that have not yet reached their turn to ask; a confirmation already displayed still waits for the user's answer.
+- The current mode is saved with the record and restored on reopen; when it is currently `full-access` and the initial mode was not, reopening yields `ask`.
+- Mode switches are not written into Context; the model learns that the current mode disallows something only from the body of a Rejected result.
 
-## 命令工具
+## Command tool
 
-`run_command` 在 macOS Seatbelt 沙箱内启动 `/bin/bash -c <command>`。`command` 非空、最多 16 KiB、拒绝 NUL；可选 `workdir` 按工作区相对路径逐段解析，越界拒绝；可选 `timeout_secs` 默认 120、最大 600，会话定义只能调低。可选 `outside_sandbox: true` 与 `justification`（最多 1 KiB UTF-8 字节、非空、拒绝 NUL）请求在沙箱外运行这一条命令；工具描述要求模型只在命令被沙箱拦下且确需工作区外写入、凭据或网络时使用，TARS 不核实是否真的被拦过。stdin 为 `/dev/null`，不分配 TTY，也不读 shell profile/rc。环境只保留 `PATH`、`HOME`、`LANG`，另设会话私有 `TMPDIR`、`TERM=dumb` 和 `NO_COLOR=1`；沙箱外运行同样清空环境，但文件、网络和信号不受限制，会话的 `network` 设置不再起作用。同一会话一次只执行一条命令，其他调用排队，排队时间计入各自期限。
+`run_command` launches `/bin/bash -c <command>` inside the macOS Seatbelt sandbox. `command` is non-empty, at most 16 KiB and rejects NUL; the optional `workdir` is resolved component by component as a workspace-relative path and rejects escapes; the optional `timeout_secs` defaults to 120 and is at most 600, and the session definition can only lower it. The optional `outside_sandbox: true` with `justification` (at most 1 KiB of UTF-8 bytes, non-empty, NUL rejected) requests running this one command outside the sandbox; the tool description asks the model to use it only when the command was blocked by the sandbox and outside writes, credentials or network are genuinely needed, and TARS does not verify that it was actually blocked. stdin is `/dev/null`, no TTY is allocated, and no shell profile/rc is read. The environment keeps only `PATH`, `HOME` and `LANG`, plus a session-private `TMPDIR`, `TERM=dumb` and `NO_COLOR=1`; sandbox-outside runs also clear the environment, but files, network and signals are unrestricted and the session's `network` setting no longer applies. One session executes only one command at a time and other calls queue, with queue time counted against their own deadlines.
 
-输出合并 stdout 和 stderr；超过结果预算时保留开头和结尾并报告省略字节数；非 UTF-8 与控制字符会被清理；空输出为 `(no output)`。shell 退出（含非零）为 Succeeded 并带 `exit_code`；被信号杀死时另带 `signal` 和 `128+signal`。命令自身超时为 TimedOut、取消为 Cancelled，二者都带已收到的输出和“可能已部分执行”；参数、路径、沙箱不可用、沙箱外请求缺理由或许可拒绝为 Rejected，没有启动进程；起进程失败为 Failed。沙箱外运行的结果另带 `outside_sandbox: true`。命令不以后台作业继续运行，也不提供交互式 stdin/TTY；完整输出不落盘。
+Output merges stdout and stderr; over the result budget the beginning and end are kept and the omitted byte count is reported; invalid UTF-8 and control characters are cleaned; empty output is `(no output)`. A shell exit (including non-zero) is Succeeded with an `exit_code`; when killed by a signal it also carries `signal` and `128+signal`. A command's own timeout is TimedOut and cancellation is Cancelled, both carrying the output received so far and "may have partially executed"; argument, path, unavailable sandbox, missing justification for a sandbox-outside request or denied permission are Rejected without starting a process; failure to start a process is Failed. Sandbox-outside results additionally carry `outside_sandbox: true`. Commands never continue as background jobs and offer no interactive stdin/TTY; complete output is not written to disk.
 
-沙箱默认拒绝，再放行：工作区与私有临时目录读写；整机只读（包括用户主目录、`/Applications` 与 `/private/var`）；`/dev` 只放行 `/dev/null`、`/dev/zero`、`/dev/urandom`、`/dev/random`，读 `/dev/tty` 失败；当前存储目录 `DIR/sessions` 与工作区、私有临时目录都不重叠时读写都拒绝。凭据位置读写都拒绝，包括 `~/.ssh`、`~/.gnupg`、`~/.aws`、`~/.azure`、`~/.config/gcloud`、`~/.kube`、`~/.docker`、`~/.config/gh`、`~/.password-store`、`~/.zsh_sessions`、`~/Library/Keychains`、`/Library/Keychains`、`/Library/Preferences/SystemConfiguration` 等目录，以及 `~/.netrc`、`~/.git-credentials`、`~/.config/git/credentials`、`~/.npmrc`、`~/.pypirc`、`~/.gem/credentials`、`~/.cargo/credentials.toml`、`~/.cargo/credentials`、`~/.vault-token`、`~/.terraform.d/credentials.tfrc.json`、`~/.zsh_history`、`~/.bash_history` 等文件；工作区恰好等于主目录时同样拒绝。工作区根目录的 `.git` 中，`hooks`、`config`、`config.worktree`、`modules`、`worktrees` 只读，`.git` 本身不能创建、删除或改名；objects、refs、index 和 logs 照常可写，沙箱外运行的 git 不受这些限制影响。嵌套仓库的 `.git` 不在保护范围内。网络默认关闭（含 loopback、DNS 与 unix socket）；`network = "open"` 只放行 IP 出站与系统 DNS 的 `/private/var/run/mDNSResponder`，其他 unix socket（如 ssh-agent 与 Docker）仍拒绝。信号只能发给沙箱内进程。单条命令可请求在沙箱外运行，由许可表决定是否询问或直接执行；未请求时命令始终在沙箱内。沙箱不可用时创建会话失败；已保存会话重开时每次调用 Rejected 并带原因，沙箱外请求同样不提供。Linux/Windows 没有后端，不能创建带命令工具的新会话。
+The sandbox denies by default and then allows: reads and writes of the workspace and the private temporary directory; whole-machine read-only (including the user home directory, `/Applications` and `/private/var`); `/dev` allows only `/dev/null`, `/dev/zero`, `/dev/urandom` and `/dev/random`, and reading `/dev/tty` fails; the current store directory `DIR/sessions` is denied read and write when it overlaps neither the workspace nor the private temporary directory. Credential locations deny both reads and writes, including `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`, `~/.kube`, `~/.docker`, `~/.config/gh`, `~/.password-store`, `~/.zsh_sessions`, `~/Library/Keychains`, `/Library/Keychains` and `/Library/Preferences/SystemConfiguration`, as well as files such as `~/.netrc`, `~/.git-credentials`, `~/.config/git/credentials`, `~/.npmrc`, `~/.pypirc`, `~/.gem/credentials`, `~/.cargo/credentials.toml`, `~/.cargo/credentials`, `~/.vault-token`, `~/.terraform.d/credentials.tfrc.json`, `~/.zsh_history` and `~/.bash_history`; the same applies when the workspace happens to equal the home directory. In the workspace root's `.git`, `hooks`, `config`, `config.worktree`, `modules` and `worktrees` are read-only, and `.git` itself cannot be created, deleted or renamed; objects, refs, index and logs remain writable, and git running outside the sandbox is unaffected by these limits. A nested repository's `.git` is outside the protection scope. Network is disabled by default (including loopback, DNS and unix sockets); `network = "open"` allows only IP egress and the system DNS socket `/private/var/run/mDNSResponder`, while other unix sockets (such as ssh-agent and Docker) are still denied. Signals can only be sent to processes inside the sandbox. A single command can request running outside the sandbox, and the permission table decides whether to ask or execute directly; without the request the command always stays inside the sandbox. When the sandbox is unavailable, creating a session fails; reopening a saved session rejects every call with a reason, and sandbox-outside requests are likewise not offered. Linux/Windows have no backend and cannot create a new session with the command tool.
 
-TUI `/status` 显示 `Commands: <backend>: ...` 的完整后端与各维度；打开时若沙箱不可用，一行提示会说明。CLI `session create` 在 stderr 打印完整状态；`tars run` 和 `session run` 打印非完整维度的简短状态。沙箱内命令的确认面板显示完整命令、工作目录、期限、网络策略，以及“工作区可写、`.git` 钩子与配置只读、凭据不可读”；沙箱外请求改为醒目的“不在沙箱内：可读写整机、可联网、可读凭据”并显示模型理由，不再显示会话的网络设置。权限规则见上一节。
+The TUI `/status` shows the full backend and each dimension as `Commands: <backend>: ...`; on open, a one-line notice explains when the sandbox is unavailable. CLI `session create` prints the full status to stderr; `tars run` and `session run` print a short status without the full dimensions. The confirmation panel for sandboxed commands shows the full command, working directory, deadline, network policy and "workspace writable, `.git` hooks and configuration read-only, credentials unreadable"; a sandbox-outside request instead shows a prominent "not in the sandbox: whole machine readable/writable, network reachable, credentials readable" and displays the model's justification, no longer showing the session's network setting. Permission rules are in the previous section.
 
-配置使用 `[profiles.NAME.command]` 的 `network`、`default_timeout_secs` 和 `max_timeout_secs`，只在预设包含 `run_command` 时生效；CLI `--command-network` 覆盖网络。TUI 新建表单只读显示当前 Tools 选择下的摘要。保存的定义固定完整值，重开不随全局配置变化。
+The configuration uses the `network`, `default_timeout_secs` and `max_timeout_secs` of `[profiles.NAME.command]`, which take effect only when the preset includes `run_command`; CLI `--command-network` overrides the network. The TUI new-session form shows a read-only summary for the current Tools selection. The saved definition freezes the complete values, and reopening does not follow global configuration changes.
 
-残余（不声称已消除）：
+Residuals (not claimed to be eliminated):
 
-- 主动 `setsid()`/`setpgid()` 的后代可以逃出进程组，仍受沙箱策略约束；TARS 结束时只清理已知进程组。
-- TARS 被 `SIGKILL` 时，正在运行的命令可能残留。
-- 进程组号在 leader 退出后有极小的复用窗口；后代持有管道时，读端线程可能在 2 秒后脱离。
-- `sysctl-read` 仍允许 `kern.proc*` 之外的名称；`kern.proc*` 与 process-info 限制只阻止读取其他进程的环境。
-- 整机可读后，凭据清单之外的秘密仍可读：写在 `~/.cargo/config.toml`、`~/.gitconfig` 里的令牌、项目外 `.env`、未受 TCC 保护的浏览器配置目录都不在清单内；终端已有的“文稿”“桌面”等 TCC 授权同样适用于命令。
-- `.git` 保护只覆盖工作区根目录的 `.git`：只锁 hooks、config、modules、worktrees 与 `.git` 本身；嵌套仓库不受保护。命令仍能改写 objects、refs、index 和 logs，可以破坏仓库内容，但不能借此在沙箱外执行代码。`.git` 指向工作区外（链接工作树）时，沙箱内的 git 写操作全部失败；子模块操作和 `git config`、`git remote add` 等改配置的操作同样失败。
-- `network = "open"` 下需要凭据的操作（SSH 方式的 git、私有 registry）因读不到凭据而失败；命令能列出 `/private/var/run` 找到 ssh-agent 的 socket，但不能连它。
-- 是否被沙箱拦下由模型自行声明，TARS 不核实；`full-access` 下模型随时可以请求在沙箱外运行。沙箱外运行仍清空环境，模型凭据不会进入命令环境。
-- 绑定命令工具时探针会依次跑 Roots 和 Host 两种策略，启动时间因此增加；探测失败仍然关闭整个工具。
+- Descendants that actively call `setsid()`/`setpgid()` can escape the process group and are still constrained by the sandbox policy; TARS only cleans up known process groups when it exits.
+- Commands still running may be left behind when TARS is `SIGKILL`ed.
+- A process group id has a very small reuse window after the leader exits; when a descendant holds the pipe, the reader thread may detach after 2 seconds.
+- `sysctl-read` still allows names other than `kern.proc*`; the `kern.proc*` and process-info restrictions only prevent reading other processes' environments.
+- After whole-machine reads are allowed, secrets outside the credential list remain readable: tokens written in `~/.cargo/config.toml` or `~/.gitconfig`, `.env` files outside the project, and browser configuration directories not protected by TCC are not in the list; existing TCC grants for the terminal such as "Documents" and "Desktop" apply to commands as well.
+- `.git` protection covers only the workspace root's `.git`: it locks hooks, config, modules, worktrees and `.git` itself; nested repositories are not protected. Commands can still rewrite objects, refs, index and logs and can corrupt the repository content, but cannot use that to execute code outside the sandbox. When `.git` points outside the workspace (a linked worktree), all sandboxed git writes fail; submodule operations and configuration-changing operations such as `git config` and `git remote add` fail as well.
+- Under `network = "open"`, operations that need credentials (git over SSH, private registries) fail because credentials are unreadable; a command can list `/private/var/run` to find the ssh-agent socket but cannot connect to it.
+- Whether a command was blocked by the sandbox is declared by the model itself and not verified by TARS; under `full-access` the model can request sandbox-outside execution at any time. Sandbox-outside runs still clear the environment, so model credentials never enter the command environment.
+- Binding the command tool runs probes for the Roots and Host policies in sequence, which increases startup time; a failed probe still disables the whole tool.
 
-## 限额
+## Limits
 
-| 有效限制 | 默认及硬上限 |
+| Effective limit | Default and hard limit |
 | --- | --- |
-| 每会话 / 全 host 实际文件操作 | 4 / 16 |
-| 单次工具执行期限（不含等待确认） | 10 秒，同时受工作剩余期限限制 |
-| 完整序列化工具结果 | 64 KiB |
-| 目录条目 / 搜索条目 | 200 / 4000 |
-| 单文件扫描 / 搜索总扫描 | 2 MiB / 8 MiB |
-| 搜索文件 / 目录深度 / 匹配 | 1000 / 32 / 200 |
+| Actual file operations per session / whole host | 4 / 16 |
+| Single tool execution deadline (excluding confirmation wait) | 10 seconds, also bounded by the remaining work deadline |
+| Complete serialized tool result | 64 KiB |
+| Directory entries / search entries | 200 / 4000 |
+| Single-file scan / total search scan | 2 MiB / 8 MiB |
+| Search files / directory depth / matches | 1000 / 32 / 200 |
 
-| 写入限制 | 默认及硬上限 |
+| Write limit | Default and hard limit |
 | --- | --- |
-| 可编辑文件大小 / 写入内容大小 | 2 MiB / 1 MiB |
-| 单次 `edit_file` 的段数 | 32 |
+| Editable file size / written content size | 2 MiB / 1 MiB |
+| Segments in one `edit_file` | 32 |
 
-预设可降低有效限制（结果最小 1024 bytes），工具参数只能进一步降低；预设和参数都不能提高硬上限。`[profiles.NAME.tool_limits]` 控制上面的通用限额，`[profiles.NAME.write_limits]` 控制三个写入限额，字段见[配置](configuration.md)。跳过前文、长行和 JSON 转义都计入限制；扫描与输出在构造过程中限量，不先收集全部结果再裁剪。搜索采用深度遍历，目录句柄随深度有界。
+A preset can lower effective limits (results no smaller than 1024 bytes), and tool arguments can only lower them further; neither presets nor arguments can raise a hard limit. `[profiles.NAME.tool_limits]` controls the general limits above, and `[profiles.NAME.write_limits]` controls the three write limits; the fields are in [Configuration](configuration.md). Skipped prefixes, long lines and JSON escaping all count toward the limits; scanning and output are bounded while being produced rather than collecting all results first and then trimming. Search uses depth-first traversal, and directory handles are bounded with depth.
 
-Causa executor 以同一保存期限作为调用等待的超时兜底；期限和取消也在排队及文件操作检查点生效；丢弃工具 future 会请求对应操作停止。每个工作的 blocking 任务由 TaskTracker 监督，写操作保留至真实闭包退出，工作终态和关闭都等待收尾。该机制不能强制抢占卡住的 OS I/O，不保证网络或异常文件系统上的有限时退出。
+The Causa executor uses the same saving deadline as a timeout fallback for call waits; deadlines and cancellation also take effect at queueing and file-operation checkpoints; dropping a tool future requests that the corresponding operation stop. Each work's blocking tasks are supervised by a TaskTracker, writes are retained until the real closure exits, and both terminal state and close wait for them to settle. This mechanism cannot forcibly preempt stuck OS I/O and does not guarantee bounded exit on network or abnormal filesystems.
 
-## 观察、保存与旧记录
+## Observation, saving and legacy records
 
-TUI 区分 Waiting、Running、Returned（待材料提交）、Committed，以及工作终态和保存状态。观察丢失会提示，并用可靠终态摘要校正。每工作最多保留 128 个调用摘要，名称/参数摘要分别最多 128/256 bytes；取消后保留 Causa 实际返回的 UnknownOutcome；真实文件任务全部退出后，应用再区分已启动但无已接受结果与等待确认期间未执行。此投影不修改原批次或已提交结果，已提交的未知结果仍保留材料提交事实。摘要不消费原未提交 ToolBatch，不构成持久工作账本。`/tools` 或 F6 从实际材料缓存展开完整调用和结果；终端控制字符仅在展示时处理。
+The TUI distinguishes Waiting, Running, Returned (materials pending commit), Committed, plus work terminal state and save state. A lost observation is reported and corrected with the reliable terminal-state summary. Each work retains at most 128 call summaries, with name/argument summaries at most 128/256 bytes each; after cancellation, the UnknownOutcome actually returned by Causa is kept; once all real file tasks have exited, the application distinguishes calls that started but produced no accepted result from calls not executed while waiting for confirmation. This projection never modifies the original batch or committed results, and a committed unknown result still retains the material-commit fact. Summaries do not consume the original uncommitted ToolBatch and are not a persistent work ledger. `/tools` or F6 expands full calls and results from the actual material cache; terminal control characters are handled only at display time.
 
-CLI 执行 stdout 仍只输出最终文本或既有 JSON 报告；工具材料可通过保存/导出查看。保存失败重试原材料，不重跑工具或模型。重开可显示原已提交调用/结果，不恢复或执行旧工作。取消可能只留下已提交声明，结果仍在原未提交批次中；保存不会补造配对结果。新输入遇到未配对材料会被原样返还。TUI F7 / `/repair` 可预览采纳原结果或移除未配对声明，CLI `session repair` 可显式移除；应用并保存后再发送新工作。UnknownOutcome 和原工作状态不变，完整条件见[中断后继续](session-continuation.md)。
+CLI execution stdout still outputs only the final text or the existing JSON report; tool materials can be inspected through save/export. Retrying a failed save reuses the original materials and never reruns tools or the model. Reopening can show originally committed calls/results but does not restore or execute old work. Cancellation may leave only a committed declaration, with the result still in the original uncommitted batch; saving never fabricates a paired result. New input that meets unpaired materials is returned as-is. TUI F7 / `/repair` can preview accepting the original result or removing the unpaired declaration, and CLI `session repair` can remove it explicitly; send new work only after applying and saving. UnknownOutcome and the original work state stay unchanged; the full conditions are in [Continuation after interruption](session-continuation.md).
 
-写入执行到一半被取消时，Causa 给出 UnknownOutcome；原子写入保证文件只会是旧内容或新内容。修复预览对这类调用标出“文件可能已被写入，继续前请重新读取”。采纳原结果只支持正式装配的内置工具（三个只读、两个写入和一个命令工具）；含 MCP 或其他非内置调用的批次只能移除，并提示外部副作用可能已经发生。
+When a write is cancelled halfway through, Causa reports UnknownOutcome; atomic writing guarantees that the file is either the old content or the new content. The repair preview marks these calls with "the file may have been written; read it again before continuing". Accepting the original result is supported only for built-in tools from the formal assembly (three read-only, two write and one command tool); a batch containing MCP or other non-built-in calls can only be removed, with a notice that external side effects may already have happened.
 
-记录格式为 `tars-session-v2`，`workspace_root`、`tools`、`tool_limits` 必须存在；写入限额、初始/当前权限模式和 MCP 快照可省略，省略时分别读作默认写入限额、`ask` 和没有服务器。v1 明确拒绝，不自动补权限或改写旧文件。可离线提取经过完整 Context 校验的材料，再显式创建采用新定义的会话：
+The record format is `tars-session-v2`; `workspace_root`, `tools` and `tool_limits` are required, while write limits, initial/current permission mode and the MCP snapshot may be omitted and then read as the default write limits, `ask` and no servers respectively. v1 is rejected explicitly, with no automatic permission backfill or old-file rewriting. Materials that pass full Context validation can be extracted offline, and a new session using a new definition can then be created explicitly:
 
 ```sh
 tars session export-materials --record ./old-record.json --output ./materials-new.json
@@ -141,8 +141,8 @@ tars session create --store ./data --provider openai-chat --model "$MODEL_ID" \
   --load ./materials-new.json --json
 ```
 
-导出最多读取 64 MiB，目标必须不存在；不读取凭据或调用模型，不复用旧定义。新建时如需工具，仍须显式选择工具和工作区。
+Export reads at most 64 MiB and the target must not exist; it reads no credentials, calls no model and reuses no old definition. When creating the new session, tools and workspace must still be selected explicitly if tools are needed.
 
-## MCP 工具
+## MCP tools
 
-MCP 工具不经过工作区目录句柄，因而不受上面的路径边界约束。配置、选择、确认档位、环境隔离和生命周期见[配置](configuration.md#mcp-服务器)。服务器以用户权限运行；需要限制它时只能靠权限模式和 `approval` 拒绝调用，不能依靠工作区边界或 OS 沙箱。
+MCP tools do not go through the workspace directory handles and are therefore not constrained by the path boundaries above. Configuration, selection, approval levels, environment isolation and lifecycle are in [Configuration](configuration.md#mcp-servers). Servers run with the user's privileges; limiting them relies only on permission modes and `approval` rejecting calls, never on the workspace boundary or an OS sandbox.
