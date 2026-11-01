@@ -31,6 +31,9 @@ max_tool_calls = 64
 # reasoning_effort = "medium"
 # max_model_attempts = 3
 # permission_mode = "ask"      # read-only | ask | accept-edits | full-access
+# context_window = 200000      # model window in tokens; omitted means unknown
+# auto_compact = true          # automatic compaction switch; default true
+# compact_threshold = 70       # trigger percentage of the window, 10..95
 # mcp = ["git"]                # ids defined in mcp.json; omitted or empty selects none
 # [profiles.work.extra_body.thinking]
 # type = "adaptive"
@@ -66,6 +69,30 @@ tars-tui --config ./config.toml --profile work
 Selecting `--profile NAME` takes precedence over default_profile. Arguments override the selected preset field by field; endpoint, credential reference, deadline and limits that are not overridden still come from the preset. CLI model arguments apply to `run` and `session create`; `session run` accepts neither `--profile` nor model overrides. `--store` and `--recovery-dir` override the corresponding paths in the configuration.
 
 The TUI new-session form is filled from the selected preset, and changes affect only the new session at hand; capacity/call limits, generation settings and `render_options` that the preset does not display are preserved as-is. In the first version the user edits the configuration file, and the TUI neither saves nor overwrites the global configuration automatically. A future GUI should reuse the same loading and parsing module.
+
+## Long-session compaction
+
+A Context only grows, so a long conversation eventually exceeds the model's context window. TARS may replace the whole Context with a working brief written by the session's own model; the replaced conversation is kept as read-only history segments and is never sent to the model again. The policy belongs to TARS; Causa supplies only the per-round `ContextPreparer` contract.
+
+Three preset fields control it, and the `create`/`run` arguments override them for one new session:
+
+| Setting | Meaning | Default |
+| --- | --- | --- |
+| `context_window` | Model context window in tokens | unset, so the window is unknown |
+| `auto_compact` | Whether the session compacts automatically | `true` |
+| `compact_threshold` | Trigger percentage of the window, 10 to 95 | `70` |
+
+`context_window` is frozen in the definition with the model. `auto_compact` and `compact_threshold` start from the definition and the running values are stored in the session record only when they differ from it, following the permission mode. The command-line arguments are `--context-window N` and `--auto-compact on|off|PERCENT`; a percentage sets the threshold and enables automatic compaction. The TUI `/auto_compact` command reads or changes the running values without touching the shared TOML. Because running values are part of the record, the next save carries them and reopening restores them.
+
+When `context_window` is unknown, automatic compaction never triggers (older records have no window); manual `tars session compact` and the TUI `/compact` still work. The request size is estimated from the previous upstream prompt token count plus one token per three bytes of material added since that request; a session without upstream usage estimates from bytes alone.
+
+Automatic compaction runs before a model round when the estimate reaches the threshold percentage of the window, or when the estimate plus `max_tokens` no longer fits the window. At most one automatic attempt happens per round; when it is abandoned (empty brief, no smaller estimate, request failure, unwritable history) the Context is unchanged and the round still goes out. A round that ends on the provider's context-window limit forces one compaction attempt on the next round even when automatic compaction is off. Manual compaction is refused while the session is busy, while a save is blocked, and while interrupted tool material still needs repair.
+
+After a successful compaction the Context contains the last effective tool declaration (omitted when no tools are offered) and one user message with a fixed prefix, `meta.source = "tars:compaction"`, holding the model's brief. The model therefore sees only the brief, not the original messages.
+
+The replaced material is written to `<store>/sessions/<conversation id>.history/<segment id>.json` in the `tars-history-v1` format: the old Context verbatim, the trigger, the create time, both estimates and the summary block id. The session record's `history` field lists the segments in order with id, time, trigger, block count and summary block id. Files are written and synced before the Context changes; files the record does not reference are removed while the write lock is held when the session is opened, and a referenced file that is missing is reported only where that segment would be displayed. Material export, recovery exports and the `--load` import contain the current Context only, never history segments. A transient `tars run` has no store, keeps no history and therefore never compacts.
+
+The record format name stays `tars-session-v2`; the new fields are appended, so a version that does not know them cannot read a compacted record. This is accepted before 0.1.
 
 ## MCP servers
 
