@@ -10,7 +10,7 @@ use tars_core::{
     application::{ClosePolicy, PreparedCreate, SaveStatus},
     definition::{CredentialRef, Provider, SessionDefinition},
 };
-#[path = "../../../../tars-core/tests/common/workspace_http.rs"]
+#[path = "../../../../core/tests/common/workspace_http.rs"]
 #[allow(dead_code)] // This shared fixture also supports tool replies used by core/CLI tests.
 mod wire;
 

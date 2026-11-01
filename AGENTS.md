@@ -38,7 +38,7 @@ must remain `publish = false`.
 | Change interrupted-session continuation or material repair | [Session continuation](docs/session-continuation.md), `tars-core::application::repair` |
 | Change workspace tool access, limits or status | [Workspace tools](docs/workspace-tools.md), `tars-core::workspace`, `tars-core::tools`, `session::ToolReporter` |
 | Change shared TOML configuration | [Configuration](docs/configuration.md), `tars-core::config` |
-| Run or change the terminal prototype | [TUI prototype](docs/tui.md), `crates/tars-tui/` |
+| Run or change the terminal prototype | [TUI prototype](docs/tui.md), `crates/tui/` |
 | Plan a change or inspect acceptance status | [Local design index](.agents/README.md) |
 | Follow Direct/Noted or proposal lifecycle rules | [Workflow](.agents/pipelines/WORKFLOW.md) |
 
@@ -61,7 +61,9 @@ features change; keep one authoritative acceptance list per proposal scope.
 
 ## Architecture and conventions
 
-- Keep Cargo packages under `crates/`, inheriting workspace metadata.
+- Keep Cargo packages under `crates/`, with directory names omitting the
+  `tars-` prefix (`crates/core`, `crates/sandbox`, `crates/cli`, `crates/tui`),
+  and inherit workspace metadata.
   `tars-core` owns shared behavior and configuration; `tars-sandbox` owns the
   platform sandbox policy, backends and process control and depends on neither
   Causa nor `tars-core`; `tars-cli` owns the `tars` binary; `tars-tui` owns the

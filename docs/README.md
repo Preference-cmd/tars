@@ -10,28 +10,28 @@ TARS 的目的是验证并改进 Causa，应用是验证的载体，见 [README 
 
 2026-10-29：命令沙箱改为整机只读，凭据位置与当前存储目录仍拒绝读写，`/dev` 只放行四个设备；`.git` 从整棵只读收紧为 hooks/config/modules/worktrees 只读且入口不可创建、删除或改名，objects/refs/index 恢复可写；`network = "open"` 收紧为 IP 出站加系统 DNS socket。探针分别验证 Roots 与 Host 两种读范围。同日第 5 步：`accept-edits` 下沙箱内命令直接执行；单条命令可带理由请求沙箱外运行（`read-only` 拒绝，`ask`/`accept-edits` 询问，`full-access` 直接执行），执行层按调用许可核对后经后端 `unconfined` 启动；`.git` 只锁 hooks、config、modules、worktrees 与入口。SC02、SC17、SC18 已勾选。[工作区工具](workspace-tools.md#命令工具)已同步。
 
-2026-10-31：沙箱层从 core 拆为独立库包 `crates/tars-sandbox`，依赖只有 `tokio`、`thiserror`、`tempfile` 和 unix 上的 `rustix`，不依赖 Causa 或 `tars-core`；`tars-core` 依赖它并在 `lib.rs` 以 `pub use tars_sandbox as sandbox` 保留 `tars_core::sandbox` 公开路径，CLI/TUI 不直接依赖。`exit_status_code` 改为公开函数；后端注入、`RecordingBackend` 与指定主目录打开 Seatbelt 的函数移到 `test-support` feature（只由 `tars-core` 的 `[dev-dependencies]` 开启，普通/发布构建不包含）。沙箱单元测试随包移动，工作区测试总数不变。
+2026-10-31：沙箱层从 core 拆为独立库包 `crates/sandbox`，依赖只有 `tokio`、`thiserror`、`tempfile` 和 unix 上的 `rustix`，不依赖 Causa 或 `tars-core`；`tars-core` 依赖它并在 `lib.rs` 以 `pub use tars_sandbox as sandbox` 保留 `tars_core::sandbox` 公开路径，CLI/TUI 不直接依赖。`exit_status_code` 改为公开函数；后端注入、`RecordingBackend` 与指定主目录打开 Seatbelt 的函数移到 `test-support` feature（只由 `tars-core` 的 `[dev-dependencies]` 开启，普通/发布构建不包含）。沙箱单元测试随包移动，工作区测试总数不变。
 
 ## 代码结构
 
 | 路径 | 当前职责 |
 | --- | --- |
-| `crates/tars-core/src/application/` | 活动目录、opening/关闭监督、实例视图、保存门禁与版本编辑 |
-| `crates/tars-core/src/definition/` | 可序列化的固定定义与纯校验 |
-| `crates/tars-core/src/config/` | 共享 TOML 加载、路径、命名模型预设与新定义默认值 |
-| `crates/tars-core/src/workspace/`、`tools/` | 固定根目录句柄、工作区工具（三个只读、两个写入和一个命令工具）、有界扫描与受监督文件任务 |
-| `crates/tars-sandbox/src/` | 平台无关沙箱策略、后端能力报告、进程树与 macOS Seatbelt 后端；独立库包，不依赖 Causa 和 `tars-core`，由 `tars-core` 的 `run_command` 使用 |
-| `crates/tars-core/src/mcp/` | 会话的 MCP 服务器：启动与关闭、子进程环境、工具过滤、结果上限与状态 |
-| `crates/tars-core/src/assembly/` | 打开时解析凭据、装配 gateway/runner 与固定执行选项 |
-| `crates/tars-core/src/session/` | 单会话 owner/handle、原工作受理、监督、去重、可靠结果与有界临时观察 |
-| `crates/tars-core/src/store/` | 私有 JSON 后端、活动期文件锁、提交与确认 |
-| `crates/tars-core/src/material/` | 显式 Context 文件导入/导出、引用校验 |
-| `crates/tars-cli/src/cli/` | 命令参数、信号、展示、恢复文件与退出码 |
-| `crates/tars-cli/src/demo/` | 脚本模型和本地工具的底层 Session 演示 |
-| `crates/tars-tui/src/` | 单列对话、命令/会话选择、输入适配、流式预览与实际材料呈现 |
-| `crates/tars-core/tests/`、`crates/tars-cli/tests/` | 核心契约消费者、真实 CLI 与本地 HTTP 测试 |
+| `crates/core/src/application/` | 活动目录、opening/关闭监督、实例视图、保存门禁与版本编辑 |
+| `crates/core/src/definition/` | 可序列化的固定定义与纯校验 |
+| `crates/core/src/config/` | 共享 TOML 加载、路径、命名模型预设与新定义默认值 |
+| `crates/core/src/workspace/`、`tools/` | 固定根目录句柄、工作区工具（三个只读、两个写入和一个命令工具）、有界扫描与受监督文件任务 |
+| `crates/sandbox/src/` | 平台无关沙箱策略、后端能力报告、进程树与 macOS Seatbelt 后端；独立库包，不依赖 Causa 和 `tars-core`，由 `tars-core` 的 `run_command` 使用 |
+| `crates/core/src/mcp/` | 会话的 MCP 服务器：启动与关闭、子进程环境、工具过滤、结果上限与状态 |
+| `crates/core/src/assembly/` | 打开时解析凭据、装配 gateway/runner 与固定执行选项 |
+| `crates/core/src/session/` | 单会话 owner/handle、原工作受理、监督、去重、可靠结果与有界临时观察 |
+| `crates/core/src/store/` | 私有 JSON 后端、活动期文件锁、提交与确认 |
+| `crates/core/src/material/` | 显式 Context 文件导入/导出、引用校验 |
+| `crates/cli/src/cli/` | 命令参数、信号、展示、恢复文件与退出码 |
+| `crates/cli/src/demo/` | 脚本模型和本地工具的底层 Session 演示 |
+| `crates/tui/src/` | 单列对话、命令/会话选择、输入适配、流式预览与实际材料呈现 |
+| `crates/core/tests/`、`crates/cli/tests/` | 核心契约消费者、真实 CLI 与本地 HTTP 测试 |
 
-workspace 包含 `tars-core`、`tars-sandbox`、`tars-cli` 和 `tars-tui`，均为 `publish=false`，binary 为 `tars` 和 `tars-tui`。CLI/TUI 只向下依赖核心和 Causa（另直接使用 `BlockId` 等事实词汇），核心没有入口/UI/信号依赖；`tars-core` 单向依赖库包 `tars-sandbox` 并以 `pub use tars_sandbox as sandbox` 保留 `tars_core::sandbox` 路径；内部 lib 不承诺第三方 SDK。以公开 facade 消费 crates.io 上发布的 `causa 0.1`，具体版本由 Cargo.lock 固定，构建不需要同级 Causa checkout。没有源码 include 或复制。独立 CI/分发是后续交付步骤。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
+workspace 包含 `tars-core`、`tars-sandbox`、`tars-cli` 和 `tars-tui`，均为 `publish=false`，binary 为 `tars` 和 `tars-tui`；crate 目录名省略 `tars-` 前缀（`crates/core`、`crates/sandbox`、`crates/cli`、`crates/tui`），包名不变。CLI/TUI 只向下依赖核心和 Causa（另直接使用 `BlockId` 等事实词汇），核心没有入口/UI/信号依赖；`tars-core` 单向依赖库包 `tars-sandbox` 并以 `pub use tars_sandbox as sandbox` 保留 `tars_core::sandbox` 路径；内部 lib 不承诺第三方 SDK。以公开 facade 消费 crates.io 上发布的 `causa 0.1`，具体版本由 Cargo.lock 固定，构建不需要同级 Causa checkout。没有源码 include 或复制。独立 CI/分发是后续交付步骤。共享配置及终端边界见 [配置](configuration.md)与 [TUI](tui.md)。
 
 完整行为见 [Session 运行机制](session-lifecycle.md)，使用方法见 [README](../README.md)，逐项验收与本机证据见 [专项提案](../.agents/pipelines/archives/architecture/2026-10-03-session-structure-and-storage.md)和[实施记录](../.agents/reviews/2026-10-03-session-implementation/README.md)。
 

@@ -5,7 +5,7 @@ use std::{
     path::Path,
     process::{Command, Output},
 };
-#[path = "../../tars-core/tests/common/workspace_http.rs"]
+#[path = "../../core/tests/common/workspace_http.rs"]
 mod wire;
 
 fn command(store: &Path, id: &str) -> Command {

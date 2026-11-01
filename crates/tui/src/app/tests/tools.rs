@@ -9,7 +9,7 @@ use tars_core::session::{
     ProgressUpdate, ToolPhase, ToolProgress, ToolProgressSnapshot, WorkProgress, WorkRef,
 };
 use tokio::sync::broadcast;
-#[path = "../../../../tars-cli/tests/common/tools.rs"]
+#[path = "../../../../cli/tests/common/tools.rs"]
 pub(super) mod wire;
 
 fn screen(app: &crate::app::App) -> String {

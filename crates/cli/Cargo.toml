@@ -11,7 +11,7 @@ name = "tars"
 path = "src/main.rs"
 
 [dependencies]
-tars-core = { path = "../tars-core" }
+tars-core = { path = "../core" }
 causa.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tokio-util.workspace = true

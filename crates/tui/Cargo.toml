@@ -7,7 +7,7 @@ publish.workspace = true
 description = "Experimental terminal interface for TARS"
 
 [dependencies]
-tars-core = { path = "../tars-core" }
+tars-core = { path = "../core" }
 causa.workspace = true
 tokio.workspace = true
 futures-util.workspace = true
