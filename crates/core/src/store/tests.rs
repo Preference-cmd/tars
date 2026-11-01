@@ -669,3 +669,32 @@ fn compaction_fields_roundtrip_and_older_records_read_as_defaults() {
     );
     assert!(record.is_err());
 }
+
+#[test]
+fn session_listing_ignores_the_history_directory() {
+    let root = tempfile::tempdir().unwrap();
+    let store = super::SessionStore::new(root.path().join("store"));
+    let sessions = store.directory().to_path_buf();
+    std::fs::create_dir_all(&sessions).unwrap();
+    let id = uuid::Uuid::now_v7().to_string();
+    let record = super::SavedSessionRecord::new(
+        id.clone(),
+        uuid::Uuid::now_v7().to_string(),
+        None,
+        definition(),
+        Context::default(),
+        None,
+    )
+    .unwrap();
+    std::fs::write(
+        sessions.join(format!("{id}.json")),
+        serde_json::to_vec(&record).unwrap(),
+    )
+    .unwrap();
+    let history = sessions.join(format!("{id}.history"));
+    std::fs::create_dir(&history).unwrap();
+    std::fs::write(history.join("segment.json"), b"{}").unwrap();
+    let listed = store.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].record.is_ok());
+}

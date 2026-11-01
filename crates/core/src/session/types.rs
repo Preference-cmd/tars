@@ -80,6 +80,19 @@ pub enum ProgressUpdate {
     Compaction(crate::compact::CompactionProgress),
 }
 
+/// One retained work's release facts, without its original materials.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetainedWork {
+    /// The retained work.
+    pub work: WorkRef,
+    /// Whether a caller has obtained its terminal result.
+    pub read: bool,
+    /// Whether the work is terminal.
+    pub finished: bool,
+    /// Whether an unclaimed uncommitted tool batch is still attached.
+    pub uncommitted: bool,
+}
+
 /// Stable admission receipt, independent of later execution state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkReceipt {
@@ -176,7 +189,9 @@ pub enum SessionError {
     #[error("session is faulted")]
     Faulted,
     /// Retained active and terminal record count reached its bound.
-    #[error("retained work capacity {capacity} reached")]
+    #[error(
+        "retained work capacity {capacity} reached; unread or unclaimed finished work cannot be released, so reopen the session or claim/adopt pending batches"
+    )]
     Capacity {
         /// Configured record bound.
         capacity: usize,

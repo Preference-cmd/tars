@@ -169,6 +169,7 @@ impl SessionHandle {
                 blocks: original_blocks,
                 record: record.clone(),
                 uncommitted: None,
+                read: false,
             },
         );
         state.active = Some(work.clone());
@@ -180,8 +181,31 @@ impl SessionHandle {
 
     /// Read retained progress; references from other conversations are not found.
     pub fn observe(&self, work: &WorkRef) -> Result<WorkObservation, SessionError> {
+        let observation = {
+            let state = self.shared.lock();
+            self.shared.record(&state, work)?.snapshot()
+        };
+        if matches!(observation.state, WorkState::Finished(_)) {
+            self.shared.mark_read(work);
+        }
+        Ok(observation)
+    }
+
+    /// Release facts for every retained work, in stable creation order.
+    pub(crate) fn retained(&self) -> Vec<crate::session::RetainedWork> {
         let state = self.shared.lock();
-        Ok(self.shared.record(&state, work)?.snapshot())
+        let mut works: Vec<_> = state
+            .records
+            .values()
+            .map(|entry| crate::session::RetainedWork {
+                work: entry.record.work.clone(),
+                read: entry.read,
+                finished: matches!(entry.record.snapshot().state, WorkState::Finished(_)),
+                uncommitted: entry.uncommitted.is_some(),
+            })
+            .collect();
+        works.sort_by(|left, right| left.work.turn_id.0.cmp(&right.work.turn_id.0));
+        works
     }
 
     /// Wait for terminal work or return its current snapshot at the finite timeout.
@@ -197,7 +221,11 @@ impl SessionHandle {
             let state = self.shared.lock();
             self.shared.record(&state, work)?
         };
-        Ok(record.wait(timeout).await)
+        let observation = record.wait(timeout).await;
+        if matches!(observation.state, WorkState::Finished(_)) {
+            self.shared.mark_read(work);
+        }
+        Ok(observation)
     }
 
     /// Request cooperative cancellation; completion and side effects must be observed.

@@ -166,6 +166,15 @@ pub struct CompactionSettings {
     pub context_window: Option<u64>,
 }
 
+/// Retained-work capacity of one open session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkCapacity {
+    /// Records currently retained, including terminal and unread ones.
+    pub used: usize,
+    /// Configured maximum; zero rejects new work.
+    pub capacity: usize,
+}
+
 /// Current conservative request-size estimate and configured window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContextUsage {

@@ -197,6 +197,34 @@ impl ManagedSession {
         if let Err(reason) = readiness {
             return Err(ManagedSubmitRejection { reason, request });
         }
+        // Retained works that a caller has already read keep the sheet full.
+        // Release the oldest eligible ones before the low-level capacity gate;
+        // unread results and unclaimed batches stay observable/repairable.
+        let capacity = state
+            .definition
+            .as_ref()
+            .expect("published definition")
+            .retained_work_capacity;
+        let owner = state.owner.as_mut().expect("published owner");
+        loop {
+            if owner.retained_count() < capacity {
+                break;
+            }
+            let candidate = owner
+                .retained()
+                .into_iter()
+                .find(|work| work.finished && work.read && !work.uncommitted)
+                .map(|work| work.work);
+            let Some(candidate) = candidate else {
+                break;
+            };
+            if let Err(error) = owner.forget(&candidate) {
+                return Err(ManagedSubmitRejection {
+                    reason: error.into(),
+                    request,
+                });
+            }
+        }
         let receipt = handle
             .submit(request)
             .map_err(|failure| ManagedSubmitRejection {
@@ -431,6 +459,20 @@ impl ManagedSession {
             .pending
             .as_ref()
             .map(|p| p.record.permission_mode)
+    }
+
+    /// Retained-work capacity and current use, for status displays.
+    pub fn work_capacity(&self) -> Option<WorkCapacity> {
+        let state = self.entry.lock();
+        let owner = state.owner.as_ref()?;
+        let capacity = state
+            .definition
+            .as_ref()
+            .map(|definition| definition.retained_work_capacity)?;
+        Some(WorkCapacity {
+            used: owner.retained_count(),
+            capacity,
+        })
     }
 
     /// Running compaction settings, when this session keeps history.

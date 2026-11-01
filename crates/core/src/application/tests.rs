@@ -4,6 +4,7 @@ mod compaction;
 mod lifecycle;
 mod opening;
 mod progress;
+mod release;
 mod repair;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod repair_http;

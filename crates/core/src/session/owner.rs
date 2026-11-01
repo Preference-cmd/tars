@@ -227,6 +227,16 @@ impl Session {
         self.workspace_tools.clone()
     }
 
+    /// Number of retained works, including terminal and unread ones.
+    pub(crate) fn retained_count(&self) -> usize {
+        self.shared.lock().records.len()
+    }
+
+    /// Release facts for every retained work, oldest first.
+    pub(crate) fn retained(&self) -> Vec<crate::session::RetainedWork> {
+        self.handle().retained()
+    }
+
     pub(crate) fn claims_revision(&self) -> u64 {
         self.shared.lock().claims_revision
     }

@@ -191,6 +191,29 @@ impl ModelGateway for ControlledRoundGateway {
     }
 }
 
+/// Same fixture call with a smaller result so round 1 lands between 50% and 70%.
+struct SmallAlphaTool;
+
+#[async_trait::async_trait]
+impl causa::kernel::Tool for SmallAlphaTool {
+    fn definition(&self) -> ToolDefinition {
+        AlphaTool.definition()
+    }
+
+    async fn execute(
+        &self,
+        ctx: &ToolCallContext,
+        _: &CallControl,
+        _: Option<&dyn causa::kernel::ArtifactStore>,
+    ) -> ToolResultPayload {
+        ToolResultPayload::new(
+            ctx.call_block_id,
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::json!("z".repeat(1_500))),
+        )
+    }
+}
+
 struct AlphaTool;
 
 #[async_trait::async_trait]
@@ -224,6 +247,24 @@ fn build_session(
     gateway: Arc<dyn ModelGateway>,
     tracker: Arc<UsageTracker>,
 ) -> (Session, Arc<CompactionRuntime>) {
+    build_session_with_tool(
+        directory,
+        definition,
+        context,
+        gateway,
+        tracker,
+        Arc::new(AlphaTool),
+    )
+}
+
+fn build_session_with_tool(
+    directory: &std::path::Path,
+    definition: SessionDefinition,
+    context: Context,
+    gateway: Arc<dyn ModelGateway>,
+    tracker: Arc<UsageTracker>,
+    tool: Arc<dyn causa::kernel::Tool>,
+) -> (Session, Arc<CompactionRuntime>) {
     let tracked: Arc<dyn ModelGateway> =
         Arc::new(UsageTrackingGateway::new(gateway, tracker.clone()));
     let runtime = CompactionRuntime::new(
@@ -237,13 +278,7 @@ fn build_session(
         tracker,
     )
     .unwrap();
-    let executor = Arc::new(
-        ToolExecutor::new(
-            vec![Arc::new(AlphaTool) as Arc<dyn causa::kernel::Tool>],
-            ToolExecutorOptions::default(),
-        )
-        .unwrap(),
-    );
+    let executor = Arc::new(ToolExecutor::new(vec![tool], ToolExecutorOptions::default()).unwrap());
     let runner = Arc::new(TurnRunner::new(tracked, executor));
     let runtime_for_work = runtime.clone();
     let session = Session::new_with_tools(
@@ -711,6 +746,51 @@ async fn disabling_automatic_compaction_during_a_work_applies_to_the_next_round(
             blocks: vec![big_block(1_200), big_block(1_200), big_block(1_200)],
         })
         .unwrap();
+    let observation = handle
+        .wait(&receipt.work, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(matches!(observation.state, WorkState::Finished(_)));
+    assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn lowering_the_threshold_during_a_work_applies_to_the_next_round() {
+    let directory = tempfile::tempdir().unwrap();
+    let summary_calls = Arc::new(AtomicUsize::new(0));
+    let gateway = Arc::new(ControlledRoundGateway {
+        main_calls: AtomicUsize::new(0),
+        summary_calls: summary_calls.clone(),
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    });
+    let tracker = Arc::new(UsageTracker::default());
+    let (mut session, runtime) = build_session_with_tool(
+        directory.path(),
+        definition(Some(1_000), None),
+        Context::new(),
+        gateway.clone(),
+        tracker,
+        Arc::new(SmallAlphaTool),
+    );
+    let handle = session.handle();
+    let receipt = handle
+        .submit(SubmitRequest {
+            request_key: "threshold-change".into(),
+            blocks: vec![ContextBlock::text(
+                BlockId::new(uuid::Uuid::now_v7()),
+                Role::User,
+                "run the fixture tool",
+            )],
+        })
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), gateway.entered.notified())
+        .await
+        .unwrap();
+    // 50% of the window triggers on the next round; 70% would not.
+    runtime.set_threshold(50);
+    gateway.release.notify_one();
     let observation = handle
         .wait(&receipt.work, Duration::from_secs(5))
         .await

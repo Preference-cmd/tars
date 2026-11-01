@@ -41,6 +41,8 @@ pub(super) struct Entry {
     pub blocks: Vec<ContextBlock>,
     pub record: Arc<Record>,
     pub uncommitted: Option<ToolBatch>,
+    /// A caller obtained the terminal result through observe or wait.
+    pub read: bool,
 }
 pub(super) struct Record {
     pub work: WorkRef,
@@ -75,6 +77,14 @@ impl Shared {
         }
         Err(SessionError::NotFound { work: work.clone() })
     }
+    /// Record that one caller has seen this work's terminal result.
+    pub fn mark_read(&self, work: &WorkRef) {
+        let mut state = self.lock();
+        if let Some(entry) = state.records.get_mut(&work.turn_id) {
+            entry.read = true;
+        }
+    }
+
     pub fn finish(
         &self,
         record: &Record,
