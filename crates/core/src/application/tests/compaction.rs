@@ -693,6 +693,10 @@ async fn transient_sessions_have_no_compaction() {
         })
         .unwrap();
     finished(&session, &receipt.work).await;
+    // The managed entry clears its active work shortly after the terminal
+    // result; a manual mutation before that point reports `Saving`, so wait for
+    // the cleared entry instead of depending on scheduling.
+    until(|| session.status().active_work.is_none()).await;
     assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 0);
     assert!(!history_dir(store.path(), &id).exists());
     assert!(matches!(
