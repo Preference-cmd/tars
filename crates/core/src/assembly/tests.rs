@@ -246,3 +246,67 @@ fn command_runtime_is_allowed_on_reopen_but_not_on_create_without_a_backend() {
         .is_ok()
     );
 }
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn command_creation_without_a_backend_names_the_build_platform() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut chosen = definition();
+    chosen.credential = CredentialRef::Environment("PATH".into());
+    chosen.workspace_root = Some(directory.path().canonicalize().unwrap());
+    chosen.tools = vec![crate::definition::WorkspaceTool::RunCommand];
+    chosen.command = Some(crate::definition::CommandSettings::default());
+    let error = match assemble(
+        &chosen,
+        "id".into(),
+        Context::default(),
+        crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)),
+        crate::permission::PermissionMode::Ask,
+        None,
+        false,
+    ) {
+        Ok(_) => panic!("a platform without a sandbox backend must fail creation"),
+        Err(error) => error,
+    };
+    let reason = error.to_string();
+    assert!(
+        reason.contains("requires a platform sandbox backend"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(std::env::consts::OS),
+        "the error must name the platform: {reason}"
+    );
+}
+
+#[test]
+fn a_failed_probe_binds_the_session_with_an_unavailable_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut chosen = definition();
+    chosen.credential = CredentialRef::Environment("PATH".into());
+    chosen.workspace_root = Some(directory.path().canonicalize().unwrap());
+    chosen.tools = vec![crate::definition::WorkspaceTool::RunCommand];
+    chosen.command = Some(crate::definition::CommandSettings::default());
+    let backend = tars_sandbox::test_support::RecordingBackend::unavailable();
+    let launches = backend.calls();
+    let error = crate::sandbox::Sandbox::open_with(Box::new(backend)).unwrap_err();
+    let resources = crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16))
+        .with_test_command_sandbox(Err(error));
+    let session = assemble(
+        &chosen,
+        "id".into(),
+        Context::default(),
+        resources,
+        crate::permission::PermissionMode::Ask,
+        None,
+        false,
+    )
+    .expect("a failed probe binds the tool with the session still open");
+    let status = session.command_status().expect("command status");
+    assert!(!status.is_available(), "{status}");
+    assert!(status.to_string().contains("probe failed"), "{status}");
+    assert!(
+        launches.lock().unwrap().is_empty(),
+        "a failed probe must not launch a process"
+    );
+}

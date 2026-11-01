@@ -143,7 +143,7 @@ impl CommandRuntime {
         }
     }
 
-    fn policy(&self) -> Result<SandboxPolicy, String> {
+    pub(super) fn policy(&self) -> Result<SandboxPolicy, String> {
         let roots = [self.root.clone(), self.temp.clone()];
         let network = match self.settings.network {
             CommandNetwork::None => NetworkAccess::None,
@@ -485,41 +485,12 @@ mod tests {
     use crate::definition::CommandSettings;
     use causa::kernel::{CallControl, ToolResultStatus};
     use std::time::{Duration, Instant};
-    use tars_sandbox::test_support::denied_paths;
     use tokio_util::sync::CancellationToken;
 
     fn runtime() -> (tempfile::TempDir, Arc<CommandRuntime>) {
         let root = tempfile::tempdir().unwrap();
         let runtime = CommandRuntime::bind(root.path(), CommandSettings::default(), None).unwrap();
         (root, runtime)
-    }
-
-    #[test]
-    fn bounded_timeout_reserves_cleanup_before_the_work_deadline() {
-        let requested = Duration::from_secs(120);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let bounded = bounded_timeout(Some(deadline), requested);
-        assert!(bounded <= Duration::from_secs(6));
-        assert!(bounded >= Duration::from_millis(100));
-        assert_eq!(bounded_timeout(None, requested), requested);
-    }
-
-    #[test]
-    fn a_failed_probe_rejects_every_command() {
-        let directory = tempfile::tempdir().unwrap();
-        let error = Sandbox::open_with(Box::new(
-            tars_sandbox::test_support::RecordingBackend::unavailable(),
-        ))
-        .unwrap_err();
-        let runtime = CommandRuntime::bind_with_sandbox(
-            directory.path(),
-            CommandSettings::default(),
-            Err(error),
-            None,
-        )
-        .unwrap();
-        let error = runtime.check(&params("true", None)).unwrap_err();
-        assert!(error.contains("unavailable"), "{error}");
     }
 
     fn params(command: &str, timeout_secs: Option<u64>) -> CommandParams {
@@ -687,134 +658,5 @@ mod tests {
         assert_eq!(result.status, ToolResultStatus::Succeeded);
         assert_ne!(result.content["exit_code"], 0);
         assert!(!outside.exists());
-    }
-
-    #[test]
-    fn storage_denial_is_skipped_only_when_it_overlaps_a_writable_root() {
-        let root = tempfile::tempdir().unwrap();
-        let inside = root.path().join("store/sessions");
-        std::fs::create_dir_all(&inside).unwrap();
-        let runtime =
-            CommandRuntime::bind(root.path(), CommandSettings::default(), Some(inside)).unwrap();
-        assert!(denied_paths(&runtime.policy().unwrap()).is_empty());
-
-        let elsewhere = tempfile::tempdir().unwrap();
-        let outside = elsewhere.path().join("sessions");
-        std::fs::create_dir(&outside).unwrap();
-        let runtime = CommandRuntime::bind(
-            root.path(),
-            CommandSettings::default(),
-            Some(outside.clone()),
-        )
-        .unwrap();
-        let policy = runtime.policy().unwrap();
-        assert_eq!(policy.read_scope(), ReadScope::Host);
-        assert_eq!(
-            denied_paths(&policy).to_vec(),
-            vec![outside.canonicalize().unwrap()]
-        );
-    }
-
-    #[test]
-    fn outside_justification_bounds_are_enforced_by_decoding() {
-        use crate::definition::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
-        use serde_json::json;
-
-        let decode = |outside: bool, justification: Option<String>| {
-            crate::tools::parameters::Params::decode(
-                WorkspaceTool::RunCommand,
-                &json!({
-                    "command": "true",
-                    "outside_sandbox": outside,
-                    "justification": justification
-                }),
-                &WorkspaceToolLimits::default(),
-                &WriteToolLimits::default(),
-                CommandSettings::default(),
-            )
-        };
-        assert!(decode(true, Some("x".repeat(1024))).is_ok());
-        assert!(decode(true, Some("x".repeat(1025))).is_err());
-        assert!(decode(true, Some("中".repeat(341))).is_ok());
-        assert!(decode(true, Some("中".repeat(342))).is_err());
-        assert!(decode(true, Some("  ".into())).is_err());
-        assert!(decode(true, Some("a\0b".into())).is_err());
-        assert!(decode(true, None).is_err());
-        assert!(decode(false, Some("x".repeat(1025))).is_err());
-        assert!(decode(false, Some("a\0b".into())).is_err());
-    }
-
-    #[test]
-    fn an_outside_request_needs_a_justification_before_execution() {
-        let (_root, runtime) = runtime();
-        let without = CommandParams {
-            command: "true".into(),
-            workdir: None,
-            timeout_secs: None,
-            outside_sandbox: Some(true),
-            justification: None,
-        };
-        let error = runtime.check(&without).unwrap_err();
-        assert!(error.contains("justification"), "{error}");
-
-        let with = CommandParams {
-            justification: Some("the sandbox blocks a needed path".into()),
-            ..without
-        };
-        let prepared = runtime.check(&with).unwrap();
-        assert!(prepared.outside_sandbox);
-    }
-
-    #[test]
-    fn timeout_above_the_session_bound_is_rejected() {
-        let (_root, runtime) = runtime();
-        let error = runtime.check(&params("true", Some(601))).unwrap_err();
-        assert!(error.contains("between 1 and 600"), "{error}");
-    }
-
-    #[test]
-    fn workdir_parent_escapes_are_rejected_before_execution() {
-        let (_root, runtime) = runtime();
-        let error = runtime
-            .check(&CommandParams {
-                command: "pwd".into(),
-                workdir: Some("../".into()),
-                timeout_secs: None,
-                outside_sandbox: None,
-                justification: None,
-            })
-            .unwrap_err();
-        assert!(error.contains("bounded relative path"));
-    }
-
-    #[test]
-    fn command_definition_exposes_the_sandbox_and_timeout() {
-        let definition = crate::definition::SessionDefinition {
-            provider: crate::definition::Provider::OpenAiChat,
-            model: "fixture".into(),
-            endpoint: None,
-            credential: crate::definition::CredentialRef::Environment("PATH".into()),
-            work_timeout_secs: Some(10),
-            retained_work_capacity: 1,
-            max_model_rounds: 1,
-            max_tool_calls: 1,
-            max_tokens: None,
-            reasoning_effort: None,
-            extra_body: Default::default(),
-            max_model_attempts: None,
-            render_options: Default::default(),
-            workspace_root: Some(std::env::current_dir().unwrap()),
-            tools: vec![crate::definition::WorkspaceTool::RunCommand],
-            tool_limits: Default::default(),
-            write_limits: None,
-            command: Some(CommandSettings::default()),
-            permission_mode: None,
-            mcp_servers: Vec::new(),
-            context_window: None,
-            auto_compact: true,
-            compact_threshold: 70,
-        };
-        definition.validate().unwrap();
-        assert!(definition.effective_command_settings().is_some());
     }
 }

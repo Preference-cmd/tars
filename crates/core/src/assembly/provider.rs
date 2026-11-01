@@ -43,6 +43,12 @@ pub(crate) struct SessionResources {
     /// with a scripted model.
     #[cfg(test)]
     pub(crate) gateway_override: Option<Arc<dyn ModelGateway>>,
+    /// Test-only command sandbox probe result injected into the real assembly
+    /// path. Mirrors `CommandRuntime::bind_with_sandbox`: no production code
+    /// can choose a backend or a probe result.
+    #[cfg(test)]
+    pub(crate) command_sandbox:
+        Option<Result<crate::sandbox::Sandbox, crate::sandbox::SandboxUnavailable>>,
 }
 
 impl SessionResources {
@@ -56,6 +62,8 @@ impl SessionResources {
             persistent: false,
             #[cfg(test)]
             gateway_override: None,
+            #[cfg(test)]
+            command_sandbox: None,
         }
     }
 
@@ -88,6 +96,18 @@ impl SessionResources {
         self.gateway_override = Some(gateway);
         self
     }
+
+    /// Bind the command runtime with an injected probe result instead of
+    /// probing the platform backend. Test-only: no production path can choose
+    /// a backend or a probe outcome.
+    #[cfg(test)]
+    pub(crate) fn with_test_command_sandbox(
+        mut self,
+        sandbox: Result<crate::sandbox::Sandbox, crate::sandbox::SandboxUnavailable>,
+    ) -> Self {
+        self.command_sandbox = Some(sandbox);
+        self
+    }
 }
 
 pub(crate) fn assemble(
@@ -108,6 +128,8 @@ pub(crate) fn assemble(
         persistent,
         #[cfg(test)]
         gateway_override,
+        #[cfg(test)]
+        command_sandbox,
     } = resources;
     let storage_for_history = storage.clone();
     definition.validate()?;
@@ -121,32 +143,51 @@ pub(crate) fn assemble(
             .workspace_root
             .as_deref()
             .expect("validated root");
-        let workspace =
-            Workspace::open(root).map_err(|error| AssemblyError::Workspace(Arc::new(error)))?;
-        if let Some(settings) = command_settings {
-            let command = crate::tools::CommandRuntime::bind(root, settings, storage)
-                .map_err(|error| AssemblyError::CommandUnavailable(error.to_string()))?;
+        // Bind the command runtime before opening the workspace: a platform
+        // without a backend must fail creation with an error that names the
+        // platform, not with a workspace error, and the workspace tools are
+        // unavailable on those platforms anyway.
+        let command = if let Some(settings) = command_settings {
+            #[cfg(test)]
+            let command = match command_sandbox {
+                Some(sandbox) => crate::tools::CommandRuntime::bind_with_sandbox(
+                    root, settings, sandbox, storage,
+                ),
+                None => crate::tools::CommandRuntime::bind(root, settings, storage),
+            };
+            #[cfg(not(test))]
+            let command = crate::tools::CommandRuntime::bind(root, settings, storage);
+            let command =
+                command.map_err(|error| AssemblyError::CommandUnavailable(error.to_string()))?;
+            // Creating a session fails closed without a backend; reopening may
+            // keep the saved command tool and reject every call at runtime.
             if !allow_unavailable_command && let Some(reason) = command.unavailable_platform() {
                 return Err(AssemblyError::CommandUnavailable(reason));
             }
             // The runtime is moved into the shared tool set; capture the probe
             // result first so the instance can report it without the tools.
             command_status = Some(command.sandbox_status());
-            Some(WorkspaceTools::with_command(
+            Some(command)
+        } else {
+            None
+        };
+        let workspace =
+            Workspace::open(root).map_err(|error| AssemblyError::Workspace(Arc::new(error)))?;
+        match command {
+            Some(command) => Some(WorkspaceTools::with_command(
                 workspace,
                 definition.tool_limits.clone(),
                 definition.write_limits.unwrap_or_default(),
                 tools.clone(),
-                settings,
+                command_settings.expect("command settings accompany the runtime"),
                 Some(command),
-            ))
-        } else {
-            Some(WorkspaceTools::with_write_limits(
+            )),
+            None => Some(WorkspaceTools::with_write_limits(
                 workspace,
                 definition.tool_limits.clone(),
                 definition.write_limits.unwrap_or_default(),
                 tools,
-            ))
+            )),
         }
     };
     let CredentialRef::Environment(name) = &definition.credential;

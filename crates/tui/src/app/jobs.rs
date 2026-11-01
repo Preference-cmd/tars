@@ -138,6 +138,15 @@ fn result_label(result: &WorkResult) -> &'static str {
 /// Longest notice shown after opening, in bytes.
 const MAX_OPENED_NOTICE_BYTES: usize = 256;
 
+/// The fixed clause shown when the session's command sandbox is unavailable.
+pub(super) const COMMAND_UNAVAILABLE_NOTICE: &str = "command sandbox unavailable (see /status)";
+
+/// The startup clause for a probed command sandbox: only an unavailable sandbox
+/// adds a notice; `/status` always shows the full outcome.
+pub(super) fn command_sandbox_notice(available: bool) -> Option<&'static str> {
+    (!available).then_some(COMMAND_UNAVAILABLE_NOTICE)
+}
+
 /// The one-line notice after opening: a saved-mode downgrade, an unavailable
 /// command sandbox and the first MCP server that did not start, with counts,
 /// cut to [`MAX_OPENED_NOTICE_BYTES`]. The fixed command clause comes before the
@@ -269,8 +278,7 @@ impl App {
                             entry.title = session.definition().model;
                             let command_notice = session
                                 .command_status()
-                                .filter(|status| !status.is_available())
-                                .map(|_| "command sandbox unavailable (see /status)");
+                                .and_then(|status| command_sandbox_notice(status.is_available()));
                             entry.notice = opened_notice(
                                 &session.mcp_status(),
                                 session.open_report().permission_downgraded,

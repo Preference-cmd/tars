@@ -28,6 +28,10 @@ pub(super) struct HostInner {
     /// Test-only model gateway injection for the real assembly path.
     #[cfg(test)]
     pub gateway_override: Mutex<Option<Arc<dyn causa::kernel::ModelGateway>>>,
+    /// Test-only command sandbox probe injection for the real assembly path.
+    #[cfg(test)]
+    pub command_sandbox:
+        Mutex<Option<Result<crate::sandbox::Sandbox, crate::sandbox::SandboxUnavailable>>>,
 }
 #[cfg(test)]
 pub(super) type TestAssembly = dyn Fn(
@@ -68,6 +72,8 @@ impl SessionHost {
                 assemble: Mutex::new(None),
                 #[cfg(test)]
                 gateway_override: Mutex::new(None),
+                #[cfg(test)]
+                command_sandbox: Mutex::new(None),
             }),
         })
     }
@@ -88,6 +94,20 @@ impl SessionHost {
     #[cfg(test)]
     pub(crate) fn set_test_gateway(&self, gateway: Option<Arc<dyn causa::kernel::ModelGateway>>) {
         *self.inner.gateway_override.lock().expect("test gateway") = gateway;
+    }
+
+    /// Bind the real assembly path's command runtime with an injected probe
+    /// result instead of probing the platform backend during tests.
+    #[cfg(test)]
+    pub(crate) fn set_test_command_sandbox(
+        &self,
+        sandbox: Option<Result<crate::sandbox::Sandbox, crate::sandbox::SandboxUnavailable>>,
+    ) {
+        *self
+            .inner
+            .command_sandbox
+            .lock()
+            .expect("test command sandbox") = sandbox;
     }
 
     /// Join an existing opening or load a saved record without replaying old work.

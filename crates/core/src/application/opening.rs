@@ -226,6 +226,18 @@ async fn assembled(
         .with_compaction(history, auto_compact, compact_threshold)
         .persistent(persistent);
     #[cfg(test)]
+    let base = {
+        let sandbox = host
+            .command_sandbox
+            .lock()
+            .expect("test command sandbox")
+            .take();
+        match sandbox {
+            Some(sandbox) => base.with_test_command_sandbox(sandbox),
+            None => base,
+        }
+    };
+    #[cfg(test)]
     let resources = {
         let gateway = host.gateway_override.lock().expect("test gateway").clone();
         match gateway {

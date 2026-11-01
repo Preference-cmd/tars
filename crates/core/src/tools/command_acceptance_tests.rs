@@ -1,4 +1,4 @@
-//! Real macOS Seatbelt acceptance for the bound `run_command` tool (SC04-SC07, SC09).
+//! Real macOS Seatbelt acceptance for the bound `run_command` tool (SC04-SC07).
 //!
 //! These tests drive the tool, not `CommandRuntime` directly, so the parameter,
 //! permission-free execution path and output payload are exercised together.
@@ -8,14 +8,15 @@
 //! Seatbelt helper rather than the tool contract.
 //!
 //! Each command runs in a private temporary workspace. Network tests use a
-//! local listener with bounded timeouts, never an external service.
+//! local listener with bounded timeouts, never an external service. The
+//! recording-backend tool contract, including fail-closed probe and capability
+//! rejections, is covered cross-platform in `command_tool_tests`.
 
 use super::command::CommandRuntime;
 use super::{ToolResources, WorkspaceTools};
 use crate::definition::{
     CommandNetwork, CommandSettings, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
 };
-use crate::sandbox::Sandbox;
 use crate::session::{ToolReporter, WorkRef};
 use crate::workspace::Workspace;
 use causa::kernel::{
@@ -31,7 +32,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tars_sandbox::test_support::RecordingBackend;
 use tokio_util::sync::CancellationToken;
 
 fn settings(network: CommandNetwork) -> CommandSettings {
@@ -678,60 +678,4 @@ async fn git_init_is_blocked_in_a_fresh_workspace() {
     assert_eq!(result.status, ToolResultStatus::Succeeded);
     assert_ne!(result.output.content["exit_code"], 0);
     assert!(!root.join(".git").exists());
-}
-
-#[tokio::test]
-async fn a_failed_probe_rejects_every_tool_call_without_launching() {
-    let directory = tempfile::tempdir().unwrap();
-    let backend = RecordingBackend::unavailable();
-    let launches = backend.calls();
-    let error = Sandbox::open_with(Box::new(backend)).unwrap_err();
-    let runtime = CommandRuntime::bind_with_sandbox(
-        directory.path(),
-        CommandSettings::default(),
-        Err(error),
-        None,
-    )
-    .unwrap();
-    let workspace = Workspace::open(&directory.path().canonicalize().unwrap()).unwrap();
-    let shared = WorkspaceTools::with_command(
-        workspace,
-        WorkspaceToolLimits::default(),
-        WriteToolLimits::default(),
-        ToolResources::new(16),
-        CommandSettings::default(),
-        Some(runtime),
-    );
-    let outside = call(json!({
-        "command": "printf third > third.txt",
-        "outside_sandbox": true,
-        "justification": "needs to write outside the workspace"
-    }));
-    shared.outside_sandbox_grants().grant(outside.call_block_id);
-    let calls = vec![
-        call(json!({"command": "printf first > first.txt"})),
-        call(json!({"command": "printf second > second.txt"})),
-        outside,
-    ];
-    let report = reporter(&calls);
-    let tool = shared
-        .bind_for_test(&[WorkspaceTool::RunCommand], report.clone())
-        .pop()
-        .unwrap();
-    let call_control = CallControl::new(CancellationToken::new(), None);
-    for invocation in &calls {
-        let output = tool.execute(invocation, &call_control, None).await;
-        assert_eq!(output.status, ToolResultStatus::Rejected);
-        let reason = output.output.content["error"].as_str().unwrap_or_default();
-        assert!(reason.contains("unavailable"), "{reason}");
-        assert!(reason.contains("probe failed"), "{reason}");
-    }
-    assert!(
-        launches.lock().unwrap().is_empty(),
-        "a failed probe must not launch a process"
-    );
-    assert!(!directory.path().join("first.txt").exists());
-    assert!(!directory.path().join("second.txt").exists());
-    assert!(!directory.path().join("third.txt").exists());
-    report.drain().await;
 }

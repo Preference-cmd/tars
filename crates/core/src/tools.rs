@@ -23,6 +23,10 @@ pub use resources::ToolResources;
 
 #[cfg(all(test, target_os = "macos"))]
 mod command_acceptance_tests;
+#[cfg(test)]
+mod command_runtime_tests;
+#[cfg(test)]
+mod command_tool_tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]

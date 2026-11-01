@@ -88,6 +88,45 @@ fn session_create_reports_the_full_command_sandbox_line_on_stderr() {
     assert_eq!(report(&output)["status"], "created");
 }
 
+/// A failed probe at session creation must still open the session fail-closed
+/// and report the unavailable sandbox through the same `session create` path.
+/// Removing `HOME` makes the Seatbelt probe fail (credential denials need a
+/// home directory) without a production injection seam.
+#[cfg(target_os = "macos")]
+#[test]
+fn session_create_reports_an_unavailable_command_sandbox_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let store = dir.path().join("store");
+    let output = command(&store, "create")
+        .args([
+            "--provider",
+            "openai-chat",
+            "--model",
+            "fixture-model",
+            "--api-key-env",
+            "TARS_TEST_KEY",
+            "--tools",
+            "run_command",
+            "--workspace",
+        ])
+        .arg(&workspace)
+        .env_remove("HOME")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "TARS: command sandbox: seatbelt sandbox is unavailable: HOME is not set; \
+             credential denials require a home directory"
+        ),
+        "{stderr}"
+    );
+    assert_eq!(report(&output)["status"], "created");
+}
+
 struct Fixture {
     endpoint: String,
     requests: mpsc::Receiver<String>,

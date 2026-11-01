@@ -348,3 +348,88 @@ async fn command_panel_allows_the_exact_command_with_y() {
         "allowed"
     );
 }
+
+#[test]
+fn the_startup_clause_is_shown_only_when_the_sandbox_is_unavailable() {
+    use crate::app::jobs::{COMMAND_UNAVAILABLE_NOTICE, command_sandbox_notice, opened_notice};
+
+    assert_eq!(command_sandbox_notice(true), None);
+    assert_eq!(
+        command_sandbox_notice(false),
+        Some(COMMAND_UNAVAILABLE_NOTICE)
+    );
+    assert!(COMMAND_UNAVAILABLE_NOTICE.contains("command sandbox unavailable"));
+    let notice = opened_notice(&[], false, command_sandbox_notice(false));
+    assert!(
+        notice.starts_with("Opened; command sandbox unavailable (see /status);"),
+        "{notice}"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn the_status_line_renders_the_core_sandbox_status_verbatim() {
+    use crate::app::commands::command_status_line;
+
+    let status = tars_core::sandbox::SandboxStatus::Unavailable(
+        tars_core::sandbox::Sandbox::open().unwrap_err(),
+    );
+    let line = command_status_line(&status);
+    assert_eq!(line, format!("Commands: {status}"));
+    assert!(line.starts_with("Commands: "), "{line}");
+    assert!(line.contains("no sandbox backend"), "{line}");
+}
+
+/// End-to-end display of a probe failure in the running TUI app: with `HOME`
+/// unset the Seatbelt probe fails at session creation, so opening the session
+/// must show the fixed startup clause and `/status` must show the full
+/// unavailable status. Ignored by default because CI has `HOME` set; run it
+/// with `env -u HOME CARGO_HOME="$HOME/.cargo" cargo test -p tars-tui -- --ignored
+/// unavailable_command_sandbox`.
+#[cfg(target_os = "macos")]
+#[ignore = "run with HOME unset so the Seatbelt probe fails and the session reports an unavailable sandbox"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unavailable_command_sandbox_is_reported_at_open_and_in_status() {
+    assert!(
+        std::env::var_os("HOME").is_none(),
+        "run this probe with HOME unset"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let workspace = workspace.canonicalize().unwrap();
+    // Creation sends no model request, so the endpoint is never contacted.
+    let mut app = app(dir.path());
+    create_command_session(&mut app, "http://127.0.0.1:9/fixture", &workspace, "ask").await;
+
+    let status = app.entries[0]
+        .session
+        .as_ref()
+        .expect("the session must open with the command tool disabled")
+        .command_status()
+        .expect("the bound command tool reports its probe result");
+    assert!(!status.is_available(), "{status}");
+    assert!(
+        status.to_string().contains("sandbox is unavailable"),
+        "{status}"
+    );
+    assert!(status.to_string().contains("HOME is not set"), "{status}");
+    assert!(
+        app.entries[0]
+            .notice
+            .contains("command sandbox unavailable (see /status)"),
+        "{}",
+        app.entries[0].notice
+    );
+
+    app.event(key(KeyCode::Char('/')));
+    for character in "status".chars() {
+        app.event(key(KeyCode::Char(character)));
+    }
+    app.event(key(KeyCode::Enter));
+    let view = screen(&app);
+    assert!(
+        view.contains("Commands: seatbelt sandbox is unavailable: HOME is not set"),
+        "{view}"
+    );
+}

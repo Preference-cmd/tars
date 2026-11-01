@@ -23,6 +23,12 @@ pub(crate) enum Panel {
     },
 }
 
+/// The `/status` line for the probed command sandbox, with its own vocabulary
+/// and no UI reinterpretation.
+pub(super) fn command_status_line(status: &tars_core::sandbox::SandboxStatus) -> String {
+    format!("Commands: {status}")
+}
+
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("new", "Create a session with model settings"),
     ("sessions", "Find and open a saved or active session"),
@@ -196,7 +202,7 @@ impl App {
                         .as_ref()
                         .and_then(|session| session.command_status())
                     {
-                        lines.push(format!("Commands: {status}"));
+                        lines.push(command_status_line(&status));
                     }
                     if let Some(capacity) = entry
                         .session

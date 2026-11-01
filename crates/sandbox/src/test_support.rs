@@ -130,6 +130,21 @@ pub fn denied_paths(policy: &SandboxPolicy) -> &[PathBuf] {
     &policy.denied_paths
 }
 
+/// Every path list in a policy: read roots, write roots, read-only subpaths,
+/// protected entries and denied paths.
+///
+/// This is a view for `tars-core` tests that assert the generated policy holds
+/// only canonical absolute paths; production code has no accessor.
+pub fn policy_paths(policy: &SandboxPolicy) -> [&[PathBuf]; 5] {
+    [
+        &policy.read_roots,
+        &policy.write_roots,
+        &policy.read_only_subpaths,
+        &policy.protected_entries,
+        &policy.denied_paths,
+    ]
+}
+
 /// The environment variables a launch request applies after clearing the
 /// inherited environment.
 pub fn launch_environment(launch: &Launch) -> &[(OsString, OsString)] {

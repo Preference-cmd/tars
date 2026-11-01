@@ -2545,7 +2545,15 @@ async fn command_tool_creation_fails_on_unsupported_platform() {
         .await
         .err()
         .expect("run_command must fail closed on unsupported platforms");
-    assert!(error.to_string().contains("command"));
+    let reason = error.to_string();
+    assert!(
+        reason.contains("requires a platform sandbox backend"),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(std::env::consts::OS),
+        "the error must name the platform: {reason}"
+    );
 }
 
 #[cfg(target_os = "macos")]

@@ -56,6 +56,19 @@ impl Workspace {
         Err(WorkspaceError::UnsupportedPlatform)
     }
 
+    /// A detached handle for command-tool tests on a platform without
+    /// workspace access.
+    ///
+    /// The command tool resolves its own workspace root and never uses the file
+    /// tools, so a command-only test can bind the shared tool set without a
+    /// real directory handle. Compiled only for tests on platforms where
+    /// [`Workspace::open`] has no implementation, and never reachable from
+    /// production code.
+    #[cfg(all(test, not(any(target_os = "linux", target_os = "macos"))))]
+    pub(crate) fn detached_for_command_tests() -> Arc<Self> {
+        Arc::new(Self {})
+    }
+
     pub(crate) fn components(path: &str) -> Result<Vec<String>, WorkspaceError> {
         if path.is_empty() || path.len() > 4096 || path.contains('\0') || path.contains('\\') {
             return Err(WorkspaceError::InvalidPath);
