@@ -6,8 +6,24 @@ Validation comes first; the application is how it is done. TARS ships as an
 application, not a crates.io library or a public Rust SDK. All Cargo packages
 must remain `publish = false`.
 
-`CLAUDE.md` is a symlink to this file; edit this file only. Read
-`AGENTS.local.md` when present for machine-local workflow rules.
+`CLAUDE.md` is a symlink to this file; edit this file only. `AGENTS.local.md` is
+machine-local, gitignored and absent from public clones; read it when present
+for machine-local workflow rules.
+
+## Repository layout and local-only files
+
+The tracked tree is the public project: `README.md`, `docs/`, `crates/`, the
+Cargo files, `.github/workflows/` and `LICENSE`. A local checkout can also carry
+material that is gitignored and absent from the public repository:
+
+- `.agents/` — local design index, proposals, reviews and source snapshots.
+- `scripts/` — local verification helpers.
+- `AGENTS.local.md` — machine-local workflow rules.
+
+Never force-add these paths, commit credentials or machine-local paths, or push
+local-only content: the repository and its history are public. Links to those
+paths only resolve in a local checkout; a public clone relies on `docs/` and the
+code.
 
 ## Purpose
 
@@ -39,12 +55,14 @@ must remain `publish = false`.
 | Change workspace tool access, limits or status | [Workspace tools](docs/workspace-tools.md), `tars-core::workspace`, `tars-core::tools`, `session::ToolReporter` |
 | Change shared TOML configuration | [Configuration](docs/configuration.md), `tars-core::config` |
 | Run or change the terminal prototype | [TUI prototype](docs/tui.md), `crates/tui/` |
-| Plan a change or inspect acceptance status | [Local design index](.agents/README.md) |
-| Follow Direct/Noted or proposal lifecycle rules | [Workflow](.agents/pipelines/WORKFLOW.md) |
+| Plan a change or inspect acceptance status (local checkout) | `.agents/README.md` |
+| Follow Direct/Noted or proposal lifecycle rules (local checkout) | `.agents/pipelines/WORKFLOW.md` |
 
-Keep implementation facts in `docs/`; keep proposals, acceptance progress and
-historical evidence in the local `.agents/` tree. Read the relevant proposal
-before implementation. Proposed structures are not current capabilities.
+Keep implementation facts in `docs/`. Proposals, acceptance progress and
+historical evidence stay in the local `.agents/` tree when present: read the
+relevant proposal before implementation there. In a public clone without that
+tree, `docs/` and the code are the only authority. Proposed structures are not
+current capabilities.
 
 ## Verify facts at the source
 
@@ -57,7 +75,8 @@ before implementation. Proposed structures are not current capabilities.
 
 Do not infer implemented behavior from a proposal or an old review. Keep the
 README, current docs and affected guidance aligned when layout, commands or
-features change; keep one authoritative acceptance list per proposal scope.
+features change; when maintaining the local proposal tree, keep one
+authoritative acceptance list per proposal scope.
 
 ## Architecture and conventions
 
@@ -84,16 +103,22 @@ features change; keep one authoritative acceptance list per proposal scope.
   limited to documentation, declarations and explicit re-exports.
 - Deny unsafe code and document public library APIs. Explain new dependencies
   or an MSRV increase in the commit. Keep `Cargo.lock` committed.
-- Use Conventional Commits, one logical change per commit. Local tracking and
-  branch defaults belong in `AGENTS.local.md`, not in duplicated process rules.
+- Use Conventional Commits, one logical change per commit. Machine-local
+  tracking and branch defaults belong in the gitignored `AGENTS.local.md` when
+  present, not in duplicated process rules.
 
 ## Validation and delivery
 
 Use the relevant checks in [docs/README.md](docs/README.md), including formatting,
 warning-free lint/docs, tests and release builds when applicable. Test observable
 behavior and failure cases; build success alone does not satisfy behavior gates.
-Documentation-only changes need link/proposal checks, not unrelated Rust tests.
+GitHub Actions runs [ci.yml](.github/workflows/ci.yml) on every push and pull
+request; keep that workflow green in addition to local checks. Documentation-only
+changes need link checks, and proposal checks when the local `.agents/` tree is
+present, not unrelated Rust tests.
 
-Tests use local fixtures; do not require live model credentials. Installation,
-platform support and release delivery need their own evidence. Do not treat a
-local build as a published release or import Causa's library publishing workflow.
+Tests use local fixtures; do not require live model credentials. Gate tests that
+need Unix workspace access or Seatbelt with `cfg` so every platform runs the
+common suite. Installation, platform support and release delivery need their own
+evidence. Do not treat a local build as a published release or import Causa's
+library publishing workflow.
