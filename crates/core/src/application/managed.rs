@@ -506,6 +506,33 @@ impl ManagedSession {
         Ok(())
     }
 
+    /// Current request-size estimate for the status display.
+    ///
+    /// The estimate combines the last upstream prompt size with the material
+    /// added since that request. Returns `None` for a session without
+    /// compaction history or after it closed.
+    pub fn context_usage(&self) -> Option<ContextUsage> {
+        let mut state = self.entry.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return None;
+        }
+        let owner = state.owner.as_mut()?;
+        let runtime = owner.compaction()?;
+        let bytes = owner
+            .with_context(|context| {
+                self.entry.cloned_snapshot();
+                crate::compact::estimate::context_bytes(context)
+            })
+            .ok()?;
+        let (auto_compact, compact_threshold) = runtime.settings();
+        Some(ContextUsage {
+            estimate_tokens: runtime.usage().estimate(bytes),
+            context_window: runtime.window(),
+            auto_compact,
+            compact_threshold,
+        })
+    }
+
     /// Segment index of the replaced conversations, in creation order.
     pub fn history(&self) -> Vec<HistorySegment> {
         self.entry

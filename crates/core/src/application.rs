@@ -24,8 +24,9 @@ pub use repair::{
 };
 pub use types::{
     ApplicationError, CloseOutcome, ClosePolicy, CommitDisposition, CompactionSettings,
-    HostOptions, Lifecycle, ManagedSubmitRejection, MaterialSnapshot, MaterialVersion, OpenReport,
-    PreparedCreate, SaveStatus, SavedSessionSummary, SessionListing, SessionStatus, SessionTarget,
+    ContextUsage, HostOptions, Lifecycle, ManagedSubmitRejection, MaterialSnapshot,
+    MaterialVersion, OpenReport, PreparedCreate, SaveStatus, SavedSessionSummary, SessionListing,
+    SessionStatus, SessionTarget,
 };
 
 #[cfg(test)]

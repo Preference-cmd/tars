@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 pub use history::HistorySegmentDocument;
 pub use runtime::CompactionOutcome;
 pub(crate) use runtime::CompactionRuntime;
+pub use summary::SUMMARY_SOURCE;
 
 /// Why a compaction attempt was abandoned before editing the Context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

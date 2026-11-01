@@ -35,6 +35,14 @@ async fn auto_compaction_replaces_the_context_and_saves_one_segment() {
     session.wait_saved().await.unwrap();
     assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 1);
     assert_eq!(gateway.main_calls.load(Ordering::SeqCst), 1);
+    let usage = session.context_usage().unwrap();
+    assert_eq!(usage.context_window, Some(1_000));
+    assert!(usage.auto_compact);
+    assert_eq!(usage.compact_threshold, 70);
+    assert!(
+        usage.estimate_tokens < 1_000,
+        "the compacted material is far below the window"
+    );
 
     let id = session.target().conversation_id().as_str().to_owned();
     let record = saved_record(store.path(), &id);

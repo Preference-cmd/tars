@@ -166,6 +166,19 @@ pub struct CompactionSettings {
     pub context_window: Option<u64>,
 }
 
+/// Current conservative request-size estimate and configured window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextUsage {
+    /// Estimated prompt size of the next request, in tokens.
+    pub estimate_tokens: u64,
+    /// Frozen model context window, or none when unknown.
+    pub context_window: Option<u64>,
+    /// Whether automatic compaction is enabled.
+    pub auto_compact: bool,
+    /// Trigger percentage of the context window.
+    pub compact_threshold: u8,
+}
+
 /// Read-only lookup and managed status; does not grant mutable owner access.
 #[derive(Clone, Debug)]
 pub struct SessionStatus {

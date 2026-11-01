@@ -17,7 +17,7 @@ pub(crate) const SUMMARY_MAX_TOKENS: u32 = 16_000;
 pub(crate) const SUMMARY_PREFIX: &str = "The conversation before this point was compacted into the working brief below. It is the only record of the earlier messages.\n\n";
 
 /// Block provenance marking a TARS-written summary; only TARS reads it.
-pub(crate) const SUMMARY_SOURCE: &str = "tars:compaction";
+pub const SUMMARY_SOURCE: &str = "tars:compaction";
 
 /// Structured instruction appended after the old material.
 pub(crate) fn instruction(current_request: Option<&str>) -> String {
