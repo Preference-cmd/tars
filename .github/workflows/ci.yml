@@ -38,11 +38,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install toolchain
         run: rustup toolchain install 1.96.0 --profile minimal
-      # Workspace tools need Unix handle-relative filesystem access; the
-      # Windows job proves the release build and CLI smoke only until that
-      # platform supports them (see docs/workspace-tools.md).
-      - name: Test (Linux/macOS)
-        if: runner.os != 'Windows'
+      # Tests are split in code: common suites run on every platform, while
+      # workspace tools and SIGINT need Unix and Seatbelt needs macOS, so those
+      # suites only compile where the platform supports them.
+      - name: Tests (common + platform-specific)
         run: cargo test --workspace --locked
       - run: cargo build --workspace --locked --release
       - name: CLI smoke
