@@ -1,4 +1,9 @@
 use super::support::*;
+use crate::application::RepairMode;
+use causa::kernel::{
+    CallControl, ModelGateway, ModelInvokeError, ModelItem, ModelOutput, ModelRequest,
+    ModelResponse, ModelStopReason, ToolCallDraft,
+};
 
 /// Wait for the work to settle and its save to confirm without observing it,
 /// so the retained record stays "unread".
@@ -96,4 +101,108 @@ async fn work_capacity_is_reported_for_a_transient_session() {
     let receipt = session.submit(request("only")).unwrap();
     finished(&session, &receipt.work).await;
     assert_eq!(session.work_capacity().unwrap().used, 1);
+}
+
+/// First ordinary round asks for the fixture tool; later rounds finish.
+struct FirstToolThenText(AtomicUsize);
+
+#[async_trait::async_trait]
+impl ModelGateway for FirstToolThenText {
+    async fn invoke(
+        &self,
+        _: &ModelRequest,
+        _: &CallControl,
+    ) -> Result<ModelOutput, ModelInvokeError> {
+        let first = self.0.fetch_add(1, Ordering::SeqCst) == 0;
+        let mut output = ModelOutput::new(
+            ModelResponse {
+                items: if first {
+                    vec![ModelItem::tool_call(ToolCallDraft::new(
+                        "fixture",
+                        serde_json::json!({}),
+                    ))]
+                } else {
+                    vec![ModelItem::text("completed fixture work")]
+                },
+            },
+            if first {
+                ModelStopReason::ToolUse
+            } else {
+                ModelStopReason::EndTurn
+            },
+        );
+        output.usage = Some(causa::kernel::ModelUsage::new(100, 10));
+        Ok(output)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unclaimed_original_batches_are_retained_then_released_after_claim() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(root.path().into()));
+    let existing = request("seed").blocks.remove(0);
+    let runner = Arc::new(TurnRunner::new(
+        Arc::new(FirstToolThenText(AtomicUsize::new(0))),
+        Arc::new(
+            ToolExecutor::new(
+                vec![Arc::new(HeldTool {
+                    entered: Arc::new(Notify::new()),
+                    release: Arc::new(Notify::new()),
+                    stopped: Arc::new(AtomicUsize::new(0)),
+                })],
+                ToolExecutorOptions::default()
+                    .with_before(vec![Arc::new(CollisionBatch(existing.id()))]),
+            )
+            .unwrap(),
+        ),
+    ));
+    custom_runner(&host, runner);
+    let mut definition = definition();
+    definition.retained_work_capacity = 2;
+    definition.max_tool_calls = 1;
+    let session = host
+        .create(PreparedCreate::persistent(
+            definition,
+            Context::from_blocks(vec![existing]).unwrap(),
+        ))
+        .await
+        .unwrap();
+    // A: interrupted with an uncommitted original batch, and read.
+    let blocked = session
+        .submit(SubmitRequest {
+            request_key: "original".into(),
+            blocks: Vec::new(),
+        })
+        .unwrap();
+    finished(&session, &blocked.work).await;
+    session.wait_saved().await.unwrap();
+    // New input cannot pass admission until the unpaired material is handled.
+    let plan = session.plan_repair(RepairMode::RemoveUnpaired).unwrap();
+    session.apply_repair(&plan).unwrap();
+    session.wait_saved().await.unwrap();
+    // B fills the retained sheet; both records are now read.
+    let second = session.submit(request("second")).unwrap();
+    finished(&session, &second.work).await;
+    session.wait_saved().await.unwrap();
+    assert_eq!(session.work_capacity().unwrap().used, 2);
+    // C releases the eligible B, while A's unclaimed batch stays retained and
+    // still readable by the repair inspection.
+    let third = session.submit(request("third")).unwrap();
+    finished(&session, &third.work).await;
+    session.wait_saved().await.unwrap();
+    assert!(session.observe(&second.work).is_err());
+    assert!(session.inspect_repair(Some(&blocked.work)).is_ok());
+    let batch = host
+        .take_uncommitted_tool_batch(&session.target(), &blocked.work)
+        .expect("original batch claimed once")
+        .expect("unclaimed batch is still attached");
+    assert_eq!(batch.completed_len(), 1);
+    // After the claim the old record is eligible; the next admission releases it.
+    let fourth = session.submit(request("fourth")).unwrap();
+    finished(&session, &fourth.work).await;
+    session.wait_saved().await.unwrap();
+    assert!(session.observe(&blocked.work).is_err());
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
 }
