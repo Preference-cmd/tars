@@ -233,10 +233,25 @@ pub(crate) struct App {
     pub(crate) clock: Clock,
     pub(crate) last_visible_approval: Option<VisibleApproval>,
     pub(crate) approval_guard: GuardWindow,
+    /// The startup environment check; `None` once the main screen is reached.
+    pub(crate) startup: Option<super::startup::Startup>,
+    /// The checks and the installation the startup splash draws from.
+    pub(crate) startup_backend: Arc<dyn super::startup::StartupBackend>,
+    /// Shortened by tests so the timeout path needs no real wait.
+    #[cfg(test)]
+    pub(crate) test_startup_timeout: Duration,
+    /// The probed sandbox, kept for `/status`.
+    pub(crate) sandbox: Option<super::startup::SandboxCheck>,
+    /// The resolved external tools bound to every session host this TUI opens.
+    pub(crate) external_tools: Option<tars_core::external_tools::ExternalTools>,
+    /// Why search cannot work, when the startup check found a reason.
+    pub(crate) search_reason: Option<String>,
 }
 impl App {
     pub fn new(options: Options) -> Self {
         let host = SessionHost::new(Some(options.store.clone()));
+        let startup_backend: Arc<dyn super::startup::StartupBackend> =
+            Arc::new(super::startup::ProcessBackend::new(options.config.clone()));
         let notice = if let Some(warning) = options.config.warnings().first() {
             warning.chars().take(120).collect()
         } else {
@@ -269,6 +284,13 @@ impl App {
             clock: Clock::real(),
             last_visible_approval: None,
             approval_guard: GuardWindow::new(),
+            startup: None,
+            startup_backend,
+            #[cfg(test)]
+            test_startup_timeout: super::startup::STARTUP_TIMEOUT,
+            sandbox: None,
+            external_tools: None,
+            search_reason: None,
         }
     }
     pub(super) fn entry_mut(&mut self, key: &Key) -> Option<&mut Entry> {
@@ -362,5 +384,6 @@ impl App {
         self.clock.advance(duration);
         self.update_approval_guard();
         self.update_repair_guard();
+        self.update_startup_guard();
     }
 }

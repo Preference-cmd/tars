@@ -11,6 +11,7 @@ mod wire;
 mod navigation;
 
 mod repair;
+mod startup;
 mod streaming;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

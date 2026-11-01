@@ -11,7 +11,9 @@ impl App {
         let mut events = EventStream::new();
         let mut tick = tokio::time::interval(Duration::from_millis(50));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        self.list();
+        // Environment checks begin after terminal initialization; the main
+        // screen is only drawn once the splash settles.
+        self.begin_startup();
         loop {
             tokio::select! {
                 event = events.next() => match event {
@@ -22,9 +24,12 @@ impl App {
                 result = self.jobs.join_next(), if !self.jobs.is_empty() => {
                     match result {
                         Some(Ok(message)) => self.complete(message),
+                        // A cancelled or ended adapter must not close other
+                        // sessions. Panics already arrive as JobPanicked.
+                        // Quitting the splash aborts its checks, so a cancelled
+                        // startup job is not a UI failure.
+                        Some(Err(error)) if error.is_cancelled() => {}
                         Some(Err(error)) => {
-                            // A cancelled or ended adapter must not close other
-                            // sessions. Panics already arrive as JobPanicked.
                             self.notice = format!("UI task ended: {error}");
                             self.dirty = true;
                         }
@@ -49,6 +54,10 @@ impl App {
     }
     pub(super) fn event(&mut self, event: Event) {
         self.dirty = true;
+        if self.startup.is_some() {
+            self.startup_event(event);
+            return;
+        }
         self.update_approval_guard();
         self.update_repair_guard();
         let is_guarded = self.is_approval_guarded();

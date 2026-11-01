@@ -55,6 +55,12 @@ pub(super) enum Message {
     Retried(Key, Result<SaveStatus, ApplicationError>),
     Exported(Key, Result<(String, bool), String>),
     Closed(Key, Result<CloseOutcome, ApplicationError>),
+    /// The startup sandbox check finished.
+    StartupSandbox(super::startup::SandboxCheck),
+    /// The startup tool check (or its re-resolve after an installation) finished.
+    StartupTools(super::startup::ToolCheck),
+    /// The consent-gated installation finished; the reason is core's own text.
+    StartupInstalled(Result<(), String>),
     JobPanicked(Option<Key>, JobKind, String),
 }
 
@@ -72,6 +78,10 @@ pub(super) enum JobKind {
     Compact,
     Wrapping,
     Repair(causa::kernel::BlockId),
+    /// One of the two startup checks.
+    Startup,
+    /// The consent-gated managed installation.
+    StartupInstall,
 }
 
 pub(super) fn save_label(save: &SaveStatus) -> String {
@@ -455,6 +465,9 @@ impl App {
                     };
                 }
             }
+            Message::StartupSandbox(check) => self.startup_sandbox(check),
+            Message::StartupTools(check) => self.startup_tools(check),
+            Message::StartupInstalled(result) => self.startup_installed(result),
             Message::Closed(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     entry.busy = None;
@@ -509,6 +522,10 @@ impl App {
                     self.notice = message;
                     return;
                 }
+                if matches!(kind, JobKind::Startup | JobKind::StartupInstall) {
+                    self.startup_failed(&detail);
+                    return;
+                }
                 let Some(key) = key else {
                     self.notice = message;
                     return;
@@ -523,6 +540,9 @@ impl App {
                     };
                     match kind {
                         JobKind::List => unreachable!("handled before the entry lookup"),
+                        JobKind::Startup | JobKind::StartupInstall => {
+                            unreachable!("handled before the entry lookup")
+                        }
                         JobKind::Materials => {
                             entry.refreshing = false;
                             entry.requested_material_version = None;

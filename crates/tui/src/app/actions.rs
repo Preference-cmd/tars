@@ -253,6 +253,7 @@ impl App {
         );
     }
     pub(super) fn poll(&mut self) {
+        self.poll_startup();
         self.poll_progress();
         for entry in &mut self.entries {
             if let Some(rx) = &mut entry.approvals_rx {

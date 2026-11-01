@@ -43,13 +43,23 @@ pub(super) async fn until(app: &mut App, predicate: impl Fn(&App) -> bool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             app.poll();
-            if predicate(app) { return; }
+            if predicate(app) {
+                return;
+            }
             tokio::select! {
-                Some(message) = app.jobs.join_next(), if !app.jobs.is_empty() => app.complete(message.unwrap()),
+                Some(message) = app.jobs.join_next(), if !app.jobs.is_empty() => {
+                    // A job aborted by a test (quitting the splash) is not a
+                    // message and must not fail the harness.
+                    if let Ok(message) = message {
+                        app.complete(message);
+                    }
+                },
                 _ = tokio::time::sleep(Duration::from_millis(5)) => {},
             }
         }
-    }).await.expect("TUI predicate must settle");
+    })
+    .await
+    .expect("TUI predicate must settle");
 }
 pub(super) async fn create(app: &mut App, endpoint: &str) {
     create_provider(app, "openai-chat", endpoint).await;

@@ -44,6 +44,10 @@ pub(super) fn inset(area: Rect) -> Rect {
     )
 }
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
+    if let Some(startup) = &app.startup {
+        super::splash::draw(frame, startup);
+        return;
+    }
     let area = frame.area();
     let pending = app
         .entries
@@ -496,7 +500,17 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             notice = format!("{hint}\n{notice}");
         }
     }
-    let warning = notice.contains("failed")
+    // Search availability is a startup fact, so it stays in the status area
+    // even after later notices replace the transient message above it.
+    if let Some(search) = app.search_unavailable_notice() {
+        notice = if notice.is_empty() {
+            search
+        } else {
+            format!("{search}\n{notice}")
+        };
+    }
+    let warning = app.search_reason.is_some()
+        || notice.contains("failed")
         || notice.contains("Failed")
         || notice.contains("paused")
         || notice.contains("retained")

@@ -195,6 +195,12 @@ impl App {
                 let mut lines = vec![format!("Config: {}", self.options.config_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "none".into())),
                     format!("Store: {}", self.options.store.display()),
                     format!("Recovery exports: {}", self.options.recovery_dir.display())];
+                if let Some(line) = self.search_status_line() {
+                    lines.push(line);
+                }
+                if let Some(sandbox) = &self.sandbox {
+                    lines.push(format!("Sandbox: {}", sandbox.detail));
+                }
                 if let Some(entry) = self.entries.get(self.selected) {
                     lines.extend([format!("Session: {}", entry.id()), format!("Model: {}", entry.title), entry.execution.clone(), entry.status.clone(), entry.notice.clone()]);
                     if let Some(status) = entry
