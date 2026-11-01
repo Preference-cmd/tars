@@ -29,6 +29,23 @@ pub(crate) enum SessionCommand {
         store: PathBuf,
         json: bool,
     },
+    Compact {
+        store: PathBuf,
+        id: String,
+        recovery_dir: PathBuf,
+        json: bool,
+    },
+    History {
+        store: PathBuf,
+        id: String,
+        last: Option<usize>,
+        json: bool,
+    },
+    Show {
+        store: PathBuf,
+        id: String,
+        json: bool,
+    },
     Repair {
         store: PathBuf,
         id: String,
@@ -64,7 +81,7 @@ impl SessionCommand {
                     .ok_or("--output is required")?,
             });
         }
-        let id = if matches!(command, "run" | "repair") {
+        let id = if matches!(command, "run" | "repair" | "compact" | "history" | "show") {
             let (id, rest) = args.split_first().ok_or("conversation ID is required")?;
             args = rest;
             Some(
@@ -75,7 +92,10 @@ impl SessionCommand {
         } else {
             None
         };
-        if !matches!(command, "create" | "run" | "list" | "repair") {
+        if !matches!(
+            command,
+            "create" | "run" | "list" | "repair" | "compact" | "history" | "show"
+        ) {
             return Err("unknown session command".into());
         }
         let mut values = HashMap::new();
@@ -115,11 +135,16 @@ impl SessionCommand {
                 | "--tools"
                 | "--command-network"
                 | "--mcp"
+                | "--context-window"
+                | "--auto-compact"
                     if command == "create" =>
                 {
                     insert(&mut values, flag, &mut args)?;
                 }
                 "--input" if command == "run" => {
+                    insert(&mut values, flag, &mut args)?;
+                }
+                "--last" if command == "history" => {
                     insert(&mut values, flag, &mut args)?;
                 }
                 "--permission-mode" if matches!(command, "create" | "run") => {
@@ -128,7 +153,7 @@ impl SessionCommand {
                 "--expected-revision" if command == "repair" => {
                     insert(&mut values, flag, &mut args)?;
                 }
-                "--recovery-dir" if matches!(command, "create" | "run" | "repair") => {
+                "--recovery-dir" if matches!(command, "create" | "run" | "repair" | "compact") => {
                     insert(&mut values, flag, &mut args)?;
                 }
                 _ => return Err("unknown, duplicate, or inapplicable session option".into()),
@@ -226,6 +251,38 @@ impl SessionCommand {
                     json,
                 })
             }
+            "compact" => Ok(Self::Compact {
+                store,
+                id: id.expect("compact ID parsed"),
+                recovery_dir: values
+                    .get("--recovery-dir")
+                    .map(PathBuf::from)
+                    .or_else(|| config.recovery_dir().map(PathBuf::from))
+                    .unwrap_or_else(|| PathBuf::from(".")),
+                json,
+            }),
+            "history" => {
+                let last = string("--last")?
+                    .map(|value| {
+                        value
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|count| *count > 0)
+                            .ok_or("--last must be a positive integer")
+                    })
+                    .transpose()?;
+                Ok(Self::History {
+                    store,
+                    id: id.expect("history ID parsed"),
+                    last,
+                    json,
+                })
+            }
+            "show" => Ok(Self::Show {
+                store,
+                id: id.expect("show ID parsed"),
+                json,
+            }),
             _ => Ok(Self::List { store, json }),
         }
     }

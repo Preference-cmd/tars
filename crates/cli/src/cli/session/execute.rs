@@ -68,6 +68,27 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 json,
             } => run_saved(store, id, input, permission_mode, recovery_dir, json).await,
             SessionCommand::List { store, json } => (list(store, json).await, false),
+            SessionCommand::Compact {
+                store,
+                id,
+                recovery_dir,
+                json,
+            } => (
+                super::compaction::compact(store, id, recovery_dir, json).await,
+                false,
+            ),
+            SessionCommand::History {
+                store,
+                id,
+                last,
+                json,
+            } => (
+                super::compaction::history(store, id, last, json).await,
+                false,
+            ),
+            SessionCommand::Show { store, id, json } => {
+                (super::show::show(store, id, json).await, false)
+            }
             SessionCommand::Repair {
                 store,
                 id,

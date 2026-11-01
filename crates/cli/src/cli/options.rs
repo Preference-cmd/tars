@@ -44,6 +44,8 @@ impl RunOptions {
                 | "--extra-body"
                 | "--render-options"
                 | "--max-model-attempts"
+                | "--context-window"
+                | "--auto-compact"
                 | "--permission-mode" => {
                     let value = args.next().ok_or("option needs a value")?;
                     if (value.is_empty() && !matches!(flag, "--tools" | "--mcp"))

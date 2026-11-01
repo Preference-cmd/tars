@@ -1,8 +1,10 @@
 //! Persistent session command parsing and presentation.
 
+mod compaction;
 mod execute;
 mod options;
 mod repair;
+mod show;
 
 pub(super) use execute::run;
 pub(super) use options::SessionCommand;
@@ -12,6 +14,9 @@ pub(super) const HELP: &str = "Persistent TARS sessions
 Usage: tars session create --store <directory> --provider <protocol> --model <id> [options]
        tars session run <conversation-id> --store <directory> (--input <text> | --stdin) [options]
        tars session list --store <directory> [--json]
+       tars session show <conversation-id> --store <directory> [--json]
+       tars session compact <conversation-id> --store <directory> [--json]
+       tars session history <conversation-id> --store <directory> [--last N] [--json]
        tars session repair <conversation-id> --store <directory> [--dry-run | --apply --expected-revision N] [--json]
        tars session export-materials --record <file> --output <new-file>
 
@@ -30,6 +35,9 @@ Create options:
   --extra-body   JSON object of further request fields, sent as written
   --render-options    JSON object of the protocol's render options, e.g. max_tokens_field
   --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
+  --context-window    Model context window in tokens; omitted leaves it unknown
+  --auto-compact      on | off | PERCENT: automatic compaction switch, or a trigger
+                      percentage in 10–95 that also enables it (default on, 70)
   --workspace         Root directory for selected workspace tools
   --tools             Comma-separated list_directory,read_file,search_text,write_file,edit_file,run_command (default empty)
   --command-network   Command network: none or open (default none)
@@ -51,6 +59,14 @@ Run options:
   --recovery-dir      Material recovery directory on save failure
                       (default: configured recovery_dir, else current directory)
 
+Compact options:
+  --recovery-dir      Material recovery directory if saving the compacted
+                      materials fails (default: configured recovery_dir, else
+                      current directory)
+
+History options:
+  --last N            Print only the newest N history segments
+
 Common options:
   --store             Local store directory (or configured store)
   --config            Shared TOML configuration file
@@ -69,6 +85,18 @@ so its configured credential environment and workspace must remain available.
 It cannot recover a previous process's uncommitted results. Removing declarations
 from future requests does not establish whether their operations occurred.
 Repair does not send a new input; use session run explicitly after saving.
+
+Show reports the saved revision, block count, context usage, history segment
+count and retained-work capacity (`Works: 3 / 256`) without changing the record
+or calling a model.
+Compact replaces the current Context with a brief written by the session's own
+model and saves it; the replaced conversation is kept as a read-only history
+segment. A busy session is refused, and materials with unpaired declarations
+must be repaired first.
+History reads one replaced segment at a time, in order, then the current
+Context; --json prints one tars-history-v1 document per line.
+Material export and --load import contain only the current Context, never the
+replaced history segments.
 
 export-materials extracts validated Context from a v1/v2 session record offline.
 It neither loads configuration nor opens a session; an existing output is refused.

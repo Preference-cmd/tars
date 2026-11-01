@@ -1,7 +1,9 @@
 use std::{collections::HashMap, ffi::OsString, process::ExitCode};
 use tars_core::{
     config::{Config, ConfigSource, DefinitionOverrides, parse_mcp, parse_tools},
-    definition::{CommandNetwork, Provider, SessionDefinition},
+    definition::{
+        CommandNetwork, MAX_COMPACT_THRESHOLD, MIN_COMPACT_THRESHOLD, Provider, SessionDefinition,
+    },
 };
 
 pub(super) type Values<'a> = HashMap<&'a str, &'a OsString>;
@@ -115,6 +117,29 @@ pub(super) fn definition(
             })
             .transpose()
     };
+    let context_window = number("--context-window")?;
+    if context_window == Some(0) {
+        return Err(CliError::argument(
+            "--context-window must be a positive token count",
+        ));
+    }
+    // `on`/`off` set the switch alone; an integer sets the trigger percentage
+    // and turns automatic compaction on.
+    let (auto_compact, compact_threshold) = match string(values, "--auto-compact")?.as_deref() {
+        None => (None, None),
+        Some("on") => (Some(true), None),
+        Some("off") => (Some(false), None),
+        Some(value) => match value.parse::<u8>() {
+            Ok(percent) if (MIN_COMPACT_THRESHOLD..=MAX_COMPACT_THRESHOLD).contains(&percent) => {
+                (Some(true), Some(percent))
+            }
+            _ => {
+                return Err(CliError::argument(
+                    "--auto-compact must be on, off, or an integer percentage between 10 and 95",
+                ));
+            }
+        },
+    };
     let overrides = DefinitionOverrides {
         provider,
         workspace_root: values.get("--workspace").map(|path| (*path).into()),
@@ -162,9 +187,9 @@ pub(super) fn definition(
             .map(u32::try_from)
             .transpose()
             .map_err(|_| CliError::argument("tool call limit too large"))?,
-        context_window: None,
-        auto_compact: None,
-        compact_threshold: None,
+        context_window,
+        auto_compact,
+        compact_threshold,
         max_tokens: number("--max-tokens")?
             .map(u32::try_from)
             .transpose()

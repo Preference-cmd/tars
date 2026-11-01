@@ -8,7 +8,7 @@ const HELP: &str = "TARS — agent application
 Usage: tars [--help | --version]
        tars demo [--save <file>]
        tars run --provider <protocol> --model <id> (--input <text> | --stdin) [options]
-       tars session <create | run | list> [options]
+       tars session <create | run | list | show | compact | history | repair | export-materials> [options]
 
 Commands:
   demo           Run the offline single-session demonstration
@@ -28,6 +28,10 @@ Run options:
   --extra-body   JSON object of further request fields, sent as written
   --render-options  JSON object of the protocol's render options, e.g. max_tokens_field
   --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
+  --context-window   Model context window in tokens; omitted leaves it unknown and
+                 disables automatic compaction
+  --auto-compact on | off | PERCENT: automatic compaction switch, or a trigger
+                 percentage in 10–95 that also enables it (default on, 70)
   --workspace    Root directory for workspace tools; relative to current directory
   --tools        Comma-separated list_directory,read_file,search_text,write_file,edit_file,run_command (default empty)
   --command-network  Command network: none or open (default none)
@@ -50,6 +54,8 @@ Options:
 The demo uses a scripted model and a local tool; it makes no network calls.
 Run/session read --config, then TARS_CONFIG, then the global config path.
 Explicit options override configured fields. Saved sessions keep their definition.
+Material export and --load import contain only the current Context, never the
+replaced history segments.
 Exit codes: 0 complete, 1 execution/configuration/file error, 2 arguments,
 124 deadline, 130 cancelled. Ctrl-C cancels work and waits for returned materials.
 ";
@@ -71,7 +77,16 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             if one == "session"
                 && matches!(
                     command.to_str(),
-                    Some("create" | "run" | "list" | "export-materials")
+                    Some(
+                        "create"
+                            | "run"
+                            | "list"
+                            | "show"
+                            | "compact"
+                            | "history"
+                            | "repair"
+                            | "export-materials"
+                    )
                 )
                 && (help == "--help" || help == "-h") =>
         {
