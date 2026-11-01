@@ -151,8 +151,11 @@ pub fn load_session_materials(path: impl AsRef<Path>) -> Result<Context, Materia
     Ok(context)
 }
 
+// The offline envelope deliberately ignores unknown record fields: newer
+// records add serde-additive facts (such as the compaction history index and
+// its running values), and exporting the current Context must keep working
+// without this path knowing them.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct SessionMaterials {
     format: String,
     conversation_id: String,

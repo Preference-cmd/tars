@@ -233,3 +233,70 @@ fn material_files_and_session_exports_written_before_message_roles_still_load() 
             .all(|block| block["content"]["shape"] == "message")
     );
 }
+
+fn record_definition() -> crate::definition::SessionDefinition {
+    crate::definition::SessionDefinition {
+        provider: crate::definition::Provider::OpenAiChat,
+        model: "fixture".into(),
+        endpoint: None,
+        credential: crate::definition::CredentialRef::Environment("TARS_FIXTURE_KEY".into()),
+        work_timeout_secs: None,
+        retained_work_capacity: 8,
+        max_model_rounds: 2,
+        max_tool_calls: 4,
+        max_tokens: None,
+        reasoning_effort: None,
+        extra_body: Default::default(),
+        max_model_attempts: None,
+        render_options: Default::default(),
+        workspace_root: None,
+        tools: Vec::new(),
+        tool_limits: Default::default(),
+        write_limits: None,
+        permission_mode: None,
+        command: None,
+        mcp_servers: Vec::new(),
+        context_window: None,
+        auto_compact: true,
+        compact_threshold: 70,
+    }
+}
+
+#[test]
+fn offline_export_extracts_context_from_a_compacted_record() {
+    let id = uuid::Uuid::now_v7().to_string();
+    let segment = crate::compact::HistorySegment {
+        id: uuid::Uuid::now_v7().to_string(),
+        created_at_ms: 1,
+        trigger: crate::compact::HistoryTrigger::Auto,
+        blocks: 1,
+        summary_block_id: causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+    };
+    let context = Context::from_blocks(vec![causa::kernel::ContextBlock::text(
+        causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::Role::User,
+        "compacted summary",
+    )])
+    .unwrap();
+    let mut definition = record_definition();
+    definition.context_window = Some(1_000);
+    definition.auto_compact = false;
+    definition.compact_threshold = 50;
+    let record = crate::store::SavedSessionRecord::new_with_compaction(
+        id.clone(),
+        uuid::Uuid::now_v7().to_string(),
+        None,
+        definition,
+        context,
+        None,
+        Some(false),
+        Some(50),
+        vec![segment],
+    )
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("record.json");
+    std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+    let loaded = load_session_materials(&path).unwrap();
+    assert_eq!(loaded.blocks().len(), 1);
+}
