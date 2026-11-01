@@ -98,6 +98,7 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
         error = Some("signal listener failed");
         code = 1;
     }
+    let usage = final_usage(&report.result);
     let rendered = if options.json {
         format!(
             "{}\n",
@@ -106,6 +107,7 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
                 "work_id": report.work.turn_id.0, "saved": saved, "error": error,
                 "error_kind": model_error.as_ref().map(|failure| failure.kind),
                 "error_detail": model_error.as_ref().map(|failure| failure.detail.as_str()),
+                "usage": usage,
             })
         )
     } else if status == "completed" {
@@ -121,6 +123,22 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
         return (ExitCode::FAILURE, save_wait_abandoned);
     }
     (ExitCode::from(code), save_wait_abandoned)
+}
+
+/// Provider-reported token accounting of a completed run, when disclosed.
+pub(super) fn final_usage(result: &WorkResult) -> Option<serde_json::Value> {
+    let WorkResult::Run(TurnResult::Completed { final_output }) = result else {
+        return None;
+    };
+    final_output.usage.as_ref().map(|usage| {
+        serde_json::json!({
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_read_tokens": usage.cache_read_tokens,
+            "cache_write_tokens": usage.cache_write_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
+        })
+    })
 }
 
 pub(super) fn classify(result: &WorkResult) -> (&'static str, String, Option<&'static str>, u8) {

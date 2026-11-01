@@ -1,6 +1,6 @@
 use super::options::SessionCommand;
 use crate::cli::command::{failure, output};
-use crate::cli::execute::{classify, early_failure, model_failure, report_detail};
+use crate::cli::execute::{classify, early_failure, final_usage, model_failure, report_detail};
 use crate::cli::managed_execution::{self, RecoveryFile, SaveWait};
 use causa::kernel::Context;
 use causa::runtime::new_block_id;
@@ -357,6 +357,7 @@ async fn run_saved(
                 "recovery_file":recovery_file,"recovery_importable":recovery_importable,
                 "recovery_error":recovery_error,"close_error":close_error,
                 "close_outcome":close.as_ref().ok().map(close_value),
+                "usage":final_usage(&report.result),
             })
         )
     } else if status == "completed" {
