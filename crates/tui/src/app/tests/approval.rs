@@ -591,6 +591,7 @@ async fn wm05_letters_ignored_when_panel_open_draft_preserved() {
 }
 
 #[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn wm17_mode_switching_cycle_and_command() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app(dir.path());
@@ -953,6 +954,7 @@ async fn wm05_ctrl_q_and_close_with_panel_open_complete_in_bounded_time() {
 }
 
 #[tokio::test]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn wm17_permission_mode_persistence() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = wire::Fixture::with_responses("openai-chat", vec![]);

@@ -351,7 +351,7 @@ max_write_bytes = 524288
 max_edit_file_bytes = 1048576
 max_edit_segments = 16
 "#,
-        ws_dir.display()
+        toml_path(&ws_dir)
     );
     std::fs::write(&config_path, config_toml).unwrap();
 
@@ -465,6 +465,14 @@ max_edit_segments = 16
     );
 }
 
+/// TOML basic strings treat backslashes as escapes, so Windows paths must be
+/// doubled before they are interpolated into a quoted value.
+fn toml_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "\\\\")
+}
+
+/// MCP-focused profile: a workspace root without workspace tools, so session
+/// creation does not need the Unix-only workspace backend.
 fn mcp_config(workspace: &Path) -> String {
     format!(
         r#"version = 1
@@ -477,10 +485,9 @@ provider = "openai-chat"
 model = "mcp-model"
 api_key_env = "TARS_CONFIG_TEST_KEY"
 workspace_root = "{}"
-tools = ["read_file"]
 mcp = ["git"]
 "#,
-        workspace.display()
+        toml_path(workspace)
     )
 }
 

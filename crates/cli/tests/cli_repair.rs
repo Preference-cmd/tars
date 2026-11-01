@@ -18,6 +18,7 @@ fn command(store: &Path, id: &str) -> Command {
 fn report(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|_| panic!("{output:?}"))
 }
+#[cfg(unix)]
 fn create(dir: &Path, provider: &str, endpoint: &str) -> (String, std::path::PathBuf) {
     let store = dir.join("store");
     let workspace = dir.join("workspace");
@@ -81,6 +82,7 @@ fn create(dir: &Path, provider: &str, endpoint: &str) -> (String, std::path::Pat
     )
 }
 
+#[cfg(unix)]
 #[test]
 fn repair_cli_preview_apply_revision_conflict_and_new_work_for_three_protocols() {
     for provider in ["openai-chat", "openai-responses", "anthropic"] {

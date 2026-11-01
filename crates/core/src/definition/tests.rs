@@ -282,7 +282,9 @@ fn write_tools_are_accepted_during_definition_validation() {
     use super::WorkspaceTool;
 
     let mut def = definition();
-    def.workspace_root = Some(std::path::PathBuf::from("/workspace"));
+    // A path that is absolute on every target; "/workspace" is not absolute on
+    // Windows because it has no drive.
+    def.workspace_root = Some(std::env::temp_dir());
     def.tools = vec![WorkspaceTool::WriteFile];
     assert!(def.validate().is_ok());
 

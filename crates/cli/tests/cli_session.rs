@@ -461,6 +461,9 @@ fn ctrl_c_still_saves_materials_and_closes_before_process_exit() {
     assert_eq!(report(&listed)["sessions"][0]["active"], false);
 }
 
+// Renaming the store while the live process still holds handles works only on
+// Unix; Windows rejects the rename and the save failure is never reached.
+#[cfg(unix)]
 #[test]
 fn completed_work_save_failure_exports_actual_recovery_and_reports_export_failure_separately() {
     for export_succeeds in [true, false] {
