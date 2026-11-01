@@ -84,6 +84,9 @@ async fn managed_reopen_preserves_definition_material_identity_and_restores_no_w
         permission_mode: None,
         command: None,
         mcp_servers: Vec::new(),
+        context_window: None,
+        auto_compact: true,
+        compact_threshold: 70,
     };
     let requests = Arc::new(Mutex::new(vec![]));
     let tool_calls = Arc::new(AtomicUsize::new(0));

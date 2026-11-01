@@ -155,6 +155,17 @@ pub struct OpenReport {
     pub permission_downgraded: bool,
 }
 
+/// Running compaction settings for one open session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompactionSettings {
+    /// Whether automatic compaction is enabled.
+    pub auto_compact: bool,
+    /// Trigger percentage of the context window.
+    pub compact_threshold: u8,
+    /// Frozen model context window, or none when unknown.
+    pub context_window: Option<u64>,
+}
+
 /// Read-only lookup and managed status; does not grant mutable owner access.
 #[derive(Clone, Debug)]
 pub struct SessionStatus {
@@ -242,6 +253,15 @@ pub enum ApplicationError {
     /// Work cannot be forgotten before its associated save is handled.
     #[error("work still has an unsettled associated save")]
     SavePending,
+    /// This session has no persistent history or is not assembled.
+    #[error("context compaction is unavailable for this session")]
+    CompactionUnavailable,
+    /// Materials are being compacted; new admissions and edits wait.
+    #[error("session materials are being compacted")]
+    Compacting,
+    /// A manual compaction could not be completed.
+    #[error("context compaction failed: {0}")]
+    Compaction(String),
     /// Requested persistent record does not exist.
     #[error("saved conversation not found")]
     NotFound,

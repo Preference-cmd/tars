@@ -31,6 +31,19 @@ pub enum CredentialRef {
     Environment(String),
 }
 
+/// Smallest accepted automatic-compaction trigger percentage.
+pub const MIN_COMPACT_THRESHOLD: u8 = 10;
+/// Largest accepted automatic-compaction trigger percentage.
+pub const MAX_COMPACT_THRESHOLD: u8 = 95;
+
+fn default_auto_compact() -> bool {
+    true
+}
+
+fn default_compact_threshold() -> u8 {
+    70
+}
+
 /// Frozen execution choices saved with a persistent session's materials.
 /// Workspace permissions and bounds are fixed by record format 2.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +82,23 @@ pub struct SessionDefinition {
     /// before this field existed reads as empty.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub extra_body: serde_json::Map<String, serde_json::Value>,
+    /// Model context window in tokens. `None` leaves the window unknown: auto
+    /// compaction never triggers for this session, while manual compaction
+    /// stays available. A value of zero is rejected. A record saved before
+    /// this field existed reads as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Whether automatic compaction is enabled for this session. The stored
+    /// record carries the running value; this field is the initial one. A
+    /// record saved before this field existed reads as enabled.
+    #[serde(default = "default_auto_compact")]
+    pub auto_compact: bool,
+    /// Automatic-compaction trigger as an integer percentage of the context
+    /// window, in [`MIN_COMPACT_THRESHOLD`]..=[`MAX_COMPACT_THRESHOLD`]. The
+    /// stored record carries the running value; this field is the initial
+    /// one. A record saved before this field existed reads as 70.
+    #[serde(default = "default_compact_threshold")]
+    pub compact_threshold: u8,
     /// Total model calls allowed per logical invocation, the first included,
     /// when the provider fails transiently or rate-limits. None or one makes
     /// a single call. A record saved before this field existed reads as none.
@@ -148,6 +178,12 @@ impl SessionDefinition {
         }
         if self.max_tokens == Some(0) {
             return Err(DefinitionError::InvalidMaxTokens);
+        }
+        if self.context_window == Some(0) {
+            return Err(DefinitionError::InvalidContextWindow);
+        }
+        if !(MIN_COMPACT_THRESHOLD..=MAX_COMPACT_THRESHOLD).contains(&self.compact_threshold) {
+            return Err(DefinitionError::InvalidCompactThreshold);
         }
         if self.max_model_attempts == Some(0) {
             return Err(DefinitionError::InvalidModelAttempts);
@@ -293,6 +329,12 @@ pub enum DefinitionError {
     /// A zero output limit can never produce a response.
     #[error("max_tokens must be positive when set")]
     InvalidMaxTokens,
+    /// A zero context window can never hold a request.
+    #[error("context_window must be positive when set")]
+    InvalidContextWindow,
+    /// The compaction trigger percentage is outside the supported range.
+    #[error("compact_threshold must be between 10 and 95")]
+    InvalidCompactThreshold,
     /// At least the first model call must be allowed.
     #[error("max_model_attempts must be positive when set")]
     InvalidModelAttempts,

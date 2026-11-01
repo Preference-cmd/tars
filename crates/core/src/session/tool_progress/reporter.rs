@@ -91,6 +91,19 @@ impl ToolReporter {
         self.0.tasks.wait().await;
     }
 
+    /// Broadcast one advisory compaction observation for this work.
+    pub(crate) fn compaction(
+        &self,
+        invocation_id: InvocationId,
+        progress: crate::compact::CompactionProgress,
+    ) {
+        let _ = self.0.sender.send(std::sync::Arc::new(WorkProgress {
+            work: self.0.work.clone(),
+            invocation_id,
+            update: ProgressUpdate::Compaction(progress),
+        }));
+    }
+
     pub(crate) fn snapshot(&self) -> Arc<ToolProgressSnapshot> {
         Arc::new(
             self.0

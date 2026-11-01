@@ -62,6 +62,9 @@ async fn repair_resource_probe() {
         permission_mode: None,
         command: None,
         mcp_servers: Vec::new(),
+        context_window: None,
+        auto_compact: true,
+        compact_threshold: 70,
     };
     let directory = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(directory.path().into()));

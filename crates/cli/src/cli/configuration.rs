@@ -162,6 +162,9 @@ pub(super) fn definition(
             .map(u32::try_from)
             .transpose()
             .map_err(|_| CliError::argument("tool call limit too large"))?,
+        context_window: None,
+        auto_compact: None,
+        compact_threshold: None,
         max_tokens: number("--max-tokens")?
             .map(u32::try_from)
             .transpose()

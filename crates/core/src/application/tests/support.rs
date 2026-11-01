@@ -33,6 +33,9 @@ pub(super) fn definition() -> SessionDefinition {
         permission_mode: None,
         command: None,
         mcp_servers: Vec::new(),
+        context_window: None,
+        auto_compact: true,
+        compact_threshold: 70,
     }
 }
 pub(super) fn request(key: &str) -> SubmitRequest {
@@ -267,4 +270,167 @@ impl causa::kernel::ToolBatchProcessor for CollisionBatch {
             .unwrap();
         Ok(())
     }
+}
+
+/// Definition used by the real assembly path with a scripted model.
+pub(super) fn compacting_definition(context_window: Option<u64>) -> SessionDefinition {
+    let mut definition = definition();
+    // The real assembly resolves this environment variable; no request uses it.
+    definition.credential = CredentialRef::Environment("PATH".into());
+    definition.max_model_rounds = 4;
+    definition.context_window = context_window;
+    definition.auto_compact = true;
+    definition.compact_threshold = 70;
+    definition
+}
+
+/// One user message whose size makes the byte-based estimator predictable.
+pub(super) fn text_block(bytes: usize) -> ContextBlock {
+    ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::Role::User,
+        "x".repeat(bytes),
+    )
+}
+
+/// How the scripted model answers a summary request.
+#[derive(Clone, Debug)]
+pub(super) enum SummaryBehavior {
+    /// Answer with this text.
+    Text(String),
+    /// Report a refusal.
+    Fail,
+    /// Answer with an empty string.
+    Empty,
+    /// Wait for release; a cancelled control is reported as cancelled.
+    Block,
+}
+
+/// Scripted gateway distinguishing summary requests from ordinary rounds.
+pub(super) struct CompactionGateway {
+    pub(super) summary_calls: Arc<AtomicUsize>,
+    pub(super) main_calls: Arc<AtomicUsize>,
+    pub(super) summary_inputs: Mutex<Vec<Vec<ContextBlock>>>,
+    pub(super) summary_behavior: Mutex<SummaryBehavior>,
+    pub(super) main_overflow: std::sync::atomic::AtomicBool,
+    pub(super) entered: Arc<Notify>,
+    pub(super) release: Arc<Notify>,
+}
+
+impl CompactionGateway {
+    pub(super) fn new(behavior: SummaryBehavior) -> Arc<Self> {
+        Arc::new(Self {
+            summary_calls: Arc::new(AtomicUsize::new(0)),
+            main_calls: Arc::new(AtomicUsize::new(0)),
+            summary_inputs: Mutex::new(Vec::new()),
+            summary_behavior: Mutex::new(behavior),
+            main_overflow: std::sync::atomic::AtomicBool::new(false),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        })
+    }
+
+    pub(super) fn summary_text(&self) -> String {
+        "Goal: finish the fixture task. Decisions: none. Progress: one step done. Next steps: report the result. Relevant files: none. Important context: fixture summary body."
+            .to_owned()
+    }
+}
+
+fn is_summary_request(request: &causa::kernel::ModelRequest) -> bool {
+    request.frame.blocks.iter().any(|block| {
+        let causa::kernel::BlockContent::Message { parts, .. } = block.content() else {
+            return false;
+        };
+        parts.iter().any(|part| {
+            let causa::kernel::ContentPart::Text(text) = part else {
+                return false;
+            };
+            text.0.contains("Prepare a continuation brief")
+        })
+    })
+}
+
+#[async_trait::async_trait]
+impl causa::kernel::ModelGateway for CompactionGateway {
+    async fn invoke(
+        &self,
+        request: &causa::kernel::ModelRequest,
+        control: &causa::kernel::CallControl,
+    ) -> Result<causa::kernel::ModelOutput, causa::kernel::ModelInvokeError> {
+        if is_summary_request(request) {
+            self.summary_calls.fetch_add(1, Ordering::SeqCst);
+            self.summary_inputs
+                .lock()
+                .unwrap()
+                .push(request.frame.blocks.clone());
+            let behavior = self.summary_behavior.lock().unwrap().clone();
+            match behavior {
+                SummaryBehavior::Text(text) => Ok(summary_output(&text)),
+                SummaryBehavior::Fail => Err(causa::kernel::ModelInvokeError::new(
+                    causa::kernel::ModelInvokeErrorKind::Permanent,
+                    "summary refused",
+                )),
+                SummaryBehavior::Empty => Ok(summary_output("")),
+                SummaryBehavior::Block => {
+                    self.entered.notify_one();
+                    tokio::select! {
+                        biased;
+                        _ = control.cancellation_token().cancelled() => {
+                            Err(causa::kernel::ModelInvokeError::new(
+                                causa::kernel::ModelInvokeErrorKind::Cancelled,
+                                "summary cancelled",
+                            ))
+                        }
+                        _ = self.release.notified() => Ok(summary_output(&self.summary_text())),
+                    }
+                }
+            }
+        } else {
+            self.main_calls.fetch_add(1, Ordering::SeqCst);
+            let overflow = self
+                .main_overflow
+                .swap(false, std::sync::atomic::Ordering::SeqCst);
+            let (stop_reason, text) = if overflow {
+                (
+                    causa::kernel::ModelStopReason::ContextWindowExceeded,
+                    "context window exceeded",
+                )
+            } else {
+                (
+                    causa::kernel::ModelStopReason::EndTurn,
+                    "completed fixture work",
+                )
+            };
+            let mut output = causa::kernel::ModelOutput::new(
+                causa::kernel::ModelResponse {
+                    items: vec![causa::kernel::ModelItem::text(text)],
+                },
+                stop_reason,
+            );
+            output.usage = Some(causa::kernel::ModelUsage::new(120, 20));
+            Ok(output)
+        }
+    }
+}
+
+fn summary_output(text: &str) -> causa::kernel::ModelOutput {
+    let mut output = causa::kernel::ModelOutput::new(
+        causa::kernel::ModelResponse {
+            items: vec![causa::kernel::ModelItem::text(text)],
+        },
+        causa::kernel::ModelStopReason::EndTurn,
+    );
+    output.usage = Some(causa::kernel::ModelUsage::new(400, 30));
+    output
+}
+
+/// Read the saved record JSON of one conversation from a store root.
+pub(super) fn saved_record(root: &std::path::Path, id: &str) -> serde_json::Value {
+    let path = root.join("sessions").join(format!("{id}.json"));
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// History directory of one conversation under a store root.
+pub(super) fn history_dir(root: &std::path::Path, id: &str) -> std::path::PathBuf {
+    root.join("sessions").join(format!("{id}.history"))
 }

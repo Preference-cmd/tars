@@ -1,12 +1,15 @@
 use super::entry::Entry;
 use super::saving;
 use super::types::*;
+use crate::compact::{
+    CompactionOutcome, CompactionRuntime, HistorySegment, HistorySegmentDocument,
+};
 use crate::definition::SessionDefinition;
 use crate::session::{
     SessionError, SubmitRequest, WorkObservation, WorkProgress, WorkReceipt, WorkRef,
 };
 use crate::store::{PreparedCommit, SavedSessionRecord};
-use causa::kernel::{Context, ContextBlock};
+use causa::kernel::{CallControl, CancellationToken, Context, ContextBlock};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -319,13 +322,17 @@ impl ManagedSession {
             .and_then(|o| o.permission_mode().map(|(m, _)| m));
         let pending = if state.persistent {
             self.entry.cloned_snapshot();
-            let record = SavedSessionRecord::new(
+            let (auto_compact, compact_threshold, history) = saving::compaction_record(state);
+            let record = SavedSessionRecord::new_with_compaction(
                 self.entry.target.conversation_id.as_str().to_owned(),
                 uuid::Uuid::now_v7().to_string(),
                 state.revision,
                 state.definition.clone().expect("definition"),
                 candidate.clone(),
                 current_mode,
+                auto_compact,
+                compact_threshold,
+                history,
             )?;
             Some(Arc::new(PreparedCommit::new(state.revision, record)?))
         } else {
@@ -426,6 +433,197 @@ impl ManagedSession {
             .map(|p| p.record.permission_mode)
     }
 
+    /// Running compaction settings, when this session keeps history.
+    pub fn compaction_settings(&self) -> Option<CompactionSettings> {
+        let state = self.entry.lock();
+        let runtime = state.owner.as_ref().and_then(|owner| owner.compaction())?;
+        let (auto_compact, compact_threshold) = runtime.settings();
+        Some(CompactionSettings {
+            auto_compact,
+            compact_threshold,
+            context_window: runtime.window(),
+        })
+    }
+
+    /// Replace the running automatic-compaction switch.
+    ///
+    /// Every new session starts from the frozen definition's value; the running
+    /// value is stored only when it differs, and changing it in an idle
+    /// persistent session starts a save.
+    pub fn set_auto_compact(&self, enabled: bool) -> Result<(), ApplicationError> {
+        self.update_compaction_settings(|runtime| {
+            if runtime.settings().0 == enabled {
+                return false;
+            }
+            runtime.set_auto_compact(enabled);
+            true
+        })
+    }
+
+    /// Replace the running trigger percentage; the supported range is 10..=95.
+    pub fn set_compact_threshold(&self, threshold: u8) -> Result<(), ApplicationError> {
+        if !(crate::definition::MIN_COMPACT_THRESHOLD..=crate::definition::MAX_COMPACT_THRESHOLD)
+            .contains(&threshold)
+        {
+            return Err(crate::definition::DefinitionError::InvalidCompactThreshold.into());
+        }
+        self.update_compaction_settings(|runtime| {
+            if runtime.settings().1 == threshold {
+                return false;
+            }
+            runtime.set_threshold(threshold);
+            true
+        })
+    }
+
+    fn update_compaction_settings(
+        &self,
+        apply: impl FnOnce(&CompactionRuntime) -> bool,
+    ) -> Result<(), ApplicationError> {
+        let mut state = self.entry.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return Err(ApplicationError::Closed);
+        }
+        if state.lifecycle == Lifecycle::Closing {
+            return Err(ApplicationError::Closing);
+        }
+        let runtime = state
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.compaction())
+            .ok_or(ApplicationError::CompactionUnavailable)?;
+        if !apply(&runtime) {
+            return Ok(());
+        }
+        if state.persistent
+            && state.active.is_none()
+            && state.pending.is_none()
+            && state.lifecycle == Lifecycle::Open
+        {
+            saving::prepare(&self.entry, &mut state)?;
+            self.entry.notify();
+        }
+        Ok(())
+    }
+
+    /// Segment index of the replaced conversations, in creation order.
+    pub fn history(&self) -> Vec<HistorySegment> {
+        self.entry
+            .lock()
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.compaction())
+            .map(|runtime| runtime.entries())
+            .unwrap_or_default()
+    }
+
+    /// Read one history segment for display; the current Context never includes it.
+    pub fn read_history_segment(
+        &self,
+        segment_id: &str,
+    ) -> Result<HistorySegmentDocument, ApplicationError> {
+        let history = {
+            let state = self.entry.lock();
+            let runtime = state
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.compaction())
+                .ok_or(ApplicationError::CompactionUnavailable)?;
+            runtime
+                .history()
+                .ok_or(ApplicationError::CompactionUnavailable)?
+        };
+        history
+            .read(segment_id)
+            .map_err(|error| ApplicationError::Store(Arc::new(error)))
+    }
+
+    /// Replace the current materials with a model-written brief and save it.
+    ///
+    /// Refused while the session is busy or being saved, and while interrupted
+    /// material still needs repair. A dropped future releases the compaction
+    /// barrier; a written segment file is cleaned up on the next open.
+    pub async fn compact(&self) -> Result<CompactionOutcome, ApplicationError> {
+        let (runtime, version, context) = {
+            let mut state = self.entry.lock();
+            if state.lifecycle == Lifecycle::Closed {
+                return Err(ApplicationError::Closed);
+            }
+            if state.lifecycle == Lifecycle::Closing {
+                return Err(ApplicationError::Closing);
+            }
+            self.entry.new_mutation(&state)?;
+            let runtime = state
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.compaction())
+                .ok_or(ApplicationError::CompactionUnavailable)?;
+            let readiness =
+                state
+                    .owner
+                    .as_mut()
+                    .expect("published owner")
+                    .with_context(|context| {
+                        self.entry.cloned_snapshot();
+                        super::repair::admission_check(context)
+                    });
+            match readiness {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => return Err(error.into()),
+                Err(error) => return Err(error.into()),
+            }
+            let version = self.entry.version(&state);
+            let context = state
+                .owner
+                .as_mut()
+                .expect("published owner")
+                .with_context(|context| context.clone())?;
+            state.compacting = true;
+            self.entry.changed();
+            (runtime, version, context)
+        };
+        let guard = CompactingGuard { entry: &self.entry };
+        let control = CallControl::new(CancellationToken::new(), None);
+        let plan = match runtime.manual_plan(&context, &control).await {
+            Ok(plan) => plan,
+            Err(reason) => {
+                return Err(ApplicationError::Compaction(reason.name().to_owned()));
+            }
+        };
+        let mut state = self.entry.lock();
+        if state.lifecycle != Lifecycle::Open || state.closing.is_some() {
+            runtime.discard(&plan);
+            return Err(if state.lifecycle == Lifecycle::Closed {
+                ApplicationError::Closed
+            } else {
+                ApplicationError::Closing
+            });
+        }
+        if self.entry.version(&state) != version {
+            runtime.discard(&plan);
+            return Err(ApplicationError::StaleMaterial);
+        }
+        let mut candidate = context;
+        let length = candidate.blocks().len();
+        if let Err(failure) = candidate
+            .edit()
+            .replace(0..length, plan.new_blocks.clone())
+            .commit()
+        {
+            runtime.discard(&plan);
+            return Err(SessionError::ContextEdit(failure.reason).into());
+        }
+        runtime.commit(&plan);
+        if let Err(error) = self.commit_materials(&mut state, candidate) {
+            runtime.rollback(&plan);
+            return Err(error);
+        }
+        drop(state);
+        let outcome = plan.outcome();
+        drop(guard);
+        Ok(outcome)
+    }
+
     /// Forget a terminal record after its associated persistence barrier is handled.
     pub fn forget(&self, work: &WorkRef) -> Result<(), ApplicationError> {
         let mut state = self.entry.lock();
@@ -441,5 +639,18 @@ impl ManagedSession {
             .ok_or(ApplicationError::InstanceGone)?
             .forget(work)?;
         Ok(())
+    }
+}
+
+/// Clears the compaction barrier even when the caller drops the future.
+struct CompactingGuard<'a> {
+    entry: &'a Entry,
+}
+
+impl Drop for CompactingGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.entry.lock();
+        state.compacting = false;
+        self.entry.changed();
     }
 }

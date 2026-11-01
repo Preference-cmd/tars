@@ -417,6 +417,9 @@ mod tests {
             permission_mode: None,
             command: None,
             mcp_servers: Vec::new(),
+            context_window: None,
+            auto_compact: true,
+            compact_threshold: 70,
         }
     }
 

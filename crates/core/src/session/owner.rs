@@ -187,8 +187,25 @@ impl Session {
                 config,
                 candidate: Arc::new(|| TurnId::new(uuid::Uuid::now_v7().to_string())),
                 progress: tokio::sync::broadcast::channel(super::progress::PROGRESS_CAPACITY).0,
+                compaction: None,
             }),
         }
+    }
+
+    /// Attach the session-wide compaction runtime before any handle is cloned.
+    pub(crate) fn with_compaction(
+        mut self,
+        compaction: Arc<crate::compact::CompactionRuntime>,
+    ) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .expect("attach compaction before cloning handles")
+            .compaction = Some(compaction);
+        self
+    }
+
+    /// The session's compaction runtime, when history can be kept.
+    pub(crate) fn compaction(&self) -> Option<Arc<crate::compact::CompactionRuntime>> {
+        self.shared.compaction.clone()
     }
 
     /// Clone a handle with submission and retained work access only.

@@ -810,6 +810,9 @@ mod tests {
             command: Some(CommandSettings::default()),
             permission_mode: None,
             mcp_servers: Vec::new(),
+            context_window: None,
+            auto_compact: true,
+            compact_threshold: 70,
         };
         definition.validate().unwrap();
         assert!(definition.effective_command_settings().is_some());

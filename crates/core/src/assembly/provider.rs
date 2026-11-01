@@ -1,3 +1,6 @@
+use crate::compact::CompactionRuntime;
+use crate::compact::estimate::{UsageTracker, UsageTrackingGateway};
+use crate::compact::preparer::CompactionPreparer;
 use crate::definition::{CredentialRef, DefinitionError, RenderOptions, SessionDefinition};
 use crate::session::{ConversationId, Session};
 use crate::tools::{ToolResources, WorkspaceTools};
@@ -25,7 +28,21 @@ pub(crate) enum AssemblyError {
 /// Host resources an assembly uses, plus the store path a command must not read.
 pub(crate) struct SessionResources {
     pub(crate) tools: Arc<ToolResources>,
+    /// Sessions directory; the command tool must not read it and history lives
+    /// beside the records.
     pub(crate) storage: Option<std::path::PathBuf>,
+    /// Restored history index of a reopened session.
+    pub(crate) history: Vec<crate::compact::HistorySegment>,
+    /// Running automatic-compaction switch read from the record, if present.
+    pub(crate) auto_compact: Option<bool>,
+    /// Running trigger percentage read from the record, if present.
+    pub(crate) compact_threshold: Option<u8>,
+    /// Whether this instance is persistent; history needs a persisted record.
+    pub(crate) persistent: bool,
+    /// Test-only gateway injection so the real assembly path can be exercised
+    /// with a scripted model.
+    #[cfg(test)]
+    pub(crate) gateway_override: Option<Arc<dyn ModelGateway>>,
 }
 
 impl SessionResources {
@@ -33,11 +50,42 @@ impl SessionResources {
         Self {
             tools,
             storage: None,
+            history: Vec::new(),
+            auto_compact: None,
+            compact_threshold: None,
+            persistent: false,
+            #[cfg(test)]
+            gateway_override: None,
         }
     }
 
     pub(crate) fn with_storage(mut self, storage: Option<std::path::PathBuf>) -> Self {
         self.storage = storage;
+        self
+    }
+
+    /// Restore the reopened session's history index and running values.
+    pub(crate) fn with_compaction(
+        mut self,
+        history: Vec<crate::compact::HistorySegment>,
+        auto_compact: Option<bool>,
+        compact_threshold: Option<u8>,
+    ) -> Self {
+        self.history = history;
+        self.auto_compact = auto_compact;
+        self.compact_threshold = compact_threshold;
+        self
+    }
+
+    /// Mark the instance as persistent so compaction may keep history.
+    pub(crate) fn persistent(mut self, persistent: bool) -> Self {
+        self.persistent = persistent;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_gateway(mut self, gateway: Arc<dyn ModelGateway>) -> Self {
+        self.gateway_override = Some(gateway);
         self
     }
 }
@@ -51,7 +99,17 @@ pub(crate) fn assemble(
     mcp: Option<Arc<crate::mcp::McpRuntime>>,
     allow_unavailable_command: bool,
 ) -> Result<Session, AssemblyError> {
-    let SessionResources { tools, storage } = resources;
+    let SessionResources {
+        tools,
+        storage,
+        history,
+        auto_compact,
+        compact_threshold,
+        persistent,
+        #[cfg(test)]
+        gateway_override,
+    } = resources;
+    let storage_for_history = storage.clone();
     definition.validate()?;
     let command_settings = definition.effective_command_settings();
     let definition_command_settings = command_settings.unwrap_or_default();
@@ -96,11 +154,28 @@ pub(crate) fn assemble(
         .ok()
         .filter(|value| !value.trim().is_empty())
         .ok_or(AssemblyError::CredentialUnavailable)?;
-    let gateway = gateway(
+    let provider_gateway = gateway(
         definition.protocol_render_options()?,
         api_key,
         definition.endpoint.clone(),
         definition.max_model_attempts,
+    );
+    #[cfg(test)]
+    let provider_gateway = gateway_override.unwrap_or(provider_gateway);
+    let usage = Arc::new(UsageTracker::default());
+    let gateway: Arc<dyn ModelGateway> =
+        Arc::new(UsageTrackingGateway::new(provider_gateway, usage.clone()));
+    let compaction = CompactionRuntime::new(
+        definition,
+        &conversation_id,
+        persistent
+            .then_some(storage_for_history.as_deref())
+            .flatten(),
+        history,
+        auto_compact,
+        compact_threshold,
+        gateway.clone(),
+        usage,
     );
     let options = definition.run_options();
     let selected = definition.tools.clone();
@@ -152,11 +227,14 @@ pub(crate) fn assemble(
         .as_ref()
         .map(|tools| tools.outside_sandbox_grants());
 
+    let compaction_for_work = compaction.clone();
     let session = Session::new_with_tools(
         conversation_id,
         context,
         move |work, _control, reporter| {
             let gateway = gateway.clone();
+            let compact_for_work = compaction_for_work.clone();
+            let reporter_for_compaction = reporter.clone();
             let options = options
                 .clone()
                 .with_processor_data(causa::kernel::ProcessorData::new(view.clone()));
@@ -225,6 +303,13 @@ pub(crate) fn assemble(
                         })?;
                     }
                 }
+                let mut options = options;
+                if let Some(runtime) = compact_for_work {
+                    options = options.with_preparer(Arc::new(CompactionPreparer::new(
+                        runtime,
+                        reporter_for_compaction,
+                    )));
+                }
                 Ok((
                     Arc::new(TurnRunner::new(gateway, Arc::new(executor))),
                     options,
@@ -241,6 +326,10 @@ pub(crate) fn assemble(
     };
     let session = match command_status {
         Some(status) => session.with_command_status(status),
+        None => session,
+    };
+    let session = match compaction {
+        Some(runtime) => session.with_compaction(runtime),
         None => session,
     };
 

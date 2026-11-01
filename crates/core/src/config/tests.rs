@@ -1017,3 +1017,61 @@ fn command_settings_without_run_command_are_refused_by_configuration() {
     std::fs::write(&file, text).unwrap();
     assert!(Config::load(ConfigSource::File(file)).is_err());
 }
+
+#[test]
+fn compaction_profile_fields_resolve_and_invalid_values_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let text =
+        format!("{CONFIG}context_window = 200000\nauto_compact = false\ncompact_threshold = 55\n");
+    std::fs::write(&path, text).unwrap();
+    let config = Config::load(ConfigSource::File(path.clone())).unwrap();
+    let definition = config
+        .definition(None, DefinitionOverrides::default())
+        .unwrap();
+    assert_eq!(definition.context_window, Some(200_000));
+    assert!(!definition.auto_compact);
+    assert_eq!(definition.compact_threshold, 55);
+    let explicit = config
+        .definition(
+            None,
+            DefinitionOverrides {
+                context_window: Some(128_000),
+                auto_compact: Some(true),
+                compact_threshold: Some(80),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(explicit.context_window, Some(128_000));
+    assert!(explicit.auto_compact);
+    assert_eq!(explicit.compact_threshold, 80);
+    let defaults = Config::load(ConfigSource::Disabled)
+        .unwrap()
+        .definition(
+            None,
+            DefinitionOverrides {
+                provider: Some(Provider::OpenAiChat),
+                model: Some("m".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(defaults.context_window, None);
+    assert!(defaults.auto_compact);
+    assert_eq!(defaults.compact_threshold, 70);
+    for broken in [
+        "context_window = 0",
+        "compact_threshold = 9",
+        "compact_threshold = 96",
+    ] {
+        std::fs::write(&path, format!("{CONFIG}{broken}\n")).unwrap();
+        assert!(
+            Config::load(ConfigSource::File(path.clone())).is_err()
+                || config
+                    .definition(None, DefinitionOverrides::default())
+                    .is_err(),
+            "accepted {broken}"
+        );
+    }
+}

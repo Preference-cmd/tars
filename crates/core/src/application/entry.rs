@@ -30,6 +30,8 @@ pub(super) struct State {
     pub error: Option<ApplicationError>,
     pub fault: Option<ApplicationError>,
     pub active: Option<WorkRef>,
+    /// A manual compaction is between its material snapshot and its edit.
+    pub compacting: bool,
     pub pending: Option<Arc<PreparedCommit>>,
     pub save_requested: bool,
     pub pending_attempted: bool,
@@ -74,6 +76,7 @@ impl Entry {
                 error: None,
                 fault: None,
                 active: None,
+                compacting: false,
                 pending: None,
                 save_requested: false,
                 pending_attempted: false,
@@ -162,6 +165,9 @@ impl Entry {
                 return Err(ApplicationError::Saving);
             }
             _ => {}
+        }
+        if state.compacting {
+            return Err(ApplicationError::Compacting);
         }
         if let Some(work) = &state.active {
             // The application barrier deliberately survives low Finished.

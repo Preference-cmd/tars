@@ -22,6 +22,9 @@ fn definition() -> SessionDefinition {
         permission_mode: None,
         command: None,
         mcp_servers: Vec::new(),
+        context_window: None,
+        auto_compact: true,
+        compact_threshold: 70,
     }
 }
 
@@ -819,4 +822,39 @@ fn command_settings_roundtrip_old_records_and_validation() {
         candidate.validate(),
         Err(DefinitionError::InvalidCommandSettings)
     );
+}
+
+#[test]
+fn compaction_settings_validate_ranges_and_read_defaults_when_absent() {
+    let mut candidate = definition();
+    candidate.context_window = Some(0);
+    assert_eq!(
+        candidate.validate(),
+        Err(DefinitionError::InvalidContextWindow)
+    );
+    candidate.context_window = Some(200_000);
+    candidate.compact_threshold = 9;
+    assert_eq!(
+        candidate.validate(),
+        Err(DefinitionError::InvalidCompactThreshold)
+    );
+    candidate.compact_threshold = 96;
+    assert_eq!(
+        candidate.validate(),
+        Err(DefinitionError::InvalidCompactThreshold)
+    );
+    for threshold in [10, 70, 95] {
+        candidate.compact_threshold = threshold;
+        assert!(candidate.validate().is_ok());
+    }
+    let mut encoded = serde_json::to_value(definition()).unwrap();
+    assert_eq!(encoded["auto_compact"], true);
+    assert_eq!(encoded["compact_threshold"], 70);
+    assert!(encoded.get("context_window").is_none());
+    encoded.as_object_mut().unwrap().remove("auto_compact");
+    encoded.as_object_mut().unwrap().remove("compact_threshold");
+    let decoded: SessionDefinition = serde_json::from_value(encoded).unwrap();
+    assert!(decoded.auto_compact);
+    assert_eq!(decoded.compact_threshold, 70);
+    assert_eq!(decoded.context_window, None);
 }

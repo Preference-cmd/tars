@@ -4,6 +4,25 @@ use super::types::*;
 use crate::store::{CommitResolution, PreparedCommit, SavedSessionRecord};
 use std::sync::Arc;
 
+/// Running compaction values and history index for the next record.
+pub(super) fn compaction_record(
+    state: &State,
+) -> (
+    Option<bool>,
+    Option<u8>,
+    Vec<crate::compact::HistorySegment>,
+) {
+    let Some(runtime) = state.owner.as_ref().and_then(|owner| owner.compaction()) else {
+        return (None, None, Vec::new());
+    };
+    let history = runtime.entries();
+    let Some(definition) = state.definition.as_ref() else {
+        return (None, None, history);
+    };
+    let (auto_compact, compact_threshold) = runtime.record_overrides(definition);
+    (auto_compact, compact_threshold, history)
+}
+
 pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), ApplicationError> {
     let context = state
         .owner
@@ -17,13 +36,17 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
         .owner
         .as_ref()
         .and_then(|o| o.permission_mode().map(|(m, _)| m));
-    let record = SavedSessionRecord::new(
+    let (auto_compact, compact_threshold, history) = compaction_record(state);
+    let record = SavedSessionRecord::new_with_compaction(
         entry.target.conversation_id.as_str().to_owned(),
         uuid::Uuid::now_v7().to_string(),
         state.revision,
         state.definition.clone().expect("assembled definition"),
         context,
         current_mode,
+        auto_compact,
+        compact_threshold,
+        history,
     )?;
     state.pending = Some(Arc::new(PreparedCommit::new(state.revision, record)?));
     state.save_requested = true;
@@ -105,6 +128,29 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
                         state.fault = state.error.clone();
                     } else {
                         entry.wake.notify_one();
+                    }
+                }
+                // A running setting changed while this commit was in flight;
+                // the next fixed snapshot carries it, like the permission mode.
+                if let Some(definition) = state.definition.clone()
+                    && let Some(runtime) = state.owner.as_ref().and_then(|o| o.compaction())
+                {
+                    let (auto_compact, compact_threshold) = runtime.settings();
+                    let committed_auto = record.auto_compact.unwrap_or(definition.auto_compact);
+                    let committed_threshold = record
+                        .compact_threshold
+                        .unwrap_or(definition.compact_threshold);
+                    if (auto_compact != committed_auto || compact_threshold != committed_threshold)
+                        && state.active.is_none()
+                        && state.closing != Some(ClosePolicy::DiscardLocal)
+                    {
+                        if let Err(error) = prepare(entry, &mut state) {
+                            state.lifecycle = Lifecycle::Faulted;
+                            state.error = Some(error);
+                            state.fault = state.error.clone();
+                        } else {
+                            entry.wake.notify_one();
+                        }
                     }
                 }
             }

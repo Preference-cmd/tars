@@ -24,11 +24,36 @@ pub(super) async fn initialize(
         let id = entry.target.conversation_id.as_str().to_owned();
         let writer = Arc::new(saving::io(host, move || store.acquire_writer(&id)).await?);
         entry.lock().writer = Some(writer.clone());
-        saving::io(host, move || writer.read_latest()).await?
+        let record = saving::io(host, move || writer.read_latest()).await?;
+        // Under the write lock, drop segment files the record does not
+        // reference: an interrupted compaction leaves an orphan behind.
+        let store = host
+            .store
+            .clone()
+            .ok_or(ApplicationError::StoreUnavailable)?;
+        let history = record
+            .as_ref()
+            .map(|record| record.history.clone())
+            .unwrap_or_default();
+        let id = entry.target.conversation_id.as_str().to_owned();
+        saving::io(host, move || {
+            crate::compact::history::cleanup_segments(store.directory(), &id, &history)
+        })
+        .await?;
+        record
     } else {
         None
     };
-    let (definition, context, revision, current_mode, open_report) = match &prepared {
+    let (
+        definition,
+        context,
+        revision,
+        current_mode,
+        open_report,
+        history,
+        auto_compact,
+        compact_threshold,
+    ) = match &prepared {
         Some(prepared) => {
             if record.is_some() {
                 return Err(ApplicationError::CreationConflict);
@@ -45,6 +70,9 @@ pub(super) async fn initialize(
                 None,
                 initial,
                 OpenReport::default(),
+                Vec::new(),
+                None,
+                None,
             )
         }
         None => {
@@ -65,6 +93,9 @@ pub(super) async fn initialize(
                 OpenReport {
                     permission_downgraded,
                 },
+                record.history,
+                record.auto_compact,
+                record.compact_threshold,
             )
         }
     };
@@ -109,6 +140,10 @@ pub(super) async fn initialize(
             // Creating must fail closed without a backend; reopening may keep
             // the saved command tool and reject each call at runtime.
             prepared.is_none(),
+            persistent,
+            history,
+            auto_compact,
+            compact_threshold,
         )
         .await?
     };
@@ -121,6 +156,10 @@ pub(super) async fn initialize(
         current_mode,
         mcp,
         prepared.is_none(),
+        persistent,
+        history,
+        auto_compact,
+        compact_threshold,
     )
     .await?;
     let mut state = entry.lock();
@@ -164,6 +203,7 @@ async fn start_mcp(
         .map_err(|error| ApplicationError::Assembly(error.to_string()))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn assembled(
     host: &Arc<HostInner>,
     definition: &crate::definition::SessionDefinition,
@@ -172,16 +212,34 @@ async fn assembled(
     current_mode: crate::permission::PermissionMode,
     mcp: Option<Arc<crate::mcp::McpRuntime>>,
     allow_unavailable_command: bool,
+    persistent: bool,
+    history: Vec<crate::compact::HistorySegment>,
+    auto_compact: Option<bool>,
+    compact_threshold: Option<u8>,
 ) -> Result<crate::session::Session, ApplicationError> {
+    let base = crate::assembly::SessionResources::new(host.tool_resources.clone())
+        .with_storage(
+            host.store
+                .as_ref()
+                .map(|store| store.directory().to_path_buf()),
+        )
+        .with_compaction(history, auto_compact, compact_threshold)
+        .persistent(persistent);
+    #[cfg(test)]
+    let resources = {
+        let gateway = host.gateway_override.lock().expect("test gateway").clone();
+        match gateway {
+            Some(gateway) => base.with_test_gateway(gateway),
+            None => base,
+        }
+    };
+    #[cfg(not(test))]
+    let resources = base;
     match crate::assembly::assemble(
         definition,
         conversation_id,
         context,
-        crate::assembly::SessionResources::new(host.tool_resources.clone()).with_storage(
-            host.store
-                .as_ref()
-                .map(|store| store.directory().to_path_buf()),
-        ),
+        resources,
         current_mode,
         mcp.clone(),
         allow_unavailable_command,

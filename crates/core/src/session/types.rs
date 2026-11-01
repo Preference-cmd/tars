@@ -75,6 +75,9 @@ pub enum ProgressUpdate {
     ModelOutputReady,
     /// A bounded tool-stage observation; reliable snapshots remain on work observation.
     Tool(super::ToolProgress),
+    /// Advisory context-compaction lifecycle; reliable facts remain the Context
+    /// returned by the work and the saved record.
+    Compaction(crate::compact::CompactionProgress),
 }
 
 /// Stable admission receipt, independent of later execution state.

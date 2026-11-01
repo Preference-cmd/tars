@@ -31,6 +31,12 @@ pub struct DefinitionOverrides {
     pub max_tool_calls: Option<u32>,
     /// Explicit output token limit per model call.
     pub max_tokens: Option<u32>,
+    /// Explicit model context window in tokens; None leaves it unknown.
+    pub context_window: Option<u64>,
+    /// Explicit initial automatic-compaction switch.
+    pub auto_compact: Option<bool>,
+    /// Explicit initial automatic-compaction trigger percentage.
+    pub compact_threshold: Option<u8>,
     /// Explicit reasoning effort, sent to the provider as written.
     pub reasoning_effort: Option<String>,
     /// Explicit extra request fields; replaces the preset's as a whole.
@@ -67,6 +73,9 @@ pub(super) struct Profile {
     max_model_rounds: Option<u32>,
     max_tool_calls: Option<u32>,
     max_tokens: Option<u32>,
+    context_window: Option<u64>,
+    auto_compact: Option<bool>,
+    compact_threshold: Option<u8>,
     reasoning_effort: Option<String>,
     extra_body: Option<serde_json::Map<String, serde_json::Value>>,
     max_model_attempts: Option<u32>,
@@ -261,6 +270,18 @@ pub(super) fn resolve(
         // No default: an unset limit stays unset, and the Anthropic protocol
         // then rejects the request before it is sent.
         max_tokens: options.max_tokens.or(profile.and_then(|p| p.max_tokens)),
+        // An unset window stays unknown, which disables automatic compaction.
+        context_window: options
+            .context_window
+            .or(profile.and_then(|p| p.context_window)),
+        auto_compact: options
+            .auto_compact
+            .or(profile.and_then(|p| p.auto_compact))
+            .unwrap_or(true),
+        compact_threshold: options
+            .compact_threshold
+            .or(profile.and_then(|p| p.compact_threshold))
+            .unwrap_or(70),
         reasoning_effort: options
             .reasoning_effort
             .or_else(|| profile.and_then(|p| p.reasoning_effort.clone())),

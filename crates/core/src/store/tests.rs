@@ -33,6 +33,9 @@ fn definition() -> SessionDefinition {
         permission_mode: None,
         command: None,
         mcp_servers: Vec::new(),
+        context_window: None,
+        auto_compact: true,
+        compact_threshold: 70,
     }
 }
 fn context(text: &str) -> Context {
@@ -611,4 +614,58 @@ fn legacy_v2_record_deserializes_with_none_permission_fields() {
     assert!(val.get("permission_mode").is_none());
     assert!(val["definition"].get("permission_mode").is_none());
     assert!(val["definition"].get("write_limits").is_none());
+}
+
+#[test]
+fn compaction_fields_roundtrip_and_older_records_read_as_defaults() {
+    let id = uuid::Uuid::now_v7().to_string();
+    let segment = crate::compact::HistorySegment {
+        id: uuid::Uuid::now_v7().to_string(),
+        created_at_ms: 7,
+        trigger: crate::compact::HistoryTrigger::Auto,
+        blocks: 3,
+        summary_block_id: causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+    };
+    let record = super::SavedSessionRecord::new_with_compaction(
+        id.clone(),
+        uuid::Uuid::now_v7().to_string(),
+        None,
+        definition(),
+        Context::default(),
+        None,
+        Some(false),
+        Some(55),
+        vec![segment.clone()],
+    )
+    .unwrap();
+    let bytes = serde_json::to_vec(&record).unwrap();
+    let decoded = super::record::decode(&bytes, &id).unwrap();
+    assert_eq!(decoded.auto_compact, Some(false));
+    assert_eq!(decoded.compact_threshold, Some(55));
+    assert_eq!(decoded.history, vec![segment.clone()]);
+    // An older record has none of the appended fields and still reads.
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let object = value.as_object_mut().unwrap();
+    object.remove("auto_compact");
+    object.remove("compact_threshold");
+    object.remove("history");
+    let older = serde_json::to_vec(&value).unwrap();
+    let decoded = super::record::decode(&older, &id).unwrap();
+    assert_eq!(decoded.auto_compact, None);
+    assert_eq!(decoded.compact_threshold, None);
+    assert!(decoded.history.is_empty());
+    // Duplicate segment identities are refused during decode.
+    let duplicate = vec![segment.clone(), segment.clone()];
+    let record = super::SavedSessionRecord::new_with_compaction(
+        id.clone(),
+        uuid::Uuid::now_v7().to_string(),
+        None,
+        definition(),
+        Context::default(),
+        None,
+        None,
+        None,
+        duplicate,
+    );
+    assert!(record.is_err());
 }

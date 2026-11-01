@@ -60,6 +60,15 @@ pub enum StoreError {
         /// Maximum accepted bytes.
         limit: usize,
     },
+    /// One history segment exceeds the same per-file resource limit.
+    #[error("history segment exceeds the {limit}-byte resource limit")]
+    HistoryTooLarge {
+        /// Maximum accepted bytes.
+        limit: usize,
+    },
+    /// A history segment is malformed, mismatched or written twice.
+    #[error("invalid history segment: {0}")]
+    InvalidHistory(String),
     /// Revision must be the checked successor of its baseline.
     #[error("revision must be the checked successor of its baseline")]
     InvalidRevision,

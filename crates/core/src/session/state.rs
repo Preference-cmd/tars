@@ -25,6 +25,7 @@ pub(super) struct Shared {
     pub config: SessionConfig,
     pub candidate: Arc<dyn Fn() -> TurnId + Send + Sync>,
     pub progress: broadcast::Sender<Arc<WorkProgress>>,
+    pub compaction: Option<Arc<crate::compact::CompactionRuntime>>,
 }
 pub(super) struct State {
     pub context: Option<Context>,
@@ -85,6 +86,14 @@ impl Shared {
         if matches!(result, WorkResult::Faulted(_)) {
             state.faulted = true;
         }
+        if let Some(runtime) = &self.compaction {
+            runtime.set_current_request(None);
+            if context_window_exceeded(&result) {
+                // One forced compaction on the session's next round, even with
+                // automatic compaction switched off; failure does not retry.
+                runtime.request_force();
+            }
+        }
         state.context = context;
         if let Some(entry) = state.records.get_mut(&record.work.turn_id) {
             entry.uncommitted = uncommitted;
@@ -94,6 +103,34 @@ impl Shared {
         state.active = None;
     }
 }
+/// Whether this failed work ended because the request no longer fit the model's
+/// context window, either as a provider stop reason or as an overflow refusal.
+fn context_window_exceeded(result: &WorkResult) -> bool {
+    use causa::kernel::ModelInvokeErrorKind;
+    use causa::runtime::{TurnInterruption, TurnResult};
+    match result {
+        WorkResult::Run(TurnResult::Interrupted { cause }) => match cause {
+            TurnInterruption::ModelContextWindowExceeded { .. } => true,
+            TurnInterruption::ModelCallFailed { error, .. } => {
+                error.kind == ModelInvokeErrorKind::InvalidRequest
+                    && mentions_context_window(&error.message)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn mentions_context_window(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("context")
+        && (message.contains("length")
+            || message.contains("window")
+            || message.contains("token")
+            || message.contains("too long")
+            || message.contains("maximum"))
+}
+
 impl Record {
     pub fn snapshot(&self) -> WorkObservation {
         WorkObservation {

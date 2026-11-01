@@ -1,5 +1,6 @@
 mod claims;
 mod command_status;
+mod compaction;
 mod lifecycle;
 mod opening;
 mod progress;

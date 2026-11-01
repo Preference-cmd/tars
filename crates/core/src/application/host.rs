@@ -25,6 +25,9 @@ pub(super) struct HostInner {
     pub external_hosts: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub assemble: Mutex<Option<Arc<TestAssembly>>>,
+    /// Test-only model gateway injection for the real assembly path.
+    #[cfg(test)]
+    pub gateway_override: Mutex<Option<Arc<dyn causa::kernel::ModelGateway>>>,
 }
 #[cfg(test)]
 pub(super) type TestAssembly = dyn Fn(
@@ -63,6 +66,8 @@ impl SessionHost {
                 snapshot_clones: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 #[cfg(test)]
                 assemble: Mutex::new(None),
+                #[cfg(test)]
+                gateway_override: Mutex::new(None),
             }),
         })
     }
@@ -79,6 +84,12 @@ impl SessionHost {
         let entry = self.register(prepared.conversation_id.clone(), Some(prepared))?;
         self.wait_ready(entry).await
     }
+    /// Route the real assembly path through a scripted gateway during tests.
+    #[cfg(test)]
+    pub(crate) fn set_test_gateway(&self, gateway: Option<Arc<dyn causa::kernel::ModelGateway>>) {
+        *self.inner.gateway_override.lock().expect("test gateway") = gateway;
+    }
+
     /// Join an existing opening or load a saved record without replaying old work.
     pub async fn open(&self, id: ConversationId) -> Result<ManagedSession, ApplicationError> {
         let entry = self.register(id, None)?;

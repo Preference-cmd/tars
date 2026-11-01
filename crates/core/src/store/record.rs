@@ -34,6 +34,15 @@ pub(crate) struct SavedSessionRecord {
     pub(crate) context: Context,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) permission_mode: Option<crate::permission::PermissionMode>,
+    /// Running automatic-compaction switch when it differs from the definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) auto_compact: Option<bool>,
+    /// Running trigger percentage when it differs from the definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) compact_threshold: Option<u8>,
+    /// Replaced conversation segments, in creation order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) history: Vec<crate::compact::HistorySegment>,
 }
 impl PartialEq for SavedSessionRecord {
     fn eq(&self, other: &Self) -> bool {
@@ -44,6 +53,9 @@ impl PartialEq for SavedSessionRecord {
             && self.definition == other.definition
             && self.context.blocks() == other.context.blocks()
             && self.permission_mode == other.permission_mode
+            && self.auto_compact == other.auto_compact
+            && self.compact_threshold == other.compact_threshold
+            && self.history == other.history
     }
 }
 impl SavedSessionRecord {
@@ -55,6 +67,31 @@ impl SavedSessionRecord {
         context: Context,
         current_mode: Option<crate::permission::PermissionMode>,
     ) -> Result<Self, StoreError> {
+        Self::new_with_compaction(
+            conversation_id,
+            last_commit_id,
+            expected_revision,
+            definition,
+            context,
+            current_mode,
+            None,
+            None,
+            Vec::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_compaction(
+        conversation_id: String,
+        last_commit_id: String,
+        expected_revision: Option<u64>,
+        definition: SessionDefinition,
+        context: Context,
+        current_mode: Option<crate::permission::PermissionMode>,
+        auto_compact: Option<bool>,
+        compact_threshold: Option<u8>,
+        history: Vec<crate::compact::HistorySegment>,
+    ) -> Result<Self, StoreError> {
         let initial_mode = definition.initial_permission_mode();
         let permission_mode = current_mode.filter(|&mode| mode != initial_mode);
         let record = Self {
@@ -65,6 +102,9 @@ impl SavedSessionRecord {
             definition,
             context,
             permission_mode,
+            auto_compact,
+            compact_threshold,
+            history,
         };
         record.validate(&record.conversation_id)?;
         Ok(record)
@@ -87,6 +127,23 @@ impl SavedSessionRecord {
         self.definition
             .validate()
             .map_err(|e| StoreError::Definition(Arc::new(e)))?;
+        if !(crate::definition::MIN_COMPACT_THRESHOLD..=crate::definition::MAX_COMPACT_THRESHOLD)
+            .contains(&self.definition.compact_threshold)
+        {
+            return Err(StoreError::Definition(Arc::new(
+                crate::definition::DefinitionError::InvalidCompactThreshold,
+            )));
+        }
+        if let Some(threshold) = self.compact_threshold
+            && !(crate::definition::MIN_COMPACT_THRESHOLD
+                ..=crate::definition::MAX_COMPACT_THRESHOLD)
+                .contains(&threshold)
+        {
+            return Err(StoreError::Definition(Arc::new(
+                crate::definition::DefinitionError::InvalidCompactThreshold,
+            )));
+        }
+        crate::compact::history::validate_index(&self.history)?;
         crate::material::validate_references(&self.context, None)
             .map_err(|e| StoreError::References(Arc::new(e)))
     }

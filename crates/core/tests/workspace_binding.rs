@@ -40,6 +40,9 @@ fn definition(provider: Provider, endpoint: &str, root: &Path) -> SessionDefinit
         permission_mode: None,
         command: None,
         mcp_servers: Vec::new(),
+        context_window: None,
+        auto_compact: true,
+        compact_threshold: 70,
     }
 }
 fn submit(session: &ManagedSession, key: &str) -> WorkRef {

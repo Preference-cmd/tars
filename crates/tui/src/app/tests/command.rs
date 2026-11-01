@@ -53,6 +53,9 @@ fn preset(command: CommandSettings) -> SessionDefinition {
         permission_mode: None,
         command: Some(command),
         mcp_servers: Vec::new(),
+        context_window: None,
+        auto_compact: true,
+        compact_threshold: 70,
     }
 }
 

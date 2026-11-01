@@ -44,6 +44,11 @@ impl Entry {
             }
             return;
         }
+        if matches!(event.update, ProgressUpdate::Compaction(_)) {
+            // Compaction progress is advisory and does not refresh the model
+            // preview; the TUI's own compaction view is P2 work.
+            return;
+        }
         if let Some(current) = &self.preview.invocation
             && current.turn_id == event.invocation_id.turn_id
             && current.round_id.0 > event.invocation_id.round_id.0
@@ -58,6 +63,9 @@ impl Entry {
             ProgressUpdate::Text { delta, truncated } => self.preview.append(delta, *truncated),
             ProgressUpdate::ModelOutputReady => self.preview.ready = true,
             ProgressUpdate::Tool(_) => unreachable!("handled independently of model preview"),
+            ProgressUpdate::Compaction(_) => {
+                unreachable!("handled independently of model preview")
+            }
         }
     }
     pub fn viewport(&self, height: usize) -> ConversationViewport {

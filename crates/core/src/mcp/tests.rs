@@ -88,6 +88,9 @@ fn definition(endpoint: &str, root: &Path, servers: Vec<McpServerConfig>) -> Ses
         permission_mode: Some(PermissionMode::FullAccess),
         command: None,
         mcp_servers: servers,
+        context_window: None,
+        auto_compact: true,
+        compact_threshold: 70,
     }
 }
 
