@@ -21,6 +21,8 @@ pub(super) struct HostInner {
     pub options: HostOptions,
     pub io: Arc<Semaphore>,
     pub tool_resources: Arc<crate::tools::ToolResources>,
+    /// Process-wide external-tool check, when the entry point resolved one.
+    pub external_tools: Option<crate::external_tools::ExternalTools>,
     pub snapshot_clones: Arc<std::sync::atomic::AtomicU64>,
     pub external_hosts: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -47,6 +49,18 @@ impl SessionHost {
     pub fn new(store_root: Option<PathBuf>) -> Self {
         Self::with_options(store_root, HostOptions::default()).expect("positive defaults")
     }
+    /// Attach the process-wide external-tool check used to bind `search_text`.
+    ///
+    /// Entry points resolve it once from their loaded configuration. A host
+    /// without it still creates sessions; search calls are then rejected as
+    /// unconfigured instead of failing creation.
+    #[must_use]
+    pub fn with_external_tools(mut self, tools: crate::external_tools::ExternalTools) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("external tools are attached before the host is cloned")
+            .external_tools = Some(tools);
+        self
+    }
     /// Construct with validated count limits; no directory or credential is read yet.
     pub fn with_options(
         store_root: Option<PathBuf>,
@@ -65,6 +79,7 @@ impl SessionHost {
                 store: store_root.map(SessionStore::new),
                 io: Arc::new(Semaphore::new(options.max_storage_operations)),
                 tool_resources: crate::tools::ToolResources::new(16),
+                external_tools: None,
                 options,
                 external_hosts: std::sync::atomic::AtomicUsize::new(1),
                 snapshot_clones: Arc::new(std::sync::atomic::AtomicU64::new(0)),

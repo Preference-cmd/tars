@@ -9,7 +9,7 @@ pub enum WorkspaceTool {
     ListDirectory,
     /// Read bounded UTF-8 file lines.
     ReadFile,
-    /// Search a bounded tree for a literal string.
+    /// Search the workspace with the sandboxed ripgrep executable.
     SearchText,
     /// Create or overwrite a bounded workspace-relative file.
     WriteFile,
@@ -100,14 +100,23 @@ pub struct WorkspaceToolLimits {
     /// Maximum entries returned from one directory.
     pub max_directory_entries: usize,
     /// Maximum bytes scanned from a single file, including skipped lines.
+    ///
+    /// A search passes this to `rg --max-filesize`: larger files are skipped
+    /// whole instead of scanned up to the limit.
     pub max_file_scan_bytes: usize,
-    /// Maximum regular files visited during a search.
+    /// Unused by `search_text`.
+    ///
+    /// Ripgrep has no file-count bound, and the call deadline bounds the total;
+    /// the field stays so saved definitions still deserialize.
     pub max_search_files: usize,
-    /// Maximum directory depth during a search.
+    /// Maximum directory depth during a search, passed to `rg --max-depth`.
     pub max_search_depth: usize,
-    /// Maximum total bytes scanned during a search.
+    /// Unused by `search_text`.
+    ///
+    /// Ripgrep cannot be told a total byte budget; the call deadline bounds the
+    /// work. The field stays so saved definitions still deserialize.
     pub max_search_scan_bytes: usize,
-    /// Maximum returned literal matches.
+    /// Maximum returned matches for a search; reaching it stops the search.
     pub max_search_matches: usize,
 }
 

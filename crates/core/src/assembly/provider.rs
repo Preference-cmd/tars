@@ -2,6 +2,7 @@ use crate::compact::CompactionRuntime;
 use crate::compact::estimate::{UsageTracker, UsageTrackingGateway};
 use crate::compact::preparer::CompactionPreparer;
 use crate::definition::{CredentialRef, DefinitionError, RenderOptions, SessionDefinition};
+use crate::external_tools::ExternalTools;
 use crate::session::{ConversationId, Session};
 use crate::tools::{ToolResources, WorkspaceTools};
 use crate::workspace::{Workspace, WorkspaceError};
@@ -23,6 +24,8 @@ pub(crate) enum AssemblyError {
     Workspace(Arc<WorkspaceError>),
     #[error("command tool unavailable: {0}")]
     CommandUnavailable(String),
+    #[error("search tool unavailable: {0}")]
+    SearchUnavailable(String),
 }
 
 /// Host resources an assembly uses, plus the store path a command must not read.
@@ -43,11 +46,17 @@ pub(crate) struct SessionResources {
     /// with a scripted model.
     #[cfg(test)]
     pub(crate) gateway_override: Option<Arc<dyn ModelGateway>>,
+    /// Process-wide external-tool check used to bind the search runtime.
+    pub(crate) external_tools: Option<ExternalTools>,
     /// Test-only command sandbox probe result injected into the real assembly
     /// path. Mirrors `CommandRuntime::bind_with_sandbox`: no production code
     /// can choose a backend or a probe result.
     #[cfg(test)]
     pub(crate) command_sandbox:
+        Option<Result<crate::sandbox::Sandbox, crate::sandbox::SandboxUnavailable>>,
+    /// Test-only search sandbox probe injection, same seam as the command one.
+    #[cfg(test)]
+    pub(crate) search_sandbox:
         Option<Result<crate::sandbox::Sandbox, crate::sandbox::SandboxUnavailable>>,
 }
 
@@ -60,11 +69,20 @@ impl SessionResources {
             auto_compact: None,
             compact_threshold: None,
             persistent: false,
+            external_tools: None,
             #[cfg(test)]
             gateway_override: None,
             #[cfg(test)]
             command_sandbox: None,
+            #[cfg(test)]
+            search_sandbox: None,
         }
+    }
+
+    /// Bind the search runtime with the process-wide external-tool check.
+    pub(crate) fn with_external_tools(mut self, tools: ExternalTools) -> Self {
+        self.external_tools = Some(tools);
+        self
     }
 
     pub(crate) fn with_storage(mut self, storage: Option<std::path::PathBuf>) -> Self {
@@ -108,6 +126,17 @@ impl SessionResources {
         self.command_sandbox = Some(sandbox);
         self
     }
+
+    /// Bind the search runtime with an injected probe result instead of
+    /// probing the platform backend.
+    #[cfg(test)]
+    pub(crate) fn with_test_search_sandbox(
+        mut self,
+        sandbox: Result<crate::sandbox::Sandbox, crate::sandbox::SandboxUnavailable>,
+    ) -> Self {
+        self.search_sandbox = Some(sandbox);
+        self
+    }
 }
 
 pub(crate) fn assemble(
@@ -126,10 +155,13 @@ pub(crate) fn assemble(
         auto_compact,
         compact_threshold,
         persistent,
+        external_tools,
         #[cfg(test)]
         gateway_override,
         #[cfg(test)]
         command_sandbox,
+        #[cfg(test)]
+        search_sandbox,
     } = resources;
     let storage_for_history = storage.clone();
     definition.validate()?;
@@ -173,22 +205,59 @@ pub(crate) fn assemble(
         };
         let workspace =
             Workspace::open(root).map_err(|error| AssemblyError::Workspace(Arc::new(error)))?;
-        match command {
-            Some(command) => Some(WorkspaceTools::with_command(
+        // The search runtime shares the session's workspace handle so its path
+        // check uses handle-relative access; an unready sandbox or `rg` still
+        // binds and rejects every call instead of failing creation.
+        let search = if definition
+            .tools
+            .contains(&crate::definition::WorkspaceTool::SearchText)
+        {
+            #[cfg(test)]
+            let bound = match search_sandbox {
+                Some(sandbox) => crate::tools::SearchRuntime::bind_with_sandbox(
+                    workspace.clone(),
+                    root,
+                    external_tools.as_ref(),
+                    sandbox,
+                ),
+                None => crate::tools::SearchRuntime::bind(
+                    workspace.clone(),
+                    root,
+                    external_tools.as_ref(),
+                ),
+            };
+            #[cfg(not(test))]
+            let bound =
+                crate::tools::SearchRuntime::bind(workspace.clone(), root, external_tools.as_ref());
+            Some(bound.map_err(|error| AssemblyError::SearchUnavailable(error.to_string()))?)
+        } else {
+            None
+        };
+        let tool_limits = definition.tool_limits.clone();
+        let write_limits = definition.write_limits.unwrap_or_default();
+        let settings = command_settings.unwrap_or_default();
+        Some(match (command, search) {
+            (None, None) => {
+                WorkspaceTools::with_write_limits(workspace, tool_limits, write_limits, tools)
+            }
+            (Some(command), None) => WorkspaceTools::with_command(
                 workspace,
-                definition.tool_limits.clone(),
-                definition.write_limits.unwrap_or_default(),
-                tools.clone(),
-                command_settings.expect("command settings accompany the runtime"),
-                Some(command),
-            )),
-            None => Some(WorkspaceTools::with_write_limits(
-                workspace,
-                definition.tool_limits.clone(),
-                definition.write_limits.unwrap_or_default(),
+                tool_limits,
+                write_limits,
                 tools,
-            )),
-        }
+                settings,
+                Some(command),
+            ),
+            (command, search) => WorkspaceTools::with_runtimes(
+                workspace,
+                tool_limits,
+                write_limits,
+                tools,
+                settings,
+                command,
+                search,
+            ),
+        })
     };
     let CredentialRef::Environment(name) = &definition.credential;
     let api_key = std::env::var(name)

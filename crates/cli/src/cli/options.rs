@@ -3,9 +3,12 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use tars_core::definition::SessionDefinition;
+use tars_core::external_tools::ExternalTools;
 
 pub(super) struct RunOptions {
     pub definition: SessionDefinition,
+    /// Resolved once from the loaded configuration and handed to the host.
+    pub external_tools: ExternalTools,
     pub input: Option<String>,
     pub load: Option<PathBuf>,
     pub save: Option<PathBuf>,
@@ -69,6 +72,7 @@ impl RunOptions {
                 .transpose()
         };
         let config = configuration::load(&values, no_config)?;
+        let external_tools = ExternalTools::resolve(&config);
         let mut definition = configuration::definition(&config, &values)?;
         // This entry performs exactly one transient work; it does not retain an
         // interactive work history even when the preset has a larger capacity.
@@ -82,6 +86,7 @@ impl RunOptions {
         }
         Ok(Self {
             definition,
+            external_tools,
             input,
             load: values.get("--load").map(PathBuf::from),
             save: values.get("--save").map(PathBuf::from),

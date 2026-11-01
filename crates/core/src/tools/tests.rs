@@ -65,7 +65,7 @@ async fn invoke(
 }
 
 #[tokio::test]
-async fn real_directory_read_and_search_report_paths_and_lines() {
+async fn real_directory_and_read_report_paths_and_lines() {
     let (dir, shared) = tools(WorkspaceToolLimits::default());
     std::fs::create_dir(dir.path().join("src")).unwrap();
     std::fs::write(
@@ -89,15 +89,16 @@ async fn real_directory_read_and_search_report_paths_and_lines() {
     assert_eq!(read.output.content["text"], "恢复: retry_save\n");
     assert_eq!(read.output.content["end_line"], 2);
     assert_eq!(read.output.content["limit_reason"], "max_lines");
-    let search = invoke(
+    // `search_text` now runs sandboxed ripgrep; without a bound search runtime
+    // it must fail closed instead of walking the workspace in-process. The real
+    // search behavior is covered by `search_acceptance_tests`.
+    let unconfigured = invoke(
         &shared,
         WorkspaceTool::SearchText,
         json!({"path":".","query":"retry_save"}),
     )
     .await;
-    assert_eq!(search.output.content["complete"], true);
-    assert_eq!(search.output.content["matches"][0]["path"], "src/data");
-    assert_eq!(search.output.content["matches"][0]["line"], 2);
+    assert_eq!(unconfigured.status, ToolResultStatus::Rejected);
     let empty = invoke(&shared, WorkspaceTool::ReadFile, json!({"path":"empty"})).await;
     assert_eq!(empty.output.content["text"], "");
     assert_eq!(empty.output.content["end_line"], Value::Null);
@@ -143,7 +144,7 @@ async fn invalid_inputs_do_not_start_filesystem_jobs() {
 }
 
 #[tokio::test]
-async fn links_binary_missing_files_and_no_matches_are_distinct() {
+async fn links_and_binary_files_are_not_readable() {
     let (dir, shared) = tools(WorkspaceToolLimits::default());
     std::fs::write(dir.path().join("data"), "safe").unwrap();
     std::os::unix::fs::symlink("/etc/passwd", dir.path().join("link")).unwrap();
@@ -168,33 +169,11 @@ async fn links_binary_missing_files_and_no_matches_are_distinct() {
             ToolResultStatus::Failed
         );
     }
-    let search = invoke(
-        &shared,
-        WorkspaceTool::SearchText,
-        json!({"path":".","query":"not here"}),
-    )
-    .await;
-    assert_eq!(search.output.content["complete"], false);
-    assert!(search.output.content["skipped"].as_u64().unwrap() >= 2);
-    std::fs::remove_file(dir.path().join("binary")).unwrap();
-    std::fs::remove_file(dir.path().join("link")).unwrap();
-    let complete = invoke(
-        &shared,
-        WorkspaceTool::SearchText,
-        json!({"path":".","query":"not here"}),
-    )
-    .await;
-    assert_eq!(complete.output.content["complete"], true);
-    assert!(
-        complete.output.content["matches"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    assert!(dir.path().join("data").exists());
 }
 
 #[tokio::test]
-async fn budgets_include_json_escaping_skipped_lines_and_partial_searches() {
+async fn budgets_include_json_escaping_for_reads_and_listings() {
     let limits = WorkspaceToolLimits {
         max_output_bytes: 2048,
         max_file_scan_bytes: 64,
@@ -219,15 +198,6 @@ async fn budgets_include_json_escaping_skipped_lines_and_partial_searches() {
     assert_eq!(read.output.content["scanned_bytes"], 64);
     assert_eq!(read.output.content["text"], "");
     assert_eq!(read.output.content["truncated"], true);
-    let search = invoke(
-        &shared,
-        WorkspaceTool::SearchText,
-        json!({"path":".","query":"no match"}),
-    )
-    .await;
-    assert_eq!(search.output.content["complete"], false);
-    assert!(search.output.content["scanned_bytes"].as_u64().unwrap() <= 80);
-    assert!(serde_json::to_vec(&search).unwrap().len() <= 2048);
     let long = "\"".repeat(100_000);
     std::fs::write(dir.path().join("long"), long).unwrap();
     let read = invoke(&shared, WorkspaceTool::ReadFile, json!({"path":"long"})).await;
@@ -346,48 +316,6 @@ async fn returned_result_and_duplicate_declaration_identities_are_independent() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn started_search_checks_cancellation_and_deadline_before_scanning() {
-    for deadline in [false, true] {
-        let (dir, shared) = tools(WorkspaceToolLimits::default());
-        std::fs::write(dir.path().join("file"), "real data").unwrap();
-        let gate = TestGate::new(false);
-        *shared.gate.lock().unwrap() = Some(gate.clone());
-        let call = call("search_text", json!({"path":".","query":"data"}));
-        let report = reporter(std::slice::from_ref(&call));
-        let tool = shared
-            .bind_for_test(&[WorkspaceTool::SearchText], report.clone())
-            .pop()
-            .unwrap();
-        let cancellation = CancellationToken::new();
-        let end = Instant::now() + Duration::from_millis(100);
-        let control = CallControl::new(cancellation.clone(), deadline.then_some(end));
-        let task = tokio::spawn(async move { tool.execute(&call, &control, None).await });
-        tokio::time::timeout(Duration::from_secs(3), gate.reached.notified())
-            .await
-            .unwrap();
-        if deadline {
-            tokio::time::sleep_until(end.into()).await;
-        } else {
-            cancellation.cancel();
-        }
-        assert_eq!(shared.metrics().active, 1);
-        gate.release();
-        let output = task.await.unwrap();
-        assert_eq!(
-            output.status,
-            if deadline {
-                ToolResultStatus::TimedOut
-            } else {
-                ToolResultStatus::Cancelled
-            }
-        );
-        report.drain().await;
-        assert_eq!(shared.metrics().scanned_bytes, 0);
-        assert_eq!(shared.metrics().active, 0);
-    }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancellation_at_return_boundary_preserves_observed_success() {
     let (dir, shared) = tools(WorkspaceToolLimits::default());
     std::fs::write(dir.path().join("file"), "result already read").unwrap();
@@ -470,117 +398,6 @@ async fn shared_host_slots_bound_actual_operations_across_instances() {
     assert_eq!(host.slots.available_permits(), 1);
 }
 
-#[tokio::test]
-async fn depth_and_file_limits_make_no_match_searches_incomplete() {
-    let limits = WorkspaceToolLimits {
-        max_search_depth: 1,
-        max_search_files: 1,
-        ..Default::default()
-    };
-    let (dir, shared) = tools(limits);
-    std::fs::create_dir_all(dir.path().join("one/two")).unwrap();
-    std::fs::write(dir.path().join("one/two/deep"), "match").unwrap();
-    let depth = invoke(
-        &shared,
-        WorkspaceTool::SearchText,
-        json!({"path":".","query":"match"}),
-    )
-    .await;
-    assert_eq!(depth.output.content["complete"], false);
-    assert_eq!(depth.output.content["issues"][0]["reason"], "search_depth");
-    assert_eq!(depth.output.content["scanned_files"], 0);
-    std::fs::write(dir.path().join("one/a"), "first").unwrap();
-    std::fs::write(dir.path().join("one/b"), "second").unwrap();
-    let files = invoke(
-        &shared,
-        WorkspaceTool::SearchText,
-        json!({"path":"one","query":"absent"}),
-    )
-    .await;
-    assert_eq!(files.output.content["complete"], false);
-    assert_eq!(files.output.content["limit_reason"], "search_files");
-    assert_eq!(files.output.content["scanned_files"], 1);
-}
-
-#[tokio::test]
-async fn directory_only_trees_cannot_bypass_search_work_bounds() {
-    let (dir, shared) = tools(WorkspaceToolLimits::default());
-    for index in 0..4001 {
-        std::fs::create_dir(dir.path().join(format!("d{index}"))).unwrap();
-    }
-    let output = invoke(
-        &shared,
-        WorkspaceTool::SearchText,
-        json!({"path":".","query":"absent"}),
-    )
-    .await;
-    assert_eq!(output.output.content["limit_reason"], "search_entries");
-    assert_eq!(output.output.content["scanned_entries"], 4000);
-    assert_eq!(output.output.content["scanned_files"], 0);
-    assert_eq!(output.output.content["complete"], false);
-}
-
-#[tokio::test]
-async fn long_line_snippets_include_the_match_and_permission_errors_remain_partial() {
-    use std::os::unix::fs::PermissionsExt;
-    let (dir, shared) = tools(WorkspaceToolLimits::default());
-    std::fs::write(
-        dir.path().join("long"),
-        format!("{}needle{}", "文".repeat(2000), "字".repeat(2000)),
-    )
-    .unwrap();
-    let output = invoke(
-        &shared,
-        WorkspaceTool::SearchText,
-        json!({"path":".","query":"needle"}),
-    )
-    .await;
-    let snippet = output.output.content["matches"][0]["text"]
-        .as_str()
-        .unwrap();
-    assert!(snippet.contains("needle"));
-    assert!(snippet.len() <= 262);
-    assert_eq!(
-        output.output.content["matches"][0]["snippet_truncated"],
-        true
-    );
-    std::fs::create_dir(dir.path().join("denied")).unwrap();
-    std::fs::write(dir.path().join("denied/private"), "hidden").unwrap();
-    std::fs::set_permissions(
-        dir.path().join("denied"),
-        std::fs::Permissions::from_mode(0o0),
-    )
-    .unwrap();
-    let denied = invoke(
-        &shared,
-        WorkspaceTool::ListDirectory,
-        json!({"path":"denied"}),
-    )
-    .await;
-    // The fixtures run as the ordinary developer account. Restore permissions
-    // before assertions so failed checks never leave an unremovable fixture.
-    let partial = invoke(
-        &shared,
-        WorkspaceTool::SearchText,
-        json!({"path":".","query":"absent"}),
-    )
-    .await;
-    std::fs::set_permissions(
-        dir.path().join("denied"),
-        std::fs::Permissions::from_mode(0o700),
-    )
-    .unwrap();
-    assert_eq!(denied.status, ToolResultStatus::Failed);
-    assert_eq!(partial.output.content["complete"], false);
-    assert!(
-        partial.output.content["issues"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|i| i["reason"] == "directory_access")
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "resource probe: run the test binary under /usr/bin/time -l"]
 async fn resource_probe() {
@@ -632,23 +449,17 @@ async fn resource_probe() {
             host.clone(),
         );
         jobs.push(tokio::spawn(async move {
-            let (output, listed, read) = tokio::join!(
-                invoke(
-                    &shared,
-                    WorkspaceTool::SearchText,
-                    json!({"path":".","query":"needle"})
-                ),
+            let (listed, read) = tokio::join!(
                 invoke(&shared, WorkspaceTool::ListDirectory, json!({"path":"."})),
                 invoke(&shared, WorkspaceTool::ReadFile, json!({"path":first_file}))
             );
             (
                 shared.metrics(),
                 [
-                    serde_json::to_vec(&output).unwrap().len(),
                     serde_json::to_vec(&listed).unwrap().len(),
                     serde_json::to_vec(&read).unwrap().len(),
                 ],
-                output.output.content,
+                listed.output.content,
             )
         }));
     }
@@ -656,7 +467,11 @@ async fn resource_probe() {
         let (metrics, size, content) = job.await.unwrap();
         println!(
             "probe_session={index} metrics={metrics:?} serialized_result_bytes={size:?} content_stats={}",
-            json!({"files":content["scanned_files"],"entries":content["scanned_entries"],"bytes":content["scanned_bytes"],"complete":content["complete"],"reason":content["limit_reason"]})
+            json!({
+                "entries": content["entries"].as_array().map(Vec::len),
+                "truncated": content["truncated"],
+                "reason": content["limit_reason"],
+            })
         );
         assert_eq!(metrics.started, metrics.completed);
         assert_eq!(metrics.active, 0);
@@ -679,13 +494,14 @@ async fn observation_probe() {
     use crate::session::{ProgressUpdate, ToolProgress, ToolProgressSnapshot, WorkProgress};
     let (dir, shared) = tools(WorkspaceToolLimits::default());
     std::fs::write(dir.path().join("file"), "actual file data\n").unwrap();
+    // A long workspace path exercises the argument-summary bound without the
+    // search tool, whose observation now belongs to the sandboxed runtime.
+    let long_name = "p".repeat(200);
+    std::fs::write(dir.path().join(&long_name), "actual file data\n").unwrap();
     let declarations = [
         (WorkspaceTool::ListDirectory, json!({"path":"."})),
         (WorkspaceTool::ReadFile, json!({"path":"file"})),
-        (
-            WorkspaceTool::SearchText,
-            json!({"path":".","query":"界".repeat(341)}),
-        ),
+        (WorkspaceTool::ReadFile, json!({"path": long_name})),
     ];
     let mut total_events = 0;
     let mut max_event = 0;

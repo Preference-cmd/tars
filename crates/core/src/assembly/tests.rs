@@ -8,6 +8,8 @@ use causa::kernel::{
 use causa::runtime::{ToolExecutor, TurnInterruption, TurnResult, TurnRunner};
 use std::sync::Arc;
 use std::time::Duration;
+#[cfg(unix)]
+use tokio_util::sync::CancellationToken;
 
 fn definition() -> SessionDefinition {
     SessionDefinition {
@@ -313,4 +315,210 @@ fn a_failed_probe_binds_the_session_with_an_unavailable_status() {
         launches.lock().unwrap().is_empty(),
         "a failed probe must not launch a process"
     );
+}
+
+fn search_definition(directory: &std::path::Path) -> SessionDefinition {
+    let mut chosen = definition();
+    chosen.credential = CredentialRef::Environment("PATH".into());
+    chosen.workspace_root = Some(directory.canonicalize().unwrap());
+    chosen.tools = vec![crate::definition::WorkspaceTool::SearchText];
+    chosen
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn search_call(arguments: serde_json::Value) -> causa::kernel::ToolCallContext {
+    causa::kernel::ToolCallContext::new(
+        causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::ToolCallPayload::new("search_text", arguments),
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn search_reporter(calls: &[causa::kernel::ToolCallContext]) -> crate::session::ToolReporter {
+    use causa::kernel::{InvocationId, RoundId, ToolBatch, TurnId};
+    let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
+    let reporter = crate::session::ToolReporter::new(
+        crate::session::WorkRef {
+            conversation_id: "assembly-search-tests".into(),
+            turn_id: turn_id.clone(),
+        },
+        tokio::sync::broadcast::channel(128).0,
+    );
+    reporter.batch_ready(
+        &InvocationId {
+            turn_id,
+            round_id: RoundId(0),
+        },
+        &ToolBatch::new(calls.to_vec()).unwrap(),
+    );
+    reporter
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn a_failed_search_probe_keeps_the_session_open_and_rejects_every_call() {
+    use crate::permission::PermissionMode;
+    let directory = tempfile::tempdir().unwrap();
+    let chosen = search_definition(directory.path());
+    let backend = tars_sandbox::test_support::RecordingBackend::unavailable();
+    let launches = backend.calls();
+    let error = crate::sandbox::Sandbox::open_with(Box::new(backend)).unwrap_err();
+    let resources = crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16))
+        .with_test_search_sandbox(Err(error));
+    let session = assemble(
+        &chosen,
+        "id".into(),
+        Context::default(),
+        resources,
+        PermissionMode::Ask,
+        None,
+        false,
+    )
+    .expect("a failed search probe must not close the session");
+    let shared = session.workspace_tools().expect("workspace tools");
+    let invocation = search_call(serde_json::json!({"path": ".", "query": "needle"}));
+    let tool = shared
+        .bind_for_test(
+            &[crate::definition::WorkspaceTool::SearchText],
+            search_reporter(std::slice::from_ref(&invocation)),
+        )
+        .pop()
+        .unwrap();
+    let output = tool
+        .execute(
+            &invocation,
+            &CallControl::new(CancellationToken::new(), None),
+            None,
+        )
+        .await;
+    assert_eq!(output.status, causa::kernel::ToolResultStatus::Rejected);
+    let reason = output.output.content["error"].as_str().unwrap();
+    assert!(reason.contains("requires a platform sandbox"), "{reason}");
+    assert!(reason.contains("probe failed"), "{reason}");
+    assert!(
+        launches.lock().unwrap().is_empty(),
+        "a failed probe must not launch a process"
+    );
+}
+
+/// Non-macOS: creating a session that selects `search_text` must not fail the
+/// way `run_command` creation does. Linux has workspace access, so creation
+/// succeeds and every call is rejected by the search runtime. Windows has no
+/// workspace access at all, so no workspace-tool session can be assembled
+/// there; that pre-existing platform limit is what this branch asserts.
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn search_creation_without_a_backend_keeps_the_session_open() {
+    use crate::permission::PermissionMode;
+    let directory = tempfile::tempdir().unwrap();
+    let chosen = search_definition(directory.path());
+    let assembled = assemble(
+        &chosen,
+        "id".into(),
+        Context::default(),
+        crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)),
+        PermissionMode::Ask,
+        None,
+        false,
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let session = assembled
+            .expect("a platform without a sandbox backend must still create a search session");
+        let shared = session.workspace_tools().expect("workspace tools");
+        let invocation = search_call(serde_json::json!({"path": ".", "query": "needle"}));
+        let tool = shared
+            .bind_for_test(
+                &[crate::definition::WorkspaceTool::SearchText],
+                search_reporter(std::slice::from_ref(&invocation)),
+            )
+            .pop()
+            .unwrap();
+        let output = tool
+            .execute(
+                &invocation,
+                &CallControl::new(CancellationToken::new(), None),
+                None,
+            )
+            .await;
+        assert_eq!(output.status, causa::kernel::ToolResultStatus::Rejected);
+        let reason = output.output.content["error"].as_str().unwrap();
+        assert!(
+            reason.contains("requires a platform sandbox backend"),
+            "{reason}"
+        );
+        assert!(reason.contains(std::env::consts::OS), "{reason}");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        assert!(matches!(
+            assembled,
+            Err(super::provider::AssemblyError::Workspace(error))
+                if matches!(&*error, crate::workspace::WorkspaceError::UnsupportedPlatform)
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn the_host_hands_resolved_external_tools_to_the_search_runtime() {
+    use crate::application::{PreparedCreate, SessionHost};
+    use crate::config::{Config, ConfigSource};
+    use crate::external_tools::ExternalTools;
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = directory.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let rg = directory.path().join("fixture-rg");
+    std::fs::write(
+        &rg,
+        "#!/bin/sh\nprintf 'ripgrep 15.2.0 (test fixture)\\n'\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&rg, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let config_path = directory.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        format!("version = 1\n[external_tools]\nrg = \"{}\"\n", rg.display()),
+    )
+    .unwrap();
+    let config = Config::load(ConfigSource::File(config_path)).unwrap();
+    let tools = ExternalTools::resolve(&config);
+    assert!(tools.rg().is_ready(), "{:?}", tools.rg());
+    let host = SessionHost::new(None).with_external_tools(tools);
+    let chosen = search_definition(&workspace);
+    let session = host
+        .create(PreparedCreate::transient(chosen, Context::default()))
+        .await
+        .expect("the host must create a session with a bound search runtime");
+    let shared = session.workspace_tools().expect("workspace tools");
+    assert!(
+        shared.search().is_some(),
+        "selecting search_text must bind the search runtime"
+    );
+    #[cfg(target_os = "macos")]
+    {
+        let runtime = shared.search().unwrap();
+        let params = crate::tools::parameters::SearchParams {
+            path: ".".into(),
+            query: "needle".into(),
+            max_matches: None,
+            regex: None,
+            ignore_case: None,
+            glob: None,
+            context_lines: None,
+            include_ignored: None,
+        };
+        runtime
+            .check(&params, shared.limits())
+            .expect("the resolved external-tool path must reach the search runtime");
+    }
+    host.close(
+        &session.target(),
+        crate::application::ClosePolicy::DiscardLocal,
+    )
+    .await
+    .unwrap();
 }

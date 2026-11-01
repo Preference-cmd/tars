@@ -225,6 +225,10 @@ async fn assembled(
         )
         .with_compaction(history, auto_compact, compact_threshold)
         .persistent(persistent);
+    let base = match host.external_tools.clone() {
+        Some(tools) => base.with_external_tools(tools),
+        None => base,
+    };
     #[cfg(test)]
     let base = {
         let sandbox = host

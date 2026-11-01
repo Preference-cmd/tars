@@ -43,7 +43,7 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
         Ok(input) => input,
         Err(error) => return (early_failure(options.json, error), false),
     };
-    let host = SessionHost::new(None);
+    let host = SessionHost::new(None).with_external_tools(options.external_tools);
     let session = match host
         .create(PreparedCreate::transient(options.definition, context))
         .await

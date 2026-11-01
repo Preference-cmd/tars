@@ -52,21 +52,34 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
             SessionCommand::Create {
                 store,
                 definition,
+                external_tools,
                 load,
                 recovery_dir,
                 json,
             } => (
-                create(store, *definition, load, recovery_dir, json).await,
+                create(store, *definition, external_tools, load, recovery_dir, json).await,
                 false,
             ),
             SessionCommand::Run {
                 store,
                 id,
+                external_tools,
                 input,
                 permission_mode,
                 recovery_dir,
                 json,
-            } => run_saved(store, id, input, permission_mode, recovery_dir, json).await,
+            } => {
+                run_saved(
+                    store,
+                    id,
+                    external_tools,
+                    input,
+                    permission_mode,
+                    recovery_dir,
+                    json,
+                )
+                .await
+            }
             SessionCommand::List { store, json } => (list(store, json).await, false),
             SessionCommand::Compact {
                 store,
@@ -115,6 +128,7 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
 async fn create(
     store: PathBuf,
     definition: SessionDefinition,
+    external_tools: tars_core::external_tools::ExternalTools,
     load: Option<PathBuf>,
     recovery_dir: PathBuf,
     json_output: bool,
@@ -134,7 +148,7 @@ async fn create(
     let prepared = PreparedCreate::persistent(definition, context.clone());
     let id = prepared.conversation_id().clone();
     // Creating saves the definition and closes; it starts no MCP server.
-    let host = managed_execution::definition_host(store);
+    let host = managed_execution::definition_host(store).with_external_tools(external_tools);
     let session = match host.create(prepared).await {
         Ok(session) => session,
         Err(error) => {
@@ -215,6 +229,7 @@ fn export_initial_recovery(
 async fn run_saved(
     store: PathBuf,
     id: String,
+    external_tools: tars_core::external_tools::ExternalTools,
     input: Option<String>,
     permission_mode: Option<tars_core::permission::PermissionMode>,
     recovery_dir: PathBuf,
@@ -225,7 +240,7 @@ async fn run_saved(
         Ok(input) => input,
         Err(error) => return (early_failure(json_output, error), false),
     };
-    let host = SessionHost::new(Some(store));
+    let host = SessionHost::new(Some(store)).with_external_tools(external_tools);
     let session = match host.open(id.into()).await {
         Ok(session) => session,
         Err(error) => return (early_failure(json_output, &error.to_string()), false),

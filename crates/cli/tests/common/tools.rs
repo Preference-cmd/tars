@@ -103,12 +103,15 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new(provider: &str, paused: bool) -> Self {
+        // A CLI process cannot rely on a resolved sandboxed ripgrep, so the
+        // scripted round-trip uses file reads. The search tool itself is
+        // covered by tars-core's sandboxed search acceptance tests.
         let responses = vec![
             tool(
                 provider,
-                "search_text",
-                json!({"path":".","query":"retry original","max_matches":10}),
-                "search1",
+                "read_file",
+                json!({"path":"recovery.rs","start_line":1,"max_lines":2}),
+                "read0",
             ),
             tool(
                 provider,

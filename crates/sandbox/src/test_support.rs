@@ -151,6 +151,21 @@ pub fn launch_environment(launch: &Launch) -> &[(OsString, OsString)] {
     launch.environment()
 }
 
+/// The program a launch request starts.
+pub fn launch_program(launch: &Launch) -> &std::path::Path {
+    launch.program()
+}
+
+/// The arguments a launch request passes.
+pub fn launch_args(launch: &Launch) -> &[OsString] {
+    launch.launch_args()
+}
+
+/// The working directory a launch request applies, when one is set.
+pub fn launch_working_directory(launch: &Launch) -> Option<&std::path::Path> {
+    launch.working_directory()
+}
+
 /// Open the macOS Seatbelt backend with an explicit home directory.
 ///
 /// The probe resolves credential denials under `home`, so a test can keep its

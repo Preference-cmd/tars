@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use tars_core::definition::SessionDefinition;
+use tars_core::external_tools::ExternalTools;
 
 pub(crate) enum SessionCommand {
     ExportMaterials {
@@ -13,6 +14,8 @@ pub(crate) enum SessionCommand {
         store: PathBuf,
         // Boxed: the definition is far larger than the other variants.
         definition: Box<SessionDefinition>,
+        /// Resolved once from the loaded configuration and handed to the host.
+        external_tools: ExternalTools,
         load: Option<PathBuf>,
         recovery_dir: PathBuf,
         json: bool,
@@ -20,6 +23,8 @@ pub(crate) enum SessionCommand {
     Run {
         store: PathBuf,
         id: String,
+        /// Resolved once from the loaded configuration and handed to the host.
+        external_tools: ExternalTools,
         input: Option<String>,
         permission_mode: Option<tars_core::permission::PermissionMode>,
         recovery_dir: PathBuf,
@@ -214,6 +219,7 @@ impl SessionCommand {
                 Ok(Self::Create {
                     store,
                     definition: Box::new(definition),
+                    external_tools: ExternalTools::resolve(&config),
                     load: values.get("--load").map(PathBuf::from),
                     recovery_dir: values
                         .get("--recovery-dir")
@@ -241,6 +247,7 @@ impl SessionCommand {
                 Ok(Self::Run {
                     store,
                     id: id.expect("run ID parsed"),
+                    external_tools: ExternalTools::resolve(&config),
                     input,
                     permission_mode,
                     recovery_dir: values

@@ -4,8 +4,11 @@ use std::process::Command;
 #[path = "common/tools.rs"]
 mod tools;
 
+/// The scripted CLI round-trip reads files instead of searching: a child CLI
+/// process has no guaranteed resolved sandboxed ripgrep. Search itself is
+/// covered by tars-core's real Seatbelt acceptance tests.
 #[test]
-fn actual_cli_process_runs_search_read_and_model_continuation_for_three_protocols() {
+fn actual_cli_process_runs_tools_and_model_continuation_for_three_protocols() {
     for provider in ["openai-chat", "openai-responses", "anthropic"] {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().join("workspace");

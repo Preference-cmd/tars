@@ -24,6 +24,17 @@ pub(crate) struct SearchParams {
     pub path: String,
     pub query: String,
     pub max_matches: Option<usize>,
+    /// Interpret the query as a regular expression instead of a literal.
+    pub regex: Option<bool>,
+    /// Match case-insensitively; the default is case-sensitive.
+    pub ignore_case: Option<bool>,
+    /// One inclusive glob filter, passed to `rg` as `--glob=<value>`.
+    pub glob: Option<String>,
+    /// Context lines around each match, at most three.
+    pub context_lines: Option<u8>,
+    /// Also search files excluded by ignore rules; version-control
+    /// directories stay excluded.
+    pub include_ignored: Option<bool>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -108,7 +119,16 @@ impl Params {
         let allowed: &[&str] = match kind {
             WorkspaceTool::ListDirectory => &["path", "limit"],
             WorkspaceTool::ReadFile => &["path", "start_line", "max_lines"],
-            WorkspaceTool::SearchText => &["path", "query", "max_matches"],
+            WorkspaceTool::SearchText => &[
+                "path",
+                "query",
+                "max_matches",
+                "regex",
+                "ignore_case",
+                "glob",
+                "context_lines",
+                "include_ignored",
+            ],
             WorkspaceTool::WriteFile => &["path", "content"],
             WorkspaceTool::EditFile => &["path", "edits"],
             WorkspaceTool::RunCommand => &[
@@ -146,11 +166,29 @@ impl Params {
                 "outside_sandbox" if !matches!(value, serde_json::Value::Bool(_)) => {
                     return Err(Cow::Borrowed("outside_sandbox must be a boolean"));
                 }
+                "regex" | "ignore_case" | "include_ignored"
+                    if !matches!(value, serde_json::Value::Bool(_)) =>
+                {
+                    return Err(Cow::Borrowed("search switches must be booleans"));
+                }
+                "glob"
+                    if value.as_str().is_none_or(|glob| {
+                        glob.is_empty() || glob.len() > 256 || glob.contains('\0')
+                    }) =>
+                {
+                    return Err(Cow::Borrowed(
+                        "glob must be a nonempty string of at most 256 bytes without NUL",
+                    ));
+                }
+                "context_lines" if value.as_u64().is_none_or(|lines| lines > 3) => {
+                    return Err(Cow::Borrowed("context_lines must be between 0 and 3"));
+                }
                 "edits" if value.as_array().is_none() => {
                     return Err(Cow::Borrowed("edits must be an array"));
                 }
                 "path" | "query" | "content" | "edits" | "command" | "workdir"
-                | "justification" | "outside_sandbox" => {}
+                | "justification" | "outside_sandbox" | "regex" | "ignore_case" | "glob"
+                | "include_ignored" => {}
                 _ if value.as_u64().is_none() => {
                     return Err(Cow::Borrowed("limits must be positive integers"));
                 }
@@ -209,10 +247,11 @@ impl Params {
                     || p.query.contains('\0')
                     || p.query.contains(['\r', '\n'])
                     || p.max_matches
-                        .is_some_and(|n| n == 0 || n > limits.max_search_matches) =>
+                        .is_some_and(|n| n == 0 || n > limits.max_search_matches)
+                    || p.context_lines.is_some_and(|lines| lines > 3) =>
             {
                 return Err(Cow::Borrowed(
-                    "search query or match limit exceeds configured bound",
+                    "search query, match limit or context lines exceed configured bounds",
                 ));
             }
             Self::Write(p) => {

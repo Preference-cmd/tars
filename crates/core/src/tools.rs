@@ -6,8 +6,10 @@ mod execute;
 pub(crate) mod operations;
 pub(crate) mod parameters;
 pub(crate) mod resources;
+mod search;
 
 pub(crate) use command::CommandRuntime;
+pub(crate) use search::SearchRuntime;
 
 #[cfg(test)]
 pub use diff::DiffSummary;
@@ -27,6 +29,10 @@ mod command_acceptance_tests;
 mod command_runtime_tests;
 #[cfg(test)]
 mod command_tool_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod search_acceptance_tests;
+#[cfg(test)]
+mod search_tool_tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]

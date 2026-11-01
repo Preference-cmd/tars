@@ -4,6 +4,7 @@ use super::diff::DiffSummary;
 use super::operations::{OperationControl, run};
 use super::parameters::Params;
 use super::resources::{Counters, OperationGuard, ToolResources};
+use super::search::SearchCheckError;
 use crate::definition::{CommandSettings, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::permission::WriteAction;
 use crate::session::ToolReporter;
@@ -40,6 +41,7 @@ pub struct WorkspaceTools {
     pub(super) write_limits: WriteToolLimits,
     command_settings: CommandSettings,
     pub(super) command: Option<Arc<super::CommandRuntime>>,
+    pub(super) search: Option<Arc<super::SearchRuntime>>,
     outside_sandbox_grants: Arc<crate::permission::OutsideSandboxGrants>,
     pub(super) local: Arc<Semaphore>,
     host: Arc<ToolResources>,
@@ -63,6 +65,10 @@ impl WorkspaceTools {
     }
     pub(crate) fn command(&self) -> Option<&Arc<super::CommandRuntime>> {
         self.command.as_ref()
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) fn search(&self) -> Option<&Arc<super::SearchRuntime>> {
+        self.search.as_ref()
     }
     pub(crate) fn outside_sandbox_grants(&self) -> Arc<crate::permission::OutsideSandboxGrants> {
         self.outside_sandbox_grants.clone()
@@ -108,6 +114,7 @@ impl WorkspaceTools {
             host,
             CommandSettings::default(),
             None,
+            None,
         )
     }
 
@@ -126,6 +133,47 @@ impl WorkspaceTools {
             host,
             command_settings,
             command,
+            None,
+        )
+    }
+
+    /// Bind the sandboxed search runtime and the command runtime together.
+    pub(crate) fn with_runtimes(
+        workspace: Arc<Workspace>,
+        limits: WorkspaceToolLimits,
+        write_limits: WriteToolLimits,
+        host: Arc<ToolResources>,
+        command_settings: CommandSettings,
+        command: Option<Arc<super::CommandRuntime>>,
+        search: Option<Arc<super::SearchRuntime>>,
+    ) -> Arc<Self> {
+        Self::with_parts(
+            workspace,
+            limits,
+            write_limits,
+            host,
+            command_settings,
+            command,
+            search,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_search(
+        workspace: Arc<Workspace>,
+        limits: WorkspaceToolLimits,
+        write_limits: WriteToolLimits,
+        host: Arc<ToolResources>,
+        search: Option<Arc<super::SearchRuntime>>,
+    ) -> Arc<Self> {
+        Self::with_parts(
+            workspace,
+            limits,
+            write_limits,
+            host,
+            CommandSettings::default(),
+            None,
+            search,
         )
     }
 
@@ -136,6 +184,7 @@ impl WorkspaceTools {
         host: Arc<ToolResources>,
         command_settings: CommandSettings,
         command: Option<Arc<super::CommandRuntime>>,
+        search: Option<Arc<super::SearchRuntime>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             workspace,
@@ -144,6 +193,7 @@ impl WorkspaceTools {
             write_limits,
             command_settings,
             command,
+            search,
             outside_sandbox_grants: crate::permission::OutsideSandboxGrants::new(),
             host,
             counters: Arc::new(Counters::default()),
@@ -345,6 +395,95 @@ impl WorkspaceToolImpl {
         self.reporter.returned(call, output.status.clone());
         output
     }
+
+    async fn execute_search(
+        &self,
+        call: &ToolCallContext,
+        control: &CallControl,
+        params: Params,
+    ) -> ToolResultPayload {
+        let Params::Search(params) = params else {
+            return result(
+                call,
+                ToolResultStatus::Rejected,
+                serde_json::json!({ "error": "invalid search parameters" }),
+            );
+        };
+        let Some(runtime) = self.shared.search.as_ref() else {
+            let output = result(
+                call,
+                ToolResultStatus::Rejected,
+                serde_json::json!({ "error": "search runtime is not available" }),
+            );
+            self.reporter.returned(call, output.status.clone());
+            return output;
+        };
+        let prepared = match runtime.check(&params, self.shared.limits()) {
+            Ok(prepared) => prepared,
+            Err(SearchCheckError::Rejected(error)) => {
+                let output = result(
+                    call,
+                    ToolResultStatus::Rejected,
+                    serde_json::json!({ "error": error }),
+                );
+                self.reporter.returned(call, output.status.clone());
+                return output;
+            }
+            Err(SearchCheckError::Failed(error)) => {
+                let output = result(
+                    call,
+                    ToolResultStatus::Failed,
+                    serde_json::json!({ "error": error }),
+                );
+                self.reporter.returned(call, output.status.clone());
+                return output;
+            }
+        };
+        let search_control = control.with_timeout(super::command::bounded_timeout(
+            control.deadline(),
+            Duration::from_secs(self.shared.limits.call_timeout_secs),
+        ));
+        self.reporter.waiting(call);
+        let Some(permit) = runtime.acquire(&search_control).await else {
+            let output = search_not_started(call, &search_control);
+            self.reporter.returned(call, output.status.clone());
+            return output;
+        };
+        self.reporter.running(call);
+        let execution = runtime
+            .run(prepared, permit, &search_control, self.shared.limits())
+            .await;
+        let mut output = result(call, execution.status, execution.content);
+        if serde_json::to_vec(&output).map_or(true, |bytes| {
+            bytes.len() > self.shared.limits.max_output_bytes
+        }) {
+            output.output.content = serde_json::json!({
+                "truncated": true,
+                "complete": false,
+                "limit_reason": "output_bytes"
+            });
+        }
+        self.reporter.returned(call, output.status.clone());
+        output
+    }
+}
+
+fn search_not_started(call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
+    let cause = if control.is_cancelled() {
+        "the work was stopped while this search was waiting for the previous search"
+    } else {
+        "the deadline expired while this search was waiting for the previous search"
+    };
+    result(
+        call,
+        ToolResultStatus::Rejected,
+        serde_json::json!({
+            "error": "the search was not started",
+            "reason": format!(
+                "searches in one session run one at a time; {cause}, so no process was started"
+            ),
+        }),
+    )
 }
 
 #[async_trait::async_trait]
@@ -364,8 +503,20 @@ impl Tool for WorkspaceToolImpl {
             ),
             WorkspaceTool::SearchText => (
                 "search_text",
-                "Search single-line literal text (at most 1024 UTF-8 bytes) in bounded workspace files; partial scans are explicitly marked.",
-                json!({"path":{"type":"string","maxLength":4096},"query":{"type":"string","minLength":1,"maxLength":1024},"max_matches":{"type":"integer","minimum":1,"maximum":self.shared.limits.max_search_matches}}),
+                "Search a sandboxed workspace tree with ripgrep, honoring .gitignore \
+                 (including nested and negated rules) and skipping .git. The query is a \
+                 single-line literal of at most 1024 UTF-8 bytes unless regex is true; \
+                 regex mode uses ripgrep's linear-time engine. Read-only; no network.",
+                json!({
+                    "path": {"type":"string","maxLength":4096,"description":"Workspace-relative directory or regular file; '.' is the workspace root."},
+                    "query": {"type":"string","minLength":1,"maxLength":1024},
+                    "max_matches": {"type":"integer","minimum":1,"maximum":self.shared.limits.max_search_matches},
+                    "regex": {"type":"boolean","description":"Treat the query as a regular expression instead of a literal."},
+                    "ignore_case": {"type":"boolean","description":"Match case-insensitively; the default is case-sensitive."},
+                    "glob": {"type":"string","minLength":1,"maxLength":256,"description":"One inclusive glob filter passed to ripgrep, for example *.rs."},
+                    "context_lines": {"type":"integer","minimum":0,"maximum":3,"description":"Context lines included before and after each match."},
+                    "include_ignored": {"type":"boolean","description":"Also search ignored files; .git, .hg, .svn and .jj stay excluded."}
+                }),
             ),
             WorkspaceTool::WriteFile => (
                 "write_file",
@@ -479,6 +630,9 @@ impl Tool for WorkspaceToolImpl {
         };
         if self.kind == WorkspaceTool::RunCommand {
             return self.execute_command(call, control, params).await;
+        }
+        if self.kind == WorkspaceTool::SearchText {
+            return self.execute_search(call, control, params).await;
         }
         let prepared_write = match self.kind {
             WorkspaceTool::WriteFile | WorkspaceTool::EditFile => {
