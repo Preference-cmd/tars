@@ -9,11 +9,13 @@ Usage: tars [--help | --version]
        tars demo [--save <file>]
        tars run --provider <protocol> --model <id> (--input <text> | --stdin) [options]
        tars session <create | run | list | show | compact | history | repair | export-materials> [options]
+       tars tools <status | install> [options]
 
 Commands:
   demo           Run the offline single-session demonstration
   run            Execute one work with a real model and explicitly selected workspace tools
   session        Save and reopen sessions; see tars session --help
+  tools          Check or install the external search tool; see tars tools --help
 
 Run options:
   --provider     openai-chat | openai-responses | anthropic (or configured profile)
@@ -52,7 +54,7 @@ Options:
   -V, --version  Show the version
 
 The demo uses a scripted model and a local tool; it makes no network calls.
-Run/session read --config, then TARS_CONFIG, then the global config path.
+Run/session/tools read --config, then TARS_CONFIG, then the global config path.
 Explicit options override configured fields. Saved sessions keep their definition.
 Material export and --load import contain only the current Context, never the
 replaced history segments.
@@ -109,6 +111,22 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             Err(error) => {
                 let hint = if error.is_argument() {
                     ". Use tars run --help."
+                } else {
+                    ""
+                };
+                let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
+                error.exit_code()
+            }
+        },
+        [one] if one == "tools" => output(super::tools::HELP),
+        [one, help] if one == "tools" && (help == "--help" || help == "-h") => {
+            output(super::tools::HELP)
+        }
+        [one, rest @ ..] if one == "tools" => match super::tools::ToolsCommand::parse(rest) {
+            Ok(command) => super::tools::run(command),
+            Err(error) => {
+                let hint = if error.is_argument() {
+                    ". Use tars tools --help."
                 } else {
                     ""
                 };

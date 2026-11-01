@@ -22,6 +22,10 @@ futures-util.workspace = true
 toml.workspace = true
 async-trait.workspace = true
 similar.workspace = true
+reqwest.workspace = true
+flate2.workspace = true
+tar.workspace = true
+sha2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["process"] }
@@ -30,6 +34,11 @@ rustix = { workspace = true, features = ["process"] }
 # Test seams (backend injection) live behind this feature; normal builds of
 # tars-core do not enable it.
 tars-sandbox = { path = "../sandbox", features = ["test-support"] }
-tokio = { workspace = true, features = ["test-util", "io-std", "io-util"] }
+tokio = { workspace = true, features = ["test-util", "io-std", "io-util", "net"] }
 # Test-only MCP server fixture; normal code uses Causa's client adapter.
 rmcp = { version = "3.6", features = ["server", "transport-async-rw"] }
+# Test-only local HTTPS fixture for the external-tool download: a certificate
+# authority generated at test time and a TLS server. Both are already in the
+# dependency graph (ring provider), and neither is used by normal builds.
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }

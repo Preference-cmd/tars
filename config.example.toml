@@ -5,6 +5,15 @@ store = "data"
 recovery_dir = "."
 default_profile = "default"
 
+# External tools used by sandboxed search. `rg` selects where the ripgrep
+# executable comes from: "managed" (default) installs the pinned copy under
+# $XDG_DATA_HOME/tars/tools after consent (`tars tools install rg`) and checks
+# its SHA-256 at startup; "system" uses the first rg on PATH (version 14 or
+# newer); an absolute path names a specific executable. See
+# `tars tools status`.
+# [external_tools]
+# rg = "managed"
+
 [profiles.default]
 provider = "openai-chat"
 model = "replace-with-your-model-id"

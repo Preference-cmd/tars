@@ -1,5 +1,6 @@
 use super::model::{self, DefinitionOverrides, Profile};
 use crate::definition::{DefinitionError, McpServerConfig, SessionDefinition};
+use crate::external_tools::ToolSource;
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -28,6 +29,15 @@ struct FileConfig {
     profiles: BTreeMap<String, Profile>,
     #[serde(default)]
     mcp_servers: Option<toml::Value>,
+    external_tools: Option<FileExternalTools>,
+}
+
+/// The `[external_tools]` table of the shared configuration.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileExternalTools {
+    /// `managed`, `system`, or an absolute executable path.
+    rg: Option<String>,
 }
 
 /// Validated, immutable defaults shared by all application entry points.
@@ -40,6 +50,7 @@ pub struct Config {
     default_profile: Option<String>,
     profiles: BTreeMap<String, Profile>,
     mcp_servers: BTreeMap<String, McpServerConfig>,
+    ripgrep: ToolSource,
     warnings: Vec<String>,
 }
 
@@ -204,6 +215,12 @@ impl Config {
             })
             .transpose()
         };
+        let ripgrep = match raw.external_tools.and_then(|tools| tools.rg) {
+            Some(value) => {
+                ToolSource::parse(&value).map_err(|_| ConfigError::InvalidExternalTool)?
+            }
+            None => ToolSource::Managed,
+        };
         let mut profiles = raw.profiles;
         for profile in profiles.values_mut() {
             profile.workspace_root = profile
@@ -220,6 +237,7 @@ impl Config {
             default_profile: raw.default_profile,
             profiles,
             mcp_servers: BTreeMap::new(),
+            ripgrep,
             warnings: Vec::new(),
         })
     }
@@ -287,6 +305,11 @@ impl Config {
     pub fn mcp_servers(&self) -> &BTreeMap<String, McpServerConfig> {
         &self.mcp_servers
     }
+
+    /// Configured source of the `rg` executable; defaults to the managed copy.
+    pub fn ripgrep_source(&self) -> &ToolSource {
+        &self.ripgrep
+    }
 }
 
 fn default_path() -> Option<PathBuf> {
@@ -346,6 +369,9 @@ pub enum ConfigError {
     /// Preset names must be nonblank.
     #[error("profile name must not be blank")]
     EmptyProfile,
+    /// The `[external_tools] rg` value is not a usable source.
+    #[error("[external_tools] rg must be \"managed\", \"system\", or an absolute path")]
+    InvalidExternalTool,
     /// The selected preset does not exist.
     #[error("unknown configuration profile {0:?}")]
     UnknownProfile(String),
