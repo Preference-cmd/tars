@@ -1,6 +1,6 @@
 # TUI prototype
 
-`tars-tui` is the native terminal consumer built on Ratatui + Crossterm and shares the `SessionHost` and the [TOML configuration](configuration.md). It is currently a development prototype: session creation/opening, current materials, temporary streaming body, final result, multi-line input, cancellation, saving and recovery operations are wired; workspace tools (including the write confirmation panel, `/mode` command and `Shift-Tab` mode switching) are wired; MCP is wired through the `mcp.json` configuration with form selection, definition snapshots and runtime tools, the status line reports servers that did not start and tools that were skipped after a session is opened, and a saved full-access that was downgraded to ask on reopen is also reported, while MCP calls support execution, confirmation and rejection according to the permission mode. There is no GUI or install distribution. Commands run through the built-in `run_command`, described in [Workspace tools](workspace-tools.md); the local command-tool proposal records are not part of this repository. Build and dependency baselines are in [Current implementation](README.md).
+`tars-tui` is the native terminal consumer built on Ratatui + Crossterm and shares the `SessionHost` and the [TOML configuration](configuration.md). It is currently a development prototype: session creation/opening, current materials, temporary streaming body, final result, multi-line input, cancellation, saving and recovery operations are wired; workspace tools (including the write confirmation panel, `/mode` command and `Shift-Tab` mode switching) are wired; MCP is wired through the `mcp.json` configuration with form selection, definition snapshots and runtime tools, the status line reports servers that did not start and tools that were skipped after a session is opened, and a saved full-access that was downgraded to ask on reopen is also reported, while MCP calls support execution, confirmation and rejection according to the permission mode. Long-session compaction is wired: the conversation shows replaced segments above the current materials, loads them lazily while scrolling up, folds the current summary, and exposes `/auto_compact`, `/compact` and `/summary`. There is no GUI or install distribution. Commands run through the built-in `run_command`, described in [Workspace tools](workspace-tools.md); the local command-tool proposal records are not part of this repository. Build and dependency baselines are in [Current implementation](README.md).
 
 The command confirmation panel shows the full command, working directory, deadline, network policy and "workspace writable, `.git` hooks and configuration read-only, credentials unreadable"; a sandbox-outside request instead shows a prominent "not in the sandbox: whole machine readable/writable, network reachable, credentials readable" and the model's justification. `/status` adds `Commands: ...`, showing the sandbox backend and each capability dimension (with the reason when unavailable). The new-session form shows a read-only `Command: network ... · timeout ...` line when Tools includes `run_command`; it is not an input field and cannot be edited. The line disappears once the command tool is disabled.
 
@@ -22,13 +22,16 @@ Both stdin and stdout must be interactive terminals. At least 30×12; below that
 | Session selection | `/sessions`, filter by model name or ID, Enter switches and opens |
 | Help / full status and error details | `/help` / `/status`; ↑↓ or PageUp/PageDown to scroll |
 | Full tool calls/results | `/tools` or F6; ↑↓ / PageUp/PageDown to scroll |
+| Automatic compaction | `/auto_compact` reports switch, threshold, window and estimate; `/auto_compact on` / `off` changes the switch; `/auto_compact 10..95` sets the threshold and turns it on |
+| Compact now | `/compact` replaces the current Context with a model-written brief and saves it |
+| Summary | `/summary` shows the current summary block in full |
 | Handle materials after interruption | `/repair` or F7; `a` previews the original result, `r` previews removal, Enter applies and saves (for 0.5 seconds after a new preview arrives, Enter and other panel keys are ignored while Esc and scrolling still work, and the notice is dimmed) |
 | Open the selected record | F3 |
 | Switch session / refresh record list | F4 / F5 |
 | Submit input | Enter or Ctrl-S |
 | Newline | Ctrl-J; Alt-Enter and Shift-Enter are also supported when the terminal reports them |
 | Edit / undo, redo | Arrow keys, Backspace, Delete / Ctrl-Z, Ctrl-Y |
-| Scroll current materials | PageUp / PageDown |
+| Scroll current materials | PageUp / PageDown; PageUp at the top loads one earlier history segment |
 | Cancel current work | Esc or Ctrl-C; Esc in a menu only goes back |
 | Save and close current session / save and quit | Ctrl-W / Ctrl-Q |
 | Retry the original save / export actual materials | Ctrl-R / Ctrl-E |
@@ -53,6 +56,14 @@ The input component currently uses ratatui-textarea 0.9.2, and plain left/right 
 In the earlier two-column prototype's local debug measurements, cached drawing for 100 KiB/1 MiB/8 MiB and 8×1 MiB sessions had a p95 of about 1–3 ms, and 30 draws made no extra full-Context reads. Re-wrapping 8 MiB took about 1.2 seconds, which is a later optimization point; the numbers represent that single local experiment only, and the raw data is in the local prototype validation records (not in this repository).
 
 The terminal captures, wide/narrow window and menu behavior evidence for this round's conversation layout are in the local UI change records (not in this repository). The interface takes inspiration from Claude Code's conversation/input/command interaction and still uses the Ratatui full-screen alternate screen; there is no native terminal scrollback, Markdown rendering or other Claude Code command capabilities yet. That record is interface evidence from before the streaming wiring.
+
+## Compaction and history display
+
+The status line shows the estimated context size (`ctx 63% / 200k`, or `ctx ~120k` when the window is unknown) and appends `auto off` when automatic compaction is disabled; `/status` additionally shows the retained-work sheet as `Works: used / capacity`. `/auto_compact` without an argument shows the same facts, and an invalid argument leaves the settings unchanged; when the window is unknown it explains that `context_window` must be set in the shared TOML or when creating the session.
+
+The conversation always shows the current Context in full. Replaced conversation is shown above it as ordered history segments, separated by lines such as `Compacted (auto, ~140k -> 6k)`. Opening or reloading reads only the current Context and the small index stored in the record, never a segment file. When the current Context does not fill one screen, earlier segments are loaded one at a time until it does; scrolling or pressing PageUp at the top loads the next earlier segment in the background and keeps the rows being viewed in place. The header states whether earlier segments remain, whether one is loading, or that the conversation start was reached. A segment file that is missing or corrupt shows `this history segment cannot be read`, and scrolling continues past it. Loaded segments are cached for the life of the open session and never re-read; a segment replaced by a live compaction is adopted from the rows already on screen. When a running work compacts automatically, the material version change refreshes the index and the older rows stay visible.
+
+The current summary block is folded to one line in the conversation, marked with the `tars:compaction` provenance; `/summary` shows its full text in a panel. `/compact` runs compaction as a session job (the UI never blocks) and then reloads materials and history; the conversation before the replacement remains visible. Older TARS versions cannot read a record that contains history; export and `--load` still handle only the current Context.
 
 ## Streaming body
 
