@@ -335,31 +335,6 @@ mod unix {
         assert!(status.is_ready());
         assert!(marker.exists());
     }
-
-    #[test]
-    fn version_probe_accepts_release_and_rejects_non_ripgrep_output() {
-        assert_eq!(parse_version("ripgrep 15.2.0\n").as_deref(), Some("15.2.0"));
-        assert_eq!(
-            parse_version("ripgrep 15.2.0 (rev abc123)\nfeatures: foo\n").as_deref(),
-            Some("15.2.0")
-        );
-        assert_eq!(parse_version("grep 15.2.0\n"), None);
-        assert_eq!(parse_version("ripgrep not-a-version\n"), None);
-        assert_eq!(parse_version("ripgrep\n"), None);
-        assert_eq!(
-            parse_version("ripgrep 14.1.0-1\n").as_deref(),
-            Some("14.1.0")
-        );
-        assert_eq!(
-            parse_version("ripgrep 14.1.1+deb\n").as_deref(),
-            Some("14.1.1")
-        );
-        assert_eq!(parse_version("ripgrep 15.0.0x\n"), None);
-        assert_eq!(parse_version("ripgrep -1\n"), None);
-        assert_eq!(major_version("15.2.0"), 15);
-        assert_eq!(major_version("14"), 14);
-        assert_eq!(major_version("not"), 0);
-    }
 }
 
 #[test]
@@ -402,4 +377,29 @@ fn process_cache_returns_the_same_resolution() {
     let second = resolve_process(&Config::load(ConfigSource::Disabled).unwrap());
     assert!(std::ptr::eq(first, second));
     assert_eq!(first.rg().source, ToolSource::Managed);
+}
+
+#[test]
+fn version_probe_accepts_release_and_rejects_non_ripgrep_output() {
+    assert_eq!(parse_version("ripgrep 15.2.0\n").as_deref(), Some("15.2.0"));
+    assert_eq!(
+        parse_version("ripgrep 15.2.0 (rev abc123)\nfeatures: foo\n").as_deref(),
+        Some("15.2.0")
+    );
+    assert_eq!(parse_version("grep 15.2.0\n"), None);
+    assert_eq!(parse_version("ripgrep not-a-version\n"), None);
+    assert_eq!(parse_version("ripgrep\n"), None);
+    assert_eq!(
+        parse_version("ripgrep 14.1.0-1\n").as_deref(),
+        Some("14.1.0")
+    );
+    assert_eq!(
+        parse_version("ripgrep 14.1.1+deb\n").as_deref(),
+        Some("14.1.1")
+    );
+    assert_eq!(parse_version("ripgrep 15.0.0x\n"), None);
+    assert_eq!(parse_version("ripgrep -1\n"), None);
+    assert_eq!(major_version("15.2.0"), 15);
+    assert_eq!(major_version("14"), 14);
+    assert_eq!(major_version("not"), 0);
 }
