@@ -37,7 +37,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: rustup toolchain install 1.96.0 --profile minimal
+        run: rustup toolchain install 1.96.0 --profile minimal --component clippy
+      # The quality job lints Linux; macOS-only (Seatbelt) and Windows-only
+      # code is linted here on its own platform.
+      - name: Clippy (platform-specific code)
+        if: runner.os != 'Linux'
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
       # Tests are split in code: common suites run on every platform, while
       # workspace tools and SIGINT need Unix and Seatbelt needs macOS, so those
       # suites only compile where the platform supports them.
