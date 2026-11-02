@@ -708,6 +708,45 @@ fn manual_compaction_reports_trigger_estimates_and_segment_and_last_limits_histo
     assert_eq!(shown["compact_threshold"], 70);
     assert!(shown["context_window"].is_null());
     assert_eq!(shown["block_count"], 1);
+
+    // An unreadable segment is reported in both output modes and fails the
+    // command, while the readable segment is still printed.
+    fs::write(
+        store
+            .join("sessions")
+            .join(format!("{id}.history"))
+            .join(format!("{first_segment}.json")),
+        b"not json",
+    )
+    .unwrap();
+    let broken_json = cli()
+        .args([
+            "session",
+            "history",
+            &id,
+            "--no-config",
+            "--json",
+            "--store",
+        ])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert_eq!(broken_json.status.code(), Some(1), "{broken_json:?}");
+    let documents = history_documents(&broken_json);
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].segment_id, second_segment);
+    let broken_human = cli()
+        .args(["session", "history", &id, "--no-config", "--store"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert_eq!(broken_human.status.code(), Some(1), "{broken_human:?}");
+    let text = String::from_utf8_lossy(&broken_human.stdout);
+    assert!(
+        text.contains("this history segment cannot be read"),
+        "{text}"
+    );
+    assert!(text.contains("Segment 2 of 2"), "{text}");
 }
 
 #[test]

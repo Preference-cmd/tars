@@ -172,7 +172,7 @@ pub(super) async fn history(
                     }
                 }
             } else {
-                write_human(&mut out, &session, visible, total, skip)?;
+                unreadable = write_human(&mut out, &session, visible, total, skip)?;
             }
             Ok(())
         })()
@@ -202,7 +202,8 @@ fn write_human(
     segments: &[HistorySegment],
     total: usize,
     skipped: usize,
-) -> io::Result<()> {
+) -> io::Result<bool> {
+    let mut unreadable = false;
     if total == 0 {
         writeln!(out, "History: no replaced segments.")?;
     } else if skipped == 0 {
@@ -232,6 +233,7 @@ fn write_human(
                     segment.blocks,
                 )?;
                 writeln!(out, "[this history segment cannot be read: {error}]")?;
+                unreadable = true;
             }
         }
     }
@@ -252,9 +254,10 @@ fn write_human(
         Err(error) => {
             writeln!(out)?;
             writeln!(out, "[current material cannot be read: {error}]")?;
+            unreadable = true;
         }
     }
-    Ok(())
+    Ok(unreadable)
 }
 
 fn write_segment_header(
