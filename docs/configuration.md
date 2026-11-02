@@ -104,14 +104,14 @@ The built-in `search_text` runs the external `rg` executable. `[external_tools] 
 | Value | Meaning | Check |
 | --- | --- | --- |
 | `managed` (default) | The pinned ripgrep 15.2.0 installed by TARS under `$XDG_DATA_HOME/tars/tools/ripgrep-15.2.0-<target>/rg`, falling back to `~/.local/share/tars/tools/...` | SHA-256 of the installed executable compiled into TARS; a mismatch means unavailable |
-| `system` | The first `rg` found on `PATH` when TARS starts, resolved once to an absolute path | Version recorded; a major version below 14 is unavailable |
+| `system` | The first `rg` found in an absolute `PATH` entry when TARS starts; empty and relative entries are skipped so a repository's own `./rg` never runs | Version recorded (a packaging suffix such as `-1` is ignored); a major version below 14 is unavailable |
 | an absolute path | That executable | Must exist; its version is recorded |
 
 Resolution happens once per process and is cached; session binding uses the resolved absolute path and never re-resolves behind the caller's back. A managed file that fails its check, a missing file, an old `system` version or an unreadable path all make search unavailable with a short reason; no source falls back to the others. A configured absolute path is trusted as given, so it is not version-checked the way `system` is.
 
 Only `tars tools install rg` (or the TUI startup consent) downloads anything, and only for the managed source: HTTPS only, restricted to `github.com` and GitHub release asset hosts including redirects, at most 10 MiB and 120 seconds, proxies from the environment, hash verified before extraction, only the single `rg` entry extracted from the `.tar.gz` with link and path escapes rejected, mode 0755, atomic rename, and one `rg --version` after installation. Any failure leaves nothing at the final path. `[external_tools] rg = "system"` or an absolute path disables the managed installation and `tars tools install rg` refuses with a notice; switch the source back to `managed` to install.
 
-
+## MCP servers
 
 MCP servers are defined in a separate `mcp.json`, kept apart from `config.toml`: common `mcpServers` JSON fragments can be pasted directly, and `config.toml` only stores the preset selection. See [mcp.example.json](../mcp.example.json) for a complete example.
 

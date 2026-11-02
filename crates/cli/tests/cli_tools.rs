@@ -3,8 +3,8 @@
 //! The tool commands are the only place the CLI can download, and these tests
 //! pin the refusals: a non-terminal run without `--yes`, a non-managed source,
 //! and every command that is not `tools install` leave the data directory
-//! untouched. The successful GitHub installation is covered by manual evidence
-//! in `.agents/local/external-tools-evidence.md`; tests never download.
+//! untouched. The successful GitHub installation is covered by a manual run
+//! outside the test suite; tests never download.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
