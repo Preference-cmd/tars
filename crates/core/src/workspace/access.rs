@@ -86,6 +86,25 @@ impl Workspace {
         Ok(parts)
     }
 
+    /// Version-control metadata directory names that built-in tools never
+    /// write or search.
+    pub(crate) const VCS_METADATA: [&'static str; 4] = [".git", ".hg", ".svn", ".jj"];
+
+    /// The first component naming version-control metadata, if any.
+    ///
+    /// The comparison ignores ASCII case because the default macOS filesystem
+    /// does, so `.GIT/config` is the same file as `.git/config`.
+    pub(crate) fn vcs_metadata_component(components: &[String]) -> Option<&str> {
+        components
+            .iter()
+            .find(|name| {
+                Self::VCS_METADATA
+                    .iter()
+                    .any(|metadata| name.eq_ignore_ascii_case(metadata))
+            })
+            .map(String::as_str)
+    }
+
     #[cfg(unix)]
     pub(crate) fn directory(&self, path: &str) -> Result<rustix::fd::OwnedFd, WorkspaceError> {
         let mut current = self.child_directory(&self.root, ".")?;

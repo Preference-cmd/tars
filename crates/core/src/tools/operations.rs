@@ -307,6 +307,20 @@ fn read(
     Ok(output)
 }
 
+/// Refuse writes into version-control metadata in every permission mode.
+///
+/// Hooks and configuration there run outside the sandbox the next time the
+/// user runs the tool, so an auto-approved write would escape it.
+#[cfg(unix)]
+fn reject_vcs_metadata(tool: &str, components: &[String]) -> Result<(), OperationError> {
+    match Workspace::vcs_metadata_component(components) {
+        Some(name) => Err(OperationError::Rejected(format!(
+            "{tool} cannot write inside version-control metadata ({name})"
+        ))),
+        None => Ok(()),
+    }
+}
+
 #[cfg(unix)]
 pub(crate) fn precheck_write(
     workspace: &Workspace,
@@ -323,6 +337,7 @@ pub(crate) fn precheck_write(
             "write_file requires a file path".into(),
         ));
     }
+    reject_vcs_metadata("write_file", &components)?;
     let normalized = components.join("/");
     let parent_components: Vec<String> = components[..components.len() - 1]
         .iter()
@@ -464,6 +479,7 @@ pub(crate) fn precheck_edit(
             "edit_file requires a file path".into(),
         ));
     }
+    reject_vcs_metadata("edit_file", &components)?;
     let normalized = components.join("/");
     let parent_components: Vec<String> = components[..components.len() - 1]
         .iter()

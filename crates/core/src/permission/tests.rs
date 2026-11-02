@@ -210,6 +210,76 @@ async fn four_modes_table_write_and_read() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_modes_refuse_writes_into_version_control_metadata() {
+    for mode in [PermissionMode::AcceptEdits, PermissionMode::FullAccess] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        std::fs::write(root.path().join(".git/config"), "[core]\n").unwrap();
+
+        // Read first so the write is refused for the metadata path itself,
+        // not for skipping read-before-write.
+        let replies = vec![
+            call_read(".git/config"),
+            Reply::Calls(vec![
+                ScriptedToolCall {
+                    name: "write_file".into(),
+                    arguments: json!({
+                        "path": ".git/config",
+                        "content": "[core]\n\tfsmonitor = touch pwned\n",
+                    }),
+                },
+                ScriptedToolCall {
+                    name: "write_file".into(),
+                    arguments: json!({"path": ".gitignore", "content": "target/\n"}),
+                },
+            ]),
+            Reply::Answer,
+        ];
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let host = SessionHost::new(None);
+        let session = host
+            .create(PreparedCreate::transient(
+                base_definition(&fixture.endpoint, root.path()),
+                Context::default(),
+            ))
+            .await
+            .unwrap();
+        session.set_permission_mode(mode).unwrap();
+
+        let work = submit(&session, "vcs metadata write");
+        let obs = finish(&session, &work).await;
+        assert_eq!(obs.tools.calls.len(), 3);
+        assert_eq!(
+            obs.tools.calls[0].status,
+            Some(ToolResultStatus::Succeeded),
+            "{mode}"
+        );
+        assert_eq!(
+            obs.tools.calls[1].status,
+            Some(ToolResultStatus::Rejected),
+            "{mode}"
+        );
+        assert_eq!(
+            obs.tools.calls[2].status,
+            Some(ToolResultStatus::Succeeded),
+            "{mode}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".git/config")).unwrap(),
+            "[core]\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(".gitignore")).unwrap(),
+            "target/\n"
+        );
+
+        host.close(&session.target(), ClosePolicy::DiscardLocal)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wm05_core_allow_deny_and_batch_ordering() {
     let root = tempfile::tempdir().unwrap();
     let replies = vec![

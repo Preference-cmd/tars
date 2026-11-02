@@ -267,6 +267,86 @@ async fn write_file_counterexamples_are_all_rejected() {
 }
 
 #[tokio::test]
+async fn write_tools_refuse_version_control_metadata() {
+    let (dir, shared) = tools(WorkspaceToolLimits::default(), WriteToolLimits::default());
+    std::fs::create_dir_all(dir.path().join(".git/hooks")).unwrap();
+    std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("sub/.git")).unwrap();
+    std::fs::write(dir.path().join("sub/.git/config"), "[core]\n").unwrap();
+    std::fs::create_dir(dir.path().join(".hg")).unwrap();
+
+    for path in [
+        ".git/config",
+        ".git/hooks/pre-commit",
+        ".GIT/config",
+        "./.git/config",
+        "sub/.git/config",
+        ".hg/hgrc",
+        ".svn/entries",
+        ".jj/repo/config.toml",
+    ] {
+        let res = invoke(
+            &shared,
+            WorkspaceTool::WriteFile,
+            json!({"path": path, "content": "x"}),
+        )
+        .await;
+        assert_eq!(res.status, ToolResultStatus::Rejected, "{path}");
+        assert!(
+            res.output.content["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("version-control metadata")),
+            "{path}: {}",
+            res.output.content
+        );
+    }
+
+    invoke(
+        &shared,
+        WorkspaceTool::ReadFile,
+        json!({"path": ".git/config"}),
+    )
+    .await;
+    let res = invoke(
+        &shared,
+        WorkspaceTool::EditFile,
+        json!({
+            "path": ".git/config",
+            "edits": [{"old_text": "[core]", "new_text": "[core]\n\thooksPath = /tmp"}]
+        }),
+    )
+    .await;
+    assert_eq!(res.status, ToolResultStatus::Rejected);
+
+    // A root `.git` file could point git at another directory.
+    std::fs::remove_dir_all(dir.path().join(".git")).unwrap();
+    let res = invoke(
+        &shared,
+        WorkspaceTool::WriteFile,
+        json!({"path": ".git", "content": "gitdir: /tmp/elsewhere\n"}),
+    )
+    .await;
+    assert_eq!(res.status, ToolResultStatus::Rejected);
+    assert!(!dir.path().join(".git").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sub/.git/config")).unwrap(),
+        "[core]\n"
+    );
+    assert!(!dir.path().join(".hg/hgrc").exists());
+
+    for path in [".gitignore", ".github/workflows/ci.yml", "docs/.gitkeep"] {
+        let res = invoke(
+            &shared,
+            WorkspaceTool::WriteFile,
+            json!({"path": path, "content": "ok\n"}),
+        )
+        .await;
+        assert_eq!(res.status, ToolResultStatus::Succeeded, "{path}");
+    }
+    assert!(!has_temporary_files(dir.path()));
+}
+
+#[tokio::test]
 async fn write_file_overwriting_existing_file_preserves_permission_bits() {
     let (dir, shared) = tools(WorkspaceToolLimits::default(), WriteToolLimits::default());
     let file_path = dir.path().join("script.sh");
