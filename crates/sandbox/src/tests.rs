@@ -1347,6 +1347,9 @@ echo dev-tty-denied
         std::fs::write(home.join(".ssh/id_ed25519"), "PROBE-CANARY\n").unwrap();
         std::fs::write(home.join(".aws/credentials"), "PROBE-CANARY\n").unwrap();
         std::fs::write(home.join(".zsh_history"), "PROBE-CANARY\n").unwrap();
+        std::fs::write(home.join(".zshrc"), "PROBE-CANARY\n").unwrap();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::write(home.join(".codex/auth.json"), "PROBE-CANARY\n").unwrap();
         std::fs::write(storage.join("record.json"), "STORAGE-SECRET\n").unwrap();
 
         let backend = super::super::seatbelt::SeatbeltBackend::with_home(home.clone());
@@ -1368,7 +1371,9 @@ for path in \
   "$home/.cargo/credentials.toml" \
   "$home/.ssh/id_ed25519" \
   "$home/.aws/credentials" \
-  "$home/.zsh_history"; do
+  "$home/.zsh_history" \
+  "$home/.zshrc" \
+  "$home/.codex/auth.json"; do
   if grep -q PROBE-CANARY "$path" 2>/dev/null; then echo credential-leaked; exit 3; fi
 done
 if /usr/bin/head -c 0 /dev/tty >/dev/null 2>&1; then echo dev-tty-open; exit 4; fi

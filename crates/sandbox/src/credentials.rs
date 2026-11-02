@@ -16,6 +16,10 @@ const HOME_DIRECTORIES: &[&str] = &[
     ".config/gh",
     ".password-store",
     ".zsh_sessions",
+    // Tokens of other AI coding tools.
+    ".codex",
+    ".gemini",
+    ".config/github-copilot",
 ];
 
 const HOME_FILES: &[&str] = &[
@@ -29,9 +33,31 @@ const HOME_FILES: &[&str] = &[
     ".cargo/credentials",
     ".vault-token",
     ".terraform.d/credentials.tfrc.json",
+    ".pgpass",
+    ".my.cnf",
+    ".claude.json",
+    ".claude/.credentials.json",
     // Shell histories routinely contain tokens typed on a command line.
     ".zsh_history",
     ".bash_history",
+    ".python_history",
+    ".node_repl_history",
+    ".psql_history",
+    ".mysql_history",
+    ".sqlite_history",
+    ".local/share/fish/fish_history",
+    // Shell startup files are where model API keys are usually exported,
+    // because TARS reads them from environment variables.
+    ".zshenv",
+    ".zprofile",
+    ".zshrc",
+    ".zlogin",
+    ".bashrc",
+    ".bash_profile",
+    ".bash_login",
+    ".profile",
+    ".config/fish/config.fish",
+    ".config/fish/fish_variables",
 ];
 
 /// Credential paths under one home, split by how a backend must match them.
@@ -60,5 +86,31 @@ fn collect(home: &Path, relatives: &[&str], target: &mut Vec<PathBuf>) {
             target.push(resolved);
         }
         target.push(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_files_and_tool_tokens_are_denied() {
+        let home = Path::new("/nonexistent-home");
+        let denials = home_denials(home);
+        for file in [
+            ".zshrc",
+            ".bash_profile",
+            ".profile",
+            ".claude.json",
+            ".pgpass",
+        ] {
+            assert!(denials.files.contains(&home.join(file)), "{file}");
+        }
+        for directory in [".codex", ".gemini", ".ssh"] {
+            assert!(
+                denials.directories.contains(&home.join(directory)),
+                "{directory}"
+            );
+        }
     }
 }
