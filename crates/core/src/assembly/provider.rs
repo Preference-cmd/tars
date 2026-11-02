@@ -273,6 +273,9 @@ pub(crate) fn assemble(
     #[cfg(test)]
     let provider_gateway = gateway_override.unwrap_or(provider_gateway);
     let usage = Arc::new(UsageTracker::default());
+    // The summary request bypasses usage capture: its (possibly trimmed)
+    // prompt is not the conversation's next request.
+    let summary_gateway = provider_gateway.clone();
     let gateway: Arc<dyn ModelGateway> =
         Arc::new(UsageTrackingGateway::new(provider_gateway, usage.clone()));
     let compaction = CompactionRuntime::new(
@@ -284,7 +287,7 @@ pub(crate) fn assemble(
         history,
         auto_compact,
         compact_threshold,
-        gateway.clone(),
+        summary_gateway,
         usage,
     );
     let options = definition.run_options();

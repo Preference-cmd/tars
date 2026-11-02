@@ -32,7 +32,10 @@ pub(crate) fn estimate_bytes(bytes: u64) -> u64 {
 #[derive(Clone, Copy, Debug, Default)]
 struct UsageState {
     last_input_tokens: Option<u64>,
+    /// Size prepared for the round whose usage is `last_input_tokens`.
     last_prepare_bytes: Option<u64>,
+    /// Size prepared for the round in flight, paired once its usage arrives.
+    pending_prepare_bytes: Option<u64>,
 }
 
 /// Upstream-reported prompt size plus the size noted by the last preparation.
@@ -48,13 +51,22 @@ impl UsageTracker {
             return;
         };
         let mut state = self.state.lock().expect("usage tracker has no callbacks");
+        let Some(prepared) = state.pending_prepare_bytes.take() else {
+            // Usage without a noted preparation cannot be paired with a size.
+            return;
+        };
         state.last_input_tokens = Some(u64::try_from(usage.input_tokens).unwrap_or(u64::MAX));
+        state.last_prepare_bytes = Some(prepared);
     }
 
     /// Note the serialized size observed when a request was prepared.
+    ///
+    /// The size becomes the estimate's base only together with that round's
+    /// usage: a round without usage keeps the older pair, so the material it
+    /// added is still counted from bytes.
     pub(crate) fn note_prepare_bytes(&self, bytes: u64) {
         let mut state = self.state.lock().expect("usage tracker has no callbacks");
-        state.last_prepare_bytes = Some(bytes);
+        state.pending_prepare_bytes = Some(bytes);
     }
 
     /// Estimate the next request's prompt size.

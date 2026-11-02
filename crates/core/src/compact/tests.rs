@@ -479,6 +479,26 @@ fn usage_estimation_uses_the_previous_round_and_resets_after_compaction() {
 }
 
 #[test]
+fn a_round_without_usage_keeps_counting_its_material_from_bytes() {
+    let tracker = UsageTracker::default();
+    tracker.note_prepare_bytes(900);
+    tracker.record_output(&summary_output("x"));
+    assert_eq!(tracker.estimate(900), 200);
+    // The next round prepares 1_500 bytes but its response has no usage.
+    tracker.note_prepare_bytes(1_500);
+    let mut silent = summary_output("x");
+    silent.usage = None;
+    tracker.record_output(&silent);
+    // The base stays 200 tokens at 900 bytes; the 900 bytes added since,
+    // including that round's 600, count at one token per three.
+    assert_eq!(tracker.estimate(1_800), 500);
+    // Usage without a noted preparation has no size to pair with.
+    tracker.reset();
+    tracker.record_output(&summary_output("x"));
+    assert_eq!(tracker.estimate(900), 300);
+}
+
+#[test]
 fn history_store_writes_reads_and_cleans_unreferenced_segments() {
     let directory = tempfile::tempdir().unwrap();
     let store = HistoryStore::new(directory.path(), "conversation", Vec::new());

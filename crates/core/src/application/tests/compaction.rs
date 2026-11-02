@@ -598,6 +598,53 @@ async fn the_output_reserve_triggers_compaction_below_the_threshold() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_abandoned_summary_does_not_become_the_usage_base() {
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    // The summary reports 400 input tokens; ordinary rounds report none.
+    let gateway = scripted(SummaryBehavior::Text("z".repeat(5_000)));
+    gateway.main_without_usage.store(true, Ordering::SeqCst);
+    host.set_test_gateway(as_gateway(&gateway));
+    let session = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(Some(1_000)),
+            Context::new(),
+        ))
+        .await
+        .unwrap();
+    for (key, blocks) in [
+        ("small", vec![text_block(30)]),
+        (
+            "large",
+            vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+        ),
+    ] {
+        let receipt = session
+            .submit(SubmitRequest {
+                request_key: key.into(),
+                blocks,
+            })
+            .unwrap();
+        finished(&session, &receipt.work).await;
+        session.wait_saved().await.unwrap();
+    }
+    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 1);
+    let bytes = session
+        .read_materials()
+        .map(|snapshot| crate::compact::estimate::context_bytes(&snapshot.context))
+        .unwrap();
+    // No ordinary round reported usage, so the estimate stays byte-based;
+    // the summary request's own usage is not the conversation's size.
+    assert_eq!(
+        session.context_usage().unwrap().estimate_tokens,
+        crate::compact::estimate::estimate_bytes(bytes)
+    );
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_summary_that_does_not_shrink_is_abandoned() {
     let store = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(store.path().into()));
