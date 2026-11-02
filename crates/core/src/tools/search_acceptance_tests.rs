@@ -7,9 +7,9 @@
 //! `search_tool_tests`.
 //!
 //! A real ripgrep is required. The tests skip with a printed reason when the
-//! host has neither the managed copy nor a suitable `rg` on `PATH`; the
-//! acceptance evidence in `.agents/local/search-rg-evidence.md` records a run
-//! with a real binary. Fixtures are private temporary workspaces.
+//! host has neither the managed copy nor a suitable `rg` on `PATH`, so a
+//! passing run without `rg` is not evidence. Fixtures are private temporary
+//! workspaces.
 
 use super::search::SearchRuntime;
 use super::{ToolResources, WorkspaceTools};
@@ -532,6 +532,19 @@ async fn ignore_case_glob_and_context_lines_take_effect() {
     assert_eq!(after.len(), 1, "{context:?}");
     assert_eq!(after[0]["line"], 3);
     assert_eq!(after[0]["text"], "after one");
+
+    // Under a `.` root rg reports `./docs/note.md`; the context still attaches.
+    let rooted = search(
+        &root,
+        &tools,
+        json!({"path": ".", "query": "needle context", "context_lines": 1}),
+        Duration::from_secs(10),
+    )
+    .await;
+    let matches = rooted.output.content["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 1, "{rooted:?}");
+    assert_eq!(matches[0]["path"], "docs/note.md");
+    assert_eq!(matches[0]["after"][0]["text"], "after one", "{rooted:?}");
 }
 
 #[tokio::test]

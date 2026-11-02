@@ -406,6 +406,46 @@ fn a_platform_without_a_backend_names_the_build_platform() {
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn version_control_paths_are_refused_without_launching() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workspace");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join(".git/config"), "url = secret\n").unwrap();
+    std::fs::create_dir_all(root.join("sub/.git")).unwrap();
+    std::fs::create_dir_all(root.join(".github")).unwrap();
+    let rg = unexecutable_rg(directory.path());
+    let (runtime, launches) = recording_runtime_with_report(&root, Ok(rg), full_report());
+    for path in [".git", ".git/config", "./.git", "sub/.GIT", ".hg"] {
+        let invocation = call(json!({"path": path, "query": "secret"}));
+        let tool = bound(
+            &root,
+            Some(runtime.clone()),
+            std::slice::from_ref(&invocation),
+        );
+        let output = tool.execute(&invocation, &control(), None).await;
+        assert_eq!(output.status, ToolResultStatus::Rejected, "{path}");
+        assert!(
+            output.output.content["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("version-control metadata")),
+            "{path}: {}",
+            output.output.content
+        );
+    }
+    assert!(
+        launches.lock().unwrap().is_empty(),
+        "no refused path may launch rg"
+    );
+
+    let invocation = call(json!({"path": ".github", "query": "secret"}));
+    let tool = bound(&root, Some(runtime), std::slice::from_ref(&invocation));
+    tool.execute(&invocation, &control(), None).await;
+    assert_eq!(launches.lock().unwrap().len(), 1, ".github is searched");
+}
+
+#[cfg(unix)]
+#[cfg(unix)]
 #[cfg(unix)]
 #[tokio::test]
 async fn the_launch_uses_the_read_only_policy_and_the_cleared_environment() {

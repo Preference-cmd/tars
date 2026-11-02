@@ -245,6 +245,13 @@ impl SearchRuntime {
     fn validate_path(&self, path: &str) -> Result<String, SearchCheckError> {
         let normalized = Workspace::components(path)
             .map_err(|error| SearchCheckError::Rejected(error.to_string()))?;
+        // rg's exclusion globs do not apply to an explicit root, so the
+        // version-control directories are refused here instead.
+        if let Some(name) = Workspace::vcs_metadata_component(&normalized) {
+            return Err(SearchCheckError::Rejected(format!(
+                "search_text does not search version-control metadata ({name})"
+            )));
+        }
         let path = if normalized.is_empty() {
             ".".to_owned()
         } else {
@@ -561,7 +568,12 @@ fn search_args(params: &SearchParams, path: &str, limits: &WorkspaceToolLimits) 
     }
     args.push("--".into());
     args.push(params.query.clone().into());
-    args.push(path.into());
+    // rg reads standard input for a bare `-`; `./-` names the file.
+    if path.starts_with('-') {
+        args.push(format!("./{path}").into());
+    } else {
+        args.push(path.into());
+    }
     args
 }
 
@@ -725,7 +737,8 @@ impl Capture {
             return None;
         }
         let data = message.get("data")?;
-        let path = data.pointer("/path/text").and_then(Value::as_str)?;
+        // Same normalization as matches: rg reports `./file` under a `.` root.
+        let path = normalize_path(data.pointer("/path/text").and_then(Value::as_str)?);
         let raw_line = data.pointer("/lines/text").and_then(Value::as_str)?;
         let line_number = data.get("line_number").and_then(Value::as_u64).unwrap_or(0);
         let text = bounded_context(line_text(raw_line));
@@ -1041,6 +1054,56 @@ mod tests {
         let stats = stats.expect("summary stats");
         assert_eq!(stats.files, 1);
         assert_eq!(stats.bytes, 42);
+    }
+
+    #[test]
+    fn parser_attaches_after_context_under_a_dot_root() {
+        // rg prefixes every path with `./` when the search root is `.`.
+        let limits = WorkspaceToolLimits::default();
+        let mut capture = Capture::new(".".into(), 1, 200, &limits);
+        let lines = [
+            r#"{"type":"begin","data":{"path":{"text":"./a.txt"}}}"#,
+            r#"{"type":"context","data":{"path":{"text":"./a.txt"},"lines":{"text":"before\n"},"line_number":1,"absolute_offset":0,"submatches":[]}}"#,
+            r#"{"type":"match","data":{"path":{"text":"./a.txt"},"lines":{"text":"needle\n"},"line_number":2,"absolute_offset":7,"submatches":[{"match":{"text":"needle"},"start":0,"end":6}]}}"#,
+            r#"{"type":"context","data":{"path":{"text":"./a.txt"},"lines":{"text":"after\n"},"line_number":3,"absolute_offset":14,"submatches":[]}}"#,
+            r#"{"type":"end","data":{"path":{"text":"./a.txt"},"binary_offset":null,"stats":{}}}"#,
+        ];
+        for line in lines {
+            assert!(capture.push(line).is_none());
+        }
+        let (output, _, _, _) = capture.finish();
+        assert_eq!(output["matches"][0]["path"], "a.txt");
+        assert_eq!(output["matches"][0]["before"][0]["text"], "before");
+        assert_eq!(output["matches"][0]["after"][0]["text"], "after");
+        assert_eq!(output["matches"][0]["after"][0]["line"], 3);
+    }
+
+    #[test]
+    fn a_dash_leading_path_is_not_read_as_standard_input() {
+        let limits = WorkspaceToolLimits::default();
+        let params = SearchParams {
+            path: "-".into(),
+            query: "needle".into(),
+            max_matches: None,
+            regex: None,
+            ignore_case: None,
+            glob: None,
+            context_lines: None,
+            include_ignored: None,
+        };
+        for (path, expected) in [("-", "./-"), ("-dir/file", "./-dir/file"), ("src", "src")] {
+            let args = search_args(&params, path, &limits);
+            assert_eq!(args.last().unwrap().to_str().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn the_exclusion_globs_cover_every_refused_metadata_directory() {
+        let expected: Vec<String> = Workspace::VCS_METADATA
+            .iter()
+            .map(|name| format!("!{name}/"))
+            .collect();
+        assert_eq!(VCS_EXCLUDES, expected.as_slice());
     }
 
     #[test]
