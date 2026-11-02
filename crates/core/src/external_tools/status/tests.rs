@@ -303,6 +303,40 @@ mod unix {
     }
 
     #[test]
+    fn system_lookup_skips_relative_and_empty_path_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let bin = directory.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let marker = directory.path().join("ran");
+        script(&bin, "rg", "15.2.0", Some(&marker));
+        // The same directory written relative to the current directory.
+        let current = std::env::current_dir().unwrap();
+        let depth = current.components().count() - 1;
+        let relative = PathBuf::from("../".repeat(depth))
+            .join(bin.canonicalize().unwrap().strip_prefix("/").unwrap());
+        assert!(relative.join("rg").is_file(), "{}", relative.display());
+        for entries in [
+            format!("{}", relative.display()),
+            format!(":{}", relative.display()),
+        ] {
+            let status = resolve_source(
+                &ToolSource::System,
+                &tool_environment(directory.path(), Path::new(&entries)),
+            );
+            assert!(!status.is_ready(), "{entries}");
+            assert!(status.path.is_none(), "{entries}");
+        }
+        assert!(!marker.exists(), "a relative PATH entry must never run");
+
+        let status = resolve_source(
+            &ToolSource::System,
+            &tool_environment(directory.path(), &bin),
+        );
+        assert!(status.is_ready());
+        assert!(marker.exists());
+    }
+
+    #[test]
     fn version_probe_accepts_release_and_rejects_non_ripgrep_output() {
         assert_eq!(parse_version("ripgrep 15.2.0\n").as_deref(), Some("15.2.0"));
         assert_eq!(
@@ -312,6 +346,16 @@ mod unix {
         assert_eq!(parse_version("grep 15.2.0\n"), None);
         assert_eq!(parse_version("ripgrep not-a-version\n"), None);
         assert_eq!(parse_version("ripgrep\n"), None);
+        assert_eq!(
+            parse_version("ripgrep 14.1.0-1\n").as_deref(),
+            Some("14.1.0")
+        );
+        assert_eq!(
+            parse_version("ripgrep 14.1.1+deb\n").as_deref(),
+            Some("14.1.1")
+        );
+        assert_eq!(parse_version("ripgrep 15.0.0x\n"), None);
+        assert_eq!(parse_version("ripgrep -1\n"), None);
         assert_eq!(major_version("15.2.0"), 15);
         assert_eq!(major_version("14"), 14);
         assert_eq!(major_version("not"), 0);

@@ -373,7 +373,7 @@ fn resolve_system(environment: &ToolEnvironment) -> ToolStatus {
             source,
             None,
             None,
-            "rg was not found on PATH; run `tars tools install rg`",
+            format!("rg was not found on PATH{}", install_hint()),
         );
     };
     match probe_version(&path) {
@@ -385,7 +385,8 @@ fn resolve_system(environment: &ToolEnvironment) -> ToolStatus {
             Some(path),
             Some(version),
             format!(
-                "rg on PATH is older than the required version {MIN_SYSTEM_MAJOR}; run `tars tools install rg`"
+                "rg on PATH is older than the required version {MIN_SYSTEM_MAJOR}{}",
+                install_hint()
             ),
         ),
         Err(reason) => ToolStatus::unavailable(source, Some(path), None, reason),
@@ -445,14 +446,28 @@ fn parse_version(text: &str) -> Option<String> {
         .strip_prefix("ripgrep ")?
         .split_whitespace()
         .next()?;
-    if !version.starts_with(|character: char| character.is_ascii_digit())
-        || !version
-            .chars()
-            .all(|character| character.is_ascii_digit() || character == '.')
-    {
+    // Keep the numeric release and drop a packaging suffix such as `-1`.
+    let numeric = version
+        .split(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .next()?
+        .trim_end_matches('.');
+    if !numeric.starts_with(|character: char| character.is_ascii_digit()) {
         return None;
     }
-    Some(version.to_owned())
+    let suffix = &version[numeric.len()..];
+    if !suffix.is_empty() && !suffix.starts_with(['-', '+', '~']) {
+        return None;
+    }
+    Some(numeric.to_owned())
+}
+
+/// The install advice, only where a managed release exists to install.
+fn install_hint() -> &'static str {
+    if ripgrep_asset().is_some() {
+        "; run `tars tools install rg`"
+    } else {
+        ""
+    }
 }
 
 fn major_version(version: &str) -> u64 {
@@ -463,27 +478,16 @@ fn major_version(version: &str) -> u64 {
         .unwrap_or(0)
 }
 
-/// Find the first executable `rg` on `PATH`, returned as an absolute path.
+/// Find the first executable `rg` in an absolute `PATH` entry.
+///
+/// Empty and relative entries name the current directory, which may be an
+/// untrusted repository; its `rg` would run unsandboxed for the version
+/// probe, so those entries are skipped.
 fn find_on_path(path: &OsStr) -> Option<PathBuf> {
-    let current_dir = std::env::current_dir().ok();
-    for directory in std::env::split_paths(path) {
-        let directory = if directory.as_os_str().is_empty() {
-            PathBuf::from(".")
-        } else {
-            directory
-        };
-        let candidate = directory.join(RG_BINARY);
-        if !is_executable(&candidate) {
-            continue;
-        }
-        let absolute = if candidate.is_absolute() {
-            candidate
-        } else {
-            current_dir.as_ref()?.join(candidate)
-        };
-        return Some(absolute);
-    }
-    None
+    std::env::split_paths(path)
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join(RG_BINARY))
+        .find(|candidate| is_executable(candidate))
 }
 
 fn is_executable(path: &Path) -> bool {
