@@ -130,6 +130,20 @@ pub(crate) fn summary_block(id: BlockId, text: &str) -> ContextBlock {
     )
 }
 
+/// The summary text, ending with the current request verbatim when the
+/// compaction happens inside a turn.
+///
+/// The model was asked to cover the request, but a brief may paraphrase it;
+/// the later rounds of the same turn need the exact wording.
+pub(crate) fn summary_text(brief: &str, current_request: Option<&str>) -> String {
+    match current_request {
+        Some(request) => {
+            format!("{brief}\n\nThe user's current request, verbatim:\n---\n{request}\n---")
+        }
+        None => brief.to_owned(),
+    }
+}
+
 /// Build the replacement block list: optional tool declaration plus summary.
 pub(crate) fn replacement_blocks(
     old_blocks: &[ContextBlock],

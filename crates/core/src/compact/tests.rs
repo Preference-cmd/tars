@@ -425,6 +425,32 @@ async fn a_later_round_keeps_the_submitted_request_verbatim_in_the_summary() {
         text.contains(request_text),
         "round 1 keeps the original request: {text}"
     );
+    // The replacement carries the request verbatim too, so the rest of the
+    // turn does not depend on the brief restating it.
+    let blocks = session
+        .with_context(|context| context.blocks().to_vec())
+        .unwrap();
+    let summary_text = blocks
+        .iter()
+        .find(|block| block.meta().source.as_deref() == Some(summary::SUMMARY_SOURCE))
+        .and_then(|block| match block.content() {
+            BlockContent::Message { parts, .. } => parts.iter().find_map(|part| match part {
+                ContentPart::Text(payload) => Some(payload.0.clone()),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .expect("summary block text");
+    assert!(
+        summary_text.contains("Goal: continue with the fixture tool."),
+        "{summary_text}"
+    );
+    assert!(
+        summary_text.ends_with(&format!(
+            "The user's current request, verbatim:\n---\n{request_text}\n---"
+        )),
+        "{summary_text}"
+    );
     session.shutdown().await;
 }
 

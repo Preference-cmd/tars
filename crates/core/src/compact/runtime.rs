@@ -247,7 +247,8 @@ impl CompactionRuntime {
             return Err(CompactionAbandon::EmptySummary);
         }
         let summary_id = summary::new_block_id();
-        let new_blocks = summary::replacement_blocks(old_blocks, summary_id, text);
+        let text = summary::summary_text(text, user_text);
+        let new_blocks = summary::replacement_blocks(old_blocks, summary_id, &text);
         let new_bytes = serde_json::to_vec(&new_blocks)
             .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
             .unwrap_or(u64::MAX);
