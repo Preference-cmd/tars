@@ -224,6 +224,11 @@ fn assert_no_process(marker: &str) {
     );
 }
 
+fn is_version_control(path: &str) -> bool {
+    path.split('/')
+        .any(|component| component.eq_ignore_ascii_case(".git"))
+}
+
 fn ignore_fixture() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("workspace");
@@ -239,6 +244,9 @@ fn ignore_fixture() -> (tempfile::TempDir, PathBuf) {
     write(&root, "secret.txt", "needle secret\n");
     write(&root, "target/ignored.txt", "needle target\n");
     write(&root, ".git/config", "needle git\n");
+    // A submodule's `.git` is a file, and the filesystem may ignore case.
+    write(&root, "vendor/sub/.git", "gitdir: needle submodule\n");
+    write(&root, "docs/.GIT/config", "needle upper\n");
     // The old in-process budget was 4000 entries; target/ alone exceeds it.
     std::fs::create_dir_all(root.join("target/bulk")).unwrap();
     for index in 0..4100 {
@@ -291,7 +299,7 @@ async fn ignore_rules_keep_docs_findable_and_exclude_git_and_ignored_files() {
         );
     }
     assert!(
-        !found.iter().any(|path| path.starts_with(".git/")),
+        !found.iter().any(|path| is_version_control(path)),
         "version-control content must never appear: {found:?}"
     );
 }
@@ -316,7 +324,7 @@ async fn include_ignored_adds_files_but_never_version_control_content() {
         );
     }
     assert!(
-        !found.iter().any(|path| path.starts_with(".git/")),
+        !found.iter().any(|path| is_version_control(path)),
         "version-control content must never appear: {found:?}"
     );
 }

@@ -445,8 +445,6 @@ async fn version_control_paths_are_refused_without_launching() {
 }
 
 #[cfg(unix)]
-#[cfg(unix)]
-#[cfg(unix)]
 #[tokio::test]
 async fn the_launch_uses_the_read_only_policy_and_the_cleared_environment() {
     let directory = tempfile::tempdir().unwrap();
@@ -609,16 +607,16 @@ async fn every_fixed_flag_and_limit_is_present_in_the_assembled_arguments() {
         "--max-filesize=2097152",
         "--regex-size-limit=1M",
         "--dfa-size-limit=1M",
-        "--glob=!.git/",
-        "--glob=!.hg/",
-        "--glob=!.svn/",
-        "--glob=!.jj/",
+        "--iglob=!.git",
+        "--iglob=!.hg",
+        "--iglob=!.svn",
+        "--iglob=!.jj",
     ] {
         assert!(argv.contains(&expected), "missing {expected:?}: {argv:?}");
     }
     let exclusions = argv
         .iter()
-        .position(|argument| *argument == "--glob=!.git/")
+        .position(|argument| *argument == "--iglob=!.git")
         .unwrap();
     assert!(
         exclusions > 0,
@@ -654,7 +652,7 @@ async fn model_glob_comes_before_the_version_control_exclusions() {
         .unwrap();
     let first_exclusion = argv
         .iter()
-        .position(|argument| *argument == "--glob=!.git/")
+        .position(|argument| *argument == "--iglob=!.git")
         .unwrap();
     assert!(
         model_glob < first_exclusion,

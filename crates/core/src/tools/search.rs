@@ -60,8 +60,10 @@ const FIXED_ARGS: &[&str] = &[
 ];
 
 /// Exclusions kept for every search; they come last so a model glob cannot
-/// re-include a version-control directory.
-const VCS_EXCLUDES: &[&str] = &["!.git/", "!.hg/", "!.svn/", "!.jj/"];
+/// re-include version-control metadata. They have no trailing slash because a
+/// submodule or linked worktree has a `.git` file, and they are passed as
+/// `--iglob` because the default macOS filesystem ignores case.
+const VCS_EXCLUDES: &[&str] = &["!.git", "!.hg", "!.svn", "!.jj"];
 
 /// Why binding the search runtime failed before a session could open.
 #[derive(Debug, thiserror::Error)]
@@ -564,7 +566,7 @@ fn search_args(params: &SearchParams, path: &str, limits: &WorkspaceToolLimits) 
         args.push(format!("--glob={glob}").into());
     }
     for exclude in VCS_EXCLUDES {
-        args.push(format!("--glob={exclude}").into());
+        args.push(format!("--iglob={exclude}").into());
     }
     args.push("--".into());
     args.push(params.query.clone().into());
@@ -958,7 +960,7 @@ mod tests {
         assert_eq!(
             rendered
                 .iter()
-                .filter(|arg| arg.starts_with("--glob=!"))
+                .filter(|arg| arg.starts_with("--iglob=!"))
                 .count(),
             VCS_EXCLUDES.len()
         );
@@ -969,7 +971,7 @@ mod tests {
             .unwrap();
         let first_exclusion = rendered
             .iter()
-            .position(|arg| arg.starts_with("--glob=!"))
+            .position(|arg| arg.starts_with("--iglob=!"))
             .unwrap();
         assert!(model_glob < first_exclusion);
     }
@@ -1101,7 +1103,7 @@ mod tests {
     fn the_exclusion_globs_cover_every_refused_metadata_directory() {
         let expected: Vec<String> = Workspace::VCS_METADATA
             .iter()
-            .map(|name| format!("!{name}/"))
+            .map(|name| format!("!{name}"))
             .collect();
         assert_eq!(VCS_EXCLUDES, expected.as_slice());
     }
