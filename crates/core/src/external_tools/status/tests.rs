@@ -15,6 +15,7 @@ fn config_with(ripgrep: Option<&str>) -> Config {
     Config::load(ConfigSource::File(path)).unwrap()
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn tool_environment(data_home: &Path, path: &Path) -> ToolEnvironment {
     ToolEnvironment {
         data_home: Some(data_home.to_owned()),
@@ -332,7 +333,7 @@ mod unix {
             &ToolSource::System,
             &tool_environment(directory.path(), &bin),
         );
-        assert!(status.is_ready());
+        assert!(status.is_ready(), "{:?}", status.state);
         assert!(marker.exists());
     }
 }
