@@ -130,6 +130,7 @@ impl SessionResources {
     /// Bind the search runtime with an injected probe result instead of
     /// probing the platform backend.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn with_test_search_sandbox(
         mut self,
         sandbox: Result<crate::sandbox::Sandbox, crate::sandbox::SandboxUnavailable>,

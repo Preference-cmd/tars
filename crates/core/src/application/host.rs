@@ -114,6 +114,7 @@ impl SessionHost {
     /// Bind the real assembly path's command runtime with an injected probe
     /// result instead of probing the platform backend during tests.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn set_test_command_sandbox(
         &self,
         sandbox: Option<Result<crate::sandbox::Sandbox, crate::sandbox::SandboxUnavailable>>,

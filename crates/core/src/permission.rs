@@ -23,6 +23,7 @@ pub(crate) use grants::{OutsideSandboxGrant, OutsideSandboxGrants};
 pub(crate) use precheck::PrecheckProcessor;
 pub(crate) use processor::PermissionProcessor;
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(unused_imports))]
 use processor::{PermissionVerdict, decide};
 pub(crate) use view::{McpPermissionTable, McpToolInfo, PermissionHub};
 

@@ -1,4 +1,6 @@
 //! Workspace write primitives, atomic replacement, and version tracking.
+// Workspace tools run only on Unix; elsewhere this code is compiled but unused.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
 
 use super::{Workspace, WorkspaceError};
 

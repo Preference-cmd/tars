@@ -176,6 +176,7 @@ fn server_config() -> (Arc<ServerConfig>, Vec<u8>) {
 /// and link entries can be produced exactly.
 pub(super) enum Entry<'a> {
     File(&'a str, &'a [u8]),
+    #[cfg_attr(not(unix), allow(dead_code))]
     Dir(&'a str),
     Symlink(&'a str, &'a str),
     HardLink(&'a str, &'a str),

@@ -109,6 +109,7 @@ impl ManagedSession {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn workspace_tools(&self) -> Option<Arc<crate::tools::WorkspaceTools>> {
         let state = self.entry.lock();
         state
@@ -119,6 +120,7 @@ impl ManagedSession {
 
     /// Append an extra before processor after the permission processor during test runs.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn add_test_before_processor(
         &self,
         processor: Arc<dyn causa::kernel::ToolBatchProcessor>,
@@ -131,6 +133,7 @@ impl ManagedSession {
 
     /// Append an extra before processor between the mode gate and precheck/permission processors during test runs.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn add_test_intermediate_processor(
         &self,
         processor: Arc<dyn causa::kernel::ToolBatchProcessor>,
@@ -435,6 +438,7 @@ impl ManagedSession {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn set_writer_fault_hook(&self, hook: Option<crate::store::FaultHook>) {
         if let Some(writer) = &self.entry.lock().writer {
             writer.set_fault_hook(hook);
@@ -442,6 +446,7 @@ impl ManagedSession {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn pending_commit_id(&self) -> Option<String> {
         self.entry
             .lock()
@@ -451,6 +456,7 @@ impl ManagedSession {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn pending_commit_permission_mode(
         &self,
     ) -> Option<Option<crate::permission::PermissionMode>> {

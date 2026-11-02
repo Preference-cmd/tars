@@ -1,3 +1,5 @@
+// Workspace tools run only on Unix; elsewhere this code is compiled but unused.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
 use super::PreparedWrite;
 use super::compute_diff;
 use super::parameters::{EditParams, EditSegment, ListParams, Params, ReadParams, WriteParams};

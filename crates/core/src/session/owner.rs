@@ -103,6 +103,7 @@ impl Session {
 
     /// Append an extra before processor after the permission processor during test runs.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn add_test_before_processor(
         &self,
         processor: Arc<dyn causa::kernel::ToolBatchProcessor>,
@@ -115,6 +116,7 @@ impl Session {
 
     /// Append an extra before processor between the mode gate and precheck/permission processors during test runs.
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn add_test_intermediate_processor(
         &self,
         processor: Arc<dyn causa::kernel::ToolBatchProcessor>,
@@ -223,6 +225,7 @@ impl Session {
     }
 
     #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn workspace_tools(&self) -> Option<Arc<crate::tools::WorkspaceTools>> {
         self.workspace_tools.clone()
     }

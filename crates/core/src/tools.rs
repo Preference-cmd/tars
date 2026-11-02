@@ -12,10 +12,12 @@ pub(crate) use command::CommandRuntime;
 pub(crate) use search::SearchRuntime;
 
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(unused_imports))]
 pub use diff::DiffSummary;
 pub use diff::compute_diff;
 pub(crate) use execute::PreparedWrite;
 #[cfg(test)]
+#[cfg_attr(not(unix), allow(unused_imports))]
 pub(crate) use execute::TestGate;
 pub use execute::WorkspaceTools;
 pub(crate) use execute::result;

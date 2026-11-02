@@ -1,3 +1,5 @@
+// Workspace tools run only on Unix; elsewhere this code is compiled but unused.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
 use crate::definition::{CommandSettings, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::workspace::Workspace;
 use serde::Deserialize;
