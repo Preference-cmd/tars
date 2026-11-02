@@ -60,8 +60,10 @@ fn blocks_estimate(blocks: &[ContextBlock]) -> u64 {
 
 /// Drop the earliest blocks until the input fits `limit` tokens.
 ///
-/// A tool result whose declaration was dropped is dropped too, so the summary
-/// request keeps valid pairing. When nothing fits, the instruction alone is sent.
+/// The kept part starts at a user message and is preceded by the tool
+/// declaration in effect at the cut. A tool result whose call was dropped is
+/// dropped too, so the summary request keeps valid pairing. When nothing fits,
+/// the instruction alone is sent.
 pub(crate) fn trim_to_limit(blocks: &[ContextBlock], limit: u64) -> Vec<ContextBlock> {
     if blocks_estimate(blocks) <= limit {
         return blocks.to_vec();
@@ -80,6 +82,19 @@ pub(crate) fn trim_to_limit(blocks: &[ContextBlock], limit: u64) -> Vec<ContextB
         total = total.saturating_sub(sizes[start]);
         start += 1;
     }
+    // Providers expect the first message to come from the user, so the kept
+    // material starts at the first user message after the cut.
+    while start < blocks.len()
+        && !matches!(
+            blocks[start].content(),
+            BlockContent::Message {
+                role: Role::User,
+                ..
+            }
+        )
+    {
+        start += 1;
+    }
     let retained = &blocks[start..];
     // A dropped declaration leaves its later result unpaired; drop those too.
     let retained_calls = retained
@@ -89,13 +104,24 @@ pub(crate) fn trim_to_limit(blocks: &[ContextBlock], limit: u64) -> Vec<ContextB
             _ => None,
         })
         .collect::<std::collections::HashSet<_>>();
-    retained
-        .iter()
-        .filter(|block| match block.content() {
-            BlockContent::ToolResult(result) => retained_calls.contains(&result.call_block_id),
-            _ => true,
-        })
-        .cloned()
+    // The cut may drop the declaration the kept calls refer to. Declare the
+    // set in effect at the cut; later changes in the kept part still apply.
+    let declaration = (start > 0)
+        .then(|| tool_change_block(&blocks[..start]))
+        .flatten();
+    declaration
+        .into_iter()
+        .chain(
+            retained
+                .iter()
+                .filter(|block| match block.content() {
+                    BlockContent::ToolResult(result) => {
+                        retained_calls.contains(&result.call_block_id)
+                    }
+                    _ => true,
+                })
+                .cloned(),
+        )
         .collect()
 }
 

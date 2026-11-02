@@ -610,6 +610,35 @@ fn summary_trimming_drops_the_earliest_blocks_and_orphan_results() {
 }
 
 #[test]
+fn trimmed_summary_input_starts_with_the_tool_declaration_and_a_user_message() {
+    let assistant =
+        |text: &str| ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::Assistant, text);
+    let user =
+        |text: &str| ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, text);
+    let blocks = vec![
+        tool_change("alpha"),
+        big_block(900),
+        assistant("first answer"),
+        user("second question"),
+        assistant("second answer"),
+    ];
+    // The cut falls after the large first message, on an assistant block.
+    let trimmed = summary::trim_to_limit(&blocks, 200);
+    assert_eq!(trimmed.len(), 3, "{trimmed:?}");
+    let BlockContent::ToolChange(_) = trimmed[0].content() else {
+        panic!("the dropped declaration is restated first")
+    };
+    assert_eq!(causa::kernel::current_tools(&trimmed)[0].name, "alpha");
+    let BlockContent::Message { role, .. } = trimmed[1].content() else {
+        panic!("a message follows the declaration")
+    };
+    assert_eq!(*role, Role::User);
+    assert_eq!(trimmed[1].id(), blocks[3].id());
+    // Nothing is restated when the input already fits.
+    assert_eq!(summary::trim_to_limit(&blocks, 10_000).len(), blocks.len());
+}
+
+#[test]
 fn instruction_is_structured_and_carries_the_current_request() {
     let text = summary::instruction(None);
     for heading in [
