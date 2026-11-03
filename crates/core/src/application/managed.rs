@@ -9,6 +9,7 @@ use crate::session::{
     SessionError, SubmitRequest, WorkObservation, WorkProgress, WorkReceipt, WorkRef,
 };
 use crate::store::{PreparedCommit, SavedSessionRecord};
+use crate::usage::{SessionUsage, WorkUsage};
 use causa::kernel::{CallControl, CancellationToken, Context, ContextBlock};
 use std::sync::Arc;
 use std::time::Duration;
@@ -579,6 +580,31 @@ impl ManagedSession {
             auto_compact,
             compact_threshold,
         })
+    }
+
+    /// Cumulative model usage across this open session instance.
+    ///
+    /// Returns `None` after the session is closed.
+    pub fn session_usage(&self) -> Option<SessionUsage> {
+        let state = self.entry.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return None;
+        }
+        let handle = state.handle.as_ref()?;
+        Some(handle.session_usage())
+    }
+
+    /// Usage statistics for a specific retained work.
+    ///
+    /// Returns `None` if the work is unknown, already released when the
+    /// retained-work sheet reached capacity, or after the session has closed.
+    pub fn work_usage(&self, work: &WorkRef) -> Option<WorkUsage> {
+        let state = self.entry.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return None;
+        }
+        let handle = state.handle.as_ref()?;
+        handle.work_usage(work)
     }
 
     /// Segment index of the replaced conversations, in creation order.

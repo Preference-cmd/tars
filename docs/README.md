@@ -31,6 +31,7 @@ TARS exists to validate and improve Causa; the application is the vehicle for va
 | `crates/core/src/mcp/` | A session's MCP servers: startup and shutdown, child-process environment, tool filtering, result limits and status |
 | `crates/core/src/assembly/` | Resolve credentials on open, assemble gateway/runner and frozen execution options |
 | `crates/core/src/compact/` | Compaction settings, request estimator and usage capture, summary request, `tars-history-v1` segments and the per-work `ContextPreparer` |
+| `crates/core/src/usage/` | Per-call figures and in-memory call and token counts: a counting layer inside the retry layer, conversation and compaction kept apart, session totals, input rounds and per-work statistics |
 | `crates/core/src/session/` | Single-session owner/handle, original work acceptance, supervision, deduplication, reliable results and bounded transient observation |
 | `crates/core/src/store/` | Private JSON backend, file lock while active, commit and confirmation |
 | `crates/core/src/material/` | Explicit Context file import/export and reference validation |

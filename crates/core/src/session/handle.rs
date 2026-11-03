@@ -151,6 +151,7 @@ impl SessionHandle {
             state: Mutex::new(WorkState::Accepted),
             changed: Notify::new(),
             tools: super::ToolReporter::new(work.clone(), self.shared.progress.clone()),
+            usage: Arc::new(Mutex::new(crate::usage::WorkUsage::default())),
             #[cfg(test)]
             abort: Mutex::new(None),
             #[cfg(test)]
@@ -173,10 +174,37 @@ impl SessionHandle {
             },
         );
         state.active = Some(work.clone());
+        self.shared
+            .usage
+            .set_active_work(Some(record.usage.clone()));
         let context = state.context.take().expect("context transferred once");
         drop(state);
         worker::start(runtime, self.shared.clone(), record, context);
         Ok(WorkReceipt { work })
+    }
+
+    /// Cumulative model usage across this session instance.
+    pub fn session_usage(&self) -> crate::usage::SessionUsage {
+        self.shared.usage.snapshot()
+    }
+
+    /// Usage statistics for a specific retained work.
+    ///
+    /// Returns `None` if the work is unknown or has been released when the
+    /// retained-work sheet reached capacity.
+    pub fn work_usage(&self, work: &WorkRef) -> Option<crate::usage::WorkUsage> {
+        let state = self.shared.lock();
+        if work.conversation_id != self.shared.conversation_id {
+            return None;
+        }
+        let entry = state.records.get(&work.turn_id)?;
+        Some(
+            *entry
+                .record
+                .usage
+                .lock()
+                .expect("record usage lock poisoned"),
+        )
     }
 
     /// Read retained progress; references from other conversations are not found.

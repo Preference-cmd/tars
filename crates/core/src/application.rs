@@ -15,6 +15,10 @@ mod supervisor;
 mod types;
 
 pub use crate::store::{CommitStage, StoreError};
+pub use crate::usage::{
+    CallCounts, CallUsage, LastCall, PurposeUsage, SessionUsage, UsagePurpose, UsageTotals,
+    WorkUsage,
+};
 pub use host::SessionHost;
 pub use managed::ManagedSession;
 pub use repair::{

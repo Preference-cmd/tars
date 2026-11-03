@@ -13,6 +13,7 @@ mod repair_originals;
 mod repair_write;
 mod saving;
 pub(crate) mod support;
+mod usage;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../../tests/common/workspace_http.rs"]
 pub(crate) mod workspace_http;

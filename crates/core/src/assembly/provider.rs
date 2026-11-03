@@ -260,25 +260,33 @@ pub(crate) fn assemble(
             ),
         })
     };
-    let CredentialRef::Environment(name) = &definition.credential;
-    let api_key = std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or(AssemblyError::CredentialUnavailable)?;
-    let provider_gateway = gateway(
-        definition.protocol_render_options()?,
-        api_key,
-        definition.endpoint.clone(),
+    // Tests may substitute only the protocol gateway, so the retry and
+    // counting layers still wrap the fixture.
+    #[cfg(test)]
+    let innermost_gateway = match gateway_override {
+        Some(gateway) => gateway,
+        None => definition_gateway(definition)?,
+    };
+    #[cfg(not(test))]
+    let innermost_gateway = definition_gateway(definition)?;
+    let usage_hub = Arc::new(crate::usage::UsageHub::new());
+    let conversation_retry = wrap_retry_and_count(
+        innermost_gateway.clone(),
+        crate::usage::UsagePurpose::Conversation,
+        usage_hub.clone(),
         definition.max_model_attempts,
     );
-    #[cfg(test)]
-    let provider_gateway = gateway_override.unwrap_or(provider_gateway);
+    let summary_gateway = wrap_retry_and_count(
+        innermost_gateway,
+        crate::usage::UsagePurpose::Compaction,
+        usage_hub.clone(),
+        definition.max_model_attempts,
+    );
     let usage = Arc::new(UsageTracker::default());
     // The summary request bypasses usage capture: its (possibly trimmed)
     // prompt is not the conversation's next request.
-    let summary_gateway = provider_gateway.clone();
     let gateway: Arc<dyn ModelGateway> =
-        Arc::new(UsageTrackingGateway::new(provider_gateway, usage.clone()));
+        Arc::new(UsageTrackingGateway::new(conversation_retry, usage.clone()));
     let compaction = CompactionRuntime::new(
         definition,
         &conversation_id,
@@ -446,6 +454,7 @@ pub(crate) fn assemble(
         Some(runtime) => session.with_compaction(runtime),
         None => session,
     };
+    let session = session.with_usage(usage_hub);
 
     #[cfg(test)]
     let session = {
@@ -457,6 +466,60 @@ pub(crate) fn assemble(
     };
 
     Ok(session)
+}
+
+/// Count every attempt, then retry around the counter so each retry is
+/// counted too. The retry wrapper repeats the same request for transient and
+/// rate-limit failures, and never after output became visible.
+fn wrap_retry_and_count(
+    innermost: Arc<dyn ModelGateway>,
+    purpose: crate::usage::UsagePurpose,
+    hub: Arc<crate::usage::UsageHub>,
+    max_attempts: Option<u32>,
+) -> Arc<dyn ModelGateway> {
+    let counted = crate::usage::CountingGateway::new(innermost, purpose, hub);
+    match max_attempts.filter(|attempts| *attempts > 1) {
+        Some(attempts) => Arc::new(RetryingGateway::new(counted, RetryPolicy::new(attempts))),
+        None => Arc::new(counted),
+    }
+}
+
+/// Protocol gateway for the definition, using its environment credential.
+fn definition_gateway(
+    definition: &SessionDefinition,
+) -> Result<Arc<dyn ModelGateway>, AssemblyError> {
+    let CredentialRef::Environment(name) = &definition.credential;
+    let api_key = std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(AssemblyError::CredentialUnavailable)?;
+    Ok(protocol_gateway(
+        definition.protocol_render_options()?,
+        api_key,
+        definition.endpoint.clone(),
+    ))
+}
+
+pub(crate) fn protocol_gateway(
+    render_options: RenderOptions,
+    api_key: String,
+    endpoint: Option<String>,
+) -> Arc<dyn ModelGateway> {
+    macro_rules! protocol_gateway {
+        ($kind:ty, $options:expr) => {{
+            let gateway = <$kind>::new(api_key).with_render_options($options);
+            let gateway = match endpoint {
+                Some(endpoint) => gateway.with_endpoint(endpoint),
+                None => gateway,
+            };
+            Arc::new(gateway) as Arc<dyn ModelGateway>
+        }};
+    }
+    match render_options {
+        RenderOptions::Chat(options) => protocol_gateway!(OpenAiChatCompletionsGateway, options),
+        RenderOptions::Responses(options) => protocol_gateway!(OpenAiResponsesGateway, options),
+        RenderOptions::Anthropic(options) => protocol_gateway!(AnthropicMessagesGateway, options),
+    }
 }
 
 #[cfg(test)]
@@ -477,35 +540,4 @@ pub(crate) fn assemble_with_runner(
         },
         definition.session_config(),
     )
-}
-
-pub(crate) fn gateway(
-    render_options: RenderOptions,
-    api_key: String,
-    endpoint: Option<String>,
-    max_attempts: Option<u32>,
-) -> Arc<dyn ModelGateway> {
-    macro_rules! gateway {
-        ($kind:ty, $options:expr) => {{
-            let gateway = <$kind>::new(api_key).with_render_options($options);
-            let gateway = match endpoint {
-                Some(endpoint) => gateway.with_endpoint(endpoint),
-                None => gateway,
-            };
-            // The wrapper repeats the same request for transient and
-            // rate-limit failures, and never after output became visible.
-            match max_attempts.filter(|attempts| *attempts > 1) {
-                Some(attempts) => {
-                    Arc::new(RetryingGateway::new(gateway, RetryPolicy::new(attempts)))
-                        as Arc<dyn ModelGateway>
-                }
-                None => Arc::new(gateway) as Arc<dyn ModelGateway>,
-            }
-        }};
-    }
-    match render_options {
-        RenderOptions::Chat(options) => gateway!(OpenAiChatCompletionsGateway, options),
-        RenderOptions::Responses(options) => gateway!(OpenAiResponsesGateway, options),
-        RenderOptions::Anthropic(options) => gateway!(AnthropicMessagesGateway, options),
-    }
 }

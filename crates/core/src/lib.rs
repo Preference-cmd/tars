@@ -18,6 +18,7 @@ pub use tars_sandbox as sandbox;
 pub mod session;
 mod store;
 pub(crate) mod tools;
+pub mod usage;
 pub(crate) mod workspace;
 
 pub use mcp::{McpServerStatus, McpSkippedTool};

@@ -190,8 +190,30 @@ impl Session {
                 candidate: Arc::new(|| TurnId::new(uuid::Uuid::now_v7().to_string())),
                 progress: tokio::sync::broadcast::channel(super::progress::PROGRESS_CAPACITY).0,
                 compaction: None,
+                usage: Arc::new(crate::usage::UsageHub::new()),
             }),
         }
+    }
+
+    /// Attach the session-wide usage hub before any handle is cloned.
+    pub(crate) fn with_usage(mut self, usage: Arc<crate::usage::UsageHub>) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .expect("attach usage before cloning handles")
+            .usage = usage;
+        self
+    }
+
+    /// Cumulative model usage across this session instance.
+    pub fn session_usage(&self) -> crate::usage::SessionUsage {
+        self.shared.usage.snapshot()
+    }
+
+    /// Usage statistics for a specific retained work.
+    ///
+    /// Returns `None` if the work is unknown or has been released when the
+    /// retained-work sheet reached capacity.
+    pub fn work_usage(&self, work: &WorkRef) -> Option<crate::usage::WorkUsage> {
+        self.handle().work_usage(work)
     }
 
     /// Attach the session-wide compaction runtime before any handle is cloned.

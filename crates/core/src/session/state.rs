@@ -26,6 +26,7 @@ pub(super) struct Shared {
     pub candidate: Arc<dyn Fn() -> TurnId + Send + Sync>,
     pub progress: broadcast::Sender<Arc<WorkProgress>>,
     pub compaction: Option<Arc<crate::compact::CompactionRuntime>>,
+    pub usage: Arc<crate::usage::UsageHub>,
 }
 pub(super) struct State {
     pub context: Option<Context>,
@@ -50,6 +51,7 @@ pub(super) struct Record {
     pub state: Mutex<WorkState>,
     pub changed: Notify,
     pub tools: super::ToolReporter,
+    pub usage: Arc<Mutex<crate::usage::WorkUsage>>,
     #[cfg(test)]
     pub abort: Mutex<Option<tokio::task::AbortHandle>>,
     #[cfg(test)]
@@ -104,6 +106,8 @@ impl Shared {
                 runtime.request_force();
             }
         }
+        self.usage.set_active_work(None);
+        self.usage.record_work_result(&result);
         state.context = context;
         if let Some(entry) = state.records.get_mut(&record.work.turn_id) {
             entry.uncommitted = uncommitted;
