@@ -14,6 +14,7 @@ pub use types::{
     CallCounts, CallUsage, LastCall, PurposeUsage, SessionUsage, UsagePurpose, UsageTotals,
     WorkUsage,
 };
+pub(crate) use types::{from_unix_millis, unix_millis};
 
 #[cfg(test)]
 mod tests;

@@ -48,6 +48,8 @@ pub(crate) struct SessionResources {
     pub(crate) gateway_override: Option<Arc<dyn ModelGateway>>,
     /// Process-wide external-tool check used to bind the search runtime.
     pub(crate) external_tools: Option<ExternalTools>,
+    /// Initial session-wide usage statistics restored from a saved record.
+    pub(crate) initial_usage: Option<crate::usage::SessionUsage>,
     /// Test-only command sandbox probe result injected into the real assembly
     /// path. Mirrors `CommandRuntime::bind_with_sandbox`: no production code
     /// can choose a backend or a probe result.
@@ -70,6 +72,7 @@ impl SessionResources {
             compact_threshold: None,
             persistent: false,
             external_tools: None,
+            initial_usage: None,
             #[cfg(test)]
             gateway_override: None,
             #[cfg(test)]
@@ -82,6 +85,12 @@ impl SessionResources {
     /// Bind the search runtime with the process-wide external-tool check.
     pub(crate) fn with_external_tools(mut self, tools: ExternalTools) -> Self {
         self.external_tools = Some(tools);
+        self
+    }
+
+    /// Restore the reopened session's cumulative usage statistics.
+    pub(crate) fn with_usage(mut self, usage: Option<crate::usage::SessionUsage>) -> Self {
+        self.initial_usage = usage;
         self
     }
 
@@ -157,6 +166,7 @@ pub(crate) fn assemble(
         compact_threshold,
         persistent,
         external_tools,
+        initial_usage,
         #[cfg(test)]
         gateway_override,
         #[cfg(test)]
@@ -269,7 +279,10 @@ pub(crate) fn assemble(
     };
     #[cfg(not(test))]
     let innermost_gateway = definition_gateway(definition)?;
-    let usage_hub = Arc::new(crate::usage::UsageHub::new());
+    let usage_hub = Arc::new(match initial_usage {
+        Some(usage) => crate::usage::UsageHub::from_session_usage(usage),
+        None => crate::usage::UsageHub::new(),
+    });
     let conversation_retry = wrap_retry_and_count(
         innermost_gateway.clone(),
         crate::usage::UsagePurpose::Conversation,

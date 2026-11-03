@@ -37,6 +37,7 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
         .as_ref()
         .and_then(|o| o.permission_mode().map(|(m, _)| m));
     let (auto_compact, compact_threshold, history) = compaction_record(state);
+    let usage = state.owner.as_ref().map(|o| o.session_usage());
     let record = SavedSessionRecord::new_with_compaction(
         entry.target.conversation_id.as_str().to_owned(),
         uuid::Uuid::now_v7().to_string(),
@@ -47,6 +48,7 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
         auto_compact,
         compact_threshold,
         history,
+        usage,
     )?;
     state.pending = Some(Arc::new(PreparedCommit::new(state.revision, record)?));
     state.save_requested = true;

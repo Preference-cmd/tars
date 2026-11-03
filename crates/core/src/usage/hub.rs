@@ -25,6 +25,19 @@ impl UsageHub {
         Self::default()
     }
 
+    /// Construct a usage hub seeded with initial session usage.
+    pub(crate) fn from_session_usage(usage: SessionUsage) -> Self {
+        Self {
+            state: Mutex::new(HubState {
+                conversation: usage.conversation,
+                compaction: usage.compaction,
+                input_rounds: usage.input_rounds,
+                last_call: usage.last_call,
+                active_work: None,
+            }),
+        }
+    }
+
     /// Record a successful model call and update session totals, last call, and active work stats.
     pub(crate) fn record_call_success(
         &self,
@@ -46,11 +59,15 @@ impl UsageHub {
             session_target.calls.unreported = session_target.calls.unreported.saturating_add(1);
         }
 
-        // 2. Last call
+        // 2. Last call, truncated to the whole milliseconds the record keeps,
+        // so a saved and reopened session reports the same time.
+        let now = SystemTime::now();
+        let timestamp =
+            super::types::from_unix_millis(super::types::unix_millis(now)).unwrap_or(now);
         state.last_call = Some(LastCall {
             purpose,
             usage: call_usage,
-            timestamp: SystemTime::now(),
+            timestamp,
         });
 
         // 3. Active work

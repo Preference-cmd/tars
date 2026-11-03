@@ -292,6 +292,7 @@ fn offline_export_extracts_context_from_a_compacted_record() {
         Some(false),
         Some(50),
         vec![segment],
+        None,
     )
     .unwrap();
     let directory = tempfile::tempdir().unwrap();

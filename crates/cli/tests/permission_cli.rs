@@ -915,8 +915,9 @@ fn session_run_mode_change_save_failure_does_not_submit_and_exits_code_1() {
     let record_str = std::fs::read_to_string(&record_path).expect("read session record file");
     let record_val: Value = serde_json::from_str(&record_str).expect("parse session record json");
 
-    assert_eq!(record_val["format"], "tars-session-v2");
+    assert_eq!(record_val["format"], "tars-session-v2.1");
     assert!(record_val["definition"].get("permission_mode").is_none());
+    assert!(record_val.get("usage").is_none());
     // DiscardLocal must drop accept-edits; Ask stays implicit in the record.
     assert!(
         record_val.get("permission_mode").is_none(),

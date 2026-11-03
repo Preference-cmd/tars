@@ -530,3 +530,239 @@ async fn a_retried_stream_through_the_session_counts_each_attempt() {
     assert_eq!(usage.conversation.tokens.output_tokens, 7);
     assert_eq!(usage.conversation.tokens.cache_hit_rate(), Some(0.3));
 }
+
+/// Gateway returning distinct usage per call to verify save/reopen accumulation.
+struct VariedUsageGateway {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl ModelGateway for VariedUsageGateway {
+    async fn invoke(
+        &self,
+        _: &ModelRequest,
+        _: &CallControl,
+    ) -> Result<ModelOutput, ModelInvokeError> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut output = ModelOutput::new(
+            ModelResponse {
+                items: vec![ModelItem::text(format!("reply {n}"))],
+            },
+            ModelStopReason::EndTurn,
+        );
+        if n == 0 {
+            let mut usage = ModelUsage::new(100, 20);
+            usage.cache_read_tokens = Some(15);
+            usage.cache_write_tokens = None;
+            usage.reasoning_tokens = Some(8);
+            output.usage = Some(usage);
+        } else {
+            let mut usage = ModelUsage::new(50, 10);
+            usage.cache_read_tokens = None;
+            usage.cache_write_tokens = Some(5);
+            usage.reasoning_tokens = None;
+            output.usage = Some(usage);
+        }
+        Ok(output)
+    }
+
+    async fn stream(
+        &self,
+        request: &ModelRequest,
+        control: &CallControl,
+    ) -> Result<ModelStream, ModelInvokeError> {
+        let output = self.invoke(request, control).await?;
+        Ok(causa::kernel::completed_model_stream(output))
+    }
+}
+
+/// US08: save, close, reopen a persistent session with fixture usage -> session_usage() equals
+/// the pre-close snapshot; running one more work -> totals grow from the saved values.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn us08_save_close_reopen_persistent_session_restores_usage_and_continues_counting() {
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+
+    let gateway = Arc::new(VariedUsageGateway {
+        calls: AtomicUsize::new(0),
+    });
+    host.set_test_gateway(Some(gateway));
+
+    let session = host
+        .create(PreparedCreate::persistent(definition(), Context::new()))
+        .await
+        .unwrap();
+
+    let id = session.target().conversation_id.as_str().to_owned();
+
+    let receipt1 = session.submit(request("first-work")).unwrap();
+    finished(&session, &receipt1.work).await;
+    session.wait_saved().await.unwrap();
+
+    let pre_close = session.session_usage().expect("session usage present");
+    assert_eq!(pre_close.input_rounds, 1);
+    assert_eq!(pre_close.conversation.calls.succeeded, 1);
+    assert_eq!(pre_close.conversation.tokens.input_tokens, 100);
+    assert_eq!(pre_close.conversation.tokens.cache_read_tokens, 15);
+    assert_eq!(pre_close.conversation.tokens.cache_write_unreported, 1);
+    assert_eq!(pre_close.conversation.tokens.reasoning_tokens, 8);
+    assert!(pre_close.last_call.is_some());
+    let last = pre_close.last_call.unwrap();
+    assert_eq!(last.purpose, crate::usage::UsagePurpose::Conversation);
+    assert_eq!(last.usage.unwrap().cache_write_tokens, None);
+    assert_eq!(last.usage.unwrap().cache_read_tokens, Some(15));
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // Reopen session
+    let reopened = host.open(id.as_str().into()).await.unwrap();
+    let restored_usage = reopened
+        .session_usage()
+        .expect("reopened session usage present");
+
+    // Must equal pre-close snapshot
+    assert_eq!(restored_usage, pre_close);
+
+    // Run one more work
+    let receipt2 = reopened.submit(request("second-work")).unwrap();
+    finished(&reopened, &receipt2.work).await;
+    reopened.wait_saved().await.unwrap();
+
+    let second_usage = reopened
+        .session_usage()
+        .expect("second session usage present");
+    assert_eq!(second_usage.input_rounds, 2);
+    assert_eq!(second_usage.conversation.calls.succeeded, 2);
+    assert_eq!(second_usage.conversation.tokens.input_tokens, 150); // 100 + 50
+    assert_eq!(second_usage.conversation.tokens.output_tokens, 30); // 20 + 10
+    assert_eq!(second_usage.conversation.tokens.cache_read_tokens, 15); // unchanged
+    assert_eq!(second_usage.conversation.tokens.cache_read_unreported, 1); // 1 call unreported
+    assert_eq!(second_usage.conversation.tokens.cache_write_tokens, 5); // 0 + 5
+    assert_eq!(second_usage.conversation.tokens.cache_write_unreported, 1); // first call unreported
+
+    let new_last = second_usage.last_call.unwrap();
+    assert_eq!(new_last.usage.unwrap().input_tokens, 50);
+    assert_eq!(new_last.usage.unwrap().cache_read_tokens, None);
+    assert_eq!(new_last.usage.unwrap().cache_write_tokens, Some(5));
+
+    host.close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+/// US08: compaction followed by save and reopen keeps totals without reset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn us08_compaction_followed_by_save_and_reopen_keeps_totals_without_reset() {
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+
+    let gateway = CompactionGateway::new(SummaryBehavior::Text(
+        "Goal: test compaction persistence.".into(),
+    ));
+    host.set_test_gateway(Some(gateway.clone()));
+
+    let session = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(Some(1_000)),
+            Context::new(),
+        ))
+        .await
+        .unwrap();
+
+    let id = session.target().conversation_id.as_str().to_owned();
+
+    let receipt = session
+        .submit(SubmitRequest {
+            request_key: "first".into(),
+            blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+        })
+        .unwrap();
+    finished(&session, &receipt.work).await;
+    session.wait_saved().await.unwrap();
+
+    let usage_pre_close = session.session_usage().expect("session usage present");
+    assert_eq!(usage_pre_close.compaction.calls.succeeded, 1);
+    assert_eq!(usage_pre_close.conversation.calls.succeeded, 1);
+    assert_eq!(usage_pre_close.compaction.tokens.input_tokens, 400);
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    let reopened = host.open(id.as_str().into()).await.unwrap();
+    let usage_reopened = reopened.session_usage().expect("reopened usage present");
+    assert_eq!(usage_reopened, usage_pre_close);
+    assert_eq!(usage_reopened.compaction.calls.succeeded, 1);
+    assert_eq!(usage_reopened.conversation.calls.succeeded, 1);
+    assert_eq!(usage_reopened.compaction.tokens.input_tokens, 400);
+
+    host.close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+/// US08: newly created session is v2.1, v2 fails with UnsupportedFormat, export-materials yields Context,
+/// and imported materials start with zero usage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn us08_format_v2_1_rejection_of_v2_and_material_export() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let store_path: std::path::PathBuf = store_dir.path().into();
+    let host = SessionHost::new(Some(store_path.clone()));
+    normal_fixture(&host);
+
+    let session = host
+        .create(PreparedCreate::persistent(definition(), Context::new()))
+        .await
+        .unwrap();
+    let id = session.target().conversation_id.as_str().to_owned();
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // Verify record on disk contains "format":"tars-session-v2.1"
+    let record_file = store_path.join("sessions").join(format!("{id}.json"));
+    let content = std::fs::read_to_string(&record_file).unwrap();
+    assert!(content.contains(r#""format":"tars-session-v2.1""#));
+
+    // A v2 record fails to open with UnsupportedFormat
+    let v2_id = uuid::Uuid::now_v7().to_string();
+    let v2_commit = uuid::Uuid::now_v7().to_string();
+    let v2_record_path = store_path.join("sessions").join(format!("{v2_id}.json"));
+    let v2_json = format!(
+        r#"{{"format":"tars-session-v2","conversation_id":"{v2_id}","revision":1,"last_commit_id":"{v2_commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+    );
+    std::fs::write(&v2_record_path, v2_json.as_bytes()).unwrap();
+
+    let open_err = host.open(v2_id.as_str().into()).await.err().unwrap();
+    match open_err {
+        ApplicationError::Store(ref err) => match &**err {
+            crate::store::StoreError::UnsupportedFormat(fmt) => {
+                assert_eq!(fmt, "tars-session-v2");
+            }
+            other => panic!("expected StoreError::UnsupportedFormat, got {other:?}"),
+        },
+        other => panic!("expected ApplicationError::Store, got {other:?}"),
+    }
+
+    // export-materials of a v2 and v2.1 record yields Context
+    let v2_ctx = crate::material::load_session_materials(&v2_record_path).unwrap();
+    assert!(v2_ctx.blocks().is_empty());
+
+    let v2_1_ctx = crate::material::load_session_materials(&record_file).unwrap();
+    assert!(v2_1_ctx.blocks().is_empty());
+
+    // Session created from imported materials starts with zero usage
+    let import_session = host
+        .create(PreparedCreate::persistent(definition(), v2_ctx))
+        .await
+        .unwrap();
+    assert_eq!(
+        import_session.session_usage(),
+        Some(crate::usage::SessionUsage::default())
+    );
+    host.close(&import_session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}

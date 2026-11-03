@@ -316,7 +316,7 @@ pub(super) fn write_history_session(
         .unwrap();
     }
     let record = serde_json::json!({
-        "format": "tars-session-v2",
+        "format": "tars-session-v2.1",
         "conversation_id": conversation_id,
         "revision": 1u64,
         "last_commit_id": causa::runtime::new_block_id().0.to_string(),

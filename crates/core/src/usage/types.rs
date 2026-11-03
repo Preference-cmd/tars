@@ -1,6 +1,19 @@
 //! Public types and calculations for model call usage and session statistics.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Whole Unix milliseconds of `time`; a time before the epoch counts as 0.
+pub(crate) fn unix_millis(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// The time `millis` Unix milliseconds after the epoch, or `None` when this
+/// platform cannot represent it.
+pub(crate) fn from_unix_millis(millis: u64) -> Option<SystemTime> {
+    UNIX_EPOCH.checked_add(Duration::from_millis(millis))
+}
 
 /// Token counts and derived totals for a single model call.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

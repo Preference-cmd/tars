@@ -95,7 +95,7 @@ After a successful compaction the Context contains the last effective tool decla
 
 The replaced material is written to `<store>/sessions/<conversation id>.history/<segment id>.json` in the `tars-history-v1` format: the old Context verbatim, the trigger, the create time, both estimates and the summary block id. The session record's `history` field lists the segments in order with id, time, trigger, block count and summary block id. Files are written and synced before the Context changes; files the record does not reference are removed while the write lock is held when the session is opened, and a referenced file that is missing is reported only where that segment would be displayed. Material export, recovery exports and the `--load` import contain the current Context only, never history segments. A transient `tars run` has no store, keeps no history and therefore never compacts.
 
-The record format name stays `tars-session-v2`; the new fields are appended, so a version that does not know them cannot read a compacted record. This is accepted before 0.1.
+The running compaction values and the history index are part of the `tars-session-v2.1` record. Compaction does not reset the session's saved usage totals; see [Session lifecycle](session-lifecycle.md).
 
 ## External tools (search)
 

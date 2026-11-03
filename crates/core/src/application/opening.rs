@@ -53,6 +53,7 @@ pub(super) async fn initialize(
         history,
         auto_compact,
         compact_threshold,
+        usage,
     ) = match &prepared {
         Some(prepared) => {
             if record.is_some() {
@@ -73,6 +74,7 @@ pub(super) async fn initialize(
                 Vec::new(),
                 None,
                 None,
+                None,
             )
         }
         None => {
@@ -85,6 +87,7 @@ pub(super) async fn initialize(
             if permission_downgraded {
                 mode = crate::permission::PermissionMode::Ask;
             }
+            let usage = record.session_usage();
             (
                 record.definition,
                 record.context,
@@ -96,6 +99,7 @@ pub(super) async fn initialize(
                 record.history,
                 record.auto_compact,
                 record.compact_threshold,
+                Some(usage),
             )
         }
     };
@@ -144,6 +148,7 @@ pub(super) async fn initialize(
             history,
             auto_compact,
             compact_threshold,
+            usage,
         )
         .await?
     };
@@ -160,6 +165,7 @@ pub(super) async fn initialize(
         history,
         auto_compact,
         compact_threshold,
+        usage,
     )
     .await?;
     let mut state = entry.lock();
@@ -216,6 +222,7 @@ async fn assembled(
     history: Vec<crate::compact::HistorySegment>,
     auto_compact: Option<bool>,
     compact_threshold: Option<u8>,
+    usage: Option<crate::usage::SessionUsage>,
 ) -> Result<crate::session::Session, ApplicationError> {
     let base = crate::assembly::SessionResources::new(host.tool_resources.clone())
         .with_storage(
@@ -224,6 +231,7 @@ async fn assembled(
                 .map(|store| store.directory().to_path_buf()),
         )
         .with_compaction(history, auto_compact, compact_threshold)
+        .with_usage(usage)
         .persistent(persistent);
     let base = match host.external_tools.clone() {
         Some(tools) => base.with_external_tools(tools),

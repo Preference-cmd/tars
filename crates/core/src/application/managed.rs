@@ -355,6 +355,7 @@ impl ManagedSession {
         let pending = if state.persistent {
             self.entry.cloned_snapshot();
             let (auto_compact, compact_threshold, history) = saving::compaction_record(state);
+            let usage = state.owner.as_ref().map(|o| o.session_usage());
             let record = SavedSessionRecord::new_with_compaction(
                 self.entry.target.conversation_id.as_str().to_owned(),
                 uuid::Uuid::now_v7().to_string(),
@@ -365,6 +366,7 @@ impl ManagedSession {
                 auto_compact,
                 compact_threshold,
                 history,
+                usage,
             )?;
             Some(Arc::new(PreparedCommit::new(state.revision, record)?))
         } else {

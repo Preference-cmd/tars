@@ -321,6 +321,74 @@ fn legacy_record_has_an_offline_non_overwriting_material_export_path() {
     assert_eq!(std::fs::read(exported).unwrap(), previous);
 }
 
+#[test]
+fn v2_record_is_refused_with_the_export_path_and_left_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let material = dir.path().join("initial.json");
+    let context = causa::kernel::Context::from_blocks(vec![tars_core::application::text_input(
+        "v2 material retained",
+    )])
+    .unwrap();
+    tars_core::material::save_new(&material, &context).unwrap();
+    let created = json(
+        cli(dir.path())
+            .args(["session", "create", "--no-config", "--store"])
+            .arg(&store)
+            .args([
+                "--provider",
+                "openai-chat",
+                "--model",
+                "fixture",
+                "--api-key-env",
+                "TARS_CONFIG_TEST_KEY",
+                "--load",
+            ])
+            .arg(&material)
+            .arg("--json")
+            .output()
+            .unwrap(),
+    );
+    let id = created["conversation_id"].as_str().unwrap();
+    let record = store.join("sessions").join(format!("{id}.json"));
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    assert_eq!(value["format"], "tars-session-v2.1");
+    value["format"] = serde_json::json!("tars-session-v2");
+    std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
+    let original = std::fs::read(&record).unwrap();
+    let reopened = cli(dir.path())
+        .args(["session", "run", id, "--no-config", "--store"])
+        .arg(&store)
+        .args(["--input", "continue", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(reopened.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&reopened.stdout);
+    assert!(
+        stdout.contains("unsupported session format: tars-session-v2;"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("expected tars-session-v2.1"), "{stdout}");
+    assert!(stdout.contains("tars session export-materials"), "{stdout}");
+    assert_eq!(std::fs::read(&record).unwrap(), original);
+    let exported = dir.path().join("export.json");
+    let result = cli(dir.path())
+        .env("TARS_CONFIG", dir.path().join("missing.toml"))
+        .env_remove("TARS_CONFIG_TEST_KEY")
+        .args(["session", "export-materials", "--record"])
+        .arg(&record)
+        .arg("--output")
+        .arg(&exported)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(
+        tars_core::material::load(&exported).unwrap().blocks(),
+        context.blocks()
+    );
+    assert_eq!(std::fs::read(&record).unwrap(), original);
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn wm10_definition_save_and_reopen_and_export_omits_credentials() {
@@ -694,7 +762,7 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
 }
 
 #[tokio::test]
-async fn wm10_legacy_v2_record_without_mcp_servers_reads_as_empty_and_ask() {
+async fn wm10_record_without_mcp_servers_reads_as_empty_and_ask() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store");
     let sessions = store.join("sessions");
@@ -704,7 +772,7 @@ async fn wm10_legacy_v2_record_without_mcp_servers_reads_as_empty_and_ask() {
     let record_path = sessions.join(format!("{id}.json"));
     // A fixed record written before MCP snapshots and initial modes existed.
     let raw = format!(
-        r#"{{"format":"tars-session-v2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+        r#"{{"format":"tars-session-v2.1","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
     );
     std::fs::write(&record_path, raw.as_bytes()).unwrap();
     let original = std::fs::read(&record_path).unwrap();
@@ -879,7 +947,7 @@ async fn wm10_stage_g_snapshot_conversion_to_current_format() {
     let commit = "018f0c4e-0000-7000-8000-00000000000a";
     let record_path = sessions.join(format!("{id}.json"));
     let raw = format!(
-        r#"{{"format":"tars-session-v2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"mcp_servers":[{{"id":"git","command":"uvx","env":{{"LOG_LEVEL":"warn"}},"env_vars":["GIT_AUTHOR_NAME"],"startup_timeout_sec":12,"tool_timeout_sec":120,"approval":"auto","tools":{{"git_status":{{"approval":"auto"}}}},"required":false}},{{"id":"docs","url":"https://example.invalid/mcp","bearer_token_env_var":"DOCS_MCP_TOKEN","startup_timeout_sec":10,"tool_timeout_sec":60,"approval":"prompt","required":false}}],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+        r#"{{"format":"tars-session-v2.1","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"mcp_servers":[{{"id":"git","command":"uvx","env":{{"LOG_LEVEL":"warn"}},"env_vars":["GIT_AUTHOR_NAME"],"startup_timeout_sec":12,"tool_timeout_sec":120,"approval":"auto","tools":{{"git_status":{{"approval":"auto"}}}},"required":false}},{{"id":"docs","url":"https://example.invalid/mcp","bearer_token_env_var":"DOCS_MCP_TOKEN","startup_timeout_sec":10,"tool_timeout_sec":60,"approval":"prompt","required":false}}],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
     );
     std::fs::write(&record_path, raw.as_bytes()).unwrap();
 

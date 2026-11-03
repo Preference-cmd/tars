@@ -37,7 +37,7 @@ pub enum StoreError {
     Json(#[source] Arc<serde_json::Error>),
     /// The record names a format this implementation cannot read.
     #[error(
-        "unsupported session format: {0}; expected tars-session-v2. Export the old record with tars session export-materials --record RECORD --output NEW_CONTEXT, then import that Context into a new session; old tool permissions are never upgraded"
+        "unsupported session format: {0}; expected tars-session-v2.1. Export the old record with tars session export-materials --record RECORD --output NEW_CONTEXT, then import that Context into a new session; old tool permissions are never upgraded"
     )]
     UnsupportedFormat(String),
     /// The record belongs to a different conversation.
@@ -69,6 +69,9 @@ pub enum StoreError {
     /// A history segment is malformed, mismatched or written twice.
     #[error("invalid history segment: {0}")]
     InvalidHistory(String),
+    /// The saved usage statistics cannot be read on this platform.
+    #[error("invalid usage statistics: {0}")]
+    InvalidUsage(String),
     /// Revision must be the checked successor of its baseline.
     #[error("revision must be the checked successor of its baseline")]
     InvalidRevision,

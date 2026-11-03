@@ -553,7 +553,7 @@ fn session_records_written_before_message_roles_load_and_save_in_the_current_for
     let written = String::from_utf8(fs::read(&path).unwrap()).unwrap();
     assert!(written.contains(r#""shape":"message""#));
     assert!(!written.contains(r#""shape":"parts""#));
-    assert!(written.contains(r#""format":"tars-session-v2""#));
+    assert!(written.contains(r#""format":"tars-session-v2.1""#));
 }
 
 #[test]
@@ -593,25 +593,31 @@ fn record_omits_permission_mode_when_matching_initial_mode() {
 }
 
 #[test]
-fn legacy_v2_record_deserializes_with_none_permission_fields() {
+fn minimal_record_deserializes_with_none_permission_and_usage_fields() {
     let id = Uuid::now_v7().to_string();
     let commit = Uuid::now_v7().to_string();
     let json_text = format!(
-        r#"{{"format":"tars-session-v2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"LEGACY_KEY"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+        r#"{{"format":"tars-session-v2.1","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"LEGACY_KEY"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
     );
 
     let record: SavedSessionRecord = serde_json::from_str(&json_text).unwrap();
     assert_eq!(record.permission_mode, None);
     assert_eq!(record.definition.permission_mode, None);
     assert_eq!(record.definition.write_limits, None);
+    assert_eq!(record.usage, None);
+    assert_eq!(
+        record.session_usage(),
+        crate::usage::SessionUsage::default()
+    );
     assert_eq!(
         record.definition.initial_permission_mode(),
         crate::permission::PermissionMode::Ask
     );
 
-    // Reserialization does not introduce permission_mode or write_limits
+    // Reserialization does not introduce permission_mode, write_limits or usage
     let val = serde_json::to_value(&record).unwrap();
     assert!(val.get("permission_mode").is_none());
+    assert!(val.get("usage").is_none());
     assert!(val["definition"].get("permission_mode").is_none());
     assert!(val["definition"].get("write_limits").is_none());
 }
@@ -636,6 +642,7 @@ fn compaction_fields_roundtrip_and_older_records_read_as_defaults() {
         Some(false),
         Some(55),
         vec![segment.clone()],
+        None,
     )
     .unwrap();
     let bytes = serde_json::to_vec(&record).unwrap();
@@ -649,10 +656,16 @@ fn compaction_fields_roundtrip_and_older_records_read_as_defaults() {
     object.remove("auto_compact");
     object.remove("compact_threshold");
     object.remove("history");
+    object.remove("usage");
     let older = serde_json::to_vec(&value).unwrap();
     let decoded = super::record::decode(&older, &id).unwrap();
     assert_eq!(decoded.auto_compact, None);
     assert_eq!(decoded.compact_threshold, None);
+    assert_eq!(decoded.usage, None);
+    assert_eq!(
+        decoded.session_usage(),
+        crate::usage::SessionUsage::default()
+    );
     assert!(decoded.history.is_empty());
     // Duplicate segment identities are refused during decode.
     let duplicate = vec![segment.clone(), segment.clone()];
@@ -666,6 +679,7 @@ fn compaction_fields_roundtrip_and_older_records_read_as_defaults() {
         None,
         None,
         duplicate,
+        None,
     );
     assert!(record.is_err());
 }
