@@ -89,6 +89,15 @@ pub fn answer_with_text(provider: &str, text: &str) -> String {
     }
 }
 
+/// Adds an OpenAI Chat usage chunk to `stream` just before its end marker.
+#[allow(dead_code)]
+pub fn with_chat_usage(stream: String, usage: Value) -> String {
+    let body = stream
+        .strip_suffix("data: [DONE]\n\n")
+        .expect("an openai-chat stream");
+    body.to_owned() + &data(json!({"id":"chat1","choices":[],"usage":usage})) + "data: [DONE]\n\n"
+}
+
 pub fn answer(provider: &str) -> String {
     answer_with_text(provider, "recovery.rs:2 retry original material")
 }

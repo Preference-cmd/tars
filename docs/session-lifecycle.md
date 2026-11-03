@@ -63,11 +63,21 @@ An owner/worker fault isolates new work, waits for confirmable task stops and ke
 
 ## 6. CLI consumers
 
-`session create` only creates and confirms the initial record. `session run ID` reopens the saved definition, submits new work, waits for the independent save result and then closes; provider/model cannot be overridden transiently. `session compact ID` compacts manually through the session's model and waits for the save; `session history ID` reads the ordered history index and one segment at a time (`--json` emits one document per line), so memory holds one segment plus the current Context; `session show ID` reports the record facts including context usage and retained-work occupancy. `session list` needs no credential resolution. All of them require an explicit `--store`.
+`session create` only creates and confirms the initial record. `session run ID` reopens the saved definition, submits new work, waits for the independent save result and then closes; provider/model cannot be overridden transiently. `session compact ID` compacts manually through the session's model and waits for the save; `session history ID` reads the ordered history index and one segment at a time (`--json` emits one document per line), so memory holds one segment plus the current Context; `session show ID` reports the record facts including context usage, retained-work occupancy and the session's [usage statistics](#7-usage-statistics). `session list` needs no credential resolution. All of them require an explicit `--store`.
 
 On save failure the CLI keeps the original execution status/text and additionally outputs save_error; according to the user's choice it exports a random, non-overwriting recovery Context and then exits 1. recovery_error, close_error and close_outcome are reported separately; a recovery file contains the actually returned materials, not the original work table or uncommitted content. After Ctrl-C cancels the work it still waits for the return and save; a second Ctrl-C during the save wait stops waiting, exports the actual Context and exits with an error.
 
 `tars run` creates a transient host and still supports the original `--load/--save`: an import gets a new ConversationId, only an explicit `--save` exports Context, and the report and exit codes are unchanged. The low-level offline demo is a separate fixture used to observe the single-session contract.
+
+## 7. Usage statistics
+
+The counting gateway sits inside the retry layer, so every request sent to the endpoint is one call, retries included. A call either succeeds or fails (an invoke error, a stream error, or a stream that ends without completing); a successful call whose response carried no usage counts as "without usage". Failed calls add no tokens. Conversation calls and compaction summary calls are counted separately, and the total is their sum.
+
+The four token counts do not overlap: `input_tokens` is uncached input, then cache read, cache write and output. Prompt = input + cache read + cache write; total = prompt + output. Reasoning is part of output and is never added to a total. The cache hit rate is cache read divided by prompt, taken only over the calls that reported cache reads.
+
+A work's statistics hold its calls, its model rounds (successful conversation calls) and its last call; they exist only in memory and are returned in the `usage` field of `tars run --json` and `session run --json`. The session's statistics add up all works plus the input rounds (works that entered the runner, whether they completed, failed or were cancelled) and the last call; `session show` and the TUI `/status` show them, and they are saved with the record as described in [section 4](#4-json-commits-and-confirmation).
+
+A count that no call reported is `null` in JSON and "not reported" in text, never 0: input, output, prompt and total when no successful call reported usage, and cache read, cache write or reasoning when every call that reported usage left that count out. These rules live in `UsageFigures` in [`usage`](../crates/core/src/usage.rs).
 
 ## Transient streaming observation
 

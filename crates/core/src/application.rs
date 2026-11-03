@@ -16,8 +16,8 @@ mod types;
 
 pub use crate::store::{CommitStage, StoreError};
 pub use crate::usage::{
-    CallCounts, CallUsage, LastCall, PurposeUsage, SessionUsage, UsagePurpose, UsageTotals,
-    WorkUsage,
+    CallCounts, CallUsage, LastCall, PurposeUsage, SessionUsage, UsageFigures, UsagePurpose,
+    UsageTotals, WorkUsage, session_usage_lines,
 };
 pub use host::SessionHost;
 pub use managed::ManagedSession;

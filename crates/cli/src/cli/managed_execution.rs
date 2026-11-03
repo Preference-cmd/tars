@@ -14,6 +14,7 @@ pub(super) struct WorkReport {
     pub result: Arc<WorkResult>,
     pub save: SaveWait,
     pub signal_failed: bool,
+    pub usage: Option<tars_core::usage::WorkUsage>,
 }
 
 /// The independent save barrier either settled or was explicitly abandoned.
@@ -169,11 +170,13 @@ pub(super) async fn work(
     // A raw Finished observation precedes persistence. Keep the runtime alive
     // through the independent host save barrier, including cancelled work.
     let (save, wait_signal_failed) = wait_saved(session).await;
+    let usage = session.work_usage(&receipt.work);
     Ok(WorkReport {
         work: receipt.work,
         result,
         save,
         signal_failed: signal_failed || wait_signal_failed,
+        usage,
     })
 }
 

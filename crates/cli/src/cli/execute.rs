@@ -98,7 +98,10 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
         error = Some("signal listener failed");
         code = 1;
     }
-    let usage = final_usage(&report.result);
+    let usage = report
+        .usage
+        .as_ref()
+        .map(crate::cli::usage_json::work_usage_value);
     let rendered = if options.json {
         format!(
             "{}\n",
@@ -123,22 +126,6 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
         return (ExitCode::FAILURE, save_wait_abandoned);
     }
     (ExitCode::from(code), save_wait_abandoned)
-}
-
-/// Provider-reported token accounting of a completed run, when disclosed.
-pub(super) fn final_usage(result: &WorkResult) -> Option<serde_json::Value> {
-    let WorkResult::Run(TurnResult::Completed { final_output }) = result else {
-        return None;
-    };
-    final_output.usage.as_ref().map(|usage| {
-        serde_json::json!({
-            "input_tokens": usage.input_tokens,
-            "output_tokens": usage.output_tokens,
-            "cache_read_tokens": usage.cache_read_tokens,
-            "cache_write_tokens": usage.cache_write_tokens,
-            "reasoning_tokens": usage.reasoning_tokens,
-        })
-    })
 }
 
 pub(super) fn classify(result: &WorkResult) -> (&'static str, String, Option<&'static str>, u8) {
@@ -222,7 +209,8 @@ pub(super) fn early_failure(json: bool, error: &str) -> ExitCode {
         let _ = output(&format!(
             "{}\n",
             serde_json::json!({ "status": "not_started",
-            "text": "", "conversation_id": null, "work_id": null, "saved": false, "error": error })
+            "text": "", "conversation_id": null, "work_id": null, "saved": false, "error": error,
+            "usage": null })
         ));
     }
     failure(error)

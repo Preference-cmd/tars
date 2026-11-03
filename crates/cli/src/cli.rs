@@ -8,5 +8,6 @@ mod managed_execution;
 mod options;
 mod session;
 mod tools;
+pub(crate) mod usage_json;
 
 pub(crate) use command::run;

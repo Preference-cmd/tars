@@ -433,3 +433,59 @@ async fn unavailable_command_sandbox_is_reported_at_open_and_in_status() {
         "{view}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn us10_status_panel_contains_usage_section_equal_to_session_usage_lines() {
+    use super::support::{Server, app, create, ctrl, key, until};
+    use crossterm::event::{Event, KeyCode};
+    use tars_core::application::SaveStatus;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    let server = Server::new().await;
+    create(&mut app, &server.endpoint).await;
+    app.event(Event::Paste("run prompt for us10".into()));
+    app.event(ctrl('s'));
+    until(&mut app, |_| server.requests.lock().unwrap().len() == 1).await;
+    server.release.add_permits(1);
+    until(&mut app, |app| app.entries[0].execution == "Completed").await;
+    until(&mut app, |app| {
+        matches!(
+            app.entries[0].session.as_ref().unwrap().status().save,
+            SaveStatus::Saved { .. }
+        )
+    })
+    .await;
+
+    // Open /status panel
+    app.event(key(KeyCode::F(1)));
+    for character in "status".chars() {
+        app.event(key(KeyCode::Char(character)));
+    }
+    app.event(key(KeyCode::Enter));
+
+    let lines = match &app.panel {
+        Some(crate::app::Panel::Info { lines, .. }) => lines.clone(),
+        other => panic!("expected Info panel, present: {}", other.is_some()),
+    };
+
+    let session = app.entries[0].session.as_ref().unwrap();
+    let usage = session.session_usage().expect("session usage present");
+    let expected = tars_core::usage::session_usage_lines(&usage);
+    assert!(!expected.is_empty());
+
+    let start_idx = lines
+        .iter()
+        .position(|l| l == &expected[0])
+        .unwrap_or_else(|| {
+            panic!(
+                "panel lines do not contain initial usage line '{}':\n{lines:#?}",
+                expected[0]
+            )
+        });
+    assert_eq!(
+        &lines[start_idx..start_idx + expected.len()],
+        &expected[..],
+        "usage section in /status does not match session_usage_lines exactly"
+    );
+}

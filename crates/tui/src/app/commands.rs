@@ -220,6 +220,13 @@ impl App {
                             capacity.used, capacity.capacity
                         ));
                     }
+                    if let Some(usage) = entry
+                        .session
+                        .as_ref()
+                        .and_then(|session| session.session_usage())
+                    {
+                        lines.extend(tars_core::usage::session_usage_lines(&usage));
+                    }
                 }
                 lines.push(self.notice.clone());
                 self.panel = Some(Panel::Info { title: "Session details".into(), lines, scroll: 0 });

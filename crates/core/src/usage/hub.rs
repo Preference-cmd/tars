@@ -64,15 +64,17 @@ impl UsageHub {
         let now = SystemTime::now();
         let timestamp =
             super::types::from_unix_millis(super::types::unix_millis(now)).unwrap_or(now);
-        state.last_call = Some(LastCall {
+        let last_call = LastCall {
             purpose,
             usage: call_usage,
             timestamp,
-        });
+        };
+        state.last_call = Some(last_call);
 
         // 3. Active work
         if let Some(active) = &state.active_work {
             let mut work = active.lock().expect("active work usage lock poisoned");
+            work.last_call = Some(last_call);
             let work_target = match purpose {
                 UsagePurpose::Conversation => {
                     work.model_rounds = work.model_rounds.saturating_add(1);

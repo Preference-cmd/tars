@@ -24,6 +24,7 @@ pub(super) async fn show(store: PathBuf, id: String, json_output: bool) -> ExitC
     let definition = session.definition();
     let revision = revision(&session.status().save);
     let usage = session.context_usage();
+    let session_usage = session.session_usage();
     let history = session.history().len();
     let work_capacity = session.work_capacity();
     let mut code = 0;
@@ -46,6 +47,7 @@ pub(super) async fn show(store: PathBuf, id: String, json_output: bool) -> ExitC
         "work_capacity": work_capacity.map(|capacity| json!({
             "used": capacity.used, "capacity": capacity.capacity,
         })),
+        "usage": session_usage.as_ref().map(crate::cli::usage_json::session_usage_value),
     });
     if let Err(error) = host
         .close(&session.target(), ClosePolicy::DiscardLocal)
@@ -87,6 +89,15 @@ pub(super) async fn show(store: PathBuf, id: String, json_output: bool) -> ExitC
             provider_name(&definition),
             definition.model
         ));
+        match session_usage {
+            Some(usage) => {
+                for line in tars_core::usage::session_usage_lines(&usage) {
+                    text.push_str(&line);
+                    text.push('\n');
+                }
+            }
+            None => text.push_str("Usage: unavailable for this session\n"),
+        }
         text
     };
     if output(&rendered) != ExitCode::SUCCESS {

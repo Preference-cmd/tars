@@ -74,6 +74,45 @@ impl CallUsage {
             Some(read as f64 / prompt as f64)
         }
     }
+
+    /// The figures to show for this call; the optional cache and reasoning
+    /// counts stay `None` when the call did not report them.
+    pub fn figures(&self) -> UsageFigures {
+        UsageFigures {
+            input_tokens: Some(self.input_tokens),
+            cache_read_tokens: self.cache_read_tokens,
+            cache_write_tokens: self.cache_write_tokens,
+            output_tokens: Some(self.output_tokens),
+            reasoning_tokens: self.reasoning_tokens,
+            prompt_tokens: Some(self.prompt_total()),
+            total_tokens: Some(self.call_total()),
+            cache_hit_rate: self.cache_hit_rate(),
+        }
+    }
+}
+
+/// Token figures ready to show for one call or a group of calls.
+///
+/// A field is `None` when no counted call reported it, so a value that was
+/// never reported is never shown as 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct UsageFigures {
+    /// Uncached input tokens.
+    pub input_tokens: Option<u64>,
+    /// Tokens read from the prompt cache.
+    pub cache_read_tokens: Option<u64>,
+    /// Tokens written to the prompt cache.
+    pub cache_write_tokens: Option<u64>,
+    /// Output tokens.
+    pub output_tokens: Option<u64>,
+    /// Reasoning tokens, a part of the output tokens.
+    pub reasoning_tokens: Option<u64>,
+    /// Prompt total: input plus cache read plus cache write.
+    pub prompt_tokens: Option<u64>,
+    /// Call total: prompt total plus output.
+    pub total_tokens: Option<u64>,
+    /// Cache read tokens over the prompt total of the calls that reported them.
+    pub cache_hit_rate: Option<f64>,
 }
 
 /// Purpose for which a model call was made.
@@ -83,6 +122,16 @@ pub enum UsagePurpose {
     Conversation,
     /// Context compaction summary generation.
     Compaction,
+}
+
+impl UsagePurpose {
+    /// The lowercase name shown in CLI and TUI output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Conversation => "conversation",
+            Self::Compaction => "compaction",
+        }
+    }
 }
 
 /// Call counts categorized by outcome.
@@ -223,6 +272,31 @@ pub struct PurposeUsage {
 }
 
 impl PurposeUsage {
+    /// The figures to show for these calls.
+    ///
+    /// Input, output, prompt and total are `None` when no successful call
+    /// reported usage. Cache read, cache write and reasoning are `None` when
+    /// every call that reported usage left that count out; otherwise they are
+    /// the sum of the reported values.
+    pub fn figures(&self) -> UsageFigures {
+        let reporting = self.calls.succeeded.saturating_sub(self.calls.unreported);
+        if reporting == 0 {
+            return UsageFigures::default();
+        }
+        let tokens = &self.tokens;
+        let optional = |sum: u64, unreported: u64| (unreported < reporting).then_some(sum);
+        UsageFigures {
+            input_tokens: Some(tokens.input_tokens),
+            cache_read_tokens: optional(tokens.cache_read_tokens, tokens.cache_read_unreported),
+            cache_write_tokens: optional(tokens.cache_write_tokens, tokens.cache_write_unreported),
+            output_tokens: Some(tokens.output_tokens),
+            reasoning_tokens: optional(tokens.reasoning_tokens, tokens.reasoning_unreported),
+            prompt_tokens: Some(tokens.prompt_total()),
+            total_tokens: Some(tokens.call_total()),
+            cache_hit_rate: tokens.cache_hit_rate(),
+        }
+    }
+
     /// Combine two purpose usages with saturating addition.
     pub fn saturating_add(&self, other: &Self) -> Self {
         Self {
@@ -241,6 +315,18 @@ pub struct LastCall {
     pub usage: Option<CallUsage>,
     /// Wall-clock timestamp when the call completed.
     pub timestamp: SystemTime,
+}
+
+impl LastCall {
+    /// The figures to show for this call; all `None` when it reported no usage.
+    pub fn figures(&self) -> UsageFigures {
+        self.usage.map(|usage| usage.figures()).unwrap_or_default()
+    }
+
+    /// When the call completed, in whole Unix milliseconds.
+    pub fn at_unix_ms(&self) -> u64 {
+        unix_millis(self.timestamp)
+    }
 }
 
 /// Complete session-wide usage statistics across all purposes.
@@ -270,6 +356,8 @@ pub struct WorkUsage {
     pub compaction: PurposeUsage,
     /// Model rounds executed in this work (successful conversation calls).
     pub model_rounds: u64,
+    /// The most recent successful model call made during this work, if any.
+    pub last_call: Option<LastCall>,
 }
 
 impl SessionUsage {
