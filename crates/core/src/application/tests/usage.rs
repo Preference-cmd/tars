@@ -721,10 +721,10 @@ async fn us08_format_v2_1_rejection_of_v2_and_material_export() {
         .await
         .unwrap();
 
-    // Verify record on disk contains "format":"tars-session-v2.1"
+    // Verify record on disk contains "format":"tars-session-v2.2"
     let record_file = store_path.join("sessions").join(format!("{id}.json"));
     let content = std::fs::read_to_string(&record_file).unwrap();
-    assert!(content.contains(r#""format":"tars-session-v2.1""#));
+    assert!(content.contains(r#""format":"tars-session-v2.2""#));
 
     // A v2 record fails to open with UnsupportedFormat
     let v2_id = uuid::Uuid::now_v7().to_string();

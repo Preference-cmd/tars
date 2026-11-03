@@ -106,6 +106,8 @@ pub struct MaterialSnapshot {
     pub version: MaterialVersion,
     /// Current idle materials.
     pub context: Context,
+    /// Rewrite record index matching this Context, in creation order.
+    pub history: Vec<crate::compact::HistoryRecordEntry>,
 }
 
 /// Independent persistence outcome; never rewrites the low-level work result.

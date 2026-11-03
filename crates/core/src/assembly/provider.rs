@@ -35,7 +35,7 @@ pub(crate) struct SessionResources {
     /// beside the records.
     pub(crate) storage: Option<std::path::PathBuf>,
     /// Restored history index of a reopened session.
-    pub(crate) history: Vec<crate::compact::HistorySegment>,
+    pub(crate) history: Vec<crate::compact::HistoryRecordEntry>,
     /// Running automatic-compaction switch read from the record, if present.
     pub(crate) auto_compact: Option<bool>,
     /// Running trigger percentage read from the record, if present.
@@ -102,7 +102,7 @@ impl SessionResources {
     /// Restore the reopened session's history index and running values.
     pub(crate) fn with_compaction(
         mut self,
-        history: Vec<crate::compact::HistorySegment>,
+        history: Vec<crate::compact::HistoryRecordEntry>,
         auto_compact: Option<bool>,
         compact_threshold: Option<u8>,
     ) -> Self {

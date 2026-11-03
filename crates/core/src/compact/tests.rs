@@ -1,10 +1,12 @@
 //! Compaction unit and low-level integration tests.
 
 use super::estimate::{UsageTracker, UsageTrackingGateway, context_bytes, estimate_bytes};
-use super::history::{HISTORY_FORMAT, HistorySegmentDocument, HistoryStore, validate_index};
+use super::history::{
+    HISTORY_FORMAT, HistoryRecord, HistoryStore, RangeReplacement, RewriteKind, validate_index,
+};
 use super::preparer::CompactionPreparer;
 use super::summary;
-use super::{CompactionRuntime, HistorySegment, HistoryTrigger};
+use super::{CompactionRuntime, HistoryRecordEntry, HistoryTrigger};
 use crate::definition::{CredentialRef, Provider, SessionDefinition};
 use crate::session::{Session, SessionConfig, SubmitRequest, WorkState};
 use causa::kernel::{
@@ -547,28 +549,32 @@ fn usage_estimation_defaults_to_input_tokens_when_cache_tokens_are_none() {
 }
 
 #[test]
-fn history_store_writes_reads_and_cleans_unreferenced_segments() {
+fn history_store_writes_reads_and_cleans_unreferenced_records() {
     let directory = tempfile::tempdir().unwrap();
     let store = HistoryStore::new(directory.path(), "conversation", Vec::new());
-    let segment_id = uuid::Uuid::now_v7().to_string();
+    let record_id_value = uuid::Uuid::now_v7().to_string();
     let summary_id = BlockId::new(uuid::Uuid::now_v7());
-    let document = HistorySegmentDocument {
+    let document = HistoryRecord {
         format: HISTORY_FORMAT.into(),
         conversation_id: "conversation".into(),
-        segment_id: segment_id.clone(),
+        record_id: record_id_value.clone(),
         created_at_ms: 1,
         trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
         estimate_before: 100,
         estimate_after: 10,
-        summary_block_id: summary_id,
-        context: Context::from_blocks(vec![big_block(30)]).unwrap(),
+        replacements: vec![RangeReplacement {
+            range: 0..1,
+            originals: vec![big_block(30)],
+            inserted_ids: vec![summary_id],
+        }],
     };
     store.write(&document).unwrap();
     store.append(document.index_entry());
-    let read = store.read(&segment_id).unwrap();
-    assert_eq!(read.context.blocks().len(), 1);
+    let read = store.read(&record_id_value).unwrap();
+    assert_eq!(read.replacements[0].originals.len(), 1);
     assert_eq!(read.trigger, HistoryTrigger::Auto);
-    // Writing the same segment again never overwrites it.
+    // Writing the same record again never overwrites it.
     assert!(store.write(&document).is_err());
     // A stray file is removed; the referenced one stays.
     std::fs::write(
@@ -579,7 +585,7 @@ fn history_store_writes_reads_and_cleans_unreferenced_segments() {
         b"{}",
     )
     .unwrap();
-    super::history::cleanup_segments(directory.path(), "conversation", &store.entries()).unwrap();
+    super::history::cleanup_records(directory.path(), "conversation", &store.entries()).unwrap();
     assert!(
         !directory
             .path()
@@ -591,23 +597,24 @@ fn history_store_writes_reads_and_cleans_unreferenced_segments() {
         directory
             .path()
             .join("conversation.history")
-            .join(format!("{segment_id}.json"))
+            .join(format!("{record_id_value}.json"))
             .exists()
     );
     // A missing referenced file is reported on read, not on validation.
-    store.remove(&segment_id);
-    assert!(store.read(&segment_id).is_err());
+    store.remove(&record_id_value);
+    assert!(store.read(&record_id_value).is_err());
 }
 
 #[test]
 fn history_index_validation_rejects_duplicates_and_bad_identity() {
     let id = uuid::Uuid::now_v7().to_string();
-    let entry = |id: &str| HistorySegment {
-        id: id.into(),
+    let entry = |id: &str| HistoryRecordEntry {
+        record_id: id.into(),
         created_at_ms: 0,
         trigger: HistoryTrigger::Manual,
-        blocks: 1,
-        summary_block_id: BlockId::new(uuid::Uuid::now_v7()),
+        kind: RewriteKind::Summarize,
+        removed_block_count: 1,
+        inserted_block_ids: vec![BlockId::new(uuid::Uuid::now_v7())],
     };
     assert!(validate_index(&[entry(&id)]).is_ok());
     assert!(validate_index(&[entry(&id), entry(&id)]).is_err());
@@ -1000,4 +1007,813 @@ async fn auto_compaction_triggers_when_cache_read_usage_crosses_threshold() {
 async fn auto_compaction_stays_below_threshold_on_uncached_input_alone() {
     // Same rounds with 100 prompt tokens stay below 840.
     assert_eq!(summary_calls_with_cache_read(None).await, 0);
+}
+
+fn history_files(directory: &std::path::Path, conversation: &str) -> Vec<String> {
+    match std::fs::read_dir(directory.join(format!("{conversation}.history"))) {
+        Ok(listing) => {
+            let mut names = listing
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+fn summarize_rewrite(
+    replacements: Vec<super::history::PlannedReplacement>,
+) -> super::history::Rewrite {
+    super::history::Rewrite {
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements,
+    }
+}
+
+#[test]
+fn test_be01_shared_commit_path_v1_1_format_multi_range_and_abandonment() {
+    use super::history::{PlannedReplacement, RewriteError};
+    let directory = tempfile::tempdir().unwrap();
+    let store = HistoryStore::new(directory.path(), "conversation-1", Vec::new());
+
+    let b0 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "b0");
+    let b1 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::Assistant, "b1");
+    let b2 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "b2");
+    let b3 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::Assistant, "b3");
+    let mut context =
+        Context::from_blocks(vec![b0.clone(), b1.clone(), b2.clone(), b3.clone()]).unwrap();
+
+    let r0_id = BlockId::new(uuid::Uuid::now_v7());
+    let r0 = ContextBlock::text(r0_id, Role::User, "r0-replacement");
+    let r2a_id = BlockId::new(uuid::Uuid::now_v7());
+    let r2a = ContextBlock::text(r2a_id, Role::User, "r2-replacement-a");
+    let r2b_id = BlockId::new(uuid::Uuid::now_v7());
+    let r2b = ContextBlock::text(r2b_id, Role::User, "r2-replacement-b");
+
+    // Two ranges around a kept block go through one edit.
+    let entry = store
+        .commit_rewrite(
+            &mut context,
+            summarize_rewrite(vec![
+                PlannedReplacement {
+                    range: 0..1,
+                    with: vec![r0.clone()],
+                },
+                PlannedReplacement {
+                    range: 2..4,
+                    with: vec![r2a.clone(), r2b.clone()],
+                },
+            ]),
+        )
+        .unwrap();
+    let ids = context
+        .blocks()
+        .iter()
+        .map(ContextBlock::id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![r0_id, b1.id(), r2a_id, r2b_id]);
+
+    let record_id = entry.record_id.clone();
+    let file_path = directory
+        .path()
+        .join("conversation-1.history")
+        .join(format!("{record_id}.json"));
+    let file_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file_path).unwrap()).unwrap();
+    assert_eq!(file_json["format"], "tars-history-v1.1");
+    assert_eq!(file_json["kind"], "summarize");
+    assert_eq!(file_json["record_id"], record_id.as_str());
+    let replacements = file_json["replacements"].as_array().unwrap();
+    assert_eq!(replacements.len(), 2);
+    assert_eq!(
+        replacements[0]["range"],
+        serde_json::json!({"start": 0, "end": 1})
+    );
+    assert_eq!(
+        replacements[0]["originals"],
+        serde_json::to_value(vec![&b0]).unwrap()
+    );
+    assert_eq!(
+        replacements[0]["inserted_ids"],
+        serde_json::to_value(vec![r0_id]).unwrap()
+    );
+    assert_eq!(
+        replacements[1]["range"],
+        serde_json::json!({"start": 2, "end": 4})
+    );
+    assert_eq!(
+        replacements[1]["originals"],
+        serde_json::to_value(vec![&b2, &b3]).unwrap()
+    );
+    assert_eq!(
+        replacements[1]["inserted_ids"],
+        serde_json::to_value(vec![r2a_id, r2b_id]).unwrap()
+    );
+    assert_eq!(store.read(&record_id).unwrap().index_entry(), entry);
+
+    assert_eq!(entry.kind, RewriteKind::Summarize);
+    assert_eq!(entry.removed_block_count, 3);
+    assert_eq!(entry.inserted_block_ids, vec![r0_id, r2a_id, r2b_id]);
+    assert_eq!(store.entries(), vec![entry.clone()]);
+
+    // Refused before writing: a range past the end, overlapping ranges, or an
+    // empty insertion leave no file, no index entry and the same Context.
+    let before = context.blocks().to_vec();
+    for replacements in [
+        vec![PlannedReplacement {
+            range: 3..9,
+            with: vec![ContextBlock::text(
+                BlockId::new(uuid::Uuid::now_v7()),
+                Role::User,
+                "x",
+            )],
+        }],
+        vec![
+            PlannedReplacement {
+                range: 0..2,
+                with: vec![ContextBlock::text(
+                    BlockId::new(uuid::Uuid::now_v7()),
+                    Role::User,
+                    "x",
+                )],
+            },
+            PlannedReplacement {
+                range: 1..3,
+                with: vec![ContextBlock::text(
+                    BlockId::new(uuid::Uuid::now_v7()),
+                    Role::User,
+                    "y",
+                )],
+            },
+        ],
+        vec![PlannedReplacement {
+            range: 1..2,
+            with: Vec::new(),
+        }],
+        Vec::new(),
+    ] {
+        let error = store
+            .commit_rewrite(&mut context, summarize_rewrite(replacements))
+            .unwrap_err();
+        assert!(matches!(error, RewriteError::Rejected(_)), "{error}");
+    }
+    assert_eq!(context.blocks(), before.as_slice());
+    assert_eq!(
+        history_files(directory.path(), "conversation-1"),
+        vec![format!("{record_id}.json")]
+    );
+    assert_eq!(store.entries(), vec![entry.clone()]);
+
+    // Refused by Causa after the record was written: reusing a kept block's
+    // identity with other content. The written file is removed again.
+    let error = store
+        .commit_rewrite(
+            &mut context,
+            summarize_rewrite(vec![PlannedReplacement {
+                range: 0..1,
+                with: vec![ContextBlock::text(b1.id(), Role::User, "changed")],
+            }]),
+        )
+        .unwrap_err();
+    assert!(matches!(error, RewriteError::Rejected(_)), "{error}");
+    assert_eq!(context.blocks(), before.as_slice());
+    assert_eq!(
+        history_files(directory.path(), "conversation-1"),
+        vec![format!("{record_id}.json")]
+    );
+    assert_eq!(store.entries(), vec![entry]);
+
+    // An unindexed file left by an interrupted rewrite is removed on reopen.
+    let stray_path = directory
+        .path()
+        .join("conversation-1.history")
+        .join("stray-unindexed.json");
+    std::fs::write(&stray_path, b"{}").unwrap();
+    super::history::cleanup_records(directory.path(), "conversation-1", &store.entries()).unwrap();
+    assert!(!stray_path.exists(), "unindexed file cleaned up on reopen");
+    assert!(file_path.exists(), "referenced file remains");
+}
+
+#[tokio::test]
+async fn test_be03_whole_context_compaction_structure_triggers_and_abandon_conditions() {
+    // 1. Structure: whole-context replacement replaces 0..len, kept tail empty,
+    // result is tool declaration + one continuation brief.
+    let original_blocks = vec![
+        tool_change("fixture_tool"),
+        ContextBlock::text(
+            BlockId::new(uuid::Uuid::now_v7()),
+            Role::User,
+            "User prompt 1",
+        ),
+        ContextBlock::text(
+            BlockId::new(uuid::Uuid::now_v7()),
+            Role::Assistant,
+            "Assistant reply 1",
+        ),
+    ];
+    let summary_id = BlockId::new(uuid::Uuid::now_v7());
+    let replacement =
+        summary::replacement_blocks(&original_blocks, summary_id, "Goal: carry out task.");
+    assert_eq!(replacement.len(), 2);
+    assert!(matches!(
+        replacement[0].content(),
+        BlockContent::ToolChange(_)
+    ));
+    assert_eq!(
+        causa::kernel::current_tools(&replacement)[0].name,
+        "fixture_tool"
+    );
+    assert_eq!(
+        replacement[1].meta().source.as_deref(),
+        Some(summary::SUMMARY_SOURCE)
+    );
+    assert_eq!(replacement[1].id(), summary_id);
+
+    // 2. Triggers: Auto, Manual, Passive
+    let directory = tempfile::tempdir().unwrap();
+    let tracker = Arc::new(UsageTracker::default());
+    let gateway = Arc::new(ToolThenDone {
+        main_calls: AtomicUsize::new(0),
+        summary_calls: Arc::new(AtomicUsize::new(0)),
+        summary_inputs: Arc::new(std::sync::Mutex::new(Vec::new())),
+        tool_call_first: false,
+        cache_read_tokens: None,
+    }) as Arc<dyn ModelGateway>;
+    let runtime = CompactionRuntime::new(
+        &definition(Some(1_000), None),
+        &"conversation-be03".into(),
+        Some(directory.path()),
+        Vec::new(),
+        None,
+        None,
+        gateway,
+        tracker,
+    )
+    .unwrap();
+    assert_eq!(runtime.trigger_for(700), Some(HistoryTrigger::Auto));
+    assert_eq!(runtime.trigger_for(699), None);
+    runtime.request_force();
+    assert_eq!(runtime.trigger_for(10), Some(HistoryTrigger::Passive));
+
+    // 3. Abandon conditions:
+    // a. Unpaired materials abandon
+    let unpaired_context = Context::from_blocks(vec![ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolCall(ToolCallPayload::new("tool", serde_json::json!({}))),
+        Default::default(),
+    )])
+    .unwrap();
+    let control = CallControl::new(causa::kernel::CancellationToken::new(), None);
+    let plan_res = runtime
+        .plan(
+            &unpaired_context,
+            &causa::kernel::ModelRef::new("fixture"),
+            &causa::kernel::GenerationOptions::default(),
+            HistoryTrigger::Manual,
+            None,
+            &control,
+        )
+        .await;
+    assert_eq!(
+        plan_res.unwrap_err(),
+        super::CompactionAbandon::UnpairedMaterials
+    );
+
+    // b. Empty summary abandon
+    struct EmptyGateway;
+    #[async_trait::async_trait]
+    impl ModelGateway for EmptyGateway {
+        async fn invoke(
+            &self,
+            _: &ModelRequest,
+            _: &CallControl,
+        ) -> Result<ModelOutput, ModelInvokeError> {
+            Ok(summary_output("   "))
+        }
+    }
+    let empty_runtime = CompactionRuntime::new(
+        &definition(Some(1_000), None),
+        &"conversation-empty".into(),
+        Some(directory.path()),
+        Vec::new(),
+        None,
+        None,
+        Arc::new(EmptyGateway),
+        Arc::new(UsageTracker::default()),
+    )
+    .unwrap();
+    let valid_context = Context::from_blocks(vec![big_block(2_000)]).unwrap();
+    let empty_res = empty_runtime
+        .plan(
+            &valid_context,
+            &causa::kernel::ModelRef::new("fixture"),
+            &causa::kernel::GenerationOptions::default(),
+            HistoryTrigger::Manual,
+            None,
+            &control,
+        )
+        .await;
+    assert_eq!(
+        empty_res.unwrap_err(),
+        super::CompactionAbandon::EmptySummary
+    );
+}
+
+#[test]
+fn test_be04_expansion_fixture_summarize_elide_merge_nesting_and_lazy_reading() {
+    use super::expansion::{BlockStatus, expand_conversation};
+
+    let directory = tempfile::tempdir().unwrap();
+    let session_dir = directory.path().join("sessions");
+    std::fs::create_dir_all(&session_dir).unwrap();
+
+    let conv_id = "test-conv-be04";
+
+    // 1. Build unrewritten conversation of 8 blocks:
+    let b0 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::User,
+        "User prompt",
+    );
+    let b1 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::Assistant,
+        "Assistant reply with tool call",
+    );
+    let b2 = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolResult(ToolResultPayload::new(
+            b1.id(),
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::json!("Large tool output")),
+        )),
+        Default::default(),
+    );
+    let b3 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::Assistant,
+        "Assistant post-tool answer",
+    );
+    let b4 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::User,
+        "User follow-up",
+    );
+    let b5 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::Assistant,
+        "Assistant follow-up",
+    );
+    let b6 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::User,
+        "User final question",
+    );
+    let b7 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::Assistant,
+        "Assistant final answer",
+    );
+
+    let original_blocks = [
+        b0.clone(),
+        b1.clone(),
+        b2.clone(),
+        b3.clone(),
+        b4.clone(),
+        b5.clone(),
+        b6.clone(),
+        b7.clone(),
+    ];
+
+    // 2. Hand-built records with summarize + elide + merge + nesting:
+    // Record 1 (Elide): Elides B2 (tool result) in place -> replaced by E1
+    let rec1_id = uuid::Uuid::now_v7().to_string();
+    let e1 = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolResult(ToolResultPayload::new(
+            b1.id(),
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::json!("[elided]")),
+        )),
+        Default::default(),
+    );
+    let rec1 = HistoryRecord {
+        format: HISTORY_FORMAT.into(),
+        conversation_id: conv_id.into(),
+        record_id: rec1_id.clone(),
+        created_at_ms: 1000,
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Elide,
+        estimate_before: 1000,
+        estimate_after: 200,
+        replacements: vec![RangeReplacement {
+            range: 2..3,
+            originals: vec![b2.clone()],
+            inserted_ids: vec![e1.id()],
+        }],
+    };
+
+    // Record 2 (Summarize - nested): Summarizes B0, B1, E1, B3 -> replaced by S1
+    let rec2_id = uuid::Uuid::now_v7().to_string();
+    let s1 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::System, "Brief 1");
+    let rec2 = HistoryRecord {
+        format: HISTORY_FORMAT.into(),
+        conversation_id: conv_id.into(),
+        record_id: rec2_id.clone(),
+        created_at_ms: 2000,
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
+        estimate_before: 800,
+        estimate_after: 150,
+        replacements: vec![RangeReplacement {
+            range: 0..4,
+            originals: vec![b0.clone(), b1.clone(), e1.clone(), b3.clone()],
+            inserted_ids: vec![s1.id()],
+        }],
+    };
+
+    // Record 3 (Summarize): Summarizes S1, B4, B5 -> replaced by S2
+    let rec3_id = uuid::Uuid::now_v7().to_string();
+    let s2 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::System, "Brief 2");
+    let rec3 = HistoryRecord {
+        format: HISTORY_FORMAT.into(),
+        conversation_id: conv_id.into(),
+        record_id: rec3_id.clone(),
+        created_at_ms: 3000,
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
+        estimate_before: 900,
+        estimate_after: 180,
+        replacements: vec![RangeReplacement {
+            range: 0..3,
+            originals: vec![s1.clone(), b4.clone(), b5.clone()],
+            inserted_ids: vec![s2.id()],
+        }],
+    };
+
+    // Record 4 (Merge): Merges S2 into M1
+    let rec4_id = uuid::Uuid::now_v7().to_string();
+    let m1 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::System,
+        "Merged Brief M1",
+    );
+    let rec4 = HistoryRecord {
+        format: HISTORY_FORMAT.into(),
+        conversation_id: conv_id.into(),
+        record_id: rec4_id.clone(),
+        created_at_ms: 4000,
+        trigger: HistoryTrigger::Manual,
+        kind: RewriteKind::Merge,
+        estimate_before: 180,
+        estimate_after: 100,
+        replacements: vec![RangeReplacement {
+            range: 0..1,
+            originals: vec![s2.clone()],
+            inserted_ids: vec![m1.id()],
+        }],
+    };
+
+    // Store records in HistoryStore
+    let index = vec![
+        rec1.index_entry(),
+        rec2.index_entry(),
+        rec3.index_entry(),
+        rec4.index_entry(),
+    ];
+    let store = HistoryStore::new(&session_dir, conv_id, index.clone());
+    store.write(&rec1).unwrap();
+    store.write(&rec2).unwrap();
+    store.write(&rec3).unwrap();
+    store.write(&rec4).unwrap();
+
+    // Context currently holds [M1, B6, B7]
+    let current_context_blocks = vec![m1.clone(), b6.clone(), b7.clone()];
+
+    // 3. Opening reads 0 record files (check via test hook read_count)
+    assert_eq!(store.read_count(), 0);
+
+    // 4. Expand conversation fully
+    let expanded = expand_conversation(&current_context_blocks, &index, None, |id| store.read(id));
+    assert!(expanded.unreadable_records.is_empty());
+    assert_eq!(expanded.blocks.len(), 8);
+
+    // Block for block equality with unrewritten conversation:
+    for (i, orig) in original_blocks.iter().enumerate() {
+        assert_eq!(
+            expanded.blocks[i].block.id(),
+            orig.id(),
+            "block {i} ID mismatch"
+        );
+        assert_eq!(
+            &expanded.blocks[i].block, orig,
+            "block {i} content mismatch"
+        );
+    }
+
+    // Verify block statuses:
+    assert_eq!(
+        expanded.blocks[0].status,
+        BlockStatus::Summarized(rec2_id.clone())
+    );
+    assert_eq!(
+        expanded.blocks[1].status,
+        BlockStatus::Summarized(rec2_id.clone())
+    );
+    assert_eq!(
+        expanded.blocks[2].status,
+        BlockStatus::Elided(rec1_id.clone())
+    );
+    assert_eq!(
+        expanded.blocks[3].status,
+        BlockStatus::Summarized(rec2_id.clone())
+    );
+    assert_eq!(
+        expanded.blocks[4].status,
+        BlockStatus::Summarized(rec3_id.clone())
+    );
+    assert_eq!(
+        expanded.blocks[5].status,
+        BlockStatus::Summarized(rec3_id.clone())
+    );
+    assert_eq!(expanded.blocks[6].status, BlockStatus::Original);
+    assert_eq!(expanded.blocks[7].status, BlockStatus::Original);
+
+    // 5. Test lazy on-demand reading:
+    // Requesting last 2 blocks (B6, B7) needs 0 record reads!
+    let reads_before = store.read_count();
+    let last_2 = expand_conversation(&current_context_blocks, &index, Some(2), |id| {
+        store.read(id)
+    });
+    assert_eq!(last_2.blocks.len(), 2);
+    assert_eq!(last_2.blocks[0].block.id(), b6.id());
+    assert_eq!(last_2.blocks[1].block.id(), b7.id());
+    assert_eq!(
+        store.read_count(),
+        reads_before,
+        "lazy expansion of original blocks reads 0 records"
+    );
+
+    // 6. Test unreadable record:
+    // Corrupt record 1, expand again: reports unreadable record without failing the rest
+    let rec1_file = session_dir
+        .join(format!("{conv_id}.history"))
+        .join(format!("{rec1_id}.json"));
+    std::fs::write(&rec1_file, b"corrupted content").unwrap();
+    let corrupted_expansion =
+        expand_conversation(&current_context_blocks, &index, None, |id| store.read(id));
+    assert_eq!(corrupted_expansion.unreadable_records.len(), 1);
+    assert_eq!(corrupted_expansion.unreadable_records[0].record_id, rec1_id);
+    // The elision stub stands in for its unreadable originals; the rest expands.
+    let shown = corrupted_expansion
+        .blocks
+        .iter()
+        .map(|expanded| (expanded.block.id(), expanded.status.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        shown,
+        vec![
+            (b0.id(), BlockStatus::Summarized(rec2_id.clone())),
+            (b1.id(), BlockStatus::Summarized(rec2_id.clone())),
+            (e1.id(), BlockStatus::Unreadable(rec1_id.clone())),
+            (b3.id(), BlockStatus::Summarized(rec2_id.clone())),
+            (b4.id(), BlockStatus::Summarized(rec3_id.clone())),
+            (b5.id(), BlockStatus::Summarized(rec3_id.clone())),
+            (b6.id(), BlockStatus::Original),
+            (b7.id(), BlockStatus::Original),
+        ]
+    );
+
+    // The newest three blocks need the merge and the outer summary only.
+    let reads_before = store.read_count();
+    let last_3 = expand_conversation(&current_context_blocks, &index, Some(3), |id| {
+        store.read(id)
+    });
+    let ids = last_3
+        .blocks
+        .iter()
+        .map(|b| b.block.id())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![b5.id(), b6.id(), b7.id()]);
+    assert_eq!(store.read_count() - reads_before, 2);
+}
+
+#[test]
+fn expansion_puts_back_each_range_of_a_multi_range_record_once() {
+    use super::expansion::{BlockStatus, expand_conversation};
+    let directory = tempfile::tempdir().unwrap();
+    let conversation = "conversation-multi";
+    let text =
+        |role, body: &str| ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), role, body);
+    let originals = vec![
+        text(Role::User, "a"),
+        text(Role::Assistant, "b"),
+        text(Role::User, "c"),
+        text(Role::Assistant, "d"),
+        text(Role::User, "e"),
+        text(Role::Assistant, "f"),
+    ];
+    let x = text(Role::User, "x");
+    let z = text(Role::User, "z");
+    let y1 = text(Role::User, "y1");
+    let y2 = text(Role::User, "y2");
+    let store = HistoryStore::new(directory.path(), conversation, Vec::new());
+    let mut context = Context::from_blocks(originals.clone()).unwrap();
+    // Two adjacent ranges (0..1, 1..2) and one after a kept block (3..5).
+    let entry = store
+        .commit_rewrite(
+            &mut context,
+            summarize_rewrite(vec![
+                super::history::PlannedReplacement {
+                    range: 0..1,
+                    with: vec![x.clone()],
+                },
+                super::history::PlannedReplacement {
+                    range: 1..2,
+                    with: vec![z.clone()],
+                },
+                super::history::PlannedReplacement {
+                    range: 3..5,
+                    with: vec![y1.clone(), y2.clone()],
+                },
+            ]),
+        )
+        .unwrap();
+    let current = context.blocks().to_vec();
+    let ids = current.iter().map(ContextBlock::id).collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            x.id(),
+            z.id(),
+            originals[2].id(),
+            y1.id(),
+            y2.id(),
+            originals[5].id()
+        ]
+    );
+
+    let index = store.entries();
+    let expanded = expand_conversation(&current, &index, None, |id| store.read(id));
+    assert!(expanded.unreadable_records.is_empty());
+    let blocks = expanded
+        .blocks
+        .iter()
+        .map(|b| b.block.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(blocks, originals);
+    let summarized = BlockStatus::Summarized(entry.record_id.clone());
+    let statuses = expanded
+        .blocks
+        .iter()
+        .map(|b| b.status.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        statuses,
+        vec![
+            summarized.clone(),
+            summarized.clone(),
+            BlockStatus::Original,
+            summarized.clone(),
+            summarized,
+            BlockStatus::Original,
+        ]
+    );
+    assert_eq!(store.read_count(), 1, "one record is read once");
+
+    // The newest block is untouched material: no record read.
+    let newest = expand_conversation(&current, &index, Some(1), |id| store.read(id));
+    assert_eq!(newest.blocks.len(), 1);
+    assert_eq!(newest.blocks[0].block, originals[5]);
+    assert_eq!(store.read_count(), 1);
+}
+
+/// Whole-Context compactions in a row, built through the shared commit path.
+///
+/// Returns the current Context and, per record, the blocks it removed that no
+/// other record inserted (the visible conversation of that span).
+fn whole_context_chain(
+    store: &HistoryStore,
+    records: usize,
+) -> (Context, Vec<ContextBlock>, Vec<String>) {
+    let text =
+        |body: String| ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, body);
+    let first = text("span 0".into());
+    let mut conversation = vec![first.clone()];
+    let mut context = Context::from_blocks(vec![first]).unwrap();
+    let mut ids = Vec::new();
+    for position in 0..records {
+        let brief = super::summary::summary_block(
+            super::summary::new_block_id(),
+            &format!("brief {position}"),
+        );
+        let range = 0..context.blocks().len();
+        let entry = store
+            .commit_rewrite(
+                &mut context,
+                summarize_rewrite(vec![super::history::PlannedReplacement {
+                    range,
+                    with: vec![brief],
+                }]),
+            )
+            .unwrap();
+        ids.push(entry.record_id);
+        let next = text(format!("span {}", position + 1));
+        conversation.push(next.clone());
+        context.edit().append([next]).commit().unwrap();
+    }
+    (context, conversation, ids)
+}
+
+#[test]
+fn cursor_continues_past_an_unreadable_record_with_the_older_ones() {
+    use super::expansion::{BlockStatus, ExpansionCursor, ExpansionStep};
+    let directory = tempfile::tempdir().unwrap();
+    let store = HistoryStore::new(directory.path(), "conversation-chain", Vec::new());
+    let (context, conversation, ids) = whole_context_chain(&store, 4);
+
+    // Intact: the expansion is the conversation with no rewrites, and every
+    // record gives one divider mark before its originals.
+    let mut cursor = ExpansionCursor::new(context.blocks(), store.entries());
+    let mut blocks = Vec::new();
+    let mut marks = Vec::new();
+    loop {
+        match cursor.next() {
+            ExpansionStep::Block(block) => blocks.push(block.block),
+            ExpansionStep::Rewrite(mark) => marks.push(mark.record_id),
+            ExpansionStep::NeedRecord(id) => {
+                let record = store.read(&id).map_err(|error| error.to_string());
+                cursor.supply(&id, record);
+            }
+            ExpansionStep::Unreadable(unreadable) => panic!("{unreadable:?}"),
+            ExpansionStep::End => break,
+        }
+    }
+    blocks.reverse();
+    assert_eq!(blocks, conversation);
+    assert_eq!(marks, ids.iter().rev().cloned().collect::<Vec<_>>());
+    assert_eq!(cursor.unread(), 0);
+
+    // Record 2 is missing: its brief stands in, then records 1 and 0 are
+    // still expanded by their place in the index.
+    std::fs::remove_file(
+        directory
+            .path()
+            .join("conversation-chain.history")
+            .join(format!("{}.json", ids[2])),
+    )
+    .unwrap();
+    let expanded =
+        super::expansion::expand_conversation(context.blocks(), &store.entries(), None, |id| {
+            store.read(id)
+        });
+    assert_eq!(expanded.unreadable_records.len(), 1);
+    assert_eq!(expanded.unreadable_records[0].record_id, ids[2]);
+    let shown = expanded
+        .blocks
+        .iter()
+        .map(|block| (block.block.id(), block.status.clone()))
+        .collect::<Vec<_>>();
+    let brief_2 = store.entries()[2].inserted_block_ids[0];
+    assert_eq!(
+        shown,
+        vec![
+            (
+                conversation[0].id(),
+                BlockStatus::Summarized(ids[0].clone())
+            ),
+            (
+                conversation[1].id(),
+                BlockStatus::Summarized(ids[1].clone())
+            ),
+            (brief_2, BlockStatus::Unreadable(ids[2].clone())),
+            (
+                conversation[3].id(),
+                BlockStatus::Summarized(ids[3].clone())
+            ),
+            (conversation[4].id(), BlockStatus::Original),
+        ]
+    );
+}
+
+#[test]
+fn cursor_adopts_a_rewrite_and_continues_with_the_older_records() {
+    use super::expansion::{ExpansionCursor, ExpansionStep};
+    let directory = tempfile::tempdir().unwrap();
+    let store = HistoryStore::new(directory.path(), "conversation-adopt", Vec::new());
+    let (_, _, ids) = whole_context_chain(&store, 2);
+    let mut entries = store.entries();
+    let newest = entries.pop().unwrap();
+    // A display opened before the newest rewrite: its prefix is the older brief.
+    let prefix = store.read(&ids[1]).unwrap().replacements[0].originals[..1].to_vec();
+    let mut cursor = ExpansionCursor::new(&prefix, entries);
+    assert_eq!(cursor.unread(), 1);
+    cursor.adopt(newest);
+    assert_eq!(cursor.unread(), 1, "an adopted record needs no read");
+    assert_eq!(cursor.next(), ExpansionStep::NeedRecord(ids[0].clone()));
 }

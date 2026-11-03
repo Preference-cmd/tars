@@ -274,54 +274,79 @@ pub(super) fn text_context(text: &str) -> causa::kernel::Context {
     causa::kernel::Context::from_blocks(vec![tars_core::application::text_input(text)]).unwrap()
 }
 
-/// Write a saved session record plus one history segment file per replaced
-/// Context, using the same on-disk formats the session store reads.
+/// A saved session after one whole-Context compaction per span in `spans`.
+///
+/// Record `k` removed the previous brief (for `k > 0`) and span `k`, and
+/// inserted brief `k`; the current Context is the newest brief followed by
+/// `current`. Every record is written through its JSON form.
 pub(super) fn write_history_session(
     store: &std::path::Path,
     current: &causa::kernel::Context,
-    segments: &[causa::kernel::Context],
+    spans: &[causa::kernel::Context],
 ) -> String {
     let conversation_id = causa::runtime::new_block_id().0.to_string();
     let sessions = store.join("sessions");
     let history = sessions.join(format!("{conversation_id}.history"));
     std::fs::create_dir_all(&history).unwrap();
+    let brief = |position: usize| {
+        causa::kernel::ContextBlock::new(
+            causa::runtime::new_block_id(),
+            causa::kernel::BlockContent::text(
+                causa::kernel::Role::User,
+                format!("brief {position}"),
+            ),
+            causa::kernel::BlockMeta::from_source(tars_core::compact::SUMMARY_SOURCE),
+        )
+    };
     let mut entries = Vec::new();
-    for (position, context) in segments.iter().enumerate() {
-        let segment_id = causa::runtime::new_block_id().0.to_string();
-        let summary_block_id = serde_json::to_value(causa::runtime::new_block_id()).unwrap();
+    let mut previous: Option<causa::kernel::ContextBlock> = None;
+    for (position, span) in spans.iter().enumerate() {
+        let record_id = causa::runtime::new_block_id().0.to_string();
+        let inserted = brief(position);
+        let mut originals = previous.iter().cloned().collect::<Vec<_>>();
+        originals.extend(span.blocks().iter().cloned());
         let estimate_before = 100_000 + 10_000 * u64::try_from(position).unwrap();
         let estimate_after = 5_000 + 1_000 * u64::try_from(position).unwrap();
         entries.push(serde_json::json!({
-            "id": segment_id,
+            "record_id": record_id,
             "created_at_ms": 1u64,
             "trigger": "auto",
-            "blocks": context.blocks().len(),
-            "summary_block_id": summary_block_id,
+            "kind": "summarize",
+            "removed_block_count": originals.len(),
+            "inserted_block_ids": [inserted.id()],
         }));
         let document = serde_json::json!({
-            "format": "tars-history-v1",
+            "format": "tars-history-v1.1",
             "conversation_id": conversation_id,
-            "segment_id": segment_id,
+            "record_id": record_id,
             "created_at_ms": 1u64,
             "trigger": "auto",
+            "kind": "summarize",
             "estimate_before": estimate_before,
             "estimate_after": estimate_after,
-            "summary_block_id": summary_block_id,
-            "context": serde_json::to_value(context).unwrap(),
+            "replacements": [{
+                "range": {"start": 0, "end": originals.len()},
+                "originals": originals,
+                "inserted_ids": [inserted.id()],
+            }],
         });
         std::fs::write(
-            history.join(format!("{segment_id}.json")),
+            history.join(format!("{record_id}.json")),
             serde_json::to_vec(&document).unwrap(),
         )
         .unwrap();
+        previous = Some(inserted);
     }
+    let mut blocks = previous.into_iter().collect::<Vec<_>>();
+    blocks.extend(current.blocks().iter().cloned());
+    let context = causa::kernel::Context::from_blocks(blocks).unwrap();
     let record = serde_json::json!({
-        "format": "tars-session-v2.1",
+        "format": "tars-session-v2.2",
         "conversation_id": conversation_id,
         "revision": 1u64,
         "last_commit_id": causa::runtime::new_block_id().0.to_string(),
         "definition": serde_json::to_value(history_definition(None)).unwrap(),
-        "context": serde_json::to_value(current).unwrap(),
+        "context": serde_json::to_value(&context).unwrap(),
         "history": entries,
     });
     std::fs::create_dir_all(&sessions).unwrap();
@@ -333,18 +358,18 @@ pub(super) fn write_history_session(
     conversation_id
 }
 
-/// Delete one segment file by index, leaving the record still listing it.
-pub(super) fn delete_history_segment(store: &std::path::Path, conversation_id: &str, index: usize) {
+/// Delete one record file by index, leaving the session record still listing it.
+pub(super) fn delete_history_record(store: &std::path::Path, conversation_id: &str, index: usize) {
     let sessions = store.join("sessions");
     let record: serde_json::Value = serde_json::from_slice(
         &std::fs::read(sessions.join(format!("{conversation_id}.json"))).unwrap(),
     )
     .unwrap();
-    let segment_id = record["history"][index]["id"].as_str().unwrap();
+    let record_id = record["history"][index]["record_id"].as_str().unwrap();
     std::fs::remove_file(
         sessions
             .join(format!("{conversation_id}.history"))
-            .join(format!("{segment_id}.json")),
+            .join(format!("{record_id}.json")),
     )
     .unwrap();
 }

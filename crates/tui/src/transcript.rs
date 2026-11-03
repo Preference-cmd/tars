@@ -1,4 +1,4 @@
-use causa::kernel::{BlockContent, ContentPart, Context};
+use causa::kernel::{BlockContent, ContentPart, Context, ContextBlock};
 use std::ops::Range;
 use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
@@ -13,24 +13,53 @@ pub(crate) struct Transcript {
     /// The current material collapses that block to one row; the panel opened
     /// by `/summary` reads this raw copy instead of the rendered rows.
     pub summary: Option<String>,
+    /// Number of leading Context blocks that a rewrite inserted.
+    ///
+    /// Those blocks stand for history; the history view expands them.
+    pub history_blocks: usize,
+    /// Byte offset in `text` where the blocks after `history_blocks` begin.
+    ///
+    /// When a later rewrite replaces this whole Context, the rows from here
+    /// on are the replaced conversation and are adopted without a read.
+    pub history_start: usize,
 }
 
 impl Transcript {
-    pub fn from_context(context: &Context) -> Self {
-        Self::build(context, true)
+    /// The current Context, marking its leading blocks that `index` inserted.
+    pub fn from_materials(
+        context: &Context,
+        index: &[tars_core::compact::HistoryRecordEntry],
+    ) -> Self {
+        let inserted = index
+            .iter()
+            .flat_map(|entry| entry.inserted_block_ids.iter().copied())
+            .collect::<std::collections::HashSet<_>>();
+        let blocks = context.blocks();
+        let history_blocks = blocks
+            .iter()
+            .take_while(|block| inserted.contains(&block.id()))
+            .count();
+        let mut head = Self::build(&blocks[..history_blocks], true);
+        let tail = Self::build(&blocks[history_blocks..], true);
+        head.history_blocks = history_blocks;
+        head.history_start = head.text.len();
+        head.text.push_str(&tail.text);
+        head.tool_details.extend(tail.tool_details);
+        head.summary = head.summary.or(tail.summary);
+        head
     }
 
-    /// History segments keep their own summary expanded: they are archived
-    /// conversation, not the current material the model continues from.
-    pub fn from_history_context(context: &Context) -> Self {
-        Self::build(context, false)
+    /// Archived conversation from history records keeps any summary expanded:
+    /// it is not the material the model continues from.
+    pub fn from_history_blocks(blocks: &[ContextBlock]) -> Self {
+        Self::build(blocks, false)
     }
 
-    fn build(context: &Context, collapse_summary: bool) -> Self {
+    fn build(blocks: &[ContextBlock], collapse_summary: bool) -> Self {
         let mut text = String::new();
         let mut tool_details = Vec::new();
         let mut summary_text = None;
-        for block in context.blocks() {
+        for block in blocks {
             // The offered tool set is configuration the runner records, not
             // conversation; it has no transcript entry.
             if matches!(block.content(), BlockContent::ToolChange(_)) {
@@ -116,6 +145,8 @@ impl Transcript {
             text,
             tool_details,
             summary: summary_text,
+            history_blocks: 0,
+            history_start: 0,
         }
     }
 }
@@ -210,7 +241,7 @@ mod tests {
             Default::default(),
         )])
         .unwrap();
-        let transcript = Transcript::from_context(&context);
+        let transcript = Transcript::from_materials(&context, &[]);
         assert!(transcript.text.contains("中文 😀"));
         assert!(transcript.text.contains('\n'));
         assert!(transcript.text.contains("\\u{202e}"));

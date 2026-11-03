@@ -265,12 +265,13 @@ fn record_definition() -> crate::definition::SessionDefinition {
 #[test]
 fn offline_export_extracts_context_from_a_compacted_record() {
     let id = uuid::Uuid::now_v7().to_string();
-    let segment = crate::compact::HistorySegment {
-        id: uuid::Uuid::now_v7().to_string(),
+    let record = crate::compact::HistoryRecordEntry {
+        record_id: uuid::Uuid::now_v7().to_string(),
         created_at_ms: 1,
         trigger: crate::compact::HistoryTrigger::Auto,
-        blocks: 1,
-        summary_block_id: causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        kind: crate::compact::RewriteKind::Summarize,
+        removed_block_count: 1,
+        inserted_block_ids: vec![causa::kernel::BlockId::new(uuid::Uuid::now_v7())],
     };
     let context = Context::from_blocks(vec![causa::kernel::ContextBlock::text(
         causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
@@ -291,7 +292,7 @@ fn offline_export_extracts_context_from_a_compacted_record() {
         None,
         Some(false),
         Some(50),
-        vec![segment],
+        vec![record],
         None,
     )
     .unwrap();

@@ -46,21 +46,17 @@ impl Entry {
         }
         if let ProgressUpdate::Compaction(update) = &event.update {
             // Advisory only: a finished attempt still needs the reloaded index
-            // before its segment can be displayed, but its estimates describe
-            // the segment adopted from the rows already on screen.
+            // before its divider can be displayed, but its estimates describe
+            // the rewrite adopted from the rows already on screen.
             if let tars_core::compact::CompactionProgress::Finished {
                 trigger,
                 estimate_before,
                 estimate_after,
-                segment,
+                record,
             } = update
             {
-                self.history.note_hint(
-                    segment.clone(),
-                    *trigger,
-                    *estimate_before,
-                    *estimate_after,
-                );
+                self.history
+                    .note_hint(record.clone(), *trigger, *estimate_before, *estimate_after);
             }
             return;
         }

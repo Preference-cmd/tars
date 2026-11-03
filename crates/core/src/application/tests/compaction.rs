@@ -11,7 +11,7 @@ fn as_gateway(gateway: &Arc<CompactionGateway>) -> Option<Arc<dyn ModelGateway>>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn auto_compaction_replaces_the_context_and_saves_one_segment() {
+async fn auto_compaction_replaces_the_context_and_saves_one_record() {
     let store = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(store.path().into()));
     let gateway = scripted(SummaryBehavior::Text(
@@ -56,14 +56,24 @@ async fn auto_compaction_replaces_the_context_and_saves_one_segment() {
     assert_eq!(blocks[0]["content"]["value"]["role"], "user");
     assert_eq!(blocks[1]["content"]["value"]["role"], "assistant");
 
-    let segment_id = history[0]["id"].as_str().unwrap();
+    let record_id_value = history[0]["record_id"]
+        .as_str()
+        .or_else(|| history[0]["id"].as_str())
+        .unwrap();
     assert!(
         history_dir(store.path(), &id)
-            .join(format!("{segment_id}.json"))
+            .join(format!("{record_id_value}.json"))
             .exists()
     );
-    let document = session.read_history_segment(segment_id).unwrap();
-    assert_eq!(document.context.blocks().len(), 3);
+    let document = session.read_history_record(record_id_value).unwrap();
+    assert_eq!(
+        document
+            .replacements
+            .iter()
+            .flat_map(|r| &r.originals)
+            .count(),
+        3
+    );
     assert_eq!(document.trigger, crate::compact::HistoryTrigger::Auto);
     assert_eq!(session.history().len(), 1);
 
@@ -228,10 +238,17 @@ async fn a_second_compaction_feeds_the_old_summary_into_the_next_request() {
         2,
         "one summary and the final answer"
     );
-    let second_id = history[1]["id"].as_str().unwrap();
-    let document = session.read_history_segment(second_id).unwrap();
+    let second_id = history[1]["record_id"]
+        .as_str()
+        .or_else(|| history[1]["id"].as_str())
+        .unwrap();
+    let document = session.read_history_record(second_id).unwrap();
     assert_eq!(
-        document.context.blocks().len(),
+        document
+            .replacements
+            .iter()
+            .flat_map(|r| &r.originals)
+            .count(),
         5,
         "the previous summary, the first answer and the three new blocks"
     );
@@ -276,12 +293,19 @@ async fn over_limit_material_is_trimmed_for_the_summary_but_kept_in_history() {
     let record = saved_record(store.path(), &id);
     let history = record["history"].as_array().unwrap();
     assert_eq!(history.len(), 1);
-    let segment_id = history[0]["id"].as_str().unwrap();
-    let document = session.read_history_segment(segment_id).unwrap();
+    let record_id_value = history[0]["record_id"]
+        .as_str()
+        .or_else(|| history[0]["id"].as_str())
+        .unwrap();
+    let document = session.read_history_record(record_id_value).unwrap();
     assert_eq!(
-        document.context.blocks().len(),
+        document
+            .replacements
+            .iter()
+            .flat_map(|r| &r.originals)
+            .count(),
         3,
-        "the history segment keeps the complete old material"
+        "the history record keeps the complete old material"
     );
     assert!(document.estimate_before >= document.estimate_after);
     host.close(&session.target(), ClosePolicy::Save)
@@ -384,7 +408,7 @@ async fn unwritable_history_abandons_the_compaction_and_keeps_the_round() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn reopening_restores_settings_and_cleans_unreferenced_segments() {
+async fn reopening_restores_settings_and_cleans_unreferenced_records() {
     let store = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(store.path().into()));
     let gateway = scripted(SummaryBehavior::Text("first summary body".into()));
@@ -406,7 +430,11 @@ async fn reopening_restores_settings_and_cleans_unreferenced_segments() {
     session.wait_saved().await.unwrap();
     let id = session.target().conversation_id().as_str().to_owned();
     let record = saved_record(store.path(), &id);
-    let segment_id = record["history"][0]["id"].as_str().unwrap().to_owned();
+    let record_id_value = record["history"][0]["record_id"]
+        .as_str()
+        .or_else(|| record["history"][0]["id"].as_str())
+        .unwrap()
+        .to_owned();
     let stray = history_dir(store.path(), &id).join("stray.json");
     std::fs::write(&stray, b"{}").unwrap();
     host.close(&session.target(), ClosePolicy::Save)
@@ -417,10 +445,10 @@ async fn reopening_restores_settings_and_cleans_unreferenced_segments() {
         .open(session.target().conversation_id().clone())
         .await
         .unwrap();
-    assert!(!stray.exists(), "unreferenced segments are removed on open");
+    assert!(!stray.exists(), "unreferenced records are removed on open");
     assert!(
         history_dir(store.path(), &id)
-            .join(format!("{segment_id}.json"))
+            .join(format!("{record_id_value}.json"))
             .exists()
     );
     let settings = reopened.compaction_settings().unwrap();
@@ -428,17 +456,33 @@ async fn reopening_restores_settings_and_cleans_unreferenced_segments() {
     assert_eq!(settings.compact_threshold, 70);
     assert_eq!(settings.context_window, Some(1_000));
     assert_eq!(reopened.history().len(), 1);
+    // Opening and reading the current materials read no record file; the
+    // expansion reads the one record it reaches.
+    reopened.read_materials().unwrap();
+    assert_eq!(reopened.record_reads(), 0);
+    let expanded = reopened.expanded_conversation(None).unwrap();
+    assert!(expanded.unreadable_records.is_empty());
+    assert_eq!(reopened.record_reads(), 1);
+    let summarized = expanded
+        .blocks
+        .iter()
+        .filter(|block| {
+            block.status == crate::compact::BlockStatus::Summarized(record_id_value.clone())
+        })
+        .count();
+    assert_eq!(summarized, 3);
     assert_eq!(
         reopened
-            .read_history_segment(&segment_id)
+            .read_history_record(&record_id_value)
             .unwrap()
-            .context
-            .blocks()
-            .len(),
+            .replacements
+            .iter()
+            .flat_map(|r| &r.originals)
+            .count(),
         3
     );
-    // A deleted referenced segment is reported on read, not at open.
-    std::fs::remove_file(history_dir(store.path(), &id).join(format!("{segment_id}.json")))
+    // A deleted referenced record is reported on read, not at open.
+    std::fs::remove_file(history_dir(store.path(), &id).join(format!("{record_id_value}.json")))
         .unwrap();
     host.close(&reopened.target(), ClosePolicy::Save)
         .await
@@ -448,7 +492,11 @@ async fn reopening_restores_settings_and_cleans_unreferenced_segments() {
         .await
         .unwrap();
     assert_eq!(reopened_again.history().len(), 1);
-    assert!(reopened_again.read_history_segment(&segment_id).is_err());
+    assert!(
+        reopened_again
+            .read_history_record(&record_id_value)
+            .is_err()
+    );
     host.close(&reopened_again.target(), ClosePolicy::Save)
         .await
         .unwrap();
@@ -548,13 +596,18 @@ async fn unknown_window_disables_auto_compaction_but_manual_compaction_works() {
         1,
         "manual compaction replaces the whole material"
     );
+    let record_id_value = history[0]["record_id"]
+        .as_str()
+        .or_else(|| history[0]["id"].as_str())
+        .unwrap();
     assert_eq!(
         session
-            .read_history_segment(history[0]["id"].as_str().unwrap())
+            .read_history_record(record_id_value)
             .unwrap()
-            .context
-            .blocks()
-            .len(),
+            .replacements
+            .iter()
+            .flat_map(|r| &r.originals)
+            .count(),
         4
     );
     host.close(&session.target(), ClosePolicy::Save)

@@ -10,7 +10,7 @@ pub(super) fn compaction_record(
 ) -> (
     Option<bool>,
     Option<u8>,
-    Vec<crate::compact::HistorySegment>,
+    Vec<crate::compact::HistoryRecordEntry>,
 ) {
     let Some(runtime) = state.owner.as_ref().and_then(|owner| owner.compaction()) else {
         return (None, None, Vec::new());

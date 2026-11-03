@@ -115,7 +115,7 @@ pub fn save_with_references(
 
 /// Load Context without external references, checking local block uniqueness.
 ///
-/// Plain Context and explicit format 1/2/2.1 session files are accepted; session definitions
+/// Plain Context and explicit format 1/2/2.1/2.2 session files are accepted; session definitions
 /// are discarded and never grant tools. The file holds selected materials only.
 /// It does not restore request keys,
 /// work references, pending tasks, side effects or previously deleted material.
@@ -138,7 +138,7 @@ pub fn load_with_references(
     Ok(context)
 }
 
-/// Extract only validated Context from a saved format 1, 2 or 2.1 session record.
+/// Extract only validated Context from a saved format 1, 2, 2.1 or 2.2 session record.
 ///
 /// This reads at most 64 MiB and never modifies the source, restores runtime state,
 /// resolves credentials or adopts the saved definition. Export with [`save_new`]
@@ -169,7 +169,7 @@ impl SessionMaterials {
     fn into_context(self) -> Result<Context, MaterialError> {
         if !matches!(
             self.format.as_str(),
-            "tars-session-v1" | "tars-session-v2" | "tars-session-v2.1"
+            "tars-session-v1" | "tars-session-v2" | "tars-session-v2.1" | "tars-session-v2.2"
         ) {
             return Err(MaterialError::SessionEnvelope("unsupported format"));
         }

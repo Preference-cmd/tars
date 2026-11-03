@@ -25,7 +25,7 @@ pub(super) async fn initialize(
         let writer = Arc::new(saving::io(host, move || store.acquire_writer(&id)).await?);
         entry.lock().writer = Some(writer.clone());
         let record = saving::io(host, move || writer.read_latest()).await?;
-        // Under the write lock, drop segment files the record does not
+        // Under the write lock, drop record files the record does not
         // reference: an interrupted compaction leaves an orphan behind.
         let store = host
             .store
@@ -37,7 +37,7 @@ pub(super) async fn initialize(
             .unwrap_or_default();
         let id = entry.target.conversation_id.as_str().to_owned();
         saving::io(host, move || {
-            crate::compact::history::cleanup_segments(store.directory(), &id, &history)
+            crate::compact::history::cleanup_records(store.directory(), &id, &history)
         })
         .await?;
         record
@@ -219,7 +219,7 @@ async fn assembled(
     mcp: Option<Arc<crate::mcp::McpRuntime>>,
     allow_unavailable_command: bool,
     persistent: bool,
-    history: Vec<crate::compact::HistorySegment>,
+    history: Vec<crate::compact::HistoryRecordEntry>,
     auto_compact: Option<bool>,
     compact_threshold: Option<u8>,
     usage: Option<crate::usage::SessionUsage>,

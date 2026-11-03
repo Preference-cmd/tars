@@ -4,15 +4,39 @@ use std::sync::Arc;
 use tars_core::application::{
     ApplicationError, CloseOutcome, ManagedSession, MaterialVersion, SaveStatus, SessionListing,
 };
-use tars_core::compact::{CompactionOutcome, HistorySegment, HistorySegmentDocument};
+use tars_core::compact::{CompactionOutcome, HistoryRecord, HistoryRecordEntry};
 use tars_core::session::{ModelFailure, WorkRef, WorkResult};
+
+/// One material read: the current Context's rows and its record index.
+pub(super) struct MaterialView {
+    pub(super) version: MaterialVersion,
+    pub(super) transcript: Arc<Transcript>,
+    pub(super) history: Vec<HistoryRecordEntry>,
+    /// The Context's leading blocks that a rewrite inserted.
+    pub(super) prefix: Vec<causa::kernel::ContextBlock>,
+}
+
+impl MaterialView {
+    /// Build the view of one snapshot off the UI thread.
+    pub(super) fn read(session: &ManagedSession) -> Result<Self, String> {
+        let snapshot = session
+            .read_materials()
+            .map_err(|error| error.to_string())?;
+        let transcript = Transcript::from_materials(&snapshot.context, &snapshot.history);
+        let prefix = snapshot.context.blocks()[..transcript.history_blocks].to_vec();
+        Ok(Self {
+            version: snapshot.version,
+            transcript: Arc::new(transcript),
+            history: snapshot.history,
+            prefix,
+        })
+    }
+}
 
 /// Materials and history reloaded after one explicit compaction.
 pub(super) struct CompactedReload {
     pub(super) outcome: CompactionOutcome,
-    pub(super) version: MaterialVersion,
-    pub(super) transcript: Arc<Transcript>,
-    pub(super) history: Vec<HistorySegment>,
+    pub(super) view: MaterialView,
 }
 
 pub(super) enum Message {
@@ -45,11 +69,8 @@ pub(super) enum Message {
             String,
         >,
     ),
-    Materials(
-        Key,
-        Result<(MaterialVersion, Arc<Transcript>, Vec<HistorySegment>), String>,
-    ),
-    HistoryLoaded(Key, String, Result<HistorySegmentDocument, String>),
+    Materials(Key, Result<MaterialView, String>),
+    HistoryLoaded(Key, String, Result<HistoryRecord, String>),
     Compacted(Key, Result<CompactedReload, String>),
     Wrapped(Key, Rows, Option<Rows>),
     Retried(Key, Result<SaveStatus, ApplicationError>),
@@ -345,15 +366,17 @@ impl App {
                         return;
                     }
                     match result {
-                        Ok((version, transcript, history)) => {
-                            // A segment produced by a live compaction replaced
-                            // exactly the conversation that is on screen, so its
-                            // rows are adopted instead of being read again.
+                        Ok(view) => {
+                            // A rewrite made live replaced the conversation that
+                            // is on screen, so its rows are adopted instead of
+                            // being read again.
                             let previous = entry.transcript.clone();
-                            entry.history.refresh(history, Some(previous));
-                            entry.material_version = Some(version);
+                            entry
+                                .history
+                                .refresh(view.history, view.prefix, Some(previous));
+                            entry.material_version = Some(view.version);
                             entry.material_retry_after = None;
-                            entry.transcript = transcript;
+                            entry.transcript = view.transcript;
                             entry.rows = None;
                             if entry.notice.starts_with("Material view unavailable") {
                                 entry.notice.clear();
@@ -370,11 +393,11 @@ impl App {
                     }
                 }
             }
-            Message::HistoryLoaded(key, segment, result) => {
+            Message::HistoryLoaded(key, record, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     match result {
                         Ok(document) => entry.history.insert_loaded(document),
-                        Err(_) => entry.history.mark_unreadable(&segment),
+                        Err(error) => entry.history.mark_unreadable(&record, error),
                     }
                 }
             }
@@ -385,17 +408,20 @@ impl App {
                         Ok(reload) => {
                             let outcome = reload.outcome;
                             entry.history.note_hint(
-                                outcome.segment.id.clone(),
+                                outcome.record.record_id.clone(),
                                 outcome.trigger,
                                 outcome.estimate_before,
                                 outcome.estimate_after,
                             );
+                            let view = reload.view;
                             let previous = entry.transcript.clone();
-                            entry.history.refresh(reload.history, Some(previous));
-                            entry.material_version = Some(reload.version.clone());
-                            entry.requested_material_version = Some(reload.version);
+                            entry
+                                .history
+                                .refresh(view.history, view.prefix, Some(previous));
+                            entry.material_version = Some(view.version.clone());
+                            entry.requested_material_version = Some(view.version);
                             entry.material_retry_after = None;
-                            entry.transcript = reload.transcript;
+                            entry.transcript = view.transcript;
                             entry.rows = None;
                             entry.history_anchor = None;
                             entry.notice = format!(

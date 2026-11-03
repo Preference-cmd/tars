@@ -1,14 +1,16 @@
 //! Running compaction settings, planning and the history hand-off.
 //!
 //! A plan is built in this order: decide on the summary request, obtain the
-//! model's brief, build the replacement blocks, estimate the result, write and
-//! fsync the history segment, and only then let the caller edit the Context.
-//! Committing the plan appends the index entry; discarding it deletes the file.
+//! model's brief, build the replacement blocks and estimate the result. The
+//! plan is a [`Rewrite`]; the shared commit path writes and fsyncs its record,
+//! edits the Context and only then appends the index entry.
 
 use super::estimate::{self, UsageTracker};
-use super::history::{HISTORY_FORMAT, HistorySegmentDocument, HistoryStore, now_ms};
+use super::history::{
+    HistoryRecordEntry, HistoryStore, PlannedReplacement, Rewrite, RewriteError, RewriteKind,
+};
 use super::summary::{self, SUMMARY_MAX_TOKENS};
-use super::{CompactionAbandon, HistorySegment, HistoryTrigger};
+use super::{CompactionAbandon, HistoryTrigger};
 use crate::definition::SessionDefinition;
 use crate::session::ConversationId;
 use causa::kernel::{
@@ -33,7 +35,6 @@ pub(crate) struct CompactionRuntime {
     settings: Mutex<Settings>,
     window: Option<u64>,
     max_tokens: Option<u32>,
-    conversation_id: String,
     history: Option<Arc<HistoryStore>>,
     usage: Arc<UsageTracker>,
     force: AtomicBool,
@@ -53,7 +54,7 @@ impl CompactionRuntime {
         definition: &SessionDefinition,
         conversation_id: &ConversationId,
         sessions_directory: Option<&Path>,
-        history: Vec<HistorySegment>,
+        history: Vec<HistoryRecordEntry>,
         current_auto_compact: Option<bool>,
         current_threshold: Option<u8>,
         gateway: Arc<dyn ModelGateway>,
@@ -73,7 +74,6 @@ impl CompactionRuntime {
             }),
             window: definition.context_window,
             max_tokens: definition.max_tokens,
-            conversation_id: conversation_id.as_str().to_owned(),
             history: Some(history),
             usage,
             force: AtomicBool::new(false),
@@ -124,7 +124,7 @@ impl CompactionRuntime {
     }
 
     /// Current history index, possibly empty.
-    pub(crate) fn entries(&self) -> Vec<HistorySegment> {
+    pub(crate) fn entries(&self) -> Vec<HistoryRecordEntry> {
         self.history
             .as_ref()
             .map(|history| history.entries())
@@ -187,11 +187,10 @@ impl CompactionRuntime {
         self.usage.note_prepare_bytes(bytes);
     }
 
-    /// Plan one compaction: summary request, replacement, history write.
+    /// Plan one whole-Context compaction: summary request and replacement.
     ///
-    /// The old Context is untouched. On success the segment file is already
-    /// written; the caller either commits the plan after editing the Context or
-    /// discards it to delete the file.
+    /// Nothing is written and the Context is untouched; the caller hands the
+    /// returned rewrite to [`Self::commit_rewrite`].
     pub(crate) async fn plan(
         &self,
         context: &Context,
@@ -200,10 +199,10 @@ impl CompactionRuntime {
         trigger: HistoryTrigger,
         user_text: Option<&str>,
         control: &CallControl,
-    ) -> Result<CompactionPlan, CompactionAbandon> {
-        let Some(history) = &self.history else {
+    ) -> Result<Rewrite, CompactionAbandon> {
+        if self.history.is_none() {
             return Err(CompactionAbandon::Unavailable);
-        };
+        }
         let old_blocks = context.blocks();
         if has_unpaired_tools(old_blocks) {
             return Err(CompactionAbandon::UnpairedMaterials);
@@ -256,29 +255,35 @@ impl CompactionRuntime {
         if estimate_after >= estimate_before {
             return Err(CompactionAbandon::NoShrink);
         }
-        let segment_id = uuid::Uuid::now_v7().to_string();
-        let created_at_ms = now_ms();
-        let document = HistorySegmentDocument {
-            format: HISTORY_FORMAT.to_owned(),
-            conversation_id: self.conversation_id.clone(),
-            segment_id: segment_id.clone(),
-            created_at_ms,
+        Ok(Rewrite {
             trigger,
+            kind: RewriteKind::Summarize,
             estimate_before,
             estimate_after,
-            summary_block_id: summary_id,
-            context: context.clone(),
-        };
-        if history.write(&document).is_err() {
-            return Err(CompactionAbandon::UnwritableHistory);
-        }
-        Ok(CompactionPlan {
-            entry: document.index_entry(),
-            new_blocks,
-            estimate_before,
-            estimate_after,
-            trigger,
+            replacements: vec![PlannedReplacement {
+                range: 0..old_blocks.len(),
+                with: new_blocks,
+            }],
         })
+    }
+
+    /// Commit one rewrite through the shared commit path.
+    pub(crate) fn commit_rewrite(
+        &self,
+        context: &mut Context,
+        rewrite: Rewrite,
+    ) -> Result<HistoryRecordEntry, CompactionAbandon> {
+        let Some(history) = &self.history else {
+            return Err(CompactionAbandon::Unavailable);
+        };
+        let entry = history
+            .commit_rewrite(context, rewrite)
+            .map_err(|error| match error {
+                RewriteError::Rejected(_) => CompactionAbandon::EditRejected,
+                RewriteError::Store(_) => CompactionAbandon::UnwritableHistory,
+            })?;
+        self.usage.reset();
+        Ok(entry)
     }
 
     /// Plan one manual compaction with the session's frozen model settings.
@@ -286,7 +291,7 @@ impl CompactionRuntime {
         &self,
         context: &Context,
         control: &CallControl,
-    ) -> Result<CompactionPlan, CompactionAbandon> {
+    ) -> Result<Rewrite, CompactionAbandon> {
         self.plan(
             context,
             &self.model,
@@ -298,42 +303,13 @@ impl CompactionRuntime {
         .await
     }
 
-    /// Drop a committed plan when the material installation failed.
-    pub(crate) fn rollback(&self, plan: &CompactionPlan) {
-        self.discard(plan);
+    /// Undo a committed rewrite whose Context was then not saved.
+    pub(crate) fn rollback_record(&self, record_id: &str) {
         if let Some(history) = &self.history {
-            history.remove_entry(&plan.entry.id);
+            history.remove(record_id);
+            history.remove_entry(record_id);
         }
     }
-
-    /// Append the plan's index entry after the Context edit committed.
-    pub(crate) fn commit(&self, plan: &CompactionPlan) {
-        if let Some(history) = &self.history {
-            history.append(plan.entry.clone());
-        }
-        self.usage.reset();
-    }
-
-    /// Delete the plan's segment file when the Context edit did not happen.
-    pub(crate) fn discard(&self, plan: &CompactionPlan) {
-        if let Some(history) = &self.history {
-            history.remove(&plan.entry.id);
-        }
-    }
-}
-
-/// One prepared compaction whose segment file exists on disk.
-pub(crate) struct CompactionPlan {
-    /// Replacement blocks; the caller installs them atomically.
-    pub(crate) new_blocks: Vec<causa::kernel::ContextBlock>,
-    /// Record index entry backing the written file.
-    pub(crate) entry: HistorySegment,
-    /// Estimated request size before the replacement.
-    pub(crate) estimate_before: u64,
-    /// Estimated request size after the replacement.
-    pub(crate) estimate_after: u64,
-    /// What triggered this attempt.
-    pub(crate) trigger: HistoryTrigger,
 }
 
 /// The public fact returned to a manual compaction caller.
@@ -345,20 +321,8 @@ pub struct CompactionOutcome {
     pub estimate_before: u64,
     /// Estimated request size after the replacement.
     pub estimate_after: u64,
-    /// Index entry of the segment that holds the replaced material.
-    pub segment: HistorySegment,
-}
-
-impl CompactionPlan {
-    /// Convert the plan to the manual caller's outcome.
-    pub(crate) fn outcome(&self) -> CompactionOutcome {
-        CompactionOutcome {
-            trigger: self.trigger,
-            estimate_before: self.estimate_before,
-            estimate_after: self.estimate_after,
-            segment: self.entry.clone(),
-        }
-    }
+    /// Index entry of the rewrite record that holds the replaced material.
+    pub record: HistoryRecordEntry,
 }
 
 /// Whether the material still has declarations without answers.

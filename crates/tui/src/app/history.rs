@@ -1,55 +1,56 @@
-//! Ordered, lazily loaded conversation segments shown before the current Context.
+//! The expanded conversation shown before the current Context, loaded lazily.
 //!
-//! The session record's history index is the authority for which segments
-//! exist. A segment file is read only when the display needs it: never while
-//! opening, and one at a time as the current Context fills the screen or the
-//! user scrolls up. A loaded segment is cached for the life of the open
-//! session, and a segment produced live during the session is adopted from the
-//! rows already on screen instead of being read again.
+//! The current Context's leading blocks that a rewrite inserted (the tool
+//! declaration and the brief) stand for older conversation. A core
+//! [`ExpansionCursor`] expands them newest first and stops at each record it
+//! needs; the view reads that record in a background job only when the screen
+//! is not full or the user scrolled to the top. Opening reads no record. A
+//! rewrite made during the session adopts the rows already on screen.
 
 use crate::transcript::Transcript;
+use causa::kernel::ContextBlock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tars_core::compact::{HistorySegment, HistorySegmentDocument, HistoryTrigger};
+use tars_core::compact::{
+    BlockStatus, ExpansionCursor, ExpansionStep, HistoryRecord, HistoryRecordEntry, HistoryTrigger,
+};
 
-/// One request to read a segment file that is not cached yet.
+/// One request to read a record the expansion needs next.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HistoryRead {
-    /// Canonical identity of the segment to read.
-    pub(crate) segment: String,
-    /// Whether this read prepends one earlier segment to the loaded display.
-    pub(crate) earlier: bool,
+    /// Canonical identity of the record to read.
+    pub(crate) record: String,
 }
 
-/// Display state of one index entry.
-enum SegmentState {
-    /// An earlier segment that has never been read; only the header counts it.
-    Unloaded,
-    /// A read is requested or in flight.
-    Pending,
-    /// Content is in the cache.
-    Loaded {
-        transcript: Arc<Transcript>,
+/// One displayed part of the history, in reading order.
+enum Piece {
+    /// Expanded original blocks.
+    Rows(Arc<Transcript>),
+    /// Where one rewrite's brief stood: after the originals it replaced.
+    Divider {
         trigger: HistoryTrigger,
-        estimate_before: Option<u64>,
-        estimate_after: Option<u64>,
+        estimates: Option<(u64, u64)>,
     },
-    /// The file is missing or corrupt; the row stays visible and loading continues.
+    /// A record that cannot be read; loading continues with older ones.
     Unreadable,
 }
 
-/// Ordered history index plus the lazily loaded segments in display order.
+/// The expansion cursor plus the pieces it produced so far.
 pub(crate) struct HistoryView {
-    index: Vec<HistorySegment>,
-    states: Vec<SegmentState>,
-    /// Number of leading index entries never loaded (the header count).
-    start: usize,
+    cursor: Option<ExpansionCursor>,
+    /// Displayed pieces, oldest first.
+    pieces: Vec<Piece>,
+    /// Number of index entries the view knows about.
+    known: usize,
+    /// Record the cursor waits for whose read was not started yet.
+    needed: Option<String>,
     loading: Option<String>,
     want_earlier: bool,
+    finished: bool,
     hints: HashMap<String, (HistoryTrigger, u64, u64)>,
     display: Option<Arc<Transcript>>,
     display_stale: bool,
-    /// Whether one record index was already read for this open instance.
+    /// Whether the record index was already taken for this open instance.
     opened: bool,
 }
 
@@ -62,11 +63,13 @@ impl Default for HistoryView {
 impl HistoryView {
     pub(crate) fn new() -> Self {
         Self {
-            index: Vec::new(),
-            states: Vec::new(),
-            start: 0,
+            cursor: None,
+            pieces: Vec::new(),
+            known: 0,
+            needed: None,
             loading: None,
             want_earlier: false,
+            finished: false,
             hints: HashMap::new(),
             display: None,
             display_stale: false,
@@ -74,195 +77,228 @@ impl HistoryView {
         }
     }
 
-    /// Forget every cached segment; called when an instance is opened or closed.
+    /// Forget every loaded piece; called when an instance is opened or closed.
     pub(crate) fn clear(&mut self) {
         *self = Self::new();
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.index.is_empty()
+        self.known == 0
     }
 
-    /// Number of earlier segments that are not loaded yet.
+    /// Number of listed records not read yet.
     pub(crate) fn earlier(&self) -> usize {
-        self.start
+        match &self.cursor {
+            Some(cursor) if !self.finished => cursor.unread(),
+            _ => 0,
+        }
+    }
+
+    /// Whether older conversation remains to be loaded.
+    pub(crate) fn has_earlier(&self) -> bool {
+        self.cursor.is_some() && !self.finished
     }
 
     pub(crate) fn loading(&self) -> bool {
         self.loading.is_some()
     }
 
-    /// Whether a scroll reached the top and asked for one earlier segment.
+    /// Whether a scroll reached the top and asked for earlier conversation.
     pub(crate) fn wants_earlier(&self) -> bool {
         self.want_earlier
     }
 
-    /// Whether any segment row is already part of the display.
+    /// Whether any history row is already part of the display.
     ///
     /// Used to decide whether an earlier read must keep the visible rows in
     /// place: the first read only adds content below the header.
     pub(crate) fn has_loaded(&self) -> bool {
-        let start = self.start.min(self.states.len());
-        self.states[start..].iter().any(|state| {
-            matches!(
-                state,
-                SegmentState::Loaded { .. } | SegmentState::Unreadable
-            )
-        })
+        !self.pieces.is_empty()
     }
 
     pub(crate) fn request_earlier(&mut self) {
         self.want_earlier = true;
     }
 
-    /// Remember the estimate of a segment observed through live progress, so a
-    /// segment adopted from the displayed rows can still show its separator.
+    /// Remember the estimates of a rewrite observed through live progress, so
+    /// its divider can show them when the rewrite is adopted without a read.
     pub(crate) fn note_hint(
         &mut self,
-        segment: String,
+        record: String,
         trigger: HistoryTrigger,
         estimate_before: u64,
         estimate_after: u64,
     ) {
         self.hints
-            .insert(segment, (trigger, estimate_before, estimate_after));
+            .insert(record, (trigger, estimate_before, estimate_after));
     }
 
-    /// The next segment file to read, or none when the display is satisfied.
+    /// The next record to read, or none when the display is satisfied.
     ///
-    /// Newer segments that appeared after a compaction are read first; an
-    /// earlier segment is read only when the screen is not full or the user
-    /// scrolled to the top of the loaded conversation.
+    /// Earlier conversation is read only when the screen is not full or the
+    /// user scrolled to the top of the loaded conversation.
     pub(crate) fn next_read(&mut self, fill_screen: bool) -> Option<HistoryRead> {
-        if self.loading.is_some() {
+        if self.loading.is_some() || !self.has_earlier() {
             return None;
         }
-        if let Some(position) = self
-            .states
-            .iter()
-            .position(|state| matches!(state, SegmentState::Pending))
-        {
-            let segment = self.index[position].id.clone();
-            self.loading = Some(segment.clone());
-            self.display_stale = true;
-            return Some(HistoryRead {
-                segment,
-                earlier: false,
-            });
-        }
-        let earlier = self.start > 0 && (fill_screen || self.want_earlier);
+        let wanted = fill_screen || self.want_earlier;
         self.want_earlier = false;
-        if !earlier {
+        if !wanted {
             return None;
         }
-        self.start -= 1;
-        let segment = self.index[self.start].id.clone();
-        self.states[self.start] = SegmentState::Pending;
-        self.loading = Some(segment.clone());
+        let record = match self.needed.take() {
+            Some(record) => record,
+            None => self.advance()?,
+        };
+        self.loading = Some(record.clone());
         self.display_stale = true;
-        Some(HistoryRead {
-            segment,
-            earlier: true,
-        })
+        Some(HistoryRead { record })
     }
 
-    /// Cache one read segment document.
-    pub(crate) fn insert_loaded(&mut self, document: HistorySegmentDocument) {
-        let Some(position) = self
-            .index
-            .iter()
-            .position(|entry| entry.id == document.segment_id)
-        else {
-            if self.loading.as_deref() == Some(document.segment_id.as_str()) {
-                self.loading = None;
-            }
+    /// Continue the expansion with one read record.
+    pub(crate) fn insert_loaded(&mut self, record: HistoryRecord) {
+        let id = record.record_id.clone();
+        self.supply(&id, Ok(record));
+    }
+
+    /// Continue the expansion past one record that cannot be read.
+    pub(crate) fn mark_unreadable(&mut self, record: &str, error: String) {
+        self.supply(record, Err(error));
+    }
+
+    fn supply(&mut self, record: &str, result: Result<HistoryRecord, String>) {
+        if self.loading.as_deref() != Some(record) {
+            // A read for a view that was rebuilt meanwhile.
             return;
-        };
-        self.states[position] = SegmentState::Loaded {
-            transcript: Arc::new(Transcript::from_history_context(&document.context)),
-            trigger: document.trigger,
-            estimate_before: Some(document.estimate_before),
-            estimate_after: Some(document.estimate_after),
-        };
+        }
         self.loading = None;
+        if let Some(cursor) = &mut self.cursor {
+            cursor.supply(record, result);
+        }
+        self.needed = self.advance();
         self.display_stale = true;
     }
 
-    /// Mark one listed segment as unreadable and keep loading earlier ones.
-    pub(crate) fn mark_unreadable(&mut self, segment: &str) {
-        if let Some(position) = self.index.iter().position(|entry| entry.id == segment) {
-            self.states[position] = SegmentState::Unreadable;
-        }
-        if self.loading.as_deref() == Some(segment) {
-            self.loading = None;
-        }
-        self.display_stale = true;
-    }
-
-    /// Abandon a read whose adapter disappeared; the segment can be retried later.
+    /// Abandon a read whose adapter disappeared; the record is read again later.
     pub(crate) fn cancel_read(&mut self) {
-        let Some(segment) = self.loading.take() else {
-            return;
-        };
-        if let Some(position) = self.index.iter().position(|entry| entry.id == segment)
-            && matches!(self.states[position], SegmentState::Pending)
-        {
-            self.states[position] = SegmentState::Unloaded;
-            if position == self.start {
-                self.start += 1;
-            }
+        if let Some(record) = self.loading.take() {
+            self.needed = Some(record);
         }
         self.display_stale = true;
     }
 
-    /// Replace the index with the record's current list, keeping cached content.
+    /// Take the record's current index together with the Context it matches.
     ///
-    /// `previous` is the conversation that was on screen before this reload: a
-    /// compaction inside the session replaces exactly that material, so the
-    /// oldest new segment adopts those rows instead of reading its file again.
+    /// `prefix` is the Context's leading blocks that a rewrite inserted and
+    /// `previous` the conversation on screen before this reload. One new
+    /// rewrite of the whole previous Context replaced exactly those rows, so
+    /// they are adopted above its divider instead of being read again. Any
+    /// other change starts the expansion again from the new Context.
     pub(crate) fn refresh(
         &mut self,
-        index: Vec<HistorySegment>,
+        index: Vec<HistoryRecordEntry>,
+        prefix: Vec<ContextBlock>,
         previous: Option<Arc<Transcript>>,
     ) {
-        if index.len() < self.index.len() {
-            // A stale snapshot cannot remove a segment that was already listed.
+        if self.opened && index.len() <= self.known {
+            // Unchanged, or a stale snapshot that cannot remove a record.
             return;
         }
-        if !self.opened && self.index.is_empty() && self.states.is_empty() {
-            // The record's index at open: no segment was displayed before it.
-            self.start = index.len();
-            self.states = index.iter().map(|_| SegmentState::Unloaded).collect();
-            self.index = index;
-            self.display_stale = true;
-            self.opened = true;
-            return;
-        }
-        if self.states.len() < index.len() {
-            let mut adopted = previous.filter(|transcript| !transcript.text.is_empty());
-            for entry in &index[self.states.len()..] {
-                let hint = self.hints.get(&entry.id).copied();
-                let state = match adopted.take() {
-                    Some(transcript) => SegmentState::Loaded {
-                        transcript,
-                        trigger: entry.trigger,
-                        estimate_before: hint.map(|hint| hint.1),
-                        estimate_after: hint.map(|hint| hint.2),
-                    },
-                    None => SegmentState::Pending,
-                };
-                self.states.push(state);
+        let adoptable = self.opened && index.len() == self.known + 1 && self.cursor.is_some();
+        self.opened = true;
+        match (adoptable, previous) {
+            (true, Some(previous)) => {
+                let entry = index.last().expect("one new entry").clone();
+                let rows = &previous.text[previous.history_start.min(previous.text.len())..];
+                if !rows.trim().is_empty() {
+                    self.pieces.push(Piece::Rows(Arc::new(Transcript {
+                        text: rows.to_owned(),
+                        ..Transcript::default()
+                    })));
+                }
+                let estimates = self
+                    .hints
+                    .get(&entry.record_id)
+                    .map(|hint| (hint.1, hint.2));
+                self.pieces.push(Piece::Divider {
+                    trigger: entry.trigger,
+                    estimates,
+                });
+                if let Some(cursor) = &mut self.cursor {
+                    cursor.adopt(entry);
+                }
             }
+            _ => {
+                self.cursor = Some(ExpansionCursor::new(&prefix, index.clone()));
+                self.pieces.clear();
+                self.needed = None;
+                self.loading = None;
+                self.finished = false;
+            }
+        }
+        self.known = index.len();
+        self.hints
+            .retain(|id, _| index.iter().any(|entry| &entry.record_id == id));
+        self.display_stale = true;
+    }
+
+    /// Run the cursor until it needs a record, prepending what it produced.
+    fn advance(&mut self) -> Option<String> {
+        let cursor = self.cursor.as_mut()?;
+        let mut blocks = Vec::new();
+        let mut newest_first = Vec::new();
+        let flush = |blocks: &mut Vec<ContextBlock>, pieces: &mut Vec<Piece>| {
+            if !blocks.is_empty() {
+                blocks.reverse();
+                pieces.push(Piece::Rows(Arc::new(Transcript::from_history_blocks(
+                    blocks,
+                ))));
+                blocks.clear();
+            }
+        };
+        let needed = loop {
+            match cursor.next() {
+                ExpansionStep::Block(block) => {
+                    // The inserted blocks of an unreadable record are the
+                    // brief already shown below; the row says what is missing.
+                    if !matches!(block.status, BlockStatus::Unreadable(_)) {
+                        blocks.push(block.block);
+                    }
+                }
+                ExpansionStep::Rewrite(mark) => {
+                    flush(&mut blocks, &mut newest_first);
+                    newest_first.push(Piece::Divider {
+                        trigger: mark.trigger,
+                        estimates: Some((mark.estimate_before, mark.estimate_after)),
+                    });
+                }
+                ExpansionStep::Unreadable(_) => {
+                    flush(&mut blocks, &mut newest_first);
+                    newest_first.push(Piece::Unreadable);
+                }
+                ExpansionStep::NeedRecord(record) => {
+                    flush(&mut blocks, &mut newest_first);
+                    break Some(record);
+                }
+                ExpansionStep::End => {
+                    flush(&mut blocks, &mut newest_first);
+                    self.finished = true;
+                    break None;
+                }
+            }
+        };
+        if !newest_first.is_empty() {
+            newest_first.reverse();
+            newest_first.append(&mut self.pieces);
+            self.pieces = newest_first;
             self.display_stale = true;
         }
-        self.index = index;
-        self.hints
-            .retain(|id, _| self.index.iter().any(|entry| &entry.id == id));
+        needed
     }
 
     /// Rows of the loaded history part of the conversation, oldest first.
     pub(crate) fn display(&mut self) -> Option<Arc<Transcript>> {
-        if self.index.is_empty() {
+        if self.known == 0 {
             return None;
         }
         if self.display_stale || self.display.is_none() {
@@ -273,34 +309,21 @@ impl HistoryView {
     }
 
     fn compose(&self) -> Transcript {
-        let header = if self.loading.is_some() {
+        let mut text = if self.loading.is_some() {
             "loading earlier conversation".to_owned()
-        } else if self.start > 0 {
-            format!("↑ {} earlier segments", self.start)
-        } else {
+        } else if self.finished {
             "start of conversation".to_owned()
+        } else {
+            match self.earlier() {
+                0 => "↑ earlier conversation".to_owned(),
+                1 => "↑ 1 earlier record".to_owned(),
+                count => format!("↑ {count} earlier records"),
+            }
         };
-        self.compose_with_header(header)
-    }
-
-    fn compose_with_header(&self, header: String) -> Transcript {
-        let mut text = header;
         text.push_str("\n\n");
-        for (offset, state) in self.states[self.start..].iter().enumerate() {
-            match state {
-                SegmentState::Unloaded => {}
-                // The earliest pending entry is the one the header names.
-                SegmentState::Pending if offset == 0 => {}
-                SegmentState::Pending => text.push_str("loading earlier conversation\n\n"),
-                SegmentState::Unreadable => {
-                    text.push_str("this history segment cannot be read\n\n");
-                }
-                SegmentState::Loaded {
-                    transcript,
-                    trigger,
-                    estimate_before,
-                    estimate_after,
-                } => {
+        for piece in &self.pieces {
+            match piece {
+                Piece::Rows(transcript) => {
                     text.push_str(&transcript.text);
                     if !text.ends_with('\n') {
                         text.push('\n');
@@ -308,16 +331,17 @@ impl HistoryView {
                     if !text.ends_with("\n\n") {
                         text.push('\n');
                     }
-                    match (estimate_before, estimate_after) {
-                        (Some(before), Some(after)) => text.push_str(&format!(
-                            "── Compacted ({}, {} → {}) ──\n\n",
-                            trigger.name(),
-                            estimate_label(*before),
-                            estimate_label(*after)
-                        )),
-                        _ => text.push_str(&format!("── Compacted ({}) ──\n\n", trigger.name())),
-                    }
                 }
+                Piece::Divider { trigger, estimates } => match estimates {
+                    Some((before, after)) => text.push_str(&format!(
+                        "── Compacted ({}, {} → {}) ──\n\n",
+                        trigger.name(),
+                        estimate_label(*before),
+                        estimate_label(*after)
+                    )),
+                    None => text.push_str(&format!("── Compacted ({}) ──\n\n", trigger.name())),
+                },
+                Piece::Unreadable => text.push_str("this history record cannot be read\n\n"),
             }
         }
         Transcript {
@@ -357,9 +381,9 @@ impl super::Entry {
         self.history_anchor = None;
     }
 
-    /// Ask for one earlier segment after a scroll reached the top.
+    /// Ask for earlier conversation after a scroll reached the top.
     pub(super) fn request_earlier_history(&mut self) {
-        if self.history_rows.is_some() && self.history.earlier() > 0 {
+        if self.history_rows.is_some() && self.history.has_earlier() {
             self.history.request_earlier();
         }
     }
@@ -368,142 +392,190 @@ impl super::Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use causa::kernel::Context;
-    use tars_core::application::text_input;
+    use causa::kernel::Role;
+    use tars_core::compact::{RangeReplacement, RewriteKind};
 
-    fn segment(id: &str, trigger: HistoryTrigger) -> HistorySegment {
-        HistorySegment {
-            id: id.to_owned(),
-            created_at_ms: 1,
-            trigger,
-            blocks: 1,
-            summary_block_id: causa::runtime::new_block_id(),
+    const OLDER: &str = "0190a000-0000-7000-8000-000000000001";
+    const NEWER: &str = "0190a000-0000-7000-8000-000000000002";
+
+    fn block(text: &str) -> ContextBlock {
+        ContextBlock::text(causa::runtime::new_block_id(), Role::User, text)
+    }
+
+    /// Two whole-Context compactions: OLDER replaced "old words" with brief
+    /// A, NEWER replaced brief A and "middle words" with brief B.
+    struct Chain {
+        records: Vec<HistoryRecord>,
+        prefix: Vec<ContextBlock>,
+    }
+
+    fn chain() -> Chain {
+        let brief_a = block("brief A");
+        let brief_b = block("brief B");
+        let record =
+            |id: &str, trigger, before, originals: Vec<ContextBlock>, inserted: &ContextBlock| {
+                HistoryRecord {
+                    format: "tars-history-v1.1".into(),
+                    conversation_id: "conversation".into(),
+                    record_id: id.into(),
+                    created_at_ms: 1,
+                    trigger,
+                    kind: RewriteKind::Summarize,
+                    estimate_before: before,
+                    estimate_after: 6_000,
+                    replacements: vec![RangeReplacement {
+                        range: 0..originals.len(),
+                        originals,
+                        inserted_ids: vec![inserted.id()],
+                    }],
+                }
+            };
+        Chain {
+            records: vec![
+                record(
+                    OLDER,
+                    HistoryTrigger::Auto,
+                    140_000,
+                    vec![block("old words")],
+                    &brief_a,
+                ),
+                record(
+                    NEWER,
+                    HistoryTrigger::Manual,
+                    150_000,
+                    vec![brief_a.clone(), block("middle words")],
+                    &brief_b,
+                ),
+            ],
+            prefix: vec![brief_b],
         }
     }
 
-    fn transcript(text: &str) -> Arc<Transcript> {
-        Arc::new(Transcript {
-            text: text.to_owned(),
-            ..Transcript::default()
-        })
+    fn index(records: &[HistoryRecord]) -> Vec<HistoryRecordEntry> {
+        records
+            .iter()
+            .map(|record| HistoryRecordEntry {
+                record_id: record.record_id.clone(),
+                created_at_ms: record.created_at_ms,
+                trigger: record.trigger,
+                kind: record.kind,
+                removed_block_count: record.replacements[0].originals.len(),
+                inserted_block_ids: record.replacements[0].inserted_ids.clone(),
+            })
+            .collect()
+    }
+
+    fn text(view: &mut HistoryView) -> String {
+        view.display().unwrap().text.clone()
     }
 
     #[test]
-    fn open_reads_no_segment_and_counts_earlier_rows() {
+    fn open_reads_no_record_and_loads_newest_first_on_demand() {
+        let chain = chain();
         let mut view = HistoryView::new();
-        view.refresh(
-            vec![
-                segment("0190a000-0000-7000-8000-000000000001", HistoryTrigger::Auto),
-                segment(
-                    "0190a000-0000-7000-8000-000000000002",
-                    HistoryTrigger::Manual,
-                ),
-            ],
-            None,
-        );
+        view.refresh(index(&chain.records), chain.prefix.clone(), None);
         assert_eq!(view.earlier(), 2);
         assert!(!view.loading());
-        let display = view.display().unwrap();
-        assert!(display.text.contains("↑ 2 earlier segments"));
-        // Fill-screen loading starts from the segment next to the current Context.
-        let read = view.next_read(true).unwrap();
-        assert_eq!(read.segment, "0190a000-0000-7000-8000-000000000002");
-        assert!(read.earlier);
-        assert!(view.loading());
-        assert!(view.next_read(true).is_none());
-        // While the file is read the header reports the pending load.
-        assert!(
-            view.display()
-                .unwrap()
-                .text
-                .contains("loading earlier conversation")
-        );
-    }
+        assert!(text(&mut view).contains("↑ 2 earlier records"));
+        // A full screen without a scroll to the top asks for nothing.
+        assert!(view.next_read(false).is_none());
 
-    #[test]
-    fn loaded_segments_keep_their_estimates_and_never_reload() {
-        let mut view = HistoryView::new();
-        view.refresh(
-            vec![segment(
-                "0190a000-0000-7000-8000-000000000001",
-                HistoryTrigger::Auto,
-            )],
-            None,
+        let read = view.next_read(true).unwrap();
+        assert_eq!(read.record, NEWER);
+        assert!(view.next_read(true).is_none(), "one read at a time");
+        assert!(text(&mut view).contains("loading earlier conversation"));
+        view.insert_loaded(chain.records[1].clone());
+        let shown = text(&mut view);
+        assert!(shown.contains("↑ 1 earlier record"), "{shown}");
+        assert!(shown.contains("middle words"), "{shown}");
+        assert!(
+            shown.contains("── Compacted (manual, ~150k → ~6k) ──"),
+            "{shown}"
         );
+        // The older brief is not shown as text: its record expands it.
+        assert!(!shown.contains("brief A"), "{shown}");
+
         view.request_earlier();
         let read = view.next_read(false).unwrap();
-        assert_eq!(read.segment, "0190a000-0000-7000-8000-000000000001");
-        let document = HistorySegmentDocument {
-            format: "tars-history-v1".into(),
-            conversation_id: "conversation".into(),
-            segment_id: read.segment.clone(),
-            created_at_ms: 1,
-            trigger: HistoryTrigger::Auto,
-            estimate_before: 140_000,
-            estimate_after: 6_000,
-            summary_block_id: causa::runtime::new_block_id(),
-            context: Context::from_blocks(vec![text_input("old words")]).unwrap(),
-        };
-        view.insert_loaded(document);
-        assert!(!view.loading());
-        let display = view.display().unwrap();
-        assert!(display.text.contains("old words"));
-        assert!(display.text.contains("Compacted (auto, ~140k → ~6k)"));
-        assert!(display.text.contains("start of conversation"));
-        // Nothing earlier remains and the loaded segment is never read twice.
+        assert_eq!(read.record, OLDER);
+        view.insert_loaded(chain.records[0].clone());
+        let shown = text(&mut view);
+        assert!(shown.starts_with("start of conversation"), "{shown}");
+        let old = shown.find("old words").unwrap();
+        let first = shown.find("Compacted (auto").unwrap();
+        let middle = shown.find("middle words").unwrap();
+        let second = shown.find("Compacted (manual").unwrap();
+        assert!(old < first && first < middle && middle < second, "{shown}");
+        assert!(!view.has_earlier());
         assert!(view.next_read(true).is_none());
-        // A same-length refresh keeps the cache.
-        let index = view.index.clone();
-        view.refresh(index, Some(transcript("replacement")));
-        assert!(view.display().unwrap().text.contains("old words"));
+
+        // A same-length refresh keeps what was loaded.
+        view.refresh(index(&chain.records), chain.prefix, None);
+        assert!(text(&mut view).contains("old words"));
     }
 
     #[test]
     fn a_live_compaction_adopts_the_rows_already_on_screen() {
+        let chain = chain();
         let mut view = HistoryView::new();
-        let first = segment("0190a000-0000-7000-8000-000000000001", HistoryTrigger::Auto);
-        view.refresh(vec![first.clone()], None);
-        // The work that compacted the context was showing this conversation.
-        view.refresh(
-            vec![
-                first,
-                segment("0190a000-0000-7000-8000-000000000002", HistoryTrigger::Auto),
-            ],
-            Some(transcript("the conversation that was on screen\n\n")),
+        // Opened after the older compaction only.
+        let older = index(&chain.records[..1]);
+        let brief_a = chain.records[1].replacements[0].originals[0].clone();
+        view.refresh(older, vec![brief_a], None);
+        let previous = Arc::new(Transcript {
+            text: "● Context summary · collapsed\n\nmiddle words on screen\n\n".into(),
+            history_start: "● Context summary · collapsed\n\n".len(),
+            ..Transcript::default()
+        });
+        view.note_hint(NEWER.into(), HistoryTrigger::Manual, 150_000, 6_000);
+        view.refresh(index(&chain.records), chain.prefix, Some(previous));
+        let shown = text(&mut view);
+        assert!(shown.contains("middle words on screen"), "{shown}");
+        assert!(!shown.contains("Context summary · collapsed"), "{shown}");
+        assert!(
+            shown.contains("── Compacted (manual, ~150k → ~6k) ──"),
+            "{shown}"
         );
-        let display = view.display().unwrap();
-        assert!(display.text.contains("the conversation that was on screen"));
-        // The adopted segment is loaded, the earlier one still needs a read.
+        // The adopted record needs no read; the older one still does.
         assert_eq!(view.earlier(), 1);
         let read = view.next_read(true).unwrap();
-        assert_eq!(read.segment, "0190a000-0000-7000-8000-000000000001");
-        assert!(read.earlier);
+        assert_eq!(read.record, OLDER);
     }
 
     #[test]
-    fn unreadable_segment_is_marked_and_earlier_loading_continues() {
+    fn an_unreadable_record_is_marked_and_older_loading_continues() {
+        let chain = chain();
         let mut view = HistoryView::new();
-        view.refresh(
-            vec![
-                segment("0190a000-0000-7000-8000-000000000001", HistoryTrigger::Auto),
-                segment(
-                    "0190a000-0000-7000-8000-000000000002",
-                    HistoryTrigger::Manual,
-                ),
-            ],
-            None,
-        );
+        view.refresh(index(&chain.records), chain.prefix, None);
         let read = view.next_read(true).unwrap();
-        view.mark_unreadable(&read.segment);
+        assert_eq!(read.record, NEWER);
+        view.mark_unreadable(&read.record, "missing".into());
+        let shown = text(&mut view);
         assert!(
-            view.display()
-                .unwrap()
-                .text
-                .contains("this history segment cannot be read")
+            shown.contains("this history record cannot be read"),
+            "{shown}"
         );
+        assert!(!shown.contains("brief B"), "{shown}");
         assert_eq!(view.earlier(), 1);
         let read = view.next_read(true).unwrap();
-        assert_eq!(read.segment, "0190a000-0000-7000-8000-000000000001");
+        assert_eq!(read.record, OLDER);
+        view.insert_loaded(chain.records[0].clone());
+        let shown = text(&mut view);
+        assert!(shown.starts_with("start of conversation"), "{shown}");
+        assert!(shown.find("old words").unwrap() < shown.find("cannot be read").unwrap());
+    }
+
+    #[test]
+    fn a_late_read_for_a_rebuilt_view_is_ignored() {
+        let chain = chain();
+        let mut view = HistoryView::new();
+        view.refresh(index(&chain.records), chain.prefix, None);
+        let read = view.next_read(true).unwrap();
+        view.cancel_read();
+        view.insert_loaded(chain.records[1].clone());
+        assert!(!text(&mut view).contains("middle words"));
+        // The cancelled record is asked for again.
+        assert_eq!(view.next_read(true).unwrap(), read);
     }
 
     #[test]

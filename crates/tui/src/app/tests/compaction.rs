@@ -149,7 +149,7 @@ async fn compact_job_keeps_the_replaced_conversation_and_summary_panel() {
     let session = app.entries[0].session.as_ref().unwrap().clone();
     let usage_before = session.context_usage().unwrap().estimate_tokens;
     assert!(usage_before > 1_000, "{usage_before}");
-    assert_eq!(app.entries[0].segment_reads, 0);
+    assert_eq!(app.entries[0].record_reads, 0);
 
     command(&mut app, "compact");
     assert_eq!(app.entries[0].busy, Some("compacting"));
@@ -165,7 +165,7 @@ async fn compact_job_keeps_the_replaced_conversation_and_summary_panel() {
     let session = app.entries[0].session.as_ref().unwrap().clone();
     assert_eq!(session.history().len(), 1);
     // The replaced conversation was already on screen, so its file is not read.
-    assert_eq!(app.entries[0].segment_reads, 0);
+    assert_eq!(app.entries[0].record_reads, 0);
     let transcript = &app.entries[0].transcript;
     assert!(
         transcript
@@ -184,7 +184,7 @@ async fn compact_job_keeps_the_replaced_conversation_and_summary_panel() {
     assert!(usage_after < usage_before, "{usage_after} < {usage_before}");
 
     // The head of the conversation keeps the replaced user request and the
-    // separator that uses the segment document's estimates.
+    // divider that uses the record's estimates.
     app.entries[0].scroll = Some(0);
     let view = screen(&app);
     assert!(view.contains("recorded before compaction"), "{view}");
@@ -195,7 +195,7 @@ async fn compact_job_keeps_the_replaced_conversation_and_summary_panel() {
             .transcript
             .text
             .contains("── Compacted (manual"),
-        "the separator uses the segment document's estimates"
+        "the divider uses the record's estimates"
     );
     // Following the bottom shows the folded summary instead of its body.
     app.entries[0].scroll = None;
@@ -214,6 +214,39 @@ async fn compact_job_keeps_the_replaced_conversation_and_summary_panel() {
     );
     app.event(key(KeyCode::Esc));
     assert!(app.panel.is_none());
+
+    // Reopening reads the record once and shows the same history the live
+    // view adopted from the rows on screen.
+    let live = app.entries[0]
+        .history_rows
+        .as_ref()
+        .unwrap()
+        .transcript
+        .text
+        .clone();
+    assert!(live.starts_with("start of conversation"), "{live}");
+    let id = app.entries[0].id().to_owned();
+    app.event(ctrl('w'));
+    until(&mut app, |app| app.entries[0].session.is_none()).await;
+    let mut reopened = crate::app::tests::support::app(dir.path());
+    open_in_view(&mut reopened, &id).await;
+    until(&mut reopened, |app| {
+        app.entries[0].record_reads == 1
+            && !app.entries[0].history.loading()
+            && !app.entries[0].wrapping
+            && app.entries[0]
+                .history_rows
+                .as_ref()
+                .is_some_and(|rows| rows.transcript.text.starts_with("start of conversation"))
+    })
+    .await;
+    let again = &reopened.entries[0]
+        .history_rows
+        .as_ref()
+        .unwrap()
+        .transcript
+        .text;
+    assert_eq!(again, &live);
 }
 
 #[test]
@@ -257,7 +290,7 @@ async fn automatic_compaction_inside_a_work_keeps_the_old_conversation_visible()
     server.release.add_permits(1);
     until(&mut app, |app| app.entries[0].execution == "Completed").await;
 
-    // The material reload after the work commits the new segment; the rows
+    // The material reload after the work commits the new record; the rows
     // that were already on screen are adopted instead of being read again.
     until(&mut app, |app| {
         app.entries[0].session.as_ref().unwrap().history().len() == 1
@@ -266,7 +299,7 @@ async fn automatic_compaction_inside_a_work_keeps_the_old_conversation_visible()
             && !app.entries[0].wrapping
     })
     .await;
-    assert_eq!(app.entries[0].segment_reads, 0);
+    assert_eq!(app.entries[0].record_reads, 0);
     let history_rows = app.entries[0].history_rows.as_ref().unwrap();
     assert!(
         history_rows

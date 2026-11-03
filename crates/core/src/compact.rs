@@ -1,36 +1,43 @@
-//! Long-session context compaction.
+//! Long-session context compaction and history expansion.
 //!
 //! A session's materials only grow, so a long conversation eventually exceeds
 //! the model's context window. Compaction replaces the current Context with a
-//! summary written by the same model, and keeps the replaced conversation as
-//! one read-only history segment beside the session record.
+//! summary written by the same model, and keeps the replaced original blocks as
+//! one read-only rewrite record beside the session record.
 //!
 //! The pieces are deliberately split:
 //!
-//! - `history` owns the `tars-history-v1` segment files and the index stored in
+//! - `history` owns the `tars-history-v1.1` rewrite files and the index stored in
 //!   the session record.
+//! - `expansion` expands the current Context into the full conversation.
 //! - `estimate` turns a Context into a conservative token estimate and wraps
 //!   the model gateway to remember the upstream-reported prompt size.
 //! - `summary` builds the summary instruction and reads the model's answer.
 //! - `runtime` holds the running settings, the force flag and the pairing of a
-//!   written segment with the replaced Context.
+//!   written record with the replaced Context.
 //! - `preparer` is the Causa `ContextPreparer` installed per work; it decides
 //!   whether to compact before a logical model invocation.
 //!
-//! Causa edits made by a preparer are committed independently, so a segment
+//! Causa edits made by a preparer are committed independently, so a record
 //! file is always written before the Context is replaced; an abandoned attempt
 //! leaves the Context untouched and is cleaned up on the next open.
 
 pub(crate) mod estimate;
+pub(crate) mod expansion;
 pub(crate) mod history;
 pub(crate) mod preparer;
 pub(crate) mod runtime;
 pub(crate) mod summary;
 
-use causa::kernel::{BlockContent, BlockId, ContentPart, ContextBlock, Role};
+use causa::kernel::{BlockContent, ContentPart, ContextBlock, Role};
 use serde::{Deserialize, Serialize};
 
-pub use history::HistorySegmentDocument;
+pub(crate) use expansion::expand_conversation;
+pub use expansion::{
+    BlockStatus, ExpandedBlock, ExpandedConversation, ExpansionCursor, ExpansionStep, RewriteMark,
+    UnreadableRecord,
+};
+pub use history::{HistoryRecord, HistoryRecordEntry, RangeReplacement, RewriteKind};
 pub use runtime::CompactionOutcome;
 pub(crate) use runtime::CompactionRuntime;
 pub use summary::SUMMARY_SOURCE;
@@ -46,9 +53,9 @@ pub enum CompactionAbandon {
     RequestFailed,
     /// Current materials still contain tool declarations without results.
     UnpairedMaterials,
-    /// The history segment file could not be written.
+    /// The rewrite record file could not be written.
     UnwritableHistory,
-    /// The replacement edit was rejected; the segment file was deleted.
+    /// The replacement edit was rejected; the record file was deleted.
     EditRejected,
     /// The session has no persistent history directory.
     Unavailable,
@@ -82,7 +89,7 @@ pub enum CompactionProgress {
         /// Estimated request size before this attempt.
         estimate_before: u64,
     },
-    /// The Context was replaced; the segment is persisted with the next save.
+    /// The Context was replaced; the record's index entry is saved with the next save.
     Finished {
         /// What asked for this attempt.
         trigger: HistoryTrigger,
@@ -90,8 +97,8 @@ pub enum CompactionProgress {
         estimate_before: u64,
         /// Estimated request size after this attempt.
         estimate_after: u64,
-        /// Identity of the history segment that holds the replaced Context.
-        segment: String,
+        /// Identity of the rewrite record that holds the replaced material.
+        record: String,
     },
     /// The attempt stopped without touching the Context.
     Abandoned {
@@ -100,26 +107,6 @@ pub enum CompactionProgress {
         /// Why it stopped.
         reason: CompactionAbandon,
     },
-}
-
-/// One replaced conversation segment as listed in the session record.
-///
-/// The record is the authority for which segments exist; files that are not
-/// listed are unreferenced and are cleaned up while the session write lock is
-/// held.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HistorySegment {
-    /// Canonical UUID of the history segment file (`<id>.json`).
-    pub id: String,
-    /// Wall-clock creation time in milliseconds since the Unix epoch.
-    pub created_at_ms: u64,
-    /// What triggered the compaction.
-    pub trigger: HistoryTrigger,
-    /// Number of blocks the replaced Context held.
-    pub blocks: usize,
-    /// Summary block that replaced those blocks in the current Context.
-    pub summary_block_id: BlockId,
 }
 
 /// What triggered one compaction.

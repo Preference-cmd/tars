@@ -1,9 +1,7 @@
 use super::entry::Entry;
 use super::saving;
 use super::types::*;
-use crate::compact::{
-    CompactionOutcome, CompactionRuntime, HistorySegment, HistorySegmentDocument,
-};
+use crate::compact::{CompactionOutcome, CompactionRuntime, HistoryRecordEntry};
 use crate::definition::SessionDefinition;
 use crate::session::{
     SessionError, SubmitRequest, WorkObservation, WorkProgress, WorkReceipt, WorkRef,
@@ -293,15 +291,22 @@ impl ManagedSession {
             .into());
         }
         let version = self.entry.version(&state);
-        let context = state
-            .owner
-            .as_mut()
-            .ok_or(ApplicationError::InstanceGone)?
-            .with_context(|context| {
-                self.entry.cloned_snapshot();
-                context.clone()
-            })?;
-        Ok(MaterialSnapshot { version, context })
+        let owner = state.owner.as_mut().ok_or(ApplicationError::InstanceGone)?;
+        // Read together under the entry lock: with no work running, no rewrite
+        // can land between the Context and its index.
+        let history = owner
+            .compaction()
+            .map(|runtime| runtime.entries())
+            .unwrap_or_default();
+        let context = owner.with_context(|context| {
+            self.entry.cloned_snapshot();
+            context.clone()
+        })?;
+        Ok(MaterialSnapshot {
+            version,
+            context,
+            history,
+        })
     }
     /// Atomically replace all blocks if the instance generation and admission gate match.
     /// Invalid identities leave the actual context unchanged; no arbitrary callbacks run.
@@ -609,8 +614,8 @@ impl ManagedSession {
         handle.work_usage(work)
     }
 
-    /// Segment index of the replaced conversations, in creation order.
-    pub fn history(&self) -> Vec<HistorySegment> {
+    /// Index of the rewrite records, in creation order.
+    pub fn history(&self) -> Vec<HistoryRecordEntry> {
         self.entry
             .lock()
             .owner
@@ -620,11 +625,11 @@ impl ManagedSession {
             .unwrap_or_default()
     }
 
-    /// Read one history segment for display; the current Context never includes it.
-    pub fn read_history_segment(
+    /// Read one history rewrite record for display; the current Context never includes it.
+    pub fn read_history_record(
         &self,
-        segment_id: &str,
-    ) -> Result<HistorySegmentDocument, ApplicationError> {
+        record_id: &str,
+    ) -> Result<crate::compact::HistoryRecord, ApplicationError> {
         let history = {
             let state = self.entry.lock();
             let runtime = state
@@ -637,15 +642,59 @@ impl ManagedSession {
                 .ok_or(ApplicationError::CompactionUnavailable)?
         };
         history
-            .read(segment_id)
+            .read(record_id)
             .map_err(|error| ApplicationError::Store(Arc::new(error)))
+    }
+
+    /// Number of record files this session has read.
+    #[cfg(test)]
+    pub(crate) fn record_reads(&self) -> usize {
+        let state = self.entry.lock();
+        state
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.compaction())
+            .and_then(|runtime| runtime.history())
+            .map(|history| history.read_count())
+            .unwrap_or(0)
+    }
+
+    /// Expand the current Context into the full conversation.
+    ///
+    /// Record files are read only for the inserted runs the expansion reaches;
+    /// with `last_n` only the newest N blocks are produced. Unreadable records
+    /// are reported in the result, not as an error.
+    pub fn expanded_conversation(
+        &self,
+        last_n: Option<usize>,
+    ) -> Result<crate::compact::ExpandedConversation, ApplicationError> {
+        let snapshot = self.read_materials()?;
+        let history = {
+            let state = self.entry.lock();
+            state
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.compaction())
+                .and_then(|runtime| runtime.history())
+        };
+        Ok(crate::compact::expand_conversation(
+            snapshot.context.blocks(),
+            &snapshot.history,
+            last_n,
+            |id| match &history {
+                Some(history) => history.read(id),
+                None => Err(crate::store::StoreError::InvalidHistory(
+                    "this session keeps no history records".into(),
+                )),
+            },
+        ))
     }
 
     /// Replace the current materials with a model-written brief and save it.
     ///
     /// Refused while the session is busy or being saved, and while interrupted
     /// material still needs repair. A dropped future releases the compaction
-    /// barrier; a written segment file is cleaned up on the next open.
+    /// barrier; a record file written before the save failed is cleaned up on the next open.
     pub async fn compact(&self) -> Result<CompactionOutcome, ApplicationError> {
         let (runtime, version, context) = {
             let mut state = self.entry.lock();
@@ -687,15 +736,14 @@ impl ManagedSession {
         };
         let guard = CompactingGuard { entry: &self.entry };
         let control = CallControl::new(CancellationToken::new(), None);
-        let plan = match runtime.manual_plan(&context, &control).await {
-            Ok(plan) => plan,
+        let rewrite = match runtime.manual_plan(&context, &control).await {
+            Ok(rewrite) => rewrite,
             Err(reason) => {
                 return Err(ApplicationError::Compaction(reason.name().to_owned()));
             }
         };
         let mut state = self.entry.lock();
         if state.lifecycle != Lifecycle::Open || state.closing.is_some() {
-            runtime.discard(&plan);
             return Err(if state.lifecycle == Lifecycle::Closed {
                 ApplicationError::Closed
             } else {
@@ -703,28 +751,32 @@ impl ManagedSession {
             });
         }
         if self.entry.version(&state) != version {
-            runtime.discard(&plan);
             return Err(ApplicationError::StaleMaterial);
         }
+        let (trigger, estimate_before, estimate_after) = (
+            rewrite.trigger,
+            rewrite.estimate_before,
+            rewrite.estimate_after,
+        );
         let mut candidate = context;
-        let length = candidate.blocks().len();
-        if let Err(failure) = candidate
-            .edit()
-            .replace(0..length, plan.new_blocks.clone())
-            .commit()
-        {
-            runtime.discard(&plan);
-            return Err(SessionError::ContextEdit(failure.reason).into());
-        }
-        runtime.commit(&plan);
+        let record = match runtime.commit_rewrite(&mut candidate, rewrite) {
+            Ok(entry) => entry,
+            Err(reason) => {
+                return Err(ApplicationError::Compaction(reason.name().to_owned()));
+            }
+        };
         if let Err(error) = self.commit_materials(&mut state, candidate) {
-            runtime.rollback(&plan);
+            runtime.rollback_record(&record.record_id);
             return Err(error);
         }
         drop(state);
-        let outcome = plan.outcome();
         drop(guard);
-        Ok(outcome)
+        Ok(CompactionOutcome {
+            trigger,
+            estimate_before,
+            estimate_after,
+            record,
+        })
     }
 
     /// Forget a terminal record after its associated persistence barrier is handled.

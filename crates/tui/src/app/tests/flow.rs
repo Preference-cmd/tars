@@ -292,7 +292,12 @@ async fn failed_material_read_retries_after_one_second_and_then_updates() {
     };
     app.complete(Message::Materials(
         key,
-        Ok((version, std::sync::Arc::new(transcript), Vec::new())),
+        Ok(crate::app::jobs::MaterialView {
+            version,
+            transcript: std::sync::Arc::new(transcript),
+            history: Vec::new(),
+            prefix: Vec::new(),
+        }),
     ));
     assert!(
         app.entries[0]

@@ -297,7 +297,7 @@ fn conversation_style(text: &str) -> Style {
     } else if text.starts_with("── ")
         || text.starts_with("↑ ")
         || text.starts_with("loading earlier conversation")
-        || text.starts_with("this history segment cannot be read")
+        || text.starts_with("this history record cannot be read")
         || text.starts_with("start of conversation")
         || text.starts_with("● Context summary")
     {

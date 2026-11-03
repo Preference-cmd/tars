@@ -2,10 +2,7 @@ use super::{
     jobs::{Message, close_label, save_label},
     state::{App, Entry},
 };
-use crate::{
-    input,
-    transcript::{Rows, Transcript},
-};
+use crate::{input, transcript::Rows};
 use causa::kernel::Context;
 use causa::runtime::new_block_id;
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -310,13 +307,7 @@ impl App {
                         super::jobs::JobKind::Materials,
                         async move {
                             let result = super::jobs::blocking(move || {
-                                let snapshot =
-                                    session.read_materials().map_err(|e| e.to_string())?;
-                                Ok((
-                                    snapshot.version,
-                                    Arc::new(Transcript::from_context(&snapshot.context)),
-                                    session.history(),
-                                ))
+                                super::jobs::MaterialView::read(&session)
                             })
                             .await
                             .unwrap_or_else(|e| Err(e.to_string()));
@@ -385,7 +376,7 @@ impl App {
         }
     }
 
-    /// Read one more history segment when the screen is not full or the user
+    /// Read the next history record when the screen is not full or the user
     /// scrolled to the top of the loaded conversation.
     fn poll_history(&mut self) {
         if self.jobs.len() >= super::state::MAX_JOBS {
@@ -419,7 +410,7 @@ impl App {
         let Some(read) = entry.history.next_read(fill_screen) else {
             return;
         };
-        if read.earlier && anchor_wanted {
+        if anchor_wanted {
             entry.history_anchor = Some(entry.scroll);
         }
         let Some(session) = entry.session.clone() else {
@@ -429,23 +420,23 @@ impl App {
         let key = entry.key.clone();
         #[cfg(test)]
         {
-            entry.segment_reads += 1;
+            entry.record_reads += 1;
         }
-        let segment = read.segment;
+        let record = read.record;
         super::jobs::spawn_job(
             &mut self.jobs,
             Some(key.clone()),
             super::jobs::JobKind::HistoryRead,
             async move {
-                let id = segment.clone();
+                let id = record.clone();
                 let result = super::jobs::blocking(move || {
                     session
-                        .read_history_segment(&id)
+                        .read_history_record(&id)
                         .map_err(|error| error.to_string())
                 })
                 .await
                 .unwrap_or_else(|error| Err(error.to_string()));
-                Message::HistoryLoaded(key, segment, result)
+                Message::HistoryLoaded(key, record, result)
             },
         );
     }
@@ -483,12 +474,9 @@ impl App {
                     Ok(outcome) => {
                         let reader = session.clone();
                         super::jobs::blocking(move || {
-                            let snapshot = reader.read_materials().map_err(|e| e.to_string())?;
                             Ok(super::jobs::CompactedReload {
                                 outcome,
-                                version: snapshot.version,
-                                transcript: Arc::new(Transcript::from_context(&snapshot.context)),
-                                history: reader.history(),
+                                view: super::jobs::MaterialView::read(&reader)?,
                             })
                         })
                         .await

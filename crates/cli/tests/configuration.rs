@@ -352,7 +352,7 @@ fn v2_record_is_refused_with_the_export_path_and_left_unchanged() {
     let id = created["conversation_id"].as_str().unwrap();
     let record = store.join("sessions").join(format!("{id}.json"));
     let mut value: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
-    assert_eq!(value["format"], "tars-session-v2.1");
+    assert_eq!(value["format"], "tars-session-v2.2");
     value["format"] = serde_json::json!("tars-session-v2");
     std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
     let original = std::fs::read(&record).unwrap();
@@ -368,7 +368,7 @@ fn v2_record_is_refused_with_the_export_path_and_left_unchanged() {
         stdout.contains("unsupported session format: tars-session-v2;"),
         "{stdout}"
     );
-    assert!(stdout.contains("expected tars-session-v2.1"), "{stdout}");
+    assert!(stdout.contains("expected tars-session-v2.2"), "{stdout}");
     assert!(stdout.contains("tars session export-materials"), "{stdout}");
     assert_eq!(std::fs::read(&record).unwrap(), original);
     let exported = dir.path().join("export.json");
@@ -772,7 +772,7 @@ async fn wm10_record_without_mcp_servers_reads_as_empty_and_ask() {
     let record_path = sessions.join(format!("{id}.json"));
     // A fixed record written before MCP snapshots and initial modes existed.
     let raw = format!(
-        r#"{{"format":"tars-session-v2.1","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+        r#"{{"format":"tars-session-v2.2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
     );
     std::fs::write(&record_path, raw.as_bytes()).unwrap();
     let original = std::fs::read(&record_path).unwrap();
@@ -947,7 +947,7 @@ async fn wm10_stage_g_snapshot_conversion_to_current_format() {
     let commit = "018f0c4e-0000-7000-8000-00000000000a";
     let record_path = sessions.join(format!("{id}.json"));
     let raw = format!(
-        r#"{{"format":"tars-session-v2.1","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"mcp_servers":[{{"id":"git","command":"uvx","env":{{"LOG_LEVEL":"warn"}},"env_vars":["GIT_AUTHOR_NAME"],"startup_timeout_sec":12,"tool_timeout_sec":120,"approval":"auto","tools":{{"git_status":{{"approval":"auto"}}}},"required":false}},{{"id":"docs","url":"https://example.invalid/mcp","bearer_token_env_var":"DOCS_MCP_TOKEN","startup_timeout_sec":10,"tool_timeout_sec":60,"approval":"prompt","required":false}}],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+        r#"{{"format":"tars-session-v2.2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"mcp_servers":[{{"id":"git","command":"uvx","env":{{"LOG_LEVEL":"warn"}},"env_vars":["GIT_AUTHOR_NAME"],"startup_timeout_sec":12,"tool_timeout_sec":120,"approval":"auto","tools":{{"git_status":{{"approval":"auto"}}}},"required":false}},{{"id":"docs","url":"https://example.invalid/mcp","bearer_token_env_var":"DOCS_MCP_TOKEN","startup_timeout_sec":10,"tool_timeout_sec":60,"approval":"prompt","required":false}}],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
     );
     std::fs::write(&record_path, raw.as_bytes()).unwrap();
 

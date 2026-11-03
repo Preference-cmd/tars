@@ -57,7 +57,7 @@ The demo uses a scripted model and a local tool; it makes no network calls.
 Run/session/tools read --config, then TARS_CONFIG, then the global config path.
 Explicit options override configured fields. Saved sessions keep their definition.
 Material export and --load import contain only the current Context, never the
-replaced history segments.
+replaced blocks kept in history records.
 Exit codes: 0 complete, 1 execution/configuration/file error, 2 arguments,
 124 deadline, 130 cancelled. Ctrl-C cancels work and waits for returned materials.
 ";

@@ -5,9 +5,9 @@
 //! replaces the Context before returning the frame. Compaction is best effort:
 //! any abandonment returns the original frame so the round still goes out.
 
+use super::CompactionProgress;
 use super::estimate;
 use super::runtime::CompactionRuntime;
-use super::{CompactionAbandon, CompactionProgress};
 use crate::session::ToolReporter;
 use causa::kernel::{
     CallControl, Context, ContextFrame, ContextPreparer, PrepareError, RoundId, RoundInfo,
@@ -70,41 +70,31 @@ impl ContextPreparer for CompactionPreparer {
                 control,
             )
             .await;
-        let plan = match plan {
-            Ok(plan) => plan,
+        let rewrite = match plan {
+            Ok(rewrite) => rewrite,
             Err(reason) => {
                 self.report(round, CompactionProgress::Abandoned { trigger, reason });
                 self.runtime.note_prepare(bytes);
                 return Ok(context.frame());
             }
         };
-        let length = context.blocks().len();
-        if context
-            .edit()
-            .replace(0..length, plan.new_blocks.clone())
-            .commit()
-            .is_err()
-        {
-            self.runtime.discard(&plan);
-            self.runtime.note_prepare(bytes);
-            self.report(
-                round,
-                CompactionProgress::Abandoned {
-                    trigger,
-                    reason: CompactionAbandon::EditRejected,
-                },
-            );
-            return Ok(context.frame());
-        }
-        self.runtime.commit(&plan);
+        let (estimate_before, estimate_after) = (rewrite.estimate_before, rewrite.estimate_after);
+        let entry = match self.runtime.commit_rewrite(context, rewrite) {
+            Ok(entry) => entry,
+            Err(reason) => {
+                self.runtime.note_prepare(bytes);
+                self.report(round, CompactionProgress::Abandoned { trigger, reason });
+                return Ok(context.frame());
+            }
+        };
         self.runtime.note_prepare(estimate::context_bytes(context));
         self.report(
             round,
             CompactionProgress::Finished {
                 trigger,
-                estimate_before: plan.estimate_before,
-                estimate_after: plan.estimate_after,
-                segment: plan.entry.id.clone(),
+                estimate_before,
+                estimate_after,
+                record: entry.record_id,
             },
         );
         Ok(context.frame())

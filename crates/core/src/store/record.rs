@@ -7,7 +7,7 @@ use uuid::Uuid;
 use super::StoreError;
 use crate::definition::SessionDefinition;
 
-pub(crate) const RECORD_FORMAT: &str = "tars-session-v2.1";
+pub(crate) const RECORD_FORMAT: &str = "tars-session-v2.2";
 /// Check the format before decoding the fixed permission-bearing definition.
 pub(super) fn decode(bytes: &[u8], identity: &str) -> Result<SavedSessionRecord, StoreError> {
     #[derive(Deserialize)]
@@ -43,7 +43,7 @@ pub(crate) struct SavedSessionRecord {
     pub(crate) compact_threshold: Option<u8>,
     /// Replaced conversation segments, in creation order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) history: Vec<crate::compact::HistorySegment>,
+    pub(crate) history: Vec<crate::compact::HistoryRecordEntry>,
     /// Cumulative session model usage, omitted when zero or untracked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) usage: Option<WireSessionUsage>,
@@ -104,7 +104,7 @@ impl SavedSessionRecord {
         current_mode: Option<crate::permission::PermissionMode>,
         auto_compact: Option<bool>,
         compact_threshold: Option<u8>,
-        history: Vec<crate::compact::HistorySegment>,
+        history: Vec<crate::compact::HistoryRecordEntry>,
         usage: Option<crate::usage::SessionUsage>,
     ) -> Result<Self, StoreError> {
         let initial_mode = definition.initial_permission_mode();
@@ -524,7 +524,24 @@ mod format_tests {
         }
         let err = super::StoreError::UnsupportedFormat("tars-session-v2".into());
         let msg = err.to_string();
-        assert!(msg.contains("expected tars-session-v2.1"));
+        assert!(msg.contains("expected tars-session-v2.2"));
+        assert!(msg.contains("tars session export-materials"));
+    }
+
+    #[test]
+    fn legacy_v2_1_format_is_rejected_with_unsupported_format() {
+        let bytes = br#"{"format":"tars-session-v2.1","definition":{"tools":["execute_command"]}}"#;
+        let result = super::decode(bytes, "unused");
+        match result {
+            Err(super::StoreError::UnsupportedFormat(format)) => {
+                assert_eq!(format, "tars-session-v2.1");
+            }
+            other => panic!("expected UnsupportedFormat for v2.1, got {other:?}"),
+        }
+        let err = super::StoreError::UnsupportedFormat("tars-session-v2.1".into());
+        let msg = err.to_string();
+        assert!(msg.contains("expected tars-session-v2.2"));
+        assert!(msg.contains("tars-session-v2.1"));
         assert!(msg.contains("tars session export-materials"));
     }
 
@@ -640,7 +657,7 @@ mod format_tests {
         let id = Uuid::now_v7().to_string();
         let commit = Uuid::now_v7().to_string();
         let raw = format!(
-            r#"{{"format":"tars-session-v2.1","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+            r#"{{"format":"tars-session-v2.2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
         );
         let record = super::decode(raw.as_bytes(), &id).unwrap();
         assert_eq!(record.usage, None);
@@ -655,7 +672,7 @@ mod format_tests {
         let id = Uuid::now_v7().to_string();
         let commit = Uuid::now_v7().to_string();
         let mut value: serde_json::Value = serde_json::from_str(&format!(
-            r#"{{"format":"tars-session-v2.1","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"m","endpoint":null,"credential":{{"environment":"KEY"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+            r#"{{"format":"tars-session-v2.2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"m","endpoint":null,"credential":{{"environment":"KEY"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
         ))
         .unwrap();
         let mut usage = serde_json::to_value(WireSessionUsage::from_session_usage(

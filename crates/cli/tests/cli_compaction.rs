@@ -211,9 +211,10 @@ fn record(store: &Path, id: &str) -> Value {
     serde_json::from_slice(&fs::read(record_path(store, id)).unwrap()).unwrap()
 }
 
-fn history_documents(output: &Output) -> Vec<tars_core::compact::HistorySegmentDocument> {
+fn history_blocks(output: &Output) -> Vec<tars_core::compact::ExpandedBlock> {
     String::from_utf8_lossy(&output.stdout)
         .lines()
+        .filter(|line| !line.trim().is_empty())
         .map(|line| {
             serde_json::from_str(line)
                 .unwrap_or_else(|error| panic!("history line {line}: {error}"))
@@ -322,8 +323,8 @@ fn compaction_flags_resolve_into_the_definition_and_help_lists_them() {
         "session show",
         "session compact",
         "session history",
-        "replaced history segments",
-        "one tars-history-v1 document per line",
+        "prints the expanded full conversation",
+        "one block per line",
     ] {
         assert!(
             help.contains(expected),
@@ -385,7 +386,7 @@ fn compaction_flags_resolve_into_the_definition_and_help_lists_them() {
 }
 
 #[test]
-fn small_context_window_compacts_automatically_and_keeps_a_history_segment() {
+fn small_context_window_compacts_automatically_and_keeps_a_history_record() {
     let folder = tempfile::tempdir().unwrap();
     let store = folder.path().join("store");
     let fixture = Fixture::new(2);
@@ -423,8 +424,8 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_segment() {
     let history = saved["history"].as_array().unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0]["trigger"], "auto");
-    assert_eq!(history[0]["blocks"], 1);
-    let summary_block = history[0]["summary_block_id"].clone();
+    assert_eq!(history[0]["removed_block_count"], 1);
+    let summary_block = history[0]["inserted_block_ids"][0].clone();
     let blocks = saved["context"]["blocks"].as_array().unwrap();
     assert_eq!(blocks.len(), 2);
     assert_eq!(blocks[0]["meta"]["source"], "tars:compaction");
@@ -444,17 +445,17 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_segment() {
         .output()
         .unwrap();
     assert!(history_output.status.success(), "{history_output:?}");
-    let documents = history_documents(&history_output);
-    assert_eq!(documents.len(), 1);
-    let document = &documents[0];
-    assert_eq!(document.format, "tars-history-v1");
-    assert_eq!(document.conversation_id, id);
-    assert_eq!(document.segment_id, history[0]["id"].as_str().unwrap());
-    assert_eq!(document.trigger, tars_core::compact::HistoryTrigger::Auto);
-    assert_eq!(document.context.blocks().len(), 1);
-    assert!(document.estimate_before > document.estimate_after);
-    assert_eq!(json!(document.summary_block_id.0), summary_block);
-    assert_eq!(history[0]["created_at_ms"], document.created_at_ms);
+    let blocks = history_blocks(&history_output);
+    assert_eq!(blocks.len(), 2);
+    let record_id = history[0]["id"]
+        .as_str()
+        .or_else(|| history[0]["record_id"].as_str())
+        .unwrap();
+    assert_eq!(
+        blocks[0].status,
+        tars_core::compact::BlockStatus::Summarized(record_id.to_owned())
+    );
+    assert_eq!(blocks[1].status, tars_core::compact::BlockStatus::Original);
 
     let last = cli()
         .args([
@@ -471,7 +472,12 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_segment() {
         .output()
         .unwrap();
     assert!(last.status.success(), "{last:?}");
-    assert_eq!(history_documents(&last).len(), 1);
+    let last_blocks = history_blocks(&last);
+    assert_eq!(last_blocks.len(), 1);
+    assert_eq!(
+        last_blocks[0].status,
+        tars_core::compact::BlockStatus::Original
+    );
 
     let human = cli()
         .args(["session", "history", &id, "--no-config", "--store"])
@@ -481,11 +487,8 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_segment() {
     assert!(human.status.success(), "{human:?}");
     let text = String::from_utf8_lossy(&human.stdout);
     for expected in [
-        "Segment 1 of 1",
-        "auto",
-        "->",
-        "Current material",
-        "2 block(s)",
+        "[user · summarized (",
+        "[assistant · original]",
         &"x".repeat(20),
     ] {
         assert!(
@@ -501,7 +504,7 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_segment() {
         .unwrap();
     assert!(show.status.success(), "{show:?}");
     let shown = report(&show);
-    assert_eq!(shown["history_segments"], 1);
+    assert_eq!(shown["history_records"], 1);
     assert_eq!(shown["block_count"], 2);
     assert_eq!(shown["context_window"], 500);
     assert_eq!(shown["auto_compact"], true);
@@ -515,12 +518,12 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_segment() {
         .unwrap();
     assert!(shown_text.status.success(), "{shown_text:?}");
     let shown_text = String::from_utf8_lossy(&shown_text.stdout);
-    assert!(shown_text.contains("1 history segment(s)"), "{shown_text}");
+    assert!(shown_text.contains("1 history record(s)"), "{shown_text}");
     assert!(shown_text.contains("auto on"), "{shown_text}");
 }
 
 /// Export and `--load` import are defined to carry only the current Context,
-/// never the replaced history segments.
+/// never the replaced history records.
 #[test]
 fn export_and_import_carry_only_the_current_context_after_compaction() {
     let folder = tempfile::tempdir().unwrap();
@@ -576,7 +579,7 @@ fn export_and_import_carry_only_the_current_context_after_compaction() {
 }
 
 #[test]
-fn manual_compaction_reports_trigger_estimates_and_segment_and_last_limits_history() {
+fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_history() {
     let folder = tempfile::tempdir().unwrap();
     let store = folder.path().join("store");
     let fixture = Fixture::new(4);
@@ -606,7 +609,7 @@ fn manual_compaction_reports_trigger_estimates_and_segment_and_last_limits_histo
     assert_eq!(first["revision"], 3);
     assert_eq!(first["blocks"], 2);
     assert!(first["estimate_before"].as_u64() > first["estimate_after"].as_u64());
-    let first_segment = first["segment_id"].as_str().unwrap().to_owned();
+    let first_record = first["record_id"].as_str().unwrap().to_owned();
     let first_summary = first["summary_block_id"].as_str().unwrap().to_owned();
     let saved = record(&store, &id);
     assert_eq!(saved["context"]["blocks"].as_array().unwrap().len(), 1);
@@ -635,12 +638,12 @@ fn manual_compaction_reports_trigger_estimates_and_segment_and_last_limits_histo
     assert_eq!(saved["revision"], 5);
     let history = saved["history"].as_array().unwrap();
     assert_eq!(history.len(), 2);
-    assert_eq!(history[0]["id"], first_segment.as_str());
+    assert_eq!(history[0]["record_id"], first_record.as_str());
     assert_eq!(history[0]["trigger"], "manual");
     assert_eq!(history[1]["trigger"], "manual");
-    assert_eq!(history[1]["blocks"], 3);
-    let second_segment = history[1]["id"].as_str().unwrap().to_owned();
-    assert!(text.contains(&second_segment), "{text}");
+    assert_eq!(history[1]["removed_block_count"], 3);
+    let second_record = history[1]["record_id"].as_str().unwrap().to_owned();
+    assert!(text.contains(&second_record), "{text}");
     assert_eq!(saved["context"]["blocks"].as_array().unwrap().len(), 1);
 
     let full = cli()
@@ -656,11 +659,24 @@ fn manual_compaction_reports_trigger_estimates_and_segment_and_last_limits_histo
         .output()
         .unwrap();
     assert!(full.status.success(), "{full:?}");
-    let documents = history_documents(&full);
-    assert_eq!(documents.len(), 2);
-    assert_eq!(documents[0].segment_id, first_segment);
-    assert_eq!(documents[1].segment_id, second_segment);
-    assert_eq!(documents[0].context.blocks().len(), 2);
+    let blocks = history_blocks(&full);
+    assert_eq!(blocks.len(), 4);
+    assert_eq!(
+        blocks[0].status,
+        tars_core::compact::BlockStatus::Summarized(first_record.clone())
+    );
+    assert_eq!(
+        blocks[1].status,
+        tars_core::compact::BlockStatus::Summarized(first_record.clone())
+    );
+    assert_eq!(
+        blocks[2].status,
+        tars_core::compact::BlockStatus::Summarized(second_record.clone())
+    );
+    assert_eq!(
+        blocks[3].status,
+        tars_core::compact::BlockStatus::Summarized(second_record.clone())
+    );
 
     let last = cli()
         .args([
@@ -676,9 +692,12 @@ fn manual_compaction_reports_trigger_estimates_and_segment_and_last_limits_histo
         .arg(&store)
         .output()
         .unwrap();
-    let last_documents = history_documents(&last);
-    assert_eq!(last_documents.len(), 1);
-    assert_eq!(last_documents[0].segment_id, second_segment);
+    let last_blocks = history_blocks(&last);
+    assert_eq!(last_blocks.len(), 1);
+    assert_eq!(
+        last_blocks[0].status,
+        tars_core::compact::BlockStatus::Summarized(second_record.clone())
+    );
     let human_last = cli()
         .args([
             "session",
@@ -693,9 +712,8 @@ fn manual_compaction_reports_trigger_estimates_and_segment_and_last_limits_histo
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&human_last.stdout);
-    assert!(text.contains("2 segment(s)"), "{text}");
-    assert!(text.contains("1 earlier not shown"), "{text}");
-    assert!(text.contains("Segment 2 of 2"), "{text}");
+    assert!(text.contains("second manual answer"), "{text}");
+    assert!(text.contains(&second_record), "{text}");
 
     let show = cli()
         .args(["session", "show", &id, "--no-config", "--json", "--store"])
@@ -703,19 +721,19 @@ fn manual_compaction_reports_trigger_estimates_and_segment_and_last_limits_histo
         .output()
         .unwrap();
     let shown = report(&show);
-    assert_eq!(shown["history_segments"], 2);
+    assert_eq!(shown["history_records"], 2);
     assert_eq!(shown["auto_compact"], false);
     assert_eq!(shown["compact_threshold"], 70);
     assert!(shown["context_window"].is_null());
     assert_eq!(shown["block_count"], 1);
 
-    // An unreadable segment is reported in both output modes and fails the
-    // command, while the readable segment is still printed.
+    // An unreadable record is reported in both output modes and fails the
+    // command, while the readable record is still expanded.
     fs::write(
         store
             .join("sessions")
             .join(format!("{id}.history"))
-            .join(format!("{first_segment}.json")),
+            .join(format!("{first_record}.json")),
         b"not json",
     )
     .unwrap();
@@ -732,21 +750,23 @@ fn manual_compaction_reports_trigger_estimates_and_segment_and_last_limits_histo
         .output()
         .unwrap();
     assert_eq!(broken_json.status.code(), Some(1), "{broken_json:?}");
-    let documents = history_documents(&broken_json);
-    assert_eq!(documents.len(), 1);
-    assert_eq!(documents[0].segment_id, second_segment);
+    let broken_stderr = String::from_utf8_lossy(&broken_json.stderr);
+    assert!(broken_stderr.contains(&first_record), "{broken_stderr}");
+    let documents = history_blocks(&broken_json);
+    assert!(
+        documents.iter().any(|block| block.status
+            == tars_core::compact::BlockStatus::Unreadable(first_record.clone()))
+    );
     let broken_human = cli()
         .args(["session", "history", &id, "--no-config", "--store"])
         .arg(&store)
         .output()
         .unwrap();
     assert_eq!(broken_human.status.code(), Some(1), "{broken_human:?}");
+    let human_stderr = String::from_utf8_lossy(&broken_human.stderr);
+    assert!(human_stderr.contains(&first_record), "{human_stderr}");
     let text = String::from_utf8_lossy(&broken_human.stdout);
-    assert!(
-        text.contains("this history segment cannot be read"),
-        "{text}"
-    );
-    assert!(text.contains("Segment 2 of 2"), "{text}");
+    assert!(text.contains(&second_record), "{text}");
 }
 
 #[test]
@@ -884,7 +904,7 @@ fn show_reports_retained_work_capacity() {
         "{shown}"
     );
     assert_eq!(shown["block_count"], 10);
-    assert_eq!(shown["history_segments"], 0);
+    assert_eq!(shown["history_records"], 0);
 
     let human = cli()
         .args(["session", "show", &id, "--no-config", "--store"])
@@ -895,4 +915,109 @@ fn show_reports_retained_work_capacity() {
     let text = String::from_utf8_lossy(&human.stdout);
     assert!(text.contains("Works: "), "{text}");
     assert!(text.contains("/ 2"), "{text}");
+}
+
+#[test]
+fn test_be05_cli_history_prints_expanded_conversation_and_deleting_record_exits_1() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = folder.path().join("store");
+    let fixture = Fixture::new(2);
+    let id = create(
+        &store,
+        &fixture.endpoint,
+        &["--context-window", "500", "--auto-compact", "50"],
+    );
+
+    let long_input = "first long user input ".repeat(50);
+    let child = spawn(run(&store, &id, &long_input));
+    let summary_request = fixture.request();
+    assert!(
+        summary_request
+            .to_string()
+            .contains("Prepare a continuation brief")
+    );
+    fixture.summary("Goal: continue task from brief.");
+    fixture.request();
+    fixture.stream("final assistant answer");
+    let output = finished(child);
+    assert!(output.status.success());
+
+    // 1. CLI history prints expanded conversation with block status
+    let human = cli()
+        .args(["session", "history", &id, "--no-config", "--store"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(human.status.success(), "{human:?}");
+    let human_text = String::from_utf8_lossy(&human.stdout);
+    assert!(human_text.contains("[user · summarized ("), "{human_text}");
+    assert!(
+        human_text.contains("[assistant · original]"),
+        "{human_text}"
+    );
+
+    // 2. --json prints one block per line
+    let json_output = cli()
+        .args([
+            "session",
+            "history",
+            &id,
+            "--no-config",
+            "--json",
+            "--store",
+        ])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(json_output.status.success(), "{json_output:?}");
+    let lines: Vec<&str> = std::str::from_utf8(&json_output.stdout)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        let block_json: Value = serde_json::from_str(line).expect("valid JSON line");
+        assert!(block_json.get("status").is_some());
+        assert!(block_json.get("block").is_some());
+    }
+
+    // 3. Deleting one record file reports it and exits 1 after printing what it could
+    let saved = record(&store, &id);
+    let rec_id = saved["history"][0]["record_id"].as_str().unwrap();
+    let rec_path = store
+        .join("sessions")
+        .join(format!("{id}.history"))
+        .join(format!("{rec_id}.json"));
+    assert!(rec_path.exists());
+    fs::remove_file(&rec_path).unwrap();
+
+    let broken = cli()
+        .args([
+            "session",
+            "history",
+            &id,
+            "--no-config",
+            "--json",
+            "--store",
+        ])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert_eq!(broken.status.code(), Some(1), "{broken:?}");
+    let stderr = String::from_utf8_lossy(&broken.stderr);
+    assert!(stderr.contains(rec_id), "{stderr}");
+    // Prints what it could (e.g. the unsummarized original block):
+    let broken_lines: Vec<&str> = std::str::from_utf8(&broken.stdout)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    // The brief of the missing record stands in for its originals.
+    assert_eq!(broken_lines.len(), 2, "{broken_lines:?}");
+    let first: Value = serde_json::from_str(broken_lines[0]).unwrap();
+    assert_eq!(first["status"], "unreadable");
+    assert_eq!(first["record_id"], rec_id);
+    let second: Value = serde_json::from_str(broken_lines[1]).unwrap();
+    assert_eq!(second["status"], "original");
 }

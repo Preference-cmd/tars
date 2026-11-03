@@ -87,7 +87,7 @@ The default source is the managed copy under `$XDG_DATA_HOME/tars/tools/` (falli
 ./target/release/tars session history "$SESSION_ID" --store ./tars-data --last 3
 ```
 
-Set `--context-window N` (the model's token window) and `--auto-compact on|off|PERCENT` when creating a session, or put `context_window`, `auto_compact` and `compact_threshold` in a preset, to let TARS replace a Context that approaches the window with a model-written working brief. The replaced conversation is kept as read-only history segments next to the record, which `session history` reads in order (`--json` prints one segment document per line) and which the TUI shows above the current conversation. `session compact` performs the replacement manually; `session show` reports the current estimate, the settings, the segment count, retained-work occupancy and the session's call and token usage. Material export, recovery exports and `--load` always contain the current Context only. Details are in [Configuration](docs/configuration.md#long-session-compaction) and [Current implementation](docs/README.md#compaction-and-history).
+Set `--context-window N` (the model's token window) and `--auto-compact on|off|PERCENT` when creating a session, or put `context_window`, `auto_compact` and `compact_threshold` in a preset, to let TARS replace a Context that approaches the window with a model-written working brief. The replaced conversation is kept as read-only history rewrite records next to the record, which `session history` expands into the full conversation (`--json` prints one block per line, `--last N` limits to the newest N blocks) and which the TUI shows above the current conversation. `session compact` performs the replacement manually; `session show` reports the current estimate, the settings, the history record count, retained-work occupancy and the session's call and token usage. Material export, recovery exports and `--load` always contain the current Context only. Details are in [Configuration](docs/configuration.md#long-session-compaction) and [Current implementation](docs/README.md#compaction-and-history).
 
 `--store` is given by an argument or the shared configuration. Records keep the frozen definition and the latest Context; reopening preserves the ConversationId and BlockIds but does not restore old work, request keys or uncommitted output. Environment-variable credentials are resolved again on every open; the record stores only the variable reference. The definition defaults to a 120-second deadline, 256 retained works, 10 model calls and 64 tool declarations; see `tars session --help` for details.
 
@@ -111,7 +111,7 @@ CLI and TUI share the [TOML configuration](docs/configuration.md) and support th
 
 Causa owns Context and single-run execution; TARS owns sessions, work acceptance, dependency assembly and application interaction.
 
-Development workflow material `.agents/` and helper `scripts/` stay on the local machine and are Git-ignored; they are not distributed with the application.
+Development workflow materials and local scripts stay on the local machine and are Git-ignored; they are not distributed with the application.
 
 ## License
 

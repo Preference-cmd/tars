@@ -43,7 +43,7 @@ pub(super) async fn show(store: PathBuf, id: String, json_output: bool) -> ExitC
         "context_window": usage.and_then(|usage| usage.context_window),
         "auto_compact": usage.map(|usage| usage.auto_compact),
         "compact_threshold": usage.map(|usage| usage.compact_threshold),
-        "history_segments": history,
+        "history_records": history,
         "work_capacity": work_capacity.map(|capacity| json!({
             "used": capacity.used, "capacity": capacity.capacity,
         })),
@@ -60,7 +60,7 @@ pub(super) async fn show(store: PathBuf, id: String, json_output: bool) -> ExitC
         format!("{value}\n")
     } else {
         let mut text = format!(
-            "Conversation {id}\nSaved revision {} · {block_count} block(s) · {history} history segment(s)\n",
+            "Conversation {id}\nSaved revision {} · {block_count} block(s) · {history} history record(s)\n",
             revision.map_or_else(|| "none".to_owned(), |value| value.to_string()),
         );
         match usage {

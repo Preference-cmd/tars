@@ -37,7 +37,7 @@ pub enum StoreError {
     Json(#[source] Arc<serde_json::Error>),
     /// The record names a format this implementation cannot read.
     #[error(
-        "unsupported session format: {0}; expected tars-session-v2.1. Export the old record with tars session export-materials --record RECORD --output NEW_CONTEXT, then import that Context into a new session; old tool permissions are never upgraded"
+        "unsupported session format: {0}; expected tars-session-v2.2. Export the old record with tars session export-materials --record RECORD --output NEW_CONTEXT, then import that Context into a new session; old tool permissions are never upgraded"
     )]
     UnsupportedFormat(String),
     /// The record belongs to a different conversation.
@@ -60,14 +60,14 @@ pub enum StoreError {
         /// Maximum accepted bytes.
         limit: usize,
     },
-    /// One history segment exceeds the same per-file resource limit.
-    #[error("history segment exceeds the {limit}-byte resource limit")]
+    /// One history record exceeds the same per-file resource limit.
+    #[error("history record exceeds the {limit}-byte resource limit")]
     HistoryTooLarge {
         /// Maximum accepted bytes.
         limit: usize,
     },
-    /// A history segment is malformed, mismatched or written twice.
-    #[error("invalid history segment: {0}")]
+    /// A history record is malformed, mismatched or written twice.
+    #[error("invalid history record: {0}")]
     InvalidHistory(String),
     /// The saved usage statistics cannot be read on this platform.
     #[error("invalid usage statistics: {0}")]

@@ -65,7 +65,7 @@ Compact options:
                       current directory)
 
 History options:
-  --last N            Print only the newest N history segments
+  --last N            Print only the newest N blocks
 
 Common options:
   --store             Local store directory (or configured store)
@@ -86,17 +86,17 @@ It cannot recover a previous process's uncommitted results. Removing declaration
 from future requests does not establish whether their operations occurred.
 Repair does not send a new input; use session run explicitly after saving.
 
-Show reports the saved revision, block count, context usage, history segment
+Show reports the saved revision, block count, context usage, history record
 count and retained-work capacity (`Works: 3 / 256`) without changing the record
 or calling a model.
 Compact replaces the current Context with a brief written by the session's own
 model and saves it; the replaced conversation is kept as a read-only history
-segment. A busy session is refused, and materials with unpaired declarations
+record. A busy session is refused, and materials with unpaired declarations
 must be repaired first.
-History reads one replaced segment at a time, in order, then the current
-Context; --json prints one tars-history-v1 document per line.
+History prints the expanded full conversation with block status; --last N
+prints only the newest N blocks; --json prints one block per line.
 Material export and --load import contain only the current Context, never the
-replaced history segments.
+history records.
 
 export-materials extracts validated Context from a v1/v2 session record offline.
 It neither loads configuration nor opens a session; an existing output is refused.
