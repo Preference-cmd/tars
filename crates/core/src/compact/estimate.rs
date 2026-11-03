@@ -31,8 +31,8 @@ pub(crate) fn estimate_bytes(bytes: u64) -> u64 {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct UsageState {
-    last_input_tokens: Option<u64>,
-    /// Size prepared for the round whose usage is `last_input_tokens`.
+    last_prompt_tokens: Option<u64>,
+    /// Size prepared for the round whose usage is `last_prompt_tokens`.
     last_prepare_bytes: Option<u64>,
     /// Size prepared for the round in flight, paired once its usage arrives.
     pending_prepare_bytes: Option<u64>,
@@ -55,7 +55,17 @@ impl UsageTracker {
             // Usage without a noted preparation cannot be paired with a size.
             return;
         };
-        state.last_input_tokens = Some(u64::try_from(usage.input_tokens).unwrap_or(u64::MAX));
+        let input = u64::try_from(usage.input_tokens).unwrap_or(u64::MAX);
+        let cache_read = usage
+            .cache_read_tokens
+            .map(|tokens| u64::try_from(tokens).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        let cache_write = usage
+            .cache_write_tokens
+            .map(|tokens| u64::try_from(tokens).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        let prompt_tokens = input.saturating_add(cache_read).saturating_add(cache_write);
+        state.last_prompt_tokens = Some(prompt_tokens);
         state.last_prepare_bytes = Some(prepared);
     }
 
@@ -76,7 +86,7 @@ impl UsageTracker {
     /// everything is estimated from bytes.
     pub(crate) fn estimate(&self, current_bytes: u64) -> u64 {
         let state = *self.state.lock().expect("usage tracker has no callbacks");
-        match state.last_input_tokens {
+        match state.last_prompt_tokens {
             Some(tokens) => {
                 let base = state
                     .last_prepare_bytes

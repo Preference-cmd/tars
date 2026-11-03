@@ -144,9 +144,9 @@ dependencies = [
 
 [[package]]
 name = "causa"
-version = "0.1.5"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a7d4ab8bf376b554fb90e298c30b2d71d7a4692fe659a6f202350548ef167ee"
+checksum = "fb057ec084a460d4fb757b2eca3bd6da8eedad99dffd9cfc3d9758eac70b9206"
 dependencies = [
  "causa-extension",
  "causa-kernel",
@@ -157,9 +157,9 @@ dependencies = [
 
 [[package]]
 name = "causa-extension"
-version = "0.1.5"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dcb92507e066fa26e44756fb05c98604937a993ede8b56a30b6ddae14102656"
+checksum = "1dd3f15441e28628e333fcaffbfcd54441b2d1fc14d4bbfec3e9f9612ed73273"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -173,9 +173,9 @@ dependencies = [
 
 [[package]]
 name = "causa-kernel"
-version = "0.1.5"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0580beb34960fef033e1a2778bc15361fa8f7fdff4f7c10bfef71c935440866b"
+checksum = "e31705801845f828493c2bcb11c8a3771eeda298bd4f3c9cb36c3062a0a98251"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -188,9 +188,9 @@ dependencies = [
 
 [[package]]
 name = "causa-protocol"
-version = "0.1.5"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce67a44a66f5aa13f3b8a65d39d16492d98658ad9bbd4520a81b24e5dc7ed576"
+checksum = "fa4df602d700def74fd143f4df342375060582a356da0d39dd97758e1c73797a"
 dependencies = [
  "causa-kernel",
  "serde",
@@ -199,9 +199,9 @@ dependencies = [
 
 [[package]]
 name = "causa-provider"
-version = "0.1.5"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7568fce462257170e47819ffa23bcc1989b408d6ad96ddebefc3230d28043370"
+checksum = "b66fa7abed614b3aeb93236ba5e40e726a38d1dd1c36cca8eb6bcf963c63e3de"
 dependencies = [
  "async-trait",
  "causa-kernel",
@@ -216,9 +216,9 @@ dependencies = [
 
 [[package]]
 name = "causa-runtime"
-version = "0.1.5"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c494f54a6fd1fe5313a38f69e49c880c5f96f6c774c45695be11596f29bc682"
+checksum = "bf57af6d36e6289e70ae86484594a58174ca2fb7a5f084b7bb50d29d57caadef"
 dependencies = [
  "async-trait",
  "causa-kernel",

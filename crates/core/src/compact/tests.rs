@@ -101,6 +101,8 @@ struct ToolThenDone {
     summary_inputs: Arc<std::sync::Mutex<Vec<Vec<ContextBlock>>>>,
     /// Whether the first ordinary round asks for the fixture tool.
     tool_call_first: bool,
+    /// Cache read tokens reported with every ordinary round.
+    cache_read_tokens: Option<usize>,
 }
 
 #[async_trait::async_trait]
@@ -139,7 +141,9 @@ impl ModelGateway for ToolThenDone {
                 ModelStopReason::EndTurn,
             )
         };
-        output.usage = Some(causa::kernel::ModelUsage::new(100, 10));
+        let mut usage = causa::kernel::ModelUsage::new(100, 10);
+        usage.cache_read_tokens = self.cache_read_tokens;
+        output.usage = Some(usage);
         Ok(output)
     }
 }
@@ -312,6 +316,7 @@ async fn compaction_keeps_the_bound_tool_declaration_and_causa_accepts_the_frame
         summary_calls: summary_calls.clone(),
         summary_inputs: Arc::new(std::sync::Mutex::new(Vec::new())),
         tool_call_first: false,
+        cache_read_tokens: None,
     });
     let tracker = Arc::new(UsageTracker::default());
     let mut context = Context::new();
@@ -375,6 +380,7 @@ async fn a_later_round_keeps_the_submitted_request_verbatim_in_the_summary() {
         summary_calls: summary_calls.clone(),
         summary_inputs: summary_inputs.clone(),
         tool_call_first: true,
+        cache_read_tokens: None,
     });
     let tracker = Arc::new(UsageTracker::default());
     let (mut session, _runtime) = build_session(
@@ -496,6 +502,48 @@ fn a_round_without_usage_keeps_counting_its_material_from_bytes() {
     tracker.reset();
     tracker.record_output(&summary_output("x"));
     assert_eq!(tracker.estimate(900), 300);
+}
+
+#[test]
+fn usage_estimation_includes_cache_read_tokens_in_prompt_base() {
+    let tracker = UsageTracker::default();
+    tracker.note_prepare_bytes(900);
+    let mut output = summary_output("x");
+    let mut usage = causa::kernel::ModelUsage::new(100, 10);
+    usage.cache_read_tokens = Some(900);
+    output.usage = Some(usage);
+    tracker.record_output(&output);
+    // Base is prompt total (100 input + 900 cache read = 1000), not ~100.
+    assert!(tracker.estimate(900) >= 1_000);
+    assert_eq!(tracker.estimate(900), 1_000);
+    assert!(tracker.estimate(900 + 30) >= 1_000);
+    assert_eq!(tracker.estimate(900 + 30), 1_010);
+}
+
+#[test]
+fn usage_estimation_includes_cache_write_tokens_in_prompt_base() {
+    let tracker = UsageTracker::default();
+    tracker.note_prepare_bytes(900);
+    let mut output = summary_output("x");
+    let mut usage = causa::kernel::ModelUsage::new(100, 10);
+    usage.cache_write_tokens = Some(50);
+    output.usage = Some(usage);
+    tracker.record_output(&output);
+    // Base is prompt total (100 input + 0 cache read + 50 cache write = 150).
+    assert!(tracker.estimate(900) >= 150);
+    assert_eq!(tracker.estimate(900), 150);
+}
+
+#[test]
+fn usage_estimation_defaults_to_input_tokens_when_cache_tokens_are_none() {
+    let tracker = UsageTracker::default();
+    tracker.note_prepare_bytes(900);
+    let mut output = summary_output("x");
+    let usage = causa::kernel::ModelUsage::new(100, 10);
+    output.usage = Some(usage);
+    tracker.record_output(&output);
+    // Read and write are None -> base equals input tokens.
+    assert_eq!(tracker.estimate(900), 100);
 }
 
 #[test]
@@ -665,6 +713,7 @@ fn trigger_rules_use_the_threshold_the_output_reserve_and_the_force_flag() {
         summary_calls: Arc::new(AtomicUsize::new(0)),
         summary_inputs: Arc::new(std::sync::Mutex::new(Vec::new())),
         tool_call_first: false,
+        cache_read_tokens: None,
     }) as Arc<dyn ModelGateway>;
     let runtime = CompactionRuntime::new(
         &definition(Some(1_000), None),
@@ -696,6 +745,7 @@ fn trigger_rules_use_the_threshold_the_output_reserve_and_the_force_flag() {
         summary_calls: Arc::new(AtomicUsize::new(0)),
         summary_inputs: Arc::new(std::sync::Mutex::new(Vec::new())),
         tool_call_first: false,
+        cache_read_tokens: None,
     }) as Arc<dyn ModelGateway>;
     let reserve = CompactionRuntime::new(
         &definition(Some(1_000), Some(800)),
@@ -720,6 +770,7 @@ fn record_overrides_only_report_values_that_differ_from_the_definition() {
         summary_calls: Arc::new(AtomicUsize::new(0)),
         summary_inputs: Arc::new(std::sync::Mutex::new(Vec::new())),
         tool_call_first: false,
+        cache_read_tokens: None,
     }) as Arc<dyn ModelGateway>;
     let tracker = Arc::new(UsageTracker::default());
     let definition = definition(Some(1_000), None);
@@ -873,4 +924,80 @@ async fn lowering_the_threshold_during_a_work_applies_to_the_next_round() {
     assert!(matches!(observation.state, WorkState::Finished(_)));
     assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
     session.shutdown().await;
+}
+
+/// Same fixture call with a tiny result, so round 1 adds only a few tokens.
+struct TinyAlphaTool;
+
+#[async_trait::async_trait]
+impl causa::kernel::Tool for TinyAlphaTool {
+    fn definition(&self) -> ToolDefinition {
+        AlphaTool.definition()
+    }
+
+    async fn execute(
+        &self,
+        ctx: &ToolCallContext,
+        _: &CallControl,
+        _: Option<&dyn causa::kernel::ArtifactStore>,
+    ) -> ToolResultPayload {
+        ToolResultPayload::new(
+            ctx.call_block_id,
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::json!("ok")),
+        )
+    }
+}
+
+/// Runs one tool round reporting 100 uncached input tokens plus `cache_read_tokens`
+/// with a 1,200-token window and the default 70% threshold (840 tokens), and
+/// returns how many summary requests were made.
+async fn summary_calls_with_cache_read(cache_read_tokens: Option<usize>) -> usize {
+    let directory = tempfile::tempdir().unwrap();
+    let summary_calls = Arc::new(AtomicUsize::new(0));
+    let gateway = Arc::new(ToolThenDone {
+        main_calls: AtomicUsize::new(0),
+        summary_calls: summary_calls.clone(),
+        summary_inputs: Arc::new(std::sync::Mutex::new(Vec::new())),
+        tool_call_first: true,
+        cache_read_tokens,
+    });
+    let (mut session, _runtime) = build_session_with_tool(
+        directory.path(),
+        definition(Some(1_200), None),
+        Context::new(),
+        gateway,
+        Arc::new(UsageTracker::default()),
+        Arc::new(TinyAlphaTool),
+    );
+    let handle = session.handle();
+    let receipt = handle
+        .submit(SubmitRequest {
+            request_key: "cache-compaction".into(),
+            blocks: vec![ContextBlock::text(
+                BlockId::new(uuid::Uuid::now_v7()),
+                Role::User,
+                "run the fixture tool",
+            )],
+        })
+        .unwrap();
+    let observation = handle
+        .wait(&receipt.work, Duration::from_secs(5))
+        .await
+        .unwrap();
+    assert!(matches!(observation.state, WorkState::Finished(_)));
+    session.shutdown().await;
+    summary_calls.load(Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn auto_compaction_triggers_when_cache_read_usage_crosses_threshold() {
+    // 100 input + 900 cache read = 1,000 prompt tokens, above 840.
+    assert_eq!(summary_calls_with_cache_read(Some(900)).await, 1);
+}
+
+#[tokio::test]
+async fn auto_compaction_stays_below_threshold_on_uncached_input_alone() {
+    // Same rounds with 100 prompt tokens stay below 840.
+    assert_eq!(summary_calls_with_cache_read(None).await, 0);
 }
