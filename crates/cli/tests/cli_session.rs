@@ -349,7 +349,7 @@ fn create_t1_close_reopen_t2_preserve_definition_identity_and_block_ids() {
     assert_eq!(second_blocks.len(), 4);
     assert_eq!(&second_blocks[..2], first_blocks);
     assert!(second_record.get("usage").is_some());
-    assert_eq!(second_record.as_object().unwrap().len(), 7); // No request keys/results/execution archive.
+    assert_eq!(second_record.as_object().unwrap().len(), 9); // No request keys/results/execution archive.
     let listed = command(&store, "list").output().unwrap();
     assert!(listed.status.success());
     let listed = report(&listed);

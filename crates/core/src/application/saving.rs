@@ -23,6 +23,19 @@ pub(super) fn compaction_record(
     (auto_compact, compact_threshold, history)
 }
 
+/// Title and last-activity time for the next record over `context`. A
+/// prepared commit it replaces may already be stored, so its time is a floor.
+pub(super) fn next_metadata(
+    state: &State,
+    context: &causa::kernel::Context,
+) -> (Option<String>, u64) {
+    let floor = state
+        .pending
+        .as_ref()
+        .map_or(0, |pending| pending.record.updated_at_ms);
+    state.saved.next(context, floor)
+}
+
 pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), ApplicationError> {
     let context = state
         .owner
@@ -38,6 +51,7 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
         .and_then(|o| o.permission_mode().map(|(m, _)| m));
     let (auto_compact, compact_threshold, history) = compaction_record(state);
     let usage = state.owner.as_ref().map(|o| o.session_usage());
+    let (title, updated_at_ms) = next_metadata(state, &context);
     let record = SavedSessionRecord::new_with_compaction(
         entry.target.conversation_id.as_str().to_owned(),
         uuid::Uuid::now_v7().to_string(),
@@ -49,6 +63,8 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
         compact_threshold,
         history,
         usage,
+        title,
+        updated_at_ms,
     )?;
     state.pending = Some(Arc::new(PreparedCommit::new(state.revision, record)?));
     state.save_requested = true;
@@ -95,6 +111,7 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
     match result {
         Ok(record) => {
             state.revision = Some(record.revision);
+            state.saved = crate::store::RecordMetadata::of(&record);
             state.pending = None;
             state.save_requested = false;
             state.save = SaveStatus::Saved {

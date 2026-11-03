@@ -78,6 +78,7 @@ pub(super) async fn create_provider(app: &mut App, provider: &str, endpoint: &st
             "",
             "ask",
             "",
+            "on",
         ]
         .into_iter()
         .map(|v| TextArea::from([v]))
@@ -266,6 +267,7 @@ pub(super) fn history_definition(
         context_window,
         auto_compact: true,
         compact_threshold: 70,
+        prompt_cache: true,
     }
 }
 
@@ -348,6 +350,7 @@ pub(super) fn write_history_session(
         "definition": serde_json::to_value(history_definition(None)).unwrap(),
         "context": serde_json::to_value(&context).unwrap(),
         "history": entries,
+        "updated_at_ms": 1000u64,
     });
     std::fs::create_dir_all(&sessions).unwrap();
     std::fs::write(

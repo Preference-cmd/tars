@@ -124,7 +124,10 @@ impl PendingApproval {
 
 pub(crate) struct Entry {
     pub(super) key: Key,
-    pub title: String,
+    pub title: Option<String>,
+    pub model: String,
+    pub updated_at_ms: u64,
+    pub prompt_cache: bool,
     pub session: Option<ManagedSession>,
     pub(super) prepared: Option<PreparedCreate>,
     pub busy: Option<&'static str>,
@@ -161,10 +164,14 @@ pub(crate) struct Entry {
     pub(crate) approval_scroll: usize,
 }
 impl Entry {
-    pub(super) fn new(id: String, title: String) -> Self {
+    pub(super) fn new(id: String, model: String) -> Self {
+        let updated_at_ms = tars_core::created_at_from_id(&id).unwrap_or(0);
         Self {
             key: Key { id, generation: 0 },
-            title,
+            title: None,
+            model,
+            updated_at_ms,
+            prompt_cache: true,
             session: None,
             prepared: None,
             busy: None,
@@ -200,6 +207,27 @@ impl Entry {
     }
     pub fn id(&self) -> &str {
         &self.key.id
+    }
+    pub fn title(&self) -> Option<String> {
+        self.session
+            .as_ref()
+            .and_then(|s| s.title())
+            .or_else(|| self.title.clone())
+    }
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    pub fn updated_at_ms(&self) -> u64 {
+        self.session
+            .as_ref()
+            .map(|s| s.updated_at_ms())
+            .unwrap_or(self.updated_at_ms)
+    }
+    pub fn prompt_cache(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.definition().prompt_cache)
+            .unwrap_or(self.prompt_cache)
     }
     pub fn has_draft(&self) -> bool {
         self.editor.lines().iter().any(|line| !line.is_empty())

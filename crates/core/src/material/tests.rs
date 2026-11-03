@@ -259,6 +259,7 @@ fn record_definition() -> crate::definition::SessionDefinition {
         context_window: None,
         auto_compact: true,
         compact_threshold: 70,
+        prompt_cache: true,
     }
 }
 
@@ -294,6 +295,8 @@ fn offline_export_extracts_context_from_a_compacted_record() {
         Some(50),
         vec![record],
         None,
+        None,
+        1_000,
     )
     .unwrap();
     let directory = tempfile::tempdir().unwrap();

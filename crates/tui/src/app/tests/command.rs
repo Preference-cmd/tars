@@ -56,6 +56,7 @@ fn preset(command: CommandSettings) -> SessionDefinition {
         context_window: None,
         auto_compact: true,
         compact_threshold: 70,
+        prompt_cache: true,
     }
 }
 
@@ -122,6 +123,7 @@ async fn create_command_session(
             "run_command",
             mode,
             "",
+            "on",
         ]
         .into_iter()
         .map(|value| TextArea::from([value]))

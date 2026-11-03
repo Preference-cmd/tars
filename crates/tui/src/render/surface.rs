@@ -75,7 +75,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     .split(body);
     let entry = app.entries.get(app.selected);
     let model = entry
-        .map(|e| e.title.as_str())
+        .map(|e| e.model.as_str())
         .or(app.options.preset.as_ref().map(|p| p.model.as_str()))
         .unwrap_or("No model selected");
     frame.render_widget(

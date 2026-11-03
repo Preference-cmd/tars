@@ -178,14 +178,16 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
                 } else {
                     ""
                 };
+                let model = entry.model();
+                let time_str = tars_core::format_timestamp_utc(entry.updated_at_ms());
+                let first_line = match entry.title() {
+                    Some(title) => format!("{title}  ·  {time_str}"),
+                    None => format!("{model}  ·  {time_str}"),
+                };
                 ListItem::new(vec![
-                    Line::from(format!(
-                        "{}  {}",
-                        entry.id().get(..8).unwrap_or(entry.id()),
-                        entry.title
-                    )),
+                    Line::from(first_line),
                     Line::styled(
-                        format!("{} · {}{waiting}", entry.execution, entry.status),
+                        format!("{model}{waiting}"),
                         Style::default().fg(if waiting.is_empty() {
                             MUTED
                         } else {

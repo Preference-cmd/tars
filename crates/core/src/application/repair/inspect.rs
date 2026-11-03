@@ -420,6 +420,7 @@ mod tests {
             context_window: None,
             auto_compact: true,
             compact_threshold: 70,
+            prompt_cache: true,
         }
     }
 

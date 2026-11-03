@@ -53,9 +53,11 @@ impl App {
                 return;
             }
         };
-        let title = definition.model.clone();
+        let model = definition.model.clone();
+        let prompt_cache = definition.prompt_cache;
         let prepared = PreparedCreate::persistent(definition, Context::new());
-        let mut entry = Entry::new(prepared.conversation_id().as_str().to_owned(), title);
+        let mut entry = Entry::new(prepared.conversation_id().as_str().to_owned(), model);
+        entry.prompt_cache = prompt_cache;
         entry.prepared = Some(prepared);
         self.entries.push(entry);
         self.selected = self.entries.len() - 1;

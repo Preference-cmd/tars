@@ -35,6 +35,7 @@ pub(crate) struct CompactionRuntime {
     settings: Mutex<Settings>,
     window: Option<u64>,
     max_tokens: Option<u32>,
+    prompt_cache: bool,
     history: Option<Arc<HistoryStore>>,
     usage: Arc<UsageTracker>,
     force: AtomicBool,
@@ -74,6 +75,7 @@ impl CompactionRuntime {
             }),
             window: definition.context_window,
             max_tokens: definition.max_tokens,
+            prompt_cache: definition.prompt_cache,
             history: Some(history),
             usage,
             force: AtomicBool::new(false),
@@ -235,6 +237,9 @@ impl CompactionRuntime {
             None => SUMMARY_MAX_TOKENS,
         });
         request.generation = generation;
+        if self.prompt_cache {
+            request.cache = causa::kernel::CacheDirective::StablePrefix;
+        }
         let output = self
             .gateway
             .invoke(&request, control)

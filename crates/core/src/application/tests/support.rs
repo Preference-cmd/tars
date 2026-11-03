@@ -36,6 +36,7 @@ pub(super) fn definition() -> SessionDefinition {
         context_window: None,
         auto_compact: true,
         compact_threshold: 70,
+        prompt_cache: true,
     }
 }
 pub(super) fn request(key: &str) -> SubmitRequest {

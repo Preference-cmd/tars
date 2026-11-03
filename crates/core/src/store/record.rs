@@ -34,6 +34,9 @@ pub(crate) struct SavedSessionRecord {
     pub(crate) definition: SessionDefinition,
     pub(crate) context: Context,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
+    pub(crate) updated_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) permission_mode: Option<crate::permission::PermissionMode>,
     /// Running automatic-compaction switch when it differs from the definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,6 +59,8 @@ impl PartialEq for SavedSessionRecord {
             && self.last_commit_id == other.last_commit_id
             && self.definition == other.definition
             && self.context.blocks() == other.context.blocks()
+            && self.title == other.title
+            && self.updated_at_ms == other.updated_at_ms
             && self.permission_mode == other.permission_mode
             && self.auto_compact == other.auto_compact
             && self.compact_threshold == other.compact_threshold
@@ -72,6 +77,7 @@ impl SavedSessionRecord {
             .unwrap_or_default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         conversation_id: String,
         last_commit_id: String,
@@ -79,6 +85,8 @@ impl SavedSessionRecord {
         definition: SessionDefinition,
         context: Context,
         current_mode: Option<crate::permission::PermissionMode>,
+        title: Option<String>,
+        updated_at_ms: u64,
     ) -> Result<Self, StoreError> {
         Self::new_with_compaction(
             conversation_id,
@@ -91,6 +99,8 @@ impl SavedSessionRecord {
             None,
             Vec::new(),
             None,
+            title,
+            updated_at_ms,
         )
     }
 
@@ -106,6 +116,8 @@ impl SavedSessionRecord {
         compact_threshold: Option<u8>,
         history: Vec<crate::compact::HistoryRecordEntry>,
         usage: Option<crate::usage::SessionUsage>,
+        title: Option<String>,
+        updated_at_ms: u64,
     ) -> Result<Self, StoreError> {
         let initial_mode = definition.initial_permission_mode();
         let permission_mode = current_mode.filter(|&mode| mode != initial_mode);
@@ -119,6 +131,8 @@ impl SavedSessionRecord {
             last_commit_id,
             definition,
             context,
+            title,
+            updated_at_ms,
             permission_mode,
             auto_compact,
             compact_threshold,
@@ -169,6 +183,89 @@ impl SavedSessionRecord {
         crate::material::validate_references(&self.context, None)
             .map_err(|e| StoreError::References(Arc::new(e)))
     }
+}
+
+/// Longest session title, in characters.
+const MAX_TITLE_CHARS: usize = 80;
+
+/// Title and last-activity time of the last stored record of a session.
+///
+/// Session state keeps only stored values: they change when a record is
+/// stored, never when a commit is merely prepared.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RecordMetadata {
+    /// Stored title, if any.
+    pub(crate) title: Option<String>,
+    /// The stored Context had a user block, so the title is final, even
+    /// when there is none.
+    pub(crate) title_settled: bool,
+    /// Stored last-activity time in Unix milliseconds.
+    pub(crate) updated_at_ms: u64,
+}
+
+impl RecordMetadata {
+    /// A session with no stored record yet; its last activity is its
+    /// creation time when the id carries one.
+    pub(crate) fn unsaved(conversation_id: &str) -> Self {
+        Self {
+            title: None,
+            title_settled: false,
+            updated_at_ms: crate::time::created_at_from_id(conversation_id).unwrap_or(0),
+        }
+    }
+
+    /// Values of a stored record.
+    pub(crate) fn of(record: &SavedSessionRecord) -> Self {
+        Self {
+            title: record.title.clone(),
+            title_settled: record.title.is_some() || first_user_parts(&record.context).is_some(),
+            updated_at_ms: record.updated_at_ms,
+        }
+    }
+
+    /// Title and last-activity time for the next record over `context`.
+    /// `floor` is the time of a prepared commit the next one replaces, so
+    /// the time never goes backwards even if that commit was stored.
+    pub(crate) fn next(&self, context: &Context, floor: u64) -> (Option<String>, u64) {
+        let title = if self.title_settled {
+            self.title.clone()
+        } else {
+            first_user_parts(context).and_then(title_from_parts)
+        };
+        let updated_at_ms = crate::time::current_time_ms()
+            .max(self.updated_at_ms)
+            .max(floor);
+        (title, updated_at_ms)
+    }
+}
+
+/// Content parts of the first user message block, if there is one.
+fn first_user_parts(context: &Context) -> Option<&[causa::kernel::ContentPart]> {
+    context
+        .blocks()
+        .iter()
+        .find_map(|block| match block.content() {
+            causa::kernel::BlockContent::Message {
+                role: causa::kernel::Role::User,
+                parts,
+            } => Some(parts.as_slice()),
+            _ => None,
+        })
+}
+
+/// The first non-blank line of the message text, with whitespace runs
+/// collapsed to one space, cut to [`MAX_TITLE_CHARS`] characters.
+fn title_from_parts(parts: &[causa::kernel::ContentPart]) -> Option<String> {
+    let mut text = String::new();
+    for part in parts {
+        if let causa::kernel::ContentPart::Text(payload) = part {
+            text.push_str(&payload.0);
+        }
+    }
+    text.lines().find_map(|line| {
+        let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!collapsed.is_empty()).then(|| collapsed.chars().take(MAX_TITLE_CHARS).collect())
+    })
 }
 
 /// Fixed before I/O and reused exactly on every retry/confirmation.
@@ -657,7 +754,7 @@ mod format_tests {
         let id = Uuid::now_v7().to_string();
         let commit = Uuid::now_v7().to_string();
         let raw = format!(
-            r#"{{"format":"tars-session-v2.2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+            r#"{{"format":"tars-session-v2.2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","updated_at_ms":1000,"definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
         );
         let record = super::decode(raw.as_bytes(), &id).unwrap();
         assert_eq!(record.usage, None);
@@ -672,7 +769,7 @@ mod format_tests {
         let id = Uuid::now_v7().to_string();
         let commit = Uuid::now_v7().to_string();
         let mut value: serde_json::Value = serde_json::from_str(&format!(
-            r#"{{"format":"tars-session-v2.2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"m","endpoint":null,"credential":{{"environment":"KEY"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+            r#"{{"format":"tars-session-v2.2","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","updated_at_ms":1000,"definition":{{"provider":"openai-chat","model":"m","endpoint":null,"credential":{{"environment":"KEY"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
         ))
         .unwrap();
         let mut usage = serde_json::to_value(WireSessionUsage::from_session_usage(

@@ -230,6 +230,7 @@ impl SessionHost {
             .into_iter()
             .map(|item| {
                 let id: ConversationId = item.conversation_id.into();
+                let created_at_ms = crate::time::created_at_from_id(id.as_str());
                 SessionListing {
                     local: self.lookup(&id),
                     conversation_id: id,
@@ -239,6 +240,9 @@ impl SessionHost {
                             block_count: record.context.blocks().len(),
                             definition: record.definition,
                             revision: record.revision,
+                            title: record.title,
+                            created_at_ms,
+                            updated_at_ms: record.updated_at_ms,
                         })
                         .map_err(Arc::new),
                     active: item.active.map_err(Arc::new),

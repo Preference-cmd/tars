@@ -40,6 +40,10 @@ fn default_auto_compact() -> bool {
     true
 }
 
+fn default_prompt_cache() -> bool {
+    true
+}
+
 fn default_compact_threshold() -> u8 {
     70
 }
@@ -93,6 +97,11 @@ pub struct SessionDefinition {
     /// record saved before this field existed reads as enabled.
     #[serde(default = "default_auto_compact")]
     pub auto_compact: bool,
+    /// Whether prompt caching is enabled for model requests in this session.
+    /// Frozen at creation; defaults to on. A record saved before this field
+    /// existed reads as enabled.
+    #[serde(default = "default_prompt_cache")]
+    pub prompt_cache: bool,
     /// Automatic-compaction trigger as an integer percentage of the context
     /// window, in [`MIN_COMPACT_THRESHOLD`]..=[`MAX_COMPACT_THRESHOLD`]. The
     /// stored record carries the running value; this field is the initial
@@ -264,6 +273,9 @@ impl SessionDefinition {
     /// Construct per-work options with the saved model and explicit execution limits.
     pub fn run_options(&self) -> TurnRunOptions {
         let mut options = TurnRunOptions::new(ModelRef::new(self.model.clone()));
+        if self.prompt_cache {
+            options = options.with_cache(causa::kernel::CacheDirective::StablePrefix);
+        }
         options.limits = TurnLimits::new(self.max_model_rounds, self.max_tool_calls);
         options.generation.max_tokens = self.max_tokens;
         options.generation.reasoning_effort = self.reasoning_effort.clone();

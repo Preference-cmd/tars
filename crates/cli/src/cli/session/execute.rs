@@ -392,40 +392,69 @@ async fn list(store: PathBuf, json_output: bool) -> ExitCode {
         Ok(entries) => entries,
         Err(error) => return early_failure(json_output, &error.to_string()),
     };
+    let mut valid = Vec::new();
+    let mut invalid = Vec::new();
+    for entry in entries {
+        if entry.record.is_ok() {
+            valid.push(entry);
+        } else {
+            invalid.push(entry);
+        }
+    }
+    valid.sort_by(|a, b| {
+        let b_time = b.record.as_ref().unwrap().updated_at_ms;
+        let a_time = a.record.as_ref().unwrap().updated_at_ms;
+        b_time
+            .cmp(&a_time)
+            .then_with(|| a.conversation_id.as_str().cmp(b.conversation_id.as_str()))
+    });
+    invalid.sort_by(|a, b| a.conversation_id.as_str().cmp(b.conversation_id.as_str()));
+    let entries: Vec<_> = valid.into_iter().chain(invalid).collect();
+
     let mut errors = false;
     let values: Vec<_> = entries
-        .into_iter()
+        .iter()
         .map(|entry| {
             let record_error = entry.record.as_ref().err().map(ToString::to_string);
             let active_error = entry.active.as_ref().err().map(ToString::to_string);
             errors |= record_error.is_some() || active_error.is_some();
+            let summary = entry.record.as_ref().ok();
             json!({
-                "conversation_id":entry.conversation_id.as_str(),
-                "revision":entry.record.as_ref().ok().map(|r|r.revision),
-                "definition":entry.record.as_ref().ok().map(|r|&r.definition),
-                "block_count":entry.record.as_ref().ok().map(|r|r.block_count),
-                "active":entry.active.ok(),"record_error":record_error,"active_error":active_error,
+                "conversation_id": entry.conversation_id.as_str(),
+                "revision": summary.map(|r| r.revision),
+                "definition": summary.map(|r| &r.definition),
+                "block_count": summary.map(|r| r.block_count),
+                "title": summary.and_then(|r| r.title.clone()),
+                "created_at_ms": summary.and_then(|r| r.created_at_ms),
+                "updated_at_ms": summary.map(|r| r.updated_at_ms),
+                "active": entry.active.as_ref().ok().copied(),
+                "record_error": record_error,
+                "active_error": active_error,
             })
         })
         .collect();
     let rendered = if json_output {
-        format!("{}\n", json!({"sessions":values}))
+        format!("{}\n", json!({"sessions": values}))
     } else {
-        values
+        entries
             .iter()
             .map(|entry| {
-                format!(
-                    "{}\t{}\t{}\n",
-                    entry["conversation_id"].as_str().unwrap_or("?"),
-                    entry["revision"],
-                    if !entry["record_error"].is_null() {
-                        "invalid"
-                    } else if entry["active"] == true {
-                        "active"
-                    } else {
-                        "saved"
+                let id = entry.conversation_id.as_str();
+                match &entry.record {
+                    Ok(summary) => {
+                        let last_activity = tars_core::format_timestamp_utc(summary.updated_at_ms);
+                        let status = if entry.active.as_ref().ok() == Some(&true) {
+                            "active"
+                        } else {
+                            "saved"
+                        };
+                        let title = summary.title.as_deref().unwrap_or("");
+                        format!("{id}\t{last_activity}\t{status}\t{title}\n")
                     }
-                )
+                    Err(err) => {
+                        format!("{id}\t-\tinvalid\t{err}\n")
+                    }
+                }
             })
             .collect::<String>()
     };

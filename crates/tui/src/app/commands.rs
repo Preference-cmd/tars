@@ -78,15 +78,32 @@ pub(crate) fn matching_commands(query: &str) -> Vec<usize> {
 impl App {
     pub(crate) fn matching_sessions(&self, query: &str) -> Vec<usize> {
         let query = query.to_lowercase();
-        self.entries
+        let mut matches: Vec<usize> = self
+            .entries
             .iter()
             .enumerate()
             .filter_map(|(i, entry)| {
-                (entry.id().to_lowercase().contains(&query)
-                    || entry.title.to_lowercase().contains(&query))
-                .then_some(i)
+                let matches_id = entry.id().to_lowercase().contains(&query);
+                let matches_title = entry
+                    .title()
+                    .map(|t| t.to_lowercase().contains(&query))
+                    .unwrap_or(false);
+                let matches_model = entry.model().to_lowercase().contains(&query);
+                (matches_id || matches_title || matches_model).then_some(i)
             })
-            .collect()
+            .collect();
+        matches.sort_by(|&a, &b| {
+            let entry_a = &self.entries[a];
+            let entry_b = &self.entries[b];
+            let a_open = entry_a.session.is_some();
+            let b_open = entry_b.session.is_some();
+            (!a_open, std::cmp::Reverse(entry_a.updated_at_ms()), a).cmp(&(
+                !b_open,
+                std::cmp::Reverse(entry_b.updated_at_ms()),
+                b,
+            ))
+        });
+        matches
     }
     pub(super) fn show_commands(&mut self) {
         self.panel = Some(Panel::Commands {
@@ -123,9 +140,15 @@ impl App {
             }
             "sessions" => {
                 self.list();
+                // The picker is ordered, so start on the current session's row.
+                let selected = self
+                    .matching_sessions("")
+                    .iter()
+                    .position(|&index| index == self.selected)
+                    .unwrap_or(0);
                 self.panel = Some(Panel::Sessions {
                     query: String::new(),
-                    selected: self.selected,
+                    selected,
                 });
             }
             "mode" => {
@@ -202,7 +225,21 @@ impl App {
                     lines.push(format!("Sandbox: {}", sandbox.detail));
                 }
                 if let Some(entry) = self.entries.get(self.selected) {
-                    lines.extend([format!("Session: {}", entry.id()), format!("Model: {}", entry.title), entry.execution.clone(), entry.status.clone(), entry.notice.clone()]);
+                    lines.extend([
+                        format!("Session: {}", entry.id()),
+                        format!("Model: {}", entry.model()),
+                        format!(
+                            "Prompt cache: {}",
+                            if entry.prompt_cache() {
+                                "on"
+                            } else {
+                                "off"
+                            }
+                        ),
+                        entry.execution.clone(),
+                        entry.status.clone(),
+                        entry.notice.clone(),
+                    ]);
                     if let Some(status) = entry
                         .session
                         .as_ref()

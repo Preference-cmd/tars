@@ -11,7 +11,7 @@ mod record;
 
 pub use error::{CommitStage, StoreError};
 pub(crate) use json::{CommitResolution, SessionStore, Writer};
-pub(crate) use record::{PreparedCommit, SavedSessionRecord};
+pub(crate) use record::{PreparedCommit, RecordMetadata, SavedSessionRecord};
 
 #[cfg(test)]
 pub(crate) use json::{FaultAction, FaultHook};

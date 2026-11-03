@@ -38,6 +38,7 @@ Create options:
   --context-window    Model context window in tokens; omitted leaves it unknown
   --auto-compact      on | off | PERCENT: automatic compaction switch, or a trigger
                       percentage in 10–95 that also enables it (default on, 70)
+  --prompt-cache      on | off: prompt caching switch (default on)
   --workspace         Root directory for selected workspace tools
   --tools             Comma-separated list_directory,read_file,search_text,write_file,edit_file,run_command (default empty)
   --command-network   Command network: none or open (default none)

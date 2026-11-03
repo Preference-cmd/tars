@@ -50,6 +50,7 @@ async fn incomplete(app: &mut crate::app::App, provider: Provider, endpoint: &st
         context_window: None,
         auto_compact: true,
         compact_threshold: 70,
+        prompt_cache: true,
     };
     let context = Context::from_blocks(vec![
         tars_core::application::text_input("old input"),
@@ -366,6 +367,7 @@ async fn repair_ui_shows_write_warning_for_unpaired_write_file() {
         context_window: None,
         auto_compact: true,
         compact_threshold: 70,
+        prompt_cache: true,
     };
     let context = Context::from_blocks(vec![
         tars_core::application::text_input("prior input"),
@@ -443,6 +445,7 @@ async fn repair_ui_shows_external_side_effect_warning_for_unpaired_mcp_call() {
         context_window: None,
         auto_compact: true,
         compact_threshold: 70,
+        prompt_cache: true,
     };
     let context = Context::from_blocks(vec![
         tars_core::application::text_input("prior input"),

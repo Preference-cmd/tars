@@ -34,6 +34,7 @@ Run options:
                  disables automatic compaction
   --auto-compact on | off | PERCENT: automatic compaction switch, or a trigger
                  percentage in 10–95 that also enables it (default on, 70)
+  --prompt-cache on | off: prompt caching switch (default on)
   --workspace    Root directory for workspace tools; relative to current directory
   --tools        Comma-separated list_directory,read_file,search_text,write_file,edit_file,run_command (default empty)
   --command-network  Command network: none or open (default none)

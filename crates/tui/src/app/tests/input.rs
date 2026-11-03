@@ -145,7 +145,7 @@ fn workspace_form_uses_shared_resolver_and_preserves_profile_limits() {
         options.profile.clone(),
         options.preset.as_ref(),
     );
-    assert_eq!(form.fields.len(), 9);
+    assert_eq!(form.fields.len(), 10);
     let frozen = form.definition().unwrap();
     assert_eq!(
         frozen.workspace_root,
@@ -261,7 +261,7 @@ mcp = ['git']
         options.profile.clone(),
         options.preset.as_ref(),
     );
-    assert_eq!(form.fields.len(), 9);
+    assert_eq!(form.fields.len(), 10);
     assert_eq!(
         input::FIELD_NAMES[8],
         "MCP servers (comma-separated ids from mcp.json)"

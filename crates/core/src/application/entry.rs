@@ -40,6 +40,8 @@ pub(super) struct State {
     pub close_in_flight: bool,
     pub close_outcome: Option<CloseOutcome>,
     pub open_report: OpenReport,
+    /// Title and last-activity time of the last stored record.
+    pub saved: crate::store::RecordMetadata,
 }
 impl Entry {
     pub fn new(
@@ -52,6 +54,7 @@ impl Entry {
             target: target.clone(),
             generation: 0,
         };
+        let saved = crate::store::RecordMetadata::unsaved(target.conversation_id.as_str());
         Self {
             target,
             snapshot_clones,
@@ -85,6 +88,7 @@ impl Entry {
                 close_in_flight: false,
                 close_outcome: None,
                 open_report: OpenReport::default(),
+                saved,
             }),
             changed: Notify::new(),
             wake: Notify::new(),

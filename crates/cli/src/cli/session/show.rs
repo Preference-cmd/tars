@@ -37,8 +37,15 @@ pub(super) async fn show(store: PathBuf, id: String, json_output: bool) -> ExitC
         }
     };
     let value = json!({
-        "conversation_id": id, "revision": revision, "saved": revision.is_some(),
-        "definition": definition, "block_count": block_count,
+        "conversation_id": id,
+        "title": session.title(),
+        "created_at_ms": session.created_at_ms(),
+        "updated_at_ms": session.updated_at_ms(),
+        "prompt_cache": definition.prompt_cache,
+        "revision": revision,
+        "saved": revision.is_some(),
+        "definition": definition,
+        "block_count": block_count,
         "context_estimate_tokens": usage.map(|usage| usage.estimate_tokens),
         "context_window": usage.and_then(|usage| usage.context_window),
         "auto_compact": usage.map(|usage| usage.auto_compact),
@@ -59,10 +66,21 @@ pub(super) async fn show(store: PathBuf, id: String, json_output: bool) -> ExitC
     let rendered = if json_output {
         format!("{value}\n")
     } else {
-        let mut text = format!(
-            "Conversation {id}\nSaved revision {} · {block_count} block(s) · {history} history record(s)\n",
+        let mut text = format!("Conversation {id}\n");
+        if let Some(title) = session.title() {
+            text.push_str(&format!("Title: {title}\n"));
+        }
+        if let Some(created) = session.created_at_ms().map(tars_core::format_timestamp_utc) {
+            text.push_str(&format!("Created: {created}\n"));
+        }
+        text.push_str(&format!(
+            "Last activity: {}\n",
+            tars_core::format_timestamp_utc(session.updated_at_ms())
+        ));
+        text.push_str(&format!(
+            "Saved revision {} · {block_count} block(s) · {history} history record(s)\n",
             revision.map_or_else(|| "none".to_owned(), |value| value.to_string()),
-        );
+        ));
         match usage {
             Some(usage) => {
                 let size = match usage.context_window {
@@ -88,6 +106,10 @@ pub(super) async fn show(store: PathBuf, id: String, json_output: bool) -> ExitC
             "Model: {} {}\n",
             provider_name(&definition),
             definition.model
+        ));
+        text.push_str(&format!(
+            "Prompt cache: {}\n",
+            if definition.prompt_cache { "on" } else { "off" }
         ));
         match session_usage {
             Some(usage) => {

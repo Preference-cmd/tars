@@ -142,6 +142,7 @@ impl SessionCommand {
                 | "--mcp"
                 | "--context-window"
                 | "--auto-compact"
+                | "--prompt-cache"
                     if command == "create" =>
                 {
                     insert(&mut values, flag, &mut args)?;

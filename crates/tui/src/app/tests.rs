@@ -21,3 +21,5 @@ mod approval;
 mod command;
 mod compaction;
 mod history;
+mod prompt_cache;
+mod sessions;

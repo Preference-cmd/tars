@@ -64,7 +64,7 @@ pub(crate) struct Form {
     /// never edits them, and creation resolves them through the preset.
     pub command: Option<CommandSettings>,
 }
-pub(crate) const FIELD_NAMES: [&str; 9] = [
+pub(crate) const FIELD_NAMES: [&str; 10] = [
     "Provider",
     "Model",
     "Endpoint (optional, full URL)",
@@ -74,6 +74,7 @@ pub(crate) const FIELD_NAMES: [&str; 9] = [
     "Tools (comma-separated list_directory,read_file,search_text,write_file,edit_file,run_command)",
     "Permission mode (read-only | ask | accept-edits | full-access)",
     "MCP servers (comma-separated ids from mcp.json)",
+    "Prompt cache (on | off)",
 ];
 
 impl Default for Form {
@@ -89,6 +90,7 @@ impl Default for Form {
                 "",
                 "ask",
                 "",
+                "on",
             ]
             .into_iter()
             .map(|s| TextArea::from([s]))
@@ -174,6 +176,7 @@ impl Form {
                 .map(|server| server.id.as_str())
                 .collect::<Vec<_>>()
                 .join(","),
+            if preset.prompt_cache { "on" } else { "off" }.to_owned(),
         ];
         form.fields = values
             .into_iter()
@@ -212,6 +215,11 @@ impl Form {
             .trim()
             .parse::<PermissionMode>()
             .map_err(|_| "Permission mode: read-only | ask | accept-edits | full-access")?;
+        let prompt_cache = match values[9].trim() {
+            "on" => true,
+            "off" => false,
+            _ => return Err("Prompt cache: on | off".into()),
+        };
         // Resolve explicit form values through the same core path as CLI input.
         // Profile limits were frozen when the selected startup preset was loaded.
         let mut definition = self
@@ -230,6 +238,7 @@ impl Form {
                     context_window: None,
                     auto_compact: None,
                     compact_threshold: None,
+                    prompt_cache: Some(prompt_cache),
                     max_tokens: self.generation.0,
                     reasoning_effort: self.generation.1.clone(),
                     extra_body: Some(self.generation.2.clone()),

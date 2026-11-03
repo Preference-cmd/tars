@@ -54,6 +54,7 @@ pub(super) async fn initialize(
         auto_compact,
         compact_threshold,
         usage,
+        saved,
     ) = match &prepared {
         Some(prepared) => {
             if record.is_some() {
@@ -75,6 +76,7 @@ pub(super) async fn initialize(
                 None,
                 None,
                 None,
+                crate::store::RecordMetadata::unsaved(entry.target.conversation_id.as_str()),
             )
         }
         None => {
@@ -88,6 +90,7 @@ pub(super) async fn initialize(
                 mode = crate::permission::PermissionMode::Ask;
             }
             let usage = record.session_usage();
+            let saved = crate::store::RecordMetadata::of(&record);
             (
                 record.definition,
                 record.context,
@@ -100,12 +103,14 @@ pub(super) async fn initialize(
                 record.auto_compact,
                 record.compact_threshold,
                 Some(usage),
+                saved,
             )
         }
     };
     definition.validate()?;
     let pending = if persistent && let Some(prepared) = &prepared {
         entry.cloned_snapshot();
+        let (title, updated_at_ms) = saved.next(&context, 0);
         let record = SavedSessionRecord::new(
             entry.target.conversation_id.as_str().to_owned(),
             prepared.commit_id.clone(),
@@ -113,6 +118,8 @@ pub(super) async fn initialize(
             definition.clone(),
             context.clone(),
             definition.permission_mode,
+            title,
+            updated_at_ms,
         )?;
         Some(Arc::new(PreparedCommit::new(None, record)?))
     } else {
@@ -175,6 +182,7 @@ pub(super) async fn initialize(
     state.revision = revision;
     state.pending = pending;
     state.open_report = open_report;
+    state.saved = saved;
     if state.closing.is_some() {
         state
             .handle

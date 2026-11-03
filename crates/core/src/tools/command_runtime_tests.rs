@@ -255,6 +255,7 @@ fn command_definition_exposes_the_sandbox_and_timeout() {
         context_window: None,
         auto_compact: true,
         compact_threshold: 70,
+        prompt_cache: true,
     };
     definition.validate().unwrap();
     assert!(definition.effective_command_settings().is_some());

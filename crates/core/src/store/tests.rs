@@ -36,6 +36,7 @@ fn definition() -> SessionDefinition {
         context_window: None,
         auto_compact: true,
         compact_threshold: 70,
+        prompt_cache: true,
     }
 }
 fn context(text: &str) -> Context {
@@ -56,6 +57,8 @@ fn op(id: &str, prior: Option<u64>, text: &str) -> PreparedCommit {
             definition(),
             context(text),
             None,
+            None,
+            1_000,
         )
         .unwrap(),
     )
@@ -346,6 +349,8 @@ fn resource_limit_rejects_oversized_load_and_checked_revisions() {
             definition(),
             Context::new(),
             None,
+            None,
+            1_000,
         )
         .is_err()
     );
@@ -545,6 +550,8 @@ fn session_records_written_before_message_roles_load_and_save_in_the_current_for
             definition(),
             loaded.context.clone(),
             None,
+            None,
+            1_000,
         )
         .unwrap(),
     )
@@ -569,6 +576,8 @@ fn record_omits_permission_mode_when_matching_initial_mode() {
         def.clone(),
         Context::new(),
         Some(crate::permission::PermissionMode::AcceptEdits),
+        None,
+        1_000,
     )
     .unwrap();
     assert_eq!(record_same.permission_mode, None);
@@ -582,6 +591,8 @@ fn record_omits_permission_mode_when_matching_initial_mode() {
         def,
         Context::new(),
         Some(crate::permission::PermissionMode::ReadOnly),
+        None,
+        1_000,
     )
     .unwrap();
     assert_eq!(
@@ -597,7 +608,7 @@ fn minimal_record_deserializes_with_none_permission_and_usage_fields() {
     let id = Uuid::now_v7().to_string();
     let commit = Uuid::now_v7().to_string();
     let json_text = format!(
-        r#"{{"format":"tars-session-v2.1","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"LEGACY_KEY"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
+        r#"{{"format":"tars-session-v2.1","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","updated_at_ms":1000,"definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"LEGACY_KEY"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
     );
 
     let record: SavedSessionRecord = serde_json::from_str(&json_text).unwrap();
@@ -644,6 +655,8 @@ fn compaction_fields_roundtrip_and_older_records_read_as_defaults() {
         Some(55),
         vec![entry.clone()],
         None,
+        None,
+        1_000,
     )
     .unwrap();
     let bytes = serde_json::to_vec(&record).unwrap();
@@ -681,6 +694,8 @@ fn compaction_fields_roundtrip_and_older_records_read_as_defaults() {
         None,
         duplicate,
         None,
+        None,
+        1_000,
     );
     assert!(record.is_err());
 }
@@ -699,6 +714,8 @@ fn session_listing_ignores_the_history_directory() {
         definition(),
         Context::default(),
         None,
+        None,
+        1_000,
     )
     .unwrap();
     std::fs::write(

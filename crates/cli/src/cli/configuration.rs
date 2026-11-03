@@ -140,6 +140,14 @@ pub(super) fn definition(
             }
         },
     };
+    let prompt_cache = match string(values, "--prompt-cache")?.as_deref() {
+        None => None,
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        Some(_) => {
+            return Err(CliError::argument("--prompt-cache must be on or off"));
+        }
+    };
     let overrides = DefinitionOverrides {
         provider,
         workspace_root: values.get("--workspace").map(|path| (*path).into()),
@@ -190,6 +198,7 @@ pub(super) fn definition(
         context_window,
         auto_compact,
         compact_threshold,
+        prompt_cache,
         max_tokens: number("--max-tokens")?
             .map(u32::try_from)
             .transpose()

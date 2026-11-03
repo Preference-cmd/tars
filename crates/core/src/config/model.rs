@@ -37,6 +37,8 @@ pub struct DefinitionOverrides {
     pub auto_compact: Option<bool>,
     /// Explicit initial automatic-compaction trigger percentage.
     pub compact_threshold: Option<u8>,
+    /// Explicit initial prompt-caching switch.
+    pub prompt_cache: Option<bool>,
     /// Explicit reasoning effort, sent to the provider as written.
     pub reasoning_effort: Option<String>,
     /// Explicit extra request fields; replaces the preset's as a whole.
@@ -76,6 +78,7 @@ pub(super) struct Profile {
     context_window: Option<u64>,
     auto_compact: Option<bool>,
     compact_threshold: Option<u8>,
+    prompt_cache: Option<bool>,
     reasoning_effort: Option<String>,
     extra_body: Option<serde_json::Map<String, serde_json::Value>>,
     max_model_attempts: Option<u32>,
@@ -282,6 +285,10 @@ pub(super) fn resolve(
             .compact_threshold
             .or(profile.and_then(|p| p.compact_threshold))
             .unwrap_or(70),
+        prompt_cache: options
+            .prompt_cache
+            .or(profile.and_then(|p| p.prompt_cache))
+            .unwrap_or(true),
         reasoning_effort: options
             .reasoning_effort
             .or_else(|| profile.and_then(|p| p.reasoning_effort.clone())),

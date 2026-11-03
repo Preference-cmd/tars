@@ -171,6 +171,19 @@ impl ManagedSession {
     pub fn status(&self) -> SessionStatus {
         self.entry.status()
     }
+    /// Title of the last stored record, taken from the first user message.
+    pub fn title(&self) -> Option<String> {
+        self.entry.lock().saved.title.clone()
+    }
+    /// Creation timestamp in milliseconds since Unix epoch, if derived from UUIDv7 ID.
+    pub fn created_at_ms(&self) -> Option<u64> {
+        crate::time::created_at_from_id(self.entry.target.conversation_id.as_str())
+    }
+    /// Last-activity time of the last stored record, in Unix milliseconds;
+    /// the creation time before the first record is stored.
+    pub fn updated_at_ms(&self) -> u64 {
+        self.entry.lock().saved.updated_at_ms
+    }
     /// Facts learned while this instance was opened.
     pub fn open_report(&self) -> OpenReport {
         self.entry.lock().open_report
@@ -361,6 +374,7 @@ impl ManagedSession {
             self.entry.cloned_snapshot();
             let (auto_compact, compact_threshold, history) = saving::compaction_record(state);
             let usage = state.owner.as_ref().map(|o| o.session_usage());
+            let (title, updated_at_ms) = saving::next_metadata(state, &candidate);
             let record = SavedSessionRecord::new_with_compaction(
                 self.entry.target.conversation_id.as_str().to_owned(),
                 uuid::Uuid::now_v7().to_string(),
@@ -372,6 +386,8 @@ impl ManagedSession {
                 compact_threshold,
                 history,
                 usage,
+                title,
+                updated_at_ms,
             )?;
             Some(Arc::new(PreparedCommit::new(state.revision, record)?))
         } else {

@@ -24,6 +24,18 @@ pub enum Reply {
     Answer,
     Call(String, Value),
     Calls(Vec<ScriptedToolCall>),
+    /// A whole JSON reply, not a stream, as a compaction brief request expects.
+    Summary(&'static str),
+}
+
+/// Non-streaming reply with one text message in the provider's shape.
+fn summary_body(provider: &str, text: &str) -> String {
+    match provider {
+        "openai-chat" => json!({"choices":[{"message":{"role":"assistant","content":text},"finish_reason":"stop"}]}),
+        "openai-responses" => json!({"id":"summary","status":"completed","output":[{"id":"message","type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]}),
+        _ => json!({"id":"summary","type":"message","role":"assistant","content":[{"type":"text","text":text}],"stop_reason":"end_turn"}),
+    }
+    .to_string()
 }
 
 fn data(value: Value) -> String {
@@ -35,7 +47,7 @@ fn body(provider: &str, reply: Reply, index: usize) -> String {
             "read_file".to_string(),
             json!({"path": path, "start_line": 1, "max_lines": 1}).to_string(),
         )],
-        Reply::Answer => Vec::new(),
+        Reply::Answer | Reply::Summary(_) => Vec::new(),
         Reply::Call(name, args) => vec![(name, args.to_string())],
         Reply::Calls(calls) => calls
             .into_iter()
@@ -143,6 +155,8 @@ fn body(provider: &str, reply: Reply, index: usize) -> String {
 pub struct Fixture {
     pub endpoint: String,
     pub requests: Arc<Mutex<Vec<Value>>>,
+    /// The same request bodies as sent, byte for byte.
+    pub raw_requests: Arc<Mutex<Vec<Vec<u8>>>>,
     /// Connections from the client under test.
     pub accepted: Arc<AtomicUsize>,
     /// Every accepted connection, counted before the fixture waits for its
@@ -165,6 +179,8 @@ impl Fixture {
         let endpoint = format!("http://{}{path}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
+        let raw_requests = Arc::new(Mutex::new(Vec::new()));
+        let raw_captured = raw_requests.clone();
         let accepted = Arc::new(AtomicUsize::new(0));
         let accepted_count = accepted.clone();
         let connected = Arc::new(AtomicUsize::new(0));
@@ -234,10 +250,12 @@ impl Fixture {
                     };
                     bytes.extend_from_slice(&chunk[..count]);
                 }
+                let request = &bytes[start..start + length];
+                raw_captured.lock().unwrap().push(request.to_vec());
                 captured
                     .lock()
                     .unwrap()
-                    .push(serde_json::from_slice(&bytes[start..start + length]).unwrap());
+                    .push(serde_json::from_slice(request).unwrap());
                 if pause_at == Some(index) {
                     while !gate.load(Ordering::SeqCst) {
                         if stopped.load(Ordering::SeqCst) || Instant::now() > deadline {
@@ -246,12 +264,15 @@ impl Fixture {
                         std::thread::sleep(Duration::from_millis(2));
                     }
                 }
-                let body = body(&provider, reply, index);
+                let (content_type, body) = match reply {
+                    Reply::Summary(text) => ("application/json", summary_body(&provider, text)),
+                    reply => ("text/event-stream", body(&provider, reply, index)),
+                };
                 // Cancelled requests may close their socket. They still consume
                 // exactly this model step; they never substitute another response.
                 let _ = write!(
                     socket,
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
             }
@@ -259,6 +280,7 @@ impl Fixture {
         Self {
             endpoint,
             requests,
+            raw_requests,
             accepted,
             connected,
             release,

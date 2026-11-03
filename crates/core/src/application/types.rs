@@ -331,6 +331,12 @@ pub struct SavedSessionSummary {
     pub revision: u64,
     /// Number of Context blocks in the current record.
     pub block_count: usize,
+    /// Session title derived from first user message, if any.
+    pub title: Option<String>,
+    /// Creation timestamp in milliseconds since Unix epoch, if derived from UUIDv7 ID.
+    pub created_at_ms: Option<u64>,
+    /// Last update timestamp in milliseconds since Unix epoch.
+    pub updated_at_ms: u64,
 }
 
 /// Confirmation of a pending commit when explicitly abandoning local materials.
