@@ -1032,3 +1032,249 @@ fn test_be05_cli_history_prints_expanded_conversation_and_deleting_record_exits_
     let third: Value = serde_json::from_str(broken_lines[2]).unwrap();
     assert_eq!(third["status"], "original");
 }
+
+#[test]
+fn test_be09_cli_export_materials_drops_own_reference_and_create_accepts() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = folder.path().join("store");
+    let fixture = Fixture::new(2);
+    let id = create(
+        &store,
+        &fixture.endpoint,
+        &["--context-window", "1500", "--auto-compact", "50"],
+    );
+
+    let child = spawn(run(&store, &id, &"x".repeat(1_200)));
+    fixture.request();
+    fixture.summary("Goal: test export drops own reference.");
+    fixture.request();
+    fixture.stream("done");
+    let output = finished(child);
+    assert!(output.status.success(), "{output:?}");
+
+    let rec_file = record_path(&store, &id);
+    let mut rec_json: Value = serde_json::from_slice(&fs::read(&rec_file).unwrap()).unwrap();
+    let record_id = rec_json["history"][0]["record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let hist_file = store
+        .join("sessions")
+        .join(format!("{id}.history"))
+        .join(format!("{record_id}.json"));
+    let hist_json: Value = serde_json::from_slice(&fs::read(&hist_file).unwrap()).unwrap();
+    let orig_block_id = hist_json["replacements"][0]["originals"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let call_id = causa::runtime::new_block_id();
+    let res_id = causa::runtime::new_block_id();
+    let tool_call_block = causa::kernel::ContextBlock::new(
+        call_id,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "read_file",
+            serde_json::json!({}),
+        )),
+        causa::kernel::BlockMeta::default(),
+    );
+    let mut out = causa::kernel::ToolOutput::new(serde_json::json!("preview of data"));
+    out.artifact = Some(causa::kernel::ArtifactRef::new(
+        format!("{record_id}/{orig_block_id}"),
+        50,
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let tool_res_payload = causa::kernel::ToolResultPayload::new(
+        call_id,
+        causa::kernel::ToolResultStatus::Succeeded,
+        out,
+    )
+    .with_notes(vec![causa::kernel::TextPayload::new("original note")]);
+    let tool_res_block = causa::kernel::ContextBlock::new(
+        res_id,
+        causa::kernel::BlockContent::ToolResult(tool_res_payload),
+        causa::kernel::BlockMeta::default(),
+    );
+
+    rec_json["context"]["blocks"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(&tool_call_block).unwrap());
+    rec_json["context"]["blocks"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(&tool_res_block).unwrap());
+    fs::write(&rec_file, serde_json::to_vec(&rec_json).unwrap()).unwrap();
+
+    let exported = folder.path().join("exported.json");
+    let export = cli()
+        .args(["session", "export-materials", "--record"])
+        .arg(&rec_file)
+        .arg("--output")
+        .arg(&exported)
+        .output()
+        .unwrap();
+    assert!(export.status.success(), "{export:?}");
+
+    let material = tars_core::material::load(&exported).unwrap();
+    let exported_res = material
+        .blocks()
+        .iter()
+        .find_map(|b| match b.content() {
+            causa::kernel::BlockContent::ToolResult(r) => Some(r),
+            _ => None,
+        })
+        .expect("exported tool result present");
+    assert!(
+        exported_res.output.artifact.is_none(),
+        "own reference must be dropped"
+    );
+    assert!(
+        exported_res
+            .notes
+            .iter()
+            .any(|n| n.0 == tars_core::material::DETACHED_HISTORY_NOTE)
+    );
+
+    let imported_store = folder.path().join("imported");
+    let imported_id = create(
+        &imported_store,
+        "http://127.0.0.1:1/unused",
+        &["--load", exported.to_str().unwrap()],
+    );
+    let imported_record = record(&imported_store, &imported_id);
+    assert_eq!(
+        imported_record["context"]["blocks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        material.blocks().len()
+    );
+}
+
+#[test]
+fn test_be09_cli_recovery_export_drops_own_reference_and_is_importable() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = folder.path().join("store");
+    let fixture = Fixture::new(3);
+    let id = create(
+        &store,
+        &fixture.endpoint,
+        &["--context-window", "1500", "--auto-compact", "50"],
+    );
+
+    let child = spawn(run(&store, &id, &"x".repeat(1_200)));
+    fixture.request();
+    fixture.summary("Goal: test recovery drops own reference.");
+    fixture.request();
+    fixture.stream("done");
+    let output = finished(child);
+    assert!(output.status.success(), "{output:?}");
+
+    let rec_file = record_path(&store, &id);
+    let mut rec_json: Value = serde_json::from_slice(&fs::read(&rec_file).unwrap()).unwrap();
+    let record_id = rec_json["history"][0]["record_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let hist_file = store
+        .join("sessions")
+        .join(format!("{id}.history"))
+        .join(format!("{record_id}.json"));
+    let hist_json: Value = serde_json::from_slice(&fs::read(&hist_file).unwrap()).unwrap();
+    let orig_block_id = hist_json["replacements"][0]["originals"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let call_id = causa::runtime::new_block_id();
+    let res_id = causa::runtime::new_block_id();
+    let tool_call_block = causa::kernel::ContextBlock::new(
+        call_id,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "read_file",
+            serde_json::json!({}),
+        )),
+        causa::kernel::BlockMeta::default(),
+    );
+    let mut out = causa::kernel::ToolOutput::new(serde_json::json!("preview of data"));
+    out.artifact = Some(causa::kernel::ArtifactRef::new(
+        format!("{record_id}/{orig_block_id}"),
+        50,
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let tool_res_payload = causa::kernel::ToolResultPayload::new(
+        call_id,
+        causa::kernel::ToolResultStatus::Succeeded,
+        out,
+    )
+    .with_notes(vec![causa::kernel::TextPayload::new("pre-recovery note")]);
+    let tool_res_block = causa::kernel::ContextBlock::new(
+        res_id,
+        causa::kernel::BlockContent::ToolResult(tool_res_payload),
+        causa::kernel::BlockMeta::default(),
+    );
+
+    rec_json["context"]["blocks"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(&tool_call_block).unwrap());
+    rec_json["context"]["blocks"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::to_value(&tool_res_block).unwrap());
+    fs::write(&rec_file, serde_json::to_vec(&rec_json).unwrap()).unwrap();
+
+    let backup = folder.path().join("store-backup");
+    let recovery_dir = folder.path().join("recovery");
+    std::fs::create_dir_all(&recovery_dir).unwrap();
+
+    let mut cmd = run(&store, &id, "trigger save failure");
+    cmd.arg("--recovery-dir").arg(&recovery_dir);
+    let child = spawn(cmd);
+    fixture.request();
+    fs::rename(&store, &backup).unwrap();
+    fixture.stream("completed turn");
+    let run_output = finished(child);
+
+    assert_eq!(run_output.status.code(), Some(1), "{run_output:?}");
+    let val = report(&run_output);
+    assert_eq!(val["saved"], false);
+    assert!(val["recovery_file"].is_string());
+    let recovery_path = PathBuf::from(val["recovery_file"].as_str().unwrap());
+
+    let recovered_context = tars_core::material::load(&recovery_path).unwrap();
+    let res = recovered_context
+        .blocks()
+        .iter()
+        .find_map(|b| match b.content() {
+            causa::kernel::BlockContent::ToolResult(r) => Some(r),
+            _ => None,
+        })
+        .expect("tool result in recovery file");
+    assert!(res.output.artifact.is_none());
+    assert!(
+        res.notes
+            .iter()
+            .any(|n| n.0 == tars_core::material::DETACHED_HISTORY_NOTE)
+    );
+
+    let import_store = folder.path().join("imported_from_recovery");
+    let imported_id = create(
+        &import_store,
+        "http://127.0.0.1:1/unused",
+        &["--load", recovery_path.to_str().unwrap()],
+    );
+    let imported_record = record(&import_store, &imported_id);
+    assert_eq!(
+        imported_record["context"]["blocks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        recovered_context.blocks().len()
+    );
+}

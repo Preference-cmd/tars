@@ -455,9 +455,14 @@ async fn a_later_round_keeps_the_submitted_request_verbatim_in_the_summary() {
         "{summary_text}"
     );
     assert!(
-        summary_text.ends_with(&format!(
+        summary_text.contains(&format!(
             "The user's current request, verbatim:\n---\n{request_text}\n---"
         )),
+        "{summary_text}"
+    );
+    let last_line = summary_text.lines().last().unwrap();
+    assert!(
+        last_line.starts_with("Original messages: recall id="),
         "{summary_text}"
     );
     session.shutdown().await;
@@ -821,6 +826,12 @@ fn summary_block_has_a_fixed_prefix_and_provenance() {
         }
         _ => panic!("summary is a message"),
     }
+}
+
+#[test]
+fn test_be08_summary_prefix_names_recall_and_omits_only_record() {
+    assert!(!summary::SUMMARY_PREFIX.contains("only record"));
+    assert!(summary::SUMMARY_PREFIX.contains("recall"));
 }
 
 #[tokio::test]
@@ -3303,4 +3314,75 @@ async fn test_be07_recall_stops_in_flight_on_cancel_deadline_and_drop() {
     tokio::time::timeout(wait, tool.reporter().drain())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_be08_shortened_result_note_contains_recall_id_and_recall_reads_original() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _runtime, tool) = setup_recall_test(dir.path());
+
+    let original_text = "original full output of a lengthy command or file read";
+    let b0 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::User,
+        original_text,
+    );
+    let mut context = Context::new();
+    context.edit().append(vec![b0.clone()]).commit().unwrap();
+
+    let record_id = super::history::new_record_id();
+    let block_id = b0.id();
+    let rewrite = super::history::Rewrite {
+        record_id: record_id.clone(),
+        trigger: super::HistoryTrigger::Auto,
+        kind: super::history::RewriteKind::Summarize,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements: vec![super::history::PlannedReplacement {
+            range: 0..1,
+            with: vec![summary::summary_block(
+                summary::new_block_id(),
+                "brief summary",
+            )],
+        }],
+    };
+    store.commit_rewrite(&mut context, rewrite).unwrap();
+
+    let note = super::shortened_result_note(&record_id, block_id.0);
+    let recall_id = format!("{record_id}/{}", block_id.0);
+    assert!(
+        note.0.contains(&recall_id),
+        "note must contain recall id: {}",
+        note.0
+    );
+
+    let mut output = ToolOutput::new(serde_json::json!("shortened preview"));
+    output.artifact = Some(causa::kernel::ArtifactRef::new(
+        recall_id.clone(),
+        original_text.len(),
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let mut result_payload = ToolResultPayload::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        ToolResultStatus::Succeeded,
+        output,
+    );
+    result_payload.notes.push(note);
+
+    // Follow the id exactly as the model sees it in the note.
+    let noted_id = result_payload.notes[0]
+        .0
+        .rsplit_once("recall id=")
+        .map(|(_, id)| id.trim())
+        .expect("note names a recall id");
+    assert_eq!(noted_id, recall_id);
+    let call = recall_call(serde_json::json!({ "id": noted_id }));
+    let res = tool.execute(&call, &recall_control(), None).await;
+    assert_eq!(res.status, ToolResultStatus::Succeeded);
+    let output_text = match &res.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        other => panic!("expected string output, got: {other:?}"),
+    };
+    assert!(output_text.contains(original_text));
 }

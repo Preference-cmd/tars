@@ -163,6 +163,8 @@ struct SessionMaterials {
     last_commit_id: String,
     // Intentionally never construct or default a permission-bearing definition.
     definition: serde::de::IgnoredAny,
+    #[serde(default)]
+    history: Vec<crate::compact::HistoryRecordEntry>,
     context: Context,
 }
 impl SessionMaterials {
@@ -184,7 +186,10 @@ impl SessionMaterials {
             return Err(MaterialError::SessionEnvelope("invalid revision"));
         }
         let _ = self.definition;
-        Ok(self.context)
+        Ok(references::detach_history_references(
+            &self.context,
+            &self.history,
+        ))
     }
 }
 

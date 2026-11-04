@@ -232,6 +232,15 @@ impl Session {
         self.shared.compaction.clone()
     }
 
+    /// The live rewrite record index; empty for sessions without compaction.
+    pub(crate) fn history_entries(&self) -> Vec<crate::compact::HistoryRecordEntry> {
+        self.shared
+            .compaction
+            .as_ref()
+            .map(|runtime| runtime.entries())
+            .unwrap_or_default()
+    }
+
     /// Clone a handle with submission and retained work access only.
     pub fn handle(&self) -> SessionHandle {
         SessionHandle {

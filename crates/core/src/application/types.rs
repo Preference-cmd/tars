@@ -110,6 +110,13 @@ pub struct MaterialSnapshot {
     pub history: Vec<crate::compact::HistoryRecordEntry>,
 }
 
+impl MaterialSnapshot {
+    /// Return a copy of the Context with history references detached for export.
+    pub fn detached_context(&self) -> Context {
+        crate::material::detach_history_references(&self.context, &self.history)
+    }
+}
+
 /// Independent persistence outcome; never rewrites the low-level work result.
 #[derive(Clone, Debug)]
 pub enum SaveStatus {

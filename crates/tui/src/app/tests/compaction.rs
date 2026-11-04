@@ -154,10 +154,13 @@ async fn compact_job_keeps_the_replaced_conversation_and_summary_panel() {
     command(&mut app, "compact");
     assert_eq!(app.entries[0].busy, Some("compacting"));
     until(&mut app, |_| server.requests.lock().unwrap().len() == 2).await;
+    // The history view settles in steps; wait until it has reached the start.
     until(&mut app, |app| {
         app.entries[0].busy.is_none()
             && app.entries[0].rows.is_some()
             && app.entries[0].history_rows.is_some()
+            && !app.entries[0].history.loading()
+            && !app.entries[0].history.has_earlier()
             && !app.entries[0].wrapping
     })
     .await;

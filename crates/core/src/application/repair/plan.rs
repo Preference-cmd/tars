@@ -105,17 +105,18 @@ impl ManagedSession {
             .clone();
         let owner = state.owner.as_mut().expect("published owner");
         let claims_revision = owner.claims_revision();
+        let history = owner.history_entries();
         let context = owner.with_context(|context| {
             self.entry.cloned_snapshot();
             context.clone()
         })?;
-        let scan = scan(&context);
+        let scan = scan(&context, &history);
         if scan.fatal {
             return Err(RepairError::Materials(scan.diagnosis).into());
         }
         if scan.unpaired.is_empty() {
             drop(state);
-            let diagnosis = diagnose(&context, &definition);
+            let diagnosis = diagnose(&context, &history, &definition);
             if !diagnosis.is_ready() {
                 return Err(RepairError::Materials(diagnosis).into());
             }
@@ -238,7 +239,7 @@ impl ManagedSession {
         ));
         let candidate = Context::from_blocks(blocks)
             .map_err(|failure| SessionError::ContextEdit(failure.reason))?;
-        candidate_check(&candidate, &definition)?;
+        candidate_check(&candidate, &history, &definition)?;
         let summary = RepairSummary {
             original_blocks,
             candidate_blocks: candidate.blocks().len(),

@@ -32,7 +32,7 @@ pub(crate) mod recall;
 pub(crate) mod runtime;
 pub(crate) mod summary;
 
-use causa::kernel::{BlockContent, ContentPart, ContextBlock, Role};
+use causa::kernel::{BlockContent, ContentPart, ContextBlock, Role, TextPayload};
 use serde::{Deserialize, Serialize};
 
 pub(crate) use artifacts::HistoryArtifacts;
@@ -166,6 +166,22 @@ pub fn user_request_text(blocks: &[ContextBlock]) -> Option<String> {
         }
     }
     (!messages.is_empty()).then(|| messages.join("\n\n"))
+}
+
+/// Prefix of the model-facing note on a shortened tool result.
+#[cfg_attr(not(test), allow(dead_code))] // Used by tests today; P4 will use this for result elision.
+pub(crate) const SHORTENED_RESULT_NOTE_PREFIX: &str =
+    "Shortened by compaction; full original: recall id=";
+
+/// Build the model-facing note for a tool result shortened by compaction.
+#[cfg_attr(not(test), allow(dead_code))] // Used by tests today; P4 will use this for result elision.
+pub(crate) fn shortened_result_note(
+    record_id: &str,
+    block_id: impl std::fmt::Display,
+) -> TextPayload {
+    TextPayload::new(format!(
+        "{SHORTENED_RESULT_NOTE_PREFIX}{record_id}/{block_id}"
+    ))
 }
 
 #[cfg(test)]

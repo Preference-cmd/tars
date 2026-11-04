@@ -14,7 +14,7 @@ use causa::kernel::{
 pub(crate) const SUMMARY_MAX_TOKENS: u32 = 16_000;
 
 /// Fixed prefix of the block that carries the summary to the model.
-pub(crate) const SUMMARY_PREFIX: &str = "The conversation before this point was compacted into the working brief below. It is the only record of the earlier messages.\n\n";
+pub(crate) const SUMMARY_PREFIX: &str = "The conversation before this point was compacted into the working brief below. The original messages can be read back with the `recall` tool using the id at the end of the brief.\n\n";
 
 /// Block provenance marking a TARS-written summary; only TARS reads it.
 pub const SUMMARY_SOURCE: &str = "tars:compaction";
@@ -157,16 +157,19 @@ pub(crate) fn summary_block(id: BlockId, text: &str) -> ContextBlock {
 }
 
 /// The summary text, ending with the current request verbatim when the
-/// compaction happens inside a turn.
+/// compaction happens inside a turn, followed by the recall pointer line.
 ///
 /// The model was asked to cover the request, but a brief may paraphrase it;
 /// the later rounds of the same turn need the exact wording.
-pub(crate) fn summary_text(brief: &str, current_request: Option<&str>) -> String {
+pub(crate) fn summary_text(brief: &str, current_request: Option<&str>, record_id: &str) -> String {
+    let pointer = format!("Original messages: recall id={record_id}");
     match current_request {
         Some(request) => {
-            format!("{brief}\n\nThe user's current request, verbatim:\n---\n{request}\n---")
+            format!(
+                "{brief}\n\nThe user's current request, verbatim:\n---\n{request}\n---\n\n{pointer}"
+            )
         }
-        None => brief.to_owned(),
+        None => format!("{brief}\n\n{pointer}"),
     }
 }
 

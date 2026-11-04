@@ -128,6 +128,23 @@ async fn repair_remove_preserves_facts_and_protocol_readiness_for_all_providers(
 async fn repair_rejects_orphans_duplicate_results_wire_ambiguity_and_media_without_edits() {
     let declaration = call("wire");
     let orphan = result(&declaration, ToolResultStatus::Succeeded);
+    // Shaped like a rewrite record reference, but this session has no records.
+    let artifact_call = call("artifact");
+    let mut artifact_result = result(&artifact_call, ToolResultStatus::Succeeded);
+    if let BlockContent::ToolResult(payload) = artifact_result.content() {
+        let mut payload = payload.clone();
+        payload.output.artifact = Some(causa::kernel::ArtifactRef::new(
+            format!("{}/{}", uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
+            10,
+            causa::kernel::ArtifactKind::FullOutput,
+            true,
+        ));
+        artifact_result = ContextBlock::new(
+            artifact_result.id(),
+            BlockContent::ToolResult(payload),
+            artifact_result.meta().clone(),
+        );
+    }
     let cases = [
         (vec![orphan.clone()], RepairIssueKind::OrphanResult),
         (
@@ -156,6 +173,10 @@ async fn repair_rejects_orphans_duplicate_results_wire_ambiguity_and_media_witho
                 ),
                 declaration,
             ],
+            RepairIssueKind::UnsupportedReference,
+        ),
+        (
+            vec![artifact_call, artifact_result],
             RepairIssueKind::UnsupportedReference,
         ),
     ];

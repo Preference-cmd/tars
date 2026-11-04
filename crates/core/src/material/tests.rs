@@ -305,3 +305,109 @@ fn offline_export_extracts_context_from_a_compacted_record() {
     let loaded = load_session_materials(&path).unwrap();
     assert_eq!(loaded.blocks().len(), 1);
 }
+
+#[test]
+fn test_be09_detach_history_references_unit() {
+    let own_record_id = uuid::Uuid::now_v7().to_string();
+    let own_block_uuid = uuid::Uuid::now_v7();
+    let foreign_record_id = uuid::Uuid::now_v7().to_string();
+    let foreign_block_uuid = uuid::Uuid::now_v7();
+
+    let history = vec![crate::compact::HistoryRecordEntry {
+        record_id: own_record_id.clone(),
+        created_at_ms: 1000,
+        trigger: crate::compact::HistoryTrigger::Auto,
+        kind: crate::compact::RewriteKind::Summarize,
+        removed_block_count: 2,
+        inserted_block_ids: vec![causa::kernel::BlockId::new(uuid::Uuid::now_v7())],
+    }];
+
+    let call_id_1 = new_block_id();
+    let call_id_2 = new_block_id();
+    let block1_id = new_block_id();
+    let block2_id = new_block_id();
+
+    let mut out1 = ToolOutput::new(serde_json::json!({"output": "data"}));
+    out1.truncation = causa::kernel::Truncation::Middle;
+    out1.artifact = Some(ArtifactRef::new(
+        format!("{own_record_id}/{own_block_uuid}"),
+        64,
+        ArtifactKind::FullOutput,
+        true,
+    ));
+    let result1 = ToolResultPayload::new(call_id_1, ToolResultStatus::Succeeded, out1)
+        .with_notes(vec![causa::kernel::TextPayload::new("pre-existing note")])
+        .with_media(vec![MediaRef::new("image/png", "img-1")]);
+
+    let mut out2 = ToolOutput::new(serde_json::json!({"other": "result"}));
+    out2.artifact = Some(ArtifactRef::new(
+        format!("{foreign_record_id}/{foreign_block_uuid}"),
+        128,
+        ArtifactKind::FullOutput,
+        true,
+    ));
+    let result2 = ToolResultPayload::new(call_id_2, ToolResultStatus::Failed, out2)
+        .with_notes(vec![causa::kernel::TextPayload::new("foreign note")]);
+
+    let block1 = ContextBlock::new(
+        block1_id,
+        BlockContent::ToolResult(result1),
+        BlockMeta::from_source("tool"),
+    );
+    let block2 = ContextBlock::new(
+        block2_id,
+        BlockContent::ToolResult(result2),
+        BlockMeta::default(),
+    );
+
+    let context = Context::from_blocks(vec![block1.clone(), block2.clone()]).unwrap();
+
+    let detached = detach_history_references(&context, &history);
+
+    assert_eq!(detached.blocks().len(), 2);
+    assert_eq!(detached.blocks()[0].id(), block1_id);
+    assert_eq!(detached.blocks()[1].id(), block2_id);
+
+    let BlockContent::ToolResult(res1) = detached.blocks()[0].content() else {
+        panic!("expected ToolResult");
+    };
+    assert!(
+        res1.output.artifact.is_none(),
+        "own artifact reference must be removed"
+    );
+    assert_eq!(res1.output.content, serde_json::json!({"output": "data"}));
+    assert_eq!(res1.status, ToolResultStatus::Succeeded);
+    assert_eq!(res1.call_block_id, call_id_1);
+    assert_eq!(res1.media, vec![MediaRef::new("image/png", "img-1")]);
+    assert_eq!(res1.output.truncation, causa::kernel::Truncation::Middle);
+    assert_eq!(detached.blocks()[0].meta().source.as_deref(), Some("tool"));
+    assert_eq!(res1.notes.len(), 2);
+    assert_eq!(res1.notes[0].0, "pre-existing note");
+    assert_eq!(res1.notes[1].0, DETACHED_HISTORY_NOTE);
+
+    let BlockContent::ToolResult(res2) = detached.blocks()[1].content() else {
+        panic!("expected ToolResult");
+    };
+    assert!(
+        res2.output.artifact.is_some(),
+        "foreign reference must remain untouched"
+    );
+    assert_eq!(
+        res2.output.artifact.as_ref().unwrap().id,
+        format!("{foreign_record_id}/{foreign_block_uuid}")
+    );
+    assert_eq!(res2.notes.len(), 1);
+    assert_eq!(res2.notes[0].0, "foreign note");
+
+    let detached_again = detach_history_references(&detached, &history);
+    let BlockContent::ToolResult(res1_again) = detached_again.blocks()[0].content() else {
+        panic!("expected ToolResult");
+    };
+    assert_eq!(
+        res1_again.notes.len(),
+        2,
+        "must not add duplicate note on second detach"
+    );
+    assert_eq!(res1_again.notes[1].0, DETACHED_HISTORY_NOTE);
+    assert_eq!(detached_again.blocks(), detached.blocks());
+}

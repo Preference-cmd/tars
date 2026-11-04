@@ -73,13 +73,16 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
     let mut saved = false;
     if let Some(path) = options.save {
         match session.read_materials() {
-            Ok(materials) => match tars_core::material::save(&path, &materials.context) {
-                Ok(()) => saved = true,
-                Err(_) => {
-                    error = Some("material save failed");
-                    code = 1;
+            Ok(materials) => {
+                let context = materials.detached_context();
+                match tars_core::material::save(&path, &context) {
+                    Ok(()) => saved = true,
+                    Err(_) => {
+                        error = Some("material save failed");
+                        code = 1;
+                    }
                 }
-            },
+            }
             Err(_) => {
                 error = Some("materials unavailable after worker failure");
                 code = 1;

@@ -23,8 +23,8 @@ pub(super) fn export(
 ) -> Result<(String, bool), String> {
     let snapshot = session.read_materials().map_err(|e| e.to_string())?;
     let path = directory.join(format!("tars-recovery-{}.json", new_block_id().0));
-    let saved =
-        tars_core::material::save_new(&path, &snapshot.context).map_err(|e| e.to_string())?;
+    let context = snapshot.detached_context();
+    let saved = tars_core::material::save_new(&path, &context).map_err(|e| e.to_string())?;
     Ok((path.display().to_string(), saved.importable))
 }
 

@@ -1360,6 +1360,276 @@ async fn test_be07_recall_runs_in_read_only_and_ask_without_approval() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be08_compaction_brief_ends_with_recall_pointer_and_recall_lists_originals() {
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+
+    struct DynamicRecallGateway {
+        target_record_id: std::sync::Mutex<Option<String>>,
+        main_rounds: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl causa::kernel::ModelGateway for DynamicRecallGateway {
+        async fn invoke(
+            &self,
+            request: &causa::kernel::ModelRequest,
+            _: &causa::kernel::CallControl,
+        ) -> Result<causa::kernel::ModelOutput, causa::kernel::ModelInvokeError> {
+            if is_summary_request(request) {
+                let mut out = causa::kernel::ModelOutput::new(
+                    causa::kernel::ModelResponse {
+                        items: vec![causa::kernel::ModelItem::text(
+                            "Goal: test recall pointer in brief.",
+                        )],
+                    },
+                    causa::kernel::ModelStopReason::EndTurn,
+                );
+                out.usage = Some(causa::kernel::ModelUsage::new(400, 30));
+                return Ok(out);
+            }
+            let round = self.main_rounds.fetch_add(1, Ordering::SeqCst);
+            let target = self.target_record_id.lock().unwrap().clone();
+            if let Some(record_id) = target
+                && round == 1
+            {
+                Ok(causa::kernel::ModelOutput::new(
+                    causa::kernel::ModelResponse {
+                        items: vec![causa::kernel::ModelItem::tool_call(
+                            causa::kernel::ToolCallDraft::new(
+                                "recall",
+                                serde_json::json!({ "id": record_id }),
+                            ),
+                        )],
+                    },
+                    causa::kernel::ModelStopReason::ToolUse,
+                ))
+            } else {
+                let mut out = causa::kernel::ModelOutput::new(
+                    causa::kernel::ModelResponse {
+                        items: vec![causa::kernel::ModelItem::text("done")],
+                    },
+                    causa::kernel::ModelStopReason::EndTurn,
+                );
+                out.usage = Some(causa::kernel::ModelUsage::new(MAIN_INPUT_TOKENS, 20));
+                Ok(out)
+            }
+        }
+    }
+
+    let gateway = Arc::new(DynamicRecallGateway {
+        target_record_id: std::sync::Mutex::new(None),
+        main_rounds: std::sync::atomic::AtomicUsize::new(0),
+    });
+    host.set_test_gateway(Some(gateway.clone() as Arc<dyn ModelGateway>));
+
+    let mut def = compacting_definition(None);
+    def.max_tool_calls = 5;
+    let session = host
+        .create(PreparedCreate::persistent(def, Context::new()))
+        .await
+        .unwrap();
+
+    let receipt = session
+        .submit(SubmitRequest {
+            request_key: "init".into(),
+            blocks: vec![text_block(1_200), text_block(1_200)],
+        })
+        .unwrap();
+    finished(&session, &receipt.work).await;
+    session.wait_saved().await.unwrap();
+
+    let outcome = session.compact().await.unwrap();
+    session.wait_saved().await.unwrap();
+    let record_id = outcome.record.record_id.clone();
+    *gateway.target_record_id.lock().unwrap() = Some(record_id.clone());
+
+    let snapshot = session.read_materials().unwrap();
+    let brief_block = snapshot
+        .context
+        .blocks()
+        .iter()
+        .find(|b| b.meta().source.as_deref() == Some(crate::compact::SUMMARY_SOURCE))
+        .expect("brief block must exist");
+    let brief_text = match brief_block.content() {
+        causa::kernel::BlockContent::Message { parts, .. } => parts
+            .iter()
+            .find_map(|p| match p {
+                causa::kernel::ContentPart::Text(t) => Some(t.0.as_str()),
+                _ => None,
+            })
+            .unwrap(),
+        _ => panic!("expected message block"),
+    };
+    let expected_pointer = format!("Original messages: recall id={record_id}");
+    assert_eq!(
+        brief_text.lines().last().unwrap(),
+        expected_pointer.as_str()
+    );
+
+    let receipt2 = session.submit(request("use recall")).unwrap();
+    finished(&session, &receipt2.work).await;
+    session.wait_saved().await.unwrap();
+
+    let snapshot2 = session.read_materials().unwrap();
+    let recall_result = snapshot2
+        .context
+        .blocks()
+        .iter()
+        .find_map(|b| match b.content() {
+            causa::kernel::BlockContent::ToolResult(payload) => Some(payload),
+            _ => None,
+        })
+        .expect("recall result must be present in context");
+    assert_eq!(
+        recall_result.status,
+        causa::kernel::ToolResultStatus::Succeeded
+    );
+    let output_str = recall_result.output.content.as_str().unwrap();
+    assert!(
+        output_str.contains(&record_id),
+        "recall output must contain record id: {output_str}"
+    );
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be09_application_export_drops_own_artifact_references_and_imports() {
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("Summary brief text.".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+
+    let session = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(None),
+            Context::new(),
+        ))
+        .await
+        .unwrap();
+
+    let receipt = session
+        .submit(SubmitRequest {
+            request_key: "k1".into(),
+            blocks: vec![text_block(1_200), text_block(1_200)],
+        })
+        .unwrap();
+    finished(&session, &receipt.work).await;
+    session.wait_saved().await.unwrap();
+
+    let outcome = session.compact().await.unwrap();
+    session.wait_saved().await.unwrap();
+    let record_id = outcome.record.record_id;
+
+    let history_doc = session.read_history_record(&record_id).unwrap();
+    let orig_block = &history_doc.replacements[0].originals[0];
+    let orig_block_id = orig_block.id().0;
+
+    let call_id = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
+    let call_block = ContextBlock::new(
+        call_id,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "echo",
+            serde_json::json!({}),
+        )),
+        Default::default(),
+    );
+    let mut output = causa::kernel::ToolOutput::new(serde_json::Value::String("short note".into()));
+    output.artifact = Some(causa::kernel::ArtifactRef::new(
+        format!("{record_id}/{orig_block_id}"),
+        10,
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let result_block = ContextBlock::new(
+        causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            output,
+        )),
+        Default::default(),
+    );
+
+    let mut blocks = session.read_materials().unwrap().context.blocks().to_vec();
+    blocks.push(call_block);
+    blocks.push(result_block);
+    let version = session.read_materials().unwrap().version;
+    session.edit(version, blocks).unwrap();
+    session.wait_saved().await.unwrap();
+
+    // A reference to this session's own record is supported material: repair
+    // inspection is ready and new input is admitted.
+    assert!(session.inspect_repair(None).unwrap().diagnosis.is_ready());
+    let receipt = session
+        .submit(SubmitRequest {
+            request_key: "k2".into(),
+            blocks: vec![text_block(10)],
+        })
+        .unwrap();
+    finished(&session, &receipt.work).await;
+    session.wait_saved().await.unwrap();
+
+    let snapshot = session.read_materials().unwrap();
+    let export_folder = tempfile::tempdir().unwrap();
+    let export_path = export_folder.path().join("exported_materials.json");
+    crate::material::save_new(&export_path, &snapshot.detached_context()).unwrap();
+
+    let loaded_context = crate::material::load(&export_path).unwrap();
+    let exported_result = loaded_context
+        .blocks()
+        .iter()
+        .find_map(|b| match b.content() {
+            causa::kernel::BlockContent::ToolResult(res) => Some(res),
+            _ => None,
+        })
+        .expect("exported tool result present");
+    assert!(exported_result.output.artifact.is_none());
+    assert!(
+        exported_result
+            .notes
+            .iter()
+            .any(|n| n.0 == crate::material::DETACHED_HISTORY_NOTE)
+    );
+
+    let new_store = tempfile::tempdir().unwrap();
+    let new_host = SessionHost::new(Some(new_store.path().into()));
+    new_host.set_test_gateway(as_gateway(&gateway));
+    let new_session = new_host
+        .create(PreparedCreate::persistent(
+            compacting_definition(None),
+            loaded_context,
+        ))
+        .await
+        .unwrap();
+    new_session.wait_saved().await.unwrap();
+
+    let target = session.target().clone();
+    host.close(&target, ClosePolicy::Save).await.unwrap();
+    let reopened = host.open(target.conversation_id().clone()).await.unwrap();
+    let reopened_snapshot = reopened.read_materials().unwrap();
+    let reopened_result = reopened_snapshot
+        .context
+        .blocks()
+        .iter()
+        .find_map(|b| match b.content() {
+            causa::kernel::BlockContent::ToolResult(res) => Some(res),
+            _ => None,
+        })
+        .expect("tool result present in reopened session");
+    assert!(
+        reopened_result.output.artifact.is_some(),
+        "original session must keep its reference"
+    );
+    assert_eq!(
+        reopened_result.output.artifact.as_ref().unwrap().id,
+        format!("{record_id}/{orig_block_id}")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_be07_reopen_without_recall_appends_tool_change_and_succeeds() {
     let store = tempfile::tempdir().unwrap();
     let ws_dir = tempfile::tempdir().unwrap();

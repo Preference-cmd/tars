@@ -163,7 +163,7 @@ async fn turn_and_brief_bodies(name: &str, provider: Provider, prompt_cache: boo
         .create(PreparedCreate::persistent(definition, Context::new()))
         .await
         .unwrap();
-    run_session_turn(&session, "Hello world prompt").await;
+    run_session_turn(&session, &"Hello world prompt. ".repeat(30)).await;
     let outcome = session.compact().await;
     assert!(
         outcome.is_ok(),

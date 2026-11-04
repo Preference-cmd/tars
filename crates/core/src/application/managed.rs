@@ -201,11 +201,10 @@ impl ManagedSession {
         if let Err(reason) = self.entry.new_mutation(&state) {
             return Err(ManagedSubmitRejection { reason, request });
         }
-        let readiness = state
-            .owner
-            .as_mut()
-            .expect("published owner")
-            .with_context(|context| super::repair::admission_check(context));
+        let owner = state.owner.as_mut().expect("published owner");
+        let history = owner.history_entries();
+        let readiness =
+            owner.with_context(|context| super::repair::admission_check(context, &history));
         let readiness = readiness
             .map_err(ApplicationError::from)
             .and_then(|result| result.map_err(Into::into));
@@ -307,10 +306,7 @@ impl ManagedSession {
         let owner = state.owner.as_mut().ok_or(ApplicationError::InstanceGone)?;
         // Read together under the entry lock: with no work running, no rewrite
         // can land between the Context and its index.
-        let history = owner
-            .compaction()
-            .map(|runtime| runtime.entries())
-            .unwrap_or_default();
+        let history = owner.history_entries();
         let context = owner.with_context(|context| {
             self.entry.cloned_snapshot();
             context.clone()
@@ -737,15 +733,12 @@ impl ManagedSession {
                 .as_ref()
                 .and_then(|owner| owner.compaction())
                 .ok_or(ApplicationError::CompactionUnavailable)?;
-            let readiness =
-                state
-                    .owner
-                    .as_mut()
-                    .expect("published owner")
-                    .with_context(|context| {
-                        self.entry.cloned_snapshot();
-                        super::repair::admission_check(context)
-                    });
+            let owner = state.owner.as_mut().expect("published owner");
+            let history = owner.history_entries();
+            let readiness = owner.with_context(|context| {
+                self.entry.cloned_snapshot();
+                super::repair::admission_check(context, &history)
+            });
             match readiness {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => return Err(error.into()),

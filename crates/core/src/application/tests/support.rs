@@ -340,7 +340,7 @@ impl CompactionGateway {
     }
 }
 
-fn is_summary_request(request: &causa::kernel::ModelRequest) -> bool {
+pub(super) fn is_summary_request(request: &causa::kernel::ModelRequest) -> bool {
     request.frame.blocks.iter().any(|block| {
         let causa::kernel::BlockContent::Message { parts, .. } = block.content() else {
             return false;

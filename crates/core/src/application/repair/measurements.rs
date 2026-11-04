@@ -33,7 +33,7 @@ async fn repair_resource_probe() {
     let context = Context::from_blocks(blocks).unwrap();
     let material_bytes = serde_json::to_vec(&context).unwrap().len();
     let start = Instant::now();
-    let scan = inspect::scan(&context);
+    let scan = inspect::scan(&context, &[]);
     let scan_ms = elapsed(start);
     assert_eq!(scan.unpaired.len(), 8);
     let start = Instant::now();

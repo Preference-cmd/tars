@@ -214,7 +214,8 @@ pub(super) fn recovery(
         .read_materials()
         .map_err(|_| "returned materials are unavailable for recovery")?;
     let path = directory.join(format!("tars-recovery-{}.json", new_block_id().0));
-    let saved = tars_core::material::save_new(&path, &snapshot.context)
+    let context = snapshot.detached_context();
+    let saved = tars_core::material::save_new(&path, &context)
         .map_err(|_| "recovery material export failed")?;
     Ok(RecoveryFile {
         path,
