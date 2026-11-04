@@ -213,7 +213,10 @@ async fn us04_compaction_calls_and_conversation_counts_remain_separate() {
 async fn us05_input_rounds_count_only_works_entering_runner() {
     let store = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(store.path().into()));
-    normal_fixture(&host);
+    // The second work's runner assembly never finishes, so cancelling that work
+    // always stops it before the runner, whatever the thread timing.
+    let entered = Arc::new(Notify::new());
+    assembly_held_for_second_work(&host, entered.clone());
 
     let session = host
         .create(PreparedCreate::transient(definition(), Context::new()))
@@ -229,8 +232,11 @@ async fn us05_input_rounds_count_only_works_entering_runner() {
         matches!(obs1.state, WorkState::Finished(ref res) if matches!(**res, WorkResult::Run(_)))
     );
 
-    // Work 2: cancel before entering the runner
+    // Work 2: cancelled while its runner is still being assembled
     let r2 = session.submit(request("w2")).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
     session.cancel(&r2.work).unwrap();
     finished(&session, &r2.work).await;
     session.wait_saved().await.unwrap();
@@ -255,6 +261,44 @@ async fn us05_input_rounds_count_only_works_entering_runner() {
     host.close(&session.target(), ClosePolicy::DiscardLocal)
         .await
         .unwrap();
+}
+
+/// Like `normal_fixture`, except that the second work's runner assembly
+/// signals `entered` and then never completes.
+fn assembly_held_for_second_work(host: &SessionHost, entered: Arc<Notify>) {
+    let runner = Arc::new(TurnRunner::new(
+        Arc::new(Gateway {
+            calls: Arc::new(AtomicUsize::new(0)),
+            entered: None,
+            release: None,
+            panic: false,
+        }),
+        Arc::new(ToolExecutor::new(vec![], ToolExecutorOptions::default()).unwrap()),
+    ));
+    *host.inner.assemble.lock().unwrap() = Some(Arc::new(move |definition, id, context| {
+        let runner = runner.clone();
+        let entered = entered.clone();
+        let options = definition.run_options();
+        let works = Arc::new(AtomicUsize::new(0));
+        Ok(Session::new(
+            id,
+            context,
+            move |_, _| {
+                let runner = runner.clone();
+                let options = options.clone();
+                let entered = entered.clone();
+                let work = works.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if work == 1 {
+                        entered.notify_one();
+                        std::future::pending::<()>().await;
+                    }
+                    Ok((runner, options))
+                }
+            },
+            definition.session_config(),
+        ))
+    }));
 }
 
 /// Fixture gateway for tool-loop test.
