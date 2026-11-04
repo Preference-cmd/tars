@@ -168,12 +168,18 @@ async fn us04_compaction_calls_and_conversation_counts_remain_separate() {
     // Tokens are counted separately per purpose
     assert_eq!(usage.compaction.tokens.input_tokens, 400); // from summary_output()
     assert_eq!(usage.compaction.tokens.output_tokens, 30);
-    assert_eq!(usage.conversation.tokens.input_tokens, 120); // from CompactionGateway main_call
+    assert_eq!(
+        usage.conversation.tokens.input_tokens,
+        MAIN_INPUT_TOKENS as u64
+    ); // from CompactionGateway main_call
     assert_eq!(usage.conversation.tokens.output_tokens, 20);
 
     // Combined total includes both
     assert_eq!(usage.combined().calls.succeeded, 2);
-    assert_eq!(usage.combined().tokens.input_tokens, 520);
+    assert_eq!(
+        usage.combined().tokens.input_tokens,
+        400 + MAIN_INPUT_TOKENS as u64
+    );
     assert_eq!(usage.combined().tokens.output_tokens, 50);
 
     // Also verify work_usage for this work
@@ -192,7 +198,10 @@ async fn us04_compaction_calls_and_conversation_counts_remain_separate() {
     assert_eq!(usage_after_manual.compaction.calls.succeeded, 2);
     // Conversation counts completely unchanged by manual compaction
     assert_eq!(usage_after_manual.conversation.calls.succeeded, 1);
-    assert_eq!(usage_after_manual.conversation.tokens.input_tokens, 120);
+    assert_eq!(
+        usage_after_manual.conversation.tokens.input_tokens,
+        MAIN_INPUT_TOKENS as u64
+    );
 
     host.close(&session.target(), ClosePolicy::Save)
         .await

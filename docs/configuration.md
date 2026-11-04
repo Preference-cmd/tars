@@ -100,6 +100,21 @@ All Context rewrites go through a shared commit path: the operation writes the r
 
 The running compaction values and the history index are part of the `tars-session-v2.2` record. Compaction does not reset the session's saved usage totals; see [Session lifecycle](session-lifecycle.md).
 
+### Compaction recall tool
+
+Persistent sessions automatically declare the built-in `recall` tool on every turn, regardless of whether workspace tools are configured or `--tools` is specified. Transient `tars run` invocations do not declare `recall`. Reopening an older session whose stored Context lacked `recall` declares it on the next turn, with Causa recording the `ToolChange`.
+
+`recall` is classified as `KnownReadOnly` and is not sandboxed (it reads the session's internal history records, not the workspace). It executes without confirmation in all four permission modes (including `read-only` and `ask`).
+
+The tool provides three calling forms with a maximum output cap of 64 KiB (truncated in the middle on char boundaries with an omission notice if exceeded):
+- **List blocks in a record** (`id = "<record id>"`): Lists the original blocks in order with block index, role/kind label, ref `<record id>/<block id>`, character count, and a 200-character preview with collapsed whitespace. Paged by block offset and limit (`offset?: integer >= 0`, `limit?: integer >= 1`, default limit 100, maximum 200). If more blocks remain, ends with `more: recall id=<record id> offset=<next>`.
+- **Read an original block** (`id = "<record id>/<block id>"`): Returns the exact full text (`block_to_text`) of that original block. Paged by Unicode scalar values (`offset?: integer >= 0`, `limit?: integer >= 1`, default limit 12,000, maximum 12,000). If more text remains, ends with `more: recall id=<ref> offset=<next>`.
+- **Search across history** (`query = "<string>"`): Searches original block text across all records in the session, newest record first and within each record from last block to first. Matching is per line: a literal substring by default, or a regular expression in [Rust `regex` syntax](https://docs.rs/regex/latest/regex/#syntax) with `regex?: bool = true` (patterns up to 1,000 characters; the engine matches in linear time and bounds the compiled size). Both are case-insensitive by default, with `case_sensitive?: bool = false`; `regex` and `case_sensitive` are refused together with `id`. Optional parameters include `role?: "user"|"assistant"|"system"|"tool"`, `kind?: "message"|"tool_call"|"tool_result"|"tool_change"`, `context?: integer 0..=3` (attaches previews of up to `n` blocks before and after each hit within the same record), and `limit?: integer 1..=20` (default 20).
+
+Labels read `role/kind`, for example `assistant/tool_call` or `tool/tool_result`: tool calls count as `assistant`, tool results as `tool` and tool changes as `system`. A call runs under the session's `tool_limits.call_timeout_secs` and returns promptly as cancelled or timed out when the turn is cancelled or the deadline passes; the record reading stops at the next block.
+
+Any block originally inserted by an earlier rewrite (such as an earlier brief inside a merge record or a shortened tool result inside a summarize record) includes the next-layer pointer line `original: recall id=<record id>` directing the model to the earlier record. Plain original blocks carry no such line.
+
 ## External tools (search)
 
 The built-in `search_text` runs the external `rg` executable. `[external_tools] rg` selects where it comes from; it is a top-level table, not a preset field, and applies to every entry point of the process:

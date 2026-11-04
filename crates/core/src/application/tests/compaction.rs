@@ -41,7 +41,8 @@ async fn auto_compaction_replaces_the_context_and_saves_one_record() {
     assert_eq!(usage.compact_threshold, 70);
     assert!(
         usage.estimate_tokens < 1_000,
-        "the compacted material is far below the window"
+        "the compacted material is far below the window: {}",
+        usage.estimate_tokens
     );
 
     let id = session.target().conversation_id().as_str().to_owned();
@@ -51,10 +52,10 @@ async fn auto_compaction_replaces_the_context_and_saves_one_record() {
     assert_eq!(history[0]["trigger"], "auto");
     let blocks = record["context"]["blocks"].as_array().unwrap();
     // The replacement summary followed by the model's final answer.
-    assert_eq!(blocks.len(), 2);
-    assert_eq!(blocks[0]["meta"]["source"], "tars:compaction");
-    assert_eq!(blocks[0]["content"]["value"]["role"], "user");
-    assert_eq!(blocks[1]["content"]["value"]["role"], "assistant");
+    assert_eq!(blocks.len(), 3);
+    assert_eq!(blocks[1]["meta"]["source"], "tars:compaction");
+    assert_eq!(blocks[1]["content"]["value"]["role"], "user");
+    assert_eq!(blocks[2]["content"]["value"]["role"], "assistant");
 
     let record_id_value = history[0]["record_id"]
         .as_str()
@@ -72,7 +73,7 @@ async fn auto_compaction_replaces_the_context_and_saves_one_record() {
             .iter()
             .flat_map(|r| &r.originals)
             .count(),
-        3
+        4
     );
     assert_eq!(document.trigger, crate::compact::HistoryTrigger::Auto);
     assert_eq!(session.history().len(), 1);
@@ -116,7 +117,7 @@ async fn abandoned_summary_keeps_the_context_and_leaves_no_history() {
         );
         assert_eq!(
             record["context"]["blocks"].as_array().unwrap().len(),
-            4,
+            5,
             "three submitted blocks and the final answer"
         );
         let mut abandoned = 0;
@@ -198,8 +199,8 @@ async fn a_second_compaction_feeds_the_old_summary_into_the_next_request() {
         "Goal: continue the fixture work. Next steps: finish.".into(),
     ));
     host.set_test_gateway(as_gateway(&gateway));
-    let mut definition = compacting_definition(Some(2_000));
-    definition.compact_threshold = 55;
+    let mut definition = compacting_definition(Some(3_000));
+    definition.compact_threshold = 40;
     let session = host
         .create(PreparedCreate::persistent(definition, Context::new()))
         .await
@@ -235,7 +236,7 @@ async fn a_second_compaction_feeds_the_old_summary_into_the_next_request() {
     assert_eq!(history.len(), 2);
     assert_eq!(
         record["context"]["blocks"].as_array().unwrap().len(),
-        2,
+        3,
         "one summary and the final answer"
     );
     let second_id = history[1]["record_id"]
@@ -249,7 +250,7 @@ async fn a_second_compaction_feeds_the_old_summary_into_the_next_request() {
             .iter()
             .flat_map(|r| &r.originals)
             .count(),
-        5,
+        6,
         "the previous summary, the first answer and the three new blocks"
     );
     host.close(&session.target(), ClosePolicy::Save)
@@ -304,7 +305,7 @@ async fn over_limit_material_is_trimmed_for_the_summary_but_kept_in_history() {
             .iter()
             .flat_map(|r| &r.originals)
             .count(),
-        3,
+        4,
         "the history record keeps the complete old material"
     );
     assert!(document.estimate_before >= document.estimate_after);
@@ -349,7 +350,7 @@ async fn cancelling_the_summary_leaves_the_context_and_history_untouched() {
     );
     assert_eq!(
         record["context"]["blocks"].as_array().unwrap().len(),
-        3,
+        4,
         "cancellation returns the untouched material"
     );
     assert_eq!(
@@ -398,7 +399,7 @@ async fn unwritable_history_abandons_the_compaction_and_keeps_the_round() {
     );
     assert_eq!(
         record["context"]["blocks"].as_array().unwrap().len(),
-        4,
+        5,
         "the round still went out with the original material"
     );
     std::fs::remove_file(history_dir(store.path(), &id)).unwrap();
@@ -470,7 +471,7 @@ async fn reopening_restores_settings_and_cleans_unreferenced_records() {
             block.status == crate::compact::BlockStatus::Summarized(record_id_value.clone())
         })
         .count();
-    assert_eq!(summarized, 3);
+    assert_eq!(summarized, 4);
     assert_eq!(
         reopened
             .read_history_record(&record_id_value)
@@ -479,7 +480,7 @@ async fn reopening_restores_settings_and_cleans_unreferenced_records() {
             .iter()
             .flat_map(|r| &r.originals)
             .count(),
-        3
+        4
     );
     // A deleted referenced record is reported on read, not at open.
     std::fs::remove_file(history_dir(store.path(), &id).join(format!("{record_id_value}.json")))
@@ -593,7 +594,7 @@ async fn unknown_window_disables_auto_compaction_but_manual_compaction_works() {
     assert_eq!(history[0]["trigger"], "manual");
     assert_eq!(
         record["context"]["blocks"].as_array().unwrap().len(),
-        1,
+        2,
         "manual compaction replaces the whole material"
     );
     let record_id_value = history[0]["record_id"]
@@ -608,7 +609,7 @@ async fn unknown_window_disables_auto_compaction_but_manual_compaction_works() {
             .iter()
             .flat_map(|r| &r.originals)
             .count(),
-        4
+        5
     );
     host.close(&session.target(), ClosePolicy::Save)
         .await
@@ -729,7 +730,7 @@ async fn a_summary_that_does_not_shrink_is_abandoned() {
     );
     assert_eq!(
         record["context"]["blocks"].as_array().unwrap().len(),
-        4,
+        5,
         "the original material and the final answer"
     );
     host.close(&session.target(), ClosePolicy::Save)
@@ -1169,6 +1170,270 @@ async fn test_be06_save_refused_for_deleted_record_file() {
     );
 
     host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be07_assembly_declaration_persistent_vs_transient() {
+    struct ToolCaptureGateway {
+        requests: std::sync::Mutex<Vec<causa::kernel::ModelRequest>>,
+    }
+    #[async_trait::async_trait]
+    impl causa::kernel::ModelGateway for ToolCaptureGateway {
+        async fn invoke(
+            &self,
+            request: &causa::kernel::ModelRequest,
+            _: &causa::kernel::CallControl,
+        ) -> Result<causa::kernel::ModelOutput, causa::kernel::ModelInvokeError> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(causa::kernel::ModelOutput::new(
+                causa::kernel::ModelResponse {
+                    items: vec![causa::kernel::ModelItem::text("done")],
+                },
+                causa::kernel::ModelStopReason::EndTurn,
+            ))
+        }
+    }
+
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = Arc::new(ToolCaptureGateway {
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    host.set_test_gateway(Some(gateway.clone() as Arc<dyn ModelGateway>));
+
+    // 1. Persistent session without workspace tools: declares recall (1 tool)
+    let def_no_ws = compacting_definition(None);
+    let s1 = host
+        .create(PreparedCreate::persistent(def_no_ws, Context::new()))
+        .await
+        .unwrap();
+    let r1 = s1.submit(request("turn1")).unwrap();
+    finished(&s1, &r1.work).await;
+    {
+        let reqs = gateway.requests.lock().unwrap();
+        let last_req = reqs.last().unwrap();
+        let tools = causa::kernel::current_tools(&last_req.frame.blocks);
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(tool_names, vec!["recall"]);
+    }
+    host.close(&s1.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+
+    // 2. Persistent session with workspace tools: declares read_file + recall (2 tools)
+    let ws_dir = tempfile::tempdir().unwrap();
+    let mut def_ws = compacting_definition(None);
+    def_ws.workspace_root = Some(ws_dir.path().canonicalize().unwrap());
+    def_ws.tools = vec![crate::definition::WorkspaceTool::ReadFile];
+    let s2 = host
+        .create(PreparedCreate::persistent(def_ws, Context::new()))
+        .await
+        .unwrap();
+    let r2 = s2.submit(request("turn2")).unwrap();
+    finished(&s2, &r2.work).await;
+    {
+        let reqs = gateway.requests.lock().unwrap();
+        let last_req = reqs.last().unwrap();
+        let tools = causa::kernel::current_tools(&last_req.frame.blocks);
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(tool_names.contains(&"recall"));
+        assert!(tool_names.contains(&"read_file"));
+        assert_eq!(tool_names.len(), 2);
+    }
+    host.close(&s2.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+
+    // 3. Transient session: does NOT declare recall
+    let mut def_transient = compacting_definition(None);
+    def_transient.workspace_root = Some(ws_dir.path().canonicalize().unwrap());
+    def_transient.tools = vec![crate::definition::WorkspaceTool::ReadFile];
+    let s3 = host
+        .create(PreparedCreate::transient(def_transient, Context::new()))
+        .await
+        .unwrap();
+    let r3 = s3.submit(request("turn3")).unwrap();
+    finished(&s3, &r3.work).await;
+    {
+        let reqs = gateway.requests.lock().unwrap();
+        let last_req = reqs.last().unwrap();
+        let tools = causa::kernel::current_tools(&last_req.frame.blocks);
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(!tool_names.contains(&"recall"));
+        assert_eq!(tool_names, vec!["read_file"]);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be07_recall_runs_in_read_only_and_ask_without_approval() {
+    use crate::permission::PermissionMode;
+
+    struct RecallInvokingGateway {
+        round: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl causa::kernel::ModelGateway for RecallInvokingGateway {
+        async fn invoke(
+            &self,
+            _req: &causa::kernel::ModelRequest,
+            _: &causa::kernel::CallControl,
+        ) -> Result<causa::kernel::ModelOutput, causa::kernel::ModelInvokeError> {
+            let r = self.round.fetch_add(1, Ordering::SeqCst);
+            if r.is_multiple_of(2) {
+                Ok(causa::kernel::ModelOutput::new(
+                    causa::kernel::ModelResponse {
+                        items: vec![causa::kernel::ModelItem::tool_call(
+                            causa::kernel::ToolCallDraft::new(
+                                "recall",
+                                serde_json::json!({ "query": "hello" }),
+                            ),
+                        )],
+                    },
+                    causa::kernel::ModelStopReason::ToolUse,
+                ))
+            } else {
+                Ok(causa::kernel::ModelOutput::new(
+                    causa::kernel::ModelResponse {
+                        items: vec![causa::kernel::ModelItem::text("done")],
+                    },
+                    causa::kernel::ModelStopReason::EndTurn,
+                ))
+            }
+        }
+    }
+
+    for mode in [PermissionMode::ReadOnly, PermissionMode::Ask] {
+        let store = tempfile::tempdir().unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+        let host = SessionHost::new(Some(store.path().into()));
+        let gateway = Arc::new(RecallInvokingGateway {
+            round: std::sync::atomic::AtomicUsize::new(0),
+        });
+        host.set_test_gateway(Some(gateway as Arc<dyn ModelGateway>));
+
+        let mut def = compacting_definition(None);
+        def.workspace_root = Some(ws_dir.path().canonicalize().unwrap());
+        def.tools = vec![crate::definition::WorkspaceTool::ReadFile];
+        def.permission_mode = Some(mode);
+        def.max_model_rounds = 3;
+        def.max_tool_calls = 5;
+
+        let session = host
+            .create(PreparedCreate::persistent(def, Context::new()))
+            .await
+            .unwrap();
+
+        let mut approval_rx = session.connect_approvals();
+        let receipt = session.submit(request("recall-perm-test")).unwrap();
+        finished(&session, &receipt.work).await;
+        session.wait_saved().await.unwrap();
+
+        assert!(
+            approval_rx.try_recv().is_err(),
+            "recall should not require approval in {mode:?}"
+        );
+
+        let snapshot = session.read_materials().unwrap();
+        let tool_result = snapshot
+            .context
+            .blocks()
+            .iter()
+            .find_map(|b| match b.content() {
+                causa::kernel::BlockContent::ToolResult(payload) => Some(payload),
+                _ => None,
+            })
+            .expect("tool result block must reach Context");
+
+        assert_eq!(
+            tool_result.status,
+            causa::kernel::ToolResultStatus::Succeeded
+        );
+        let content_str = tool_result.output.content.as_str().unwrap();
+        assert!(content_str.contains("no hits found for query"));
+
+        host.close(&session.target(), ClosePolicy::DiscardLocal)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be07_reopen_without_recall_appends_tool_change_and_succeeds() {
+    let store = tempfile::tempdir().unwrap();
+    let ws_dir = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+
+    let gateway = Arc::new(Gateway {
+        calls: Arc::new(AtomicUsize::new(0)),
+        entered: None,
+        release: None,
+        panic: false,
+    });
+    host.set_test_gateway(Some(gateway as Arc<dyn ModelGateway>));
+
+    let mut def = compacting_definition(None);
+    def.workspace_root = Some(ws_dir.path().canonicalize().unwrap());
+    def.tools = vec![crate::definition::WorkspaceTool::ReadFile];
+
+    // Build context with an initial ToolChange that declared only read_file (lacking recall)
+    let mut context = Context::new();
+    let old_tool = causa::kernel::ToolDefinition::new(
+        "read_file",
+        "read file description",
+        serde_json::json!({ "type": "object" }),
+    );
+    let tc_block = ContextBlock::new(
+        causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::BlockContent::ToolChange(causa::kernel::ToolChange::between(
+            &[],
+            &[old_tool],
+        )),
+        Default::default(),
+    );
+    context.edit().append(vec![tc_block]).commit().unwrap();
+
+    let session = host
+        .create(PreparedCreate::persistent(def.clone(), context))
+        .await
+        .unwrap();
+    let id = session.target().conversation_id().clone();
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // Reopen session: context's latest ToolChange lacks recall
+    let reopened = host.open(id).await.unwrap();
+    let mat_before = reopened.read_materials().unwrap();
+    let tools_before = causa::kernel::current_tools(mat_before.context.blocks());
+    assert_eq!(tools_before.len(), 1);
+    assert_eq!(tools_before[0].name, "read_file");
+
+    // Next turn runs: Causa appends a ToolChange declaring recall and the turn succeeds
+    let receipt = reopened.submit(request("next-turn")).unwrap();
+    finished(&reopened, &receipt.work).await;
+    reopened.wait_saved().await.unwrap();
+
+    let mat_after = reopened.read_materials().unwrap();
+    let tools_after = causa::kernel::current_tools(mat_after.context.blocks());
+    let tool_names: Vec<&str> = tools_after.iter().map(|t| t.name.as_str()).collect();
+    assert!(tool_names.contains(&"recall"));
+    assert!(tool_names.contains(&"read_file"));
+
+    let tc_blocks: Vec<_> = mat_after
+        .context
+        .blocks()
+        .iter()
+        .filter_map(|b| match b.content() {
+            causa::kernel::BlockContent::ToolChange(tc) => Some(tc),
+            _ => None,
+        })
+        .collect();
+    // At least 2 ToolChanges: the old one and the new one adding recall
+    assert!(tc_blocks.len() >= 2);
+
+    host.close(&reopened.target(), ClosePolicy::DiscardLocal)
         .await
         .unwrap();
 }

@@ -49,7 +49,7 @@ pub(super) async fn compact(
             let summary_block_id = outcome
                 .record
                 .inserted_block_ids
-                .first()
+                .last()
                 .map(|id| id.0.to_string())
                 .unwrap_or_default();
             value["status"] = json!("compacted");

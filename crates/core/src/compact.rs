@@ -28,6 +28,7 @@ pub(crate) mod estimate;
 pub(crate) mod expansion;
 pub(crate) mod history;
 pub(crate) mod preparer;
+pub(crate) mod recall;
 pub(crate) mod runtime;
 pub(crate) mod summary;
 
@@ -42,6 +43,7 @@ pub use expansion::{
     UnreadableRecord,
 };
 pub use history::{HistoryRecord, HistoryRecordEntry, RangeReplacement, RewriteKind};
+pub(crate) use recall::RecallTool;
 pub use runtime::CompactionOutcome;
 pub(crate) use runtime::CompactionRuntime;
 pub use summary::SUMMARY_SOURCE;

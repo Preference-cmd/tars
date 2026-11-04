@@ -102,6 +102,9 @@ impl PermissionView {
     /// Classify a tool by name, checking built-in workspace tools first,
     /// then the registered MCP tools.
     pub(crate) fn classify_tool(&self, name: &str) -> Option<ToolPermissionClass> {
+        if name == crate::compact::recall::TOOL_NAME {
+            return Some(ToolPermissionClass::KnownReadOnly);
+        }
         if crate::definition::WorkspaceTool::is_builtin_name(name) {
             match name {
                 "list_directory" | "read_file" | "search_text" => {

@@ -361,24 +361,33 @@ impl HistoryStore {
         }
     }
 
-    /// Read the text of one original block of an indexed record (see
-    /// [`super::block_to_text`]). The record file is read on every call.
-    #[allow(dead_code)] // The recall tool reads through this.
-    pub(crate) fn read_original_block_text(
+    /// Read one original block of an indexed record. The record file is read
+    /// on every call.
+    pub(crate) fn read_original_block(
         &self,
         record_id: &str,
         block_id: BlockId,
-    ) -> Result<String, StoreError> {
+    ) -> Result<ContextBlock, StoreError> {
         self.indexed_record_file(record_id)?;
         let record = self.read(record_id)?;
         self.cache_original_ids(&record);
         record
             .replacements
-            .iter()
-            .flat_map(|replacement| &replacement.originals)
+            .into_iter()
+            .flat_map(|replacement| replacement.originals)
             .find(|original| original.id() == block_id)
-            .map(super::block_to_text)
             .ok_or_else(|| missing_block(record_id, block_id))
+    }
+
+    /// Read the text of one original block of an indexed record (see
+    /// [`super::block_to_text`]).
+    pub(crate) fn read_original_block_text(
+        &self,
+        record_id: &str,
+        block_id: BlockId,
+    ) -> Result<String, StoreError> {
+        self.read_original_block(record_id, block_id)
+            .map(|block| super::block_to_text(&block))
     }
 
     /// Number of record files read through this store.

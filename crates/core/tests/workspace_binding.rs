@@ -126,19 +126,30 @@ fn results(context: &Context) -> Vec<&ToolResultPayload> {
         })
         .collect()
 }
-fn schemas(provider: &str, requests: &[Value]) {
+fn schemas(provider: &str, requests: &[Value], persistent: bool) {
     for request in requests {
         assert_eq!(request["stream"], true);
         let tools = request["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            1,
-            "only selected tools may enter provider request"
+            if persistent { 2 } else { 1 },
+            "only selected tools (and recall in persistent sessions) may enter provider request"
         );
+        let read_file_entry = tools
+            .iter()
+            .find(|t| {
+                let name = if provider == "openai-chat" {
+                    &t["function"]["name"]
+                } else {
+                    &t["name"]
+                };
+                name == "read_file"
+            })
+            .expect("read_file present");
         let tool = if provider == "openai-chat" {
-            &tools[0]["function"]
+            &read_file_entry["function"]
         } else {
-            &tools[0]
+            read_file_entry
         };
         assert_eq!(tool["name"], "read_file");
         let schema = if provider == "anthropic" {
@@ -148,6 +159,18 @@ fn schemas(provider: &str, requests: &[Value]) {
         };
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["path"]["type"], "string");
+        assert_eq!(
+            tools.iter().any(|t| {
+                let name = if provider == "openai-chat" {
+                    &t["function"]["name"]
+                } else {
+                    &t["name"]
+                };
+                name == "recall"
+            }),
+            persistent,
+            "recall tool must be declared only in persistent sessions"
+        );
     }
 }
 
@@ -251,7 +274,7 @@ async fn actual_host_binds_each_work_and_instance_to_its_saved_root_and_fresh_co
         assert!(b_requests[1].to_string().contains(&marker_b));
         assert!(!b_requests[1].to_string().contains(&marker_a));
         assert!(!b_requests[1].to_string().contains(&marker_a_new));
-        schemas("openai-chat", &b_requests);
+        schemas("openai-chat", &b_requests, true);
     }
 
     let saved = a.read_materials().unwrap().context;
@@ -320,7 +343,7 @@ async fn actual_host_binds_each_work_and_instance_to_its_saved_root_and_fresh_co
     {
         let a_requests = fixture_a.requests.lock().unwrap();
         assert_eq!(a_requests.len(), 8);
-        schemas("openai-chat", &a_requests);
+        schemas("openai-chat", &a_requests, true);
     }
     host.close(&reopened.target(), ClosePolicy::Save)
         .await
@@ -402,7 +425,7 @@ async fn all_three_protocols_preserve_actual_partial_failure_and_recover_after_c
         {
             let requests = fixture.requests.lock().unwrap();
             assert_eq!(requests.len(), 5);
-            schemas(name, &requests);
+            schemas(name, &requests, false);
             assert!(requests[1].to_string().contains(&marker));
             assert!(requests[4].to_string().contains(&marker));
             assert!(requests[4].to_string().contains("workspace I/O failed"));

@@ -314,8 +314,10 @@ pub(crate) fn assemble(
     );
     let options = definition.run_options();
     let selected = definition.tools.clone();
-    let builtin_timeout = (!selected.is_empty())
-        .then(|| std::time::Duration::from_secs(definition.tool_limits.call_timeout_secs));
+    let has_persistent_compaction = compaction.is_some();
+    let call_timeout_secs = definition.tool_limits.call_timeout_secs;
+    let builtin_timeout = (!selected.is_empty() || has_persistent_compaction)
+        .then(|| std::time::Duration::from_secs(call_timeout_secs));
     let builtin_timeout = match (
         builtin_timeout,
         command_settings
@@ -377,11 +379,18 @@ pub(crate) fn assemble(
                 causa::kernel::BlockId,
                 crate::tools::PreparedWrite,
             >::new()));
-            let tools = workspace_tools.as_ref().map_or_else(Vec::new, |tools| {
+            let mut tools = workspace_tools.as_ref().map_or_else(Vec::new, |tools| {
                 tools.bind_with_prepared(&selected, reporter.clone(), prepared_writes.clone())
             });
+            if let Some(runtime) = &compact_for_work {
+                tools.push(Arc::new(crate::compact::RecallTool::new(
+                    runtime.clone(),
+                    reporter.clone(),
+                    call_timeout_secs,
+                )));
+            }
             let mut before: Vec<Arc<dyn ToolBatchProcessor>> = Vec::new();
-            if workspace_tools.is_some() || mcp_for_work.is_some() {
+            if workspace_tools.is_some() || mcp_for_work.is_some() || compact_for_work.is_some() {
                 before.push(Arc::new(crate::permission::ModeGateProcessor::new(
                     reporter.clone(),
                     approvals.clone(),
@@ -403,7 +412,7 @@ pub(crate) fn assemble(
             }
             // Every tool that can have effects is gated: built-in tools and
             // MCP tools alike pass the permission processor.
-            if workspace_tools.is_some() || mcp_for_work.is_some() {
+            if workspace_tools.is_some() || mcp_for_work.is_some() || compact_for_work.is_some() {
                 before.push(Arc::new(crate::permission::PermissionProcessor::new(
                     work,
                     reporter,

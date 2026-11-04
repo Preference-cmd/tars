@@ -33,3 +33,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 flate2 = "1"
 tar = "0.4"
 sha2 = "0.10"
+# Regular-expression search in the `recall` tool. Linear-time matching, so a
+# model-supplied pattern cannot cause catastrophic backtracking.
+regex = "1"

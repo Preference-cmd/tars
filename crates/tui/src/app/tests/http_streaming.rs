@@ -327,7 +327,7 @@ async fn visible_partial_text_is_cleared_after_error_eof_or_cancellation_and_nev
             .unwrap()
             .read_materials()
             .unwrap();
-        assert_eq!(snapshot.context.blocks().len(), 1);
+        assert_eq!(snapshot.context.blocks().len(), 2);
         let saved = std::fs::read_to_string(record(&app, 0)).unwrap();
         assert!(saved.contains("accepted input"));
         assert!(!saved.contains("must not persist"));

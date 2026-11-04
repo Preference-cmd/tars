@@ -354,6 +354,12 @@ fn is_summary_request(request: &causa::kernel::ModelRequest) -> bool {
     })
 }
 
+/// Input tokens the fixture reports for a conversation round. A brief
+/// re-declares the session's tools (`recall` at least), so a compaction only
+/// shrinks while this stays above that declaration's estimate; tests with a
+/// 1,000-token window also need the reported size below the window.
+pub(crate) const MAIN_INPUT_TOKENS: usize = 600;
+
 #[async_trait::async_trait]
 impl causa::kernel::ModelGateway for CompactionGateway {
     async fn invoke(
@@ -412,7 +418,7 @@ impl causa::kernel::ModelGateway for CompactionGateway {
                 stop_reason,
             );
             if !self.main_without_usage.load(Ordering::SeqCst) {
-                output.usage = Some(causa::kernel::ModelUsage::new(120, 20));
+                output.usage = Some(causa::kernel::ModelUsage::new(MAIN_INPUT_TOKENS, 20));
             }
             Ok(output)
         }

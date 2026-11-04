@@ -8,12 +8,12 @@ use super::preparer::CompactionPreparer;
 use super::summary;
 use super::{CompactionRuntime, HistoryRecordEntry, HistoryTrigger};
 use crate::definition::{CredentialRef, Provider, SessionDefinition};
-use crate::session::{Session, SessionConfig, SubmitRequest, WorkState};
+use crate::session::{Session, SessionConfig, SubmitRequest, ToolReporter, WorkRef, WorkState};
 use causa::kernel::{
-    BlockContent, BlockId, CallControl, ContentPart, Context, ContextBlock, ModelGateway,
-    ModelInvokeError, ModelOutput, ModelRequest, ModelResponse, ModelStopReason, Role,
-    ToolCallContext, ToolCallPayload, ToolDefinition, ToolOutput, ToolResultPayload,
-    ToolResultStatus,
+    BlockContent, BlockId, BlockMeta, CallControl, CancellationToken, ContentPart, Context,
+    ContextBlock, ModelGateway, ModelInvokeError, ModelOutput, ModelRequest, ModelResponse,
+    ModelStopReason, Role, Tool, ToolCallContext, ToolCallPayload, ToolDefinition, ToolOutput,
+    ToolResultPayload, ToolResultStatus, TurnId,
 };
 use causa::runtime::{ToolExecutor, ToolExecutorOptions, TurnLimits, TurnRunOptions, TurnRunner};
 use std::sync::Arc;
@@ -2239,4 +2239,1068 @@ fn test_be06_record_id_allocation_and_commit_rewrite_validation() {
     let err_bad = store.commit_rewrite(&mut context, bad_rewrite).unwrap_err();
     assert!(matches!(err_bad, RewriteError::Rejected(_)));
     assert!(!bad_file.exists());
+}
+
+fn setup_recall_test(
+    dir: &std::path::Path,
+) -> (
+    Arc<super::history::HistoryStore>,
+    Arc<super::CompactionRuntime>,
+    super::RecallTool,
+) {
+    let definition = definition(Some(100), None);
+    let tracker = Arc::new(UsageTracker::default());
+    let gateway: Arc<dyn ModelGateway> = Arc::new(ToolThenDone {
+        main_calls: AtomicUsize::new(0),
+        summary_calls: Arc::new(AtomicUsize::new(0)),
+        summary_inputs: Arc::new(std::sync::Mutex::new(Vec::new())),
+        tool_call_first: false,
+        cache_read_tokens: None,
+    });
+    let runtime = super::CompactionRuntime::new(
+        &definition,
+        &"conversation-recall".into(),
+        Some(dir),
+        Vec::new(),
+        None,
+        None,
+        gateway,
+        tracker,
+    )
+    .unwrap();
+    let history = runtime.history().unwrap();
+    let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
+    let reporter = ToolReporter::new(
+        WorkRef {
+            conversation_id: "conversation-recall".into(),
+            turn_id,
+        },
+        tokio::sync::broadcast::channel(128).0,
+    );
+    let tool = super::RecallTool::new(runtime.clone(), reporter, 60);
+    (history, runtime, tool)
+}
+
+fn recall_control() -> CallControl {
+    CallControl::new(CancellationToken::new(), None)
+}
+
+fn recall_call(args: serde_json::Value) -> causa::kernel::ToolCallContext {
+    causa::kernel::ToolCallContext::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::ToolCallPayload::new(super::recall::TOOL_NAME, args),
+    )
+}
+
+#[tokio::test]
+async fn test_be07_recall_list_and_paging() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _runtime, tool) = setup_recall_test(dir.path());
+
+    let b0 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::User,
+        "first original message with some text",
+    );
+    let b1 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::Assistant,
+        "second original response",
+    );
+    let mut context = Context::new();
+    context
+        .edit()
+        .append(vec![b0.clone(), b1.clone()])
+        .commit()
+        .unwrap();
+
+    let brief = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::User,
+        "brief replacing two blocks",
+    );
+    let record_id = super::history::new_record_id();
+    let rewrite = super::history::Rewrite {
+        record_id: record_id.clone(),
+        trigger: super::HistoryTrigger::Auto,
+        kind: super::history::RewriteKind::Summarize,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements: vec![super::history::PlannedReplacement {
+            range: 0..2,
+            with: vec![brief],
+        }],
+    };
+    store.commit_rewrite(&mut context, rewrite).unwrap();
+
+    let control = recall_control();
+
+    // 1. Full list
+    let call = recall_call(serde_json::json!({ "id": record_id }));
+    let result = tool.execute(&call, &control, None).await;
+    assert_eq!(result.status, ToolResultStatus::Succeeded);
+    let content = match &result.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        other => panic!("expected string output, got {other:?}"),
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    // Header line has record id, kind, trigger, UTC timestamp, number of blocks
+    assert!(lines[0].contains(&record_id));
+    assert!(lines[0].contains("summarize"));
+    assert!(lines[0].contains("auto"));
+    assert!(lines[0].contains("UTC"));
+    assert!(lines[0].contains("2 blocks"));
+
+    // Two block lines
+    assert!(lines[1].starts_with("0 user/message "));
+    assert!(lines[1].contains(&format!("{record_id}/{}", b0.id().0)));
+    assert!(lines[1].contains("first original message with some text"));
+
+    assert!(lines[2].starts_with("1 assistant/message "));
+    assert!(lines[2].contains(&format!("{record_id}/{}", b1.id().0)));
+    assert!(lines[2].contains("second original response"));
+    assert_eq!(lines.len(), 3); // No more line when all fit
+
+    // 2. Paged list: offset 0, limit 1
+    let call_paged = recall_call(serde_json::json!({ "id": record_id, "offset": 0, "limit": 1 }));
+    let result_paged = tool.execute(&call_paged, &control, None).await;
+    assert_eq!(result_paged.status, ToolResultStatus::Succeeded);
+    let paged_content = match &result_paged.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    let paged_lines: Vec<&str> = paged_content.lines().collect();
+    assert_eq!(paged_lines.len(), 3);
+    assert!(paged_lines[1].starts_with("0 user"));
+    assert_eq!(
+        paged_lines[2],
+        format!("more: recall id={record_id} offset=1")
+    );
+
+    // 3. Paged list: offset 1, limit 1
+    let call_paged2 = recall_call(serde_json::json!({ "id": record_id, "offset": 1, "limit": 1 }));
+    let result_paged2 = tool.execute(&call_paged2, &control, None).await;
+    let paged_content2 = match &result_paged2.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    let paged_lines2: Vec<&str> = paged_content2.lines().collect();
+    assert_eq!(paged_lines2.len(), 2);
+    assert!(paged_lines2[1].starts_with("1 assistant"));
+}
+
+#[tokio::test]
+async fn test_be07_recall_read_and_paging_cjk() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _runtime, tool) = setup_recall_test(dir.path());
+
+    let cjk_text = "你好世界！这是TARS上下文压缩测试。Hello, World!";
+    let b0 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, cjk_text);
+    let mut context = Context::new();
+    context.edit().append(vec![b0.clone()]).commit().unwrap();
+
+    let record_id = super::history::new_record_id();
+    let brief = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "brief");
+    let rewrite = super::history::Rewrite {
+        record_id: record_id.clone(),
+        trigger: super::HistoryTrigger::Manual,
+        kind: super::history::RewriteKind::Summarize,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements: vec![super::history::PlannedReplacement {
+            range: 0..1,
+            with: vec![brief],
+        }],
+    };
+    store.commit_rewrite(&mut context, rewrite).unwrap();
+
+    let control = recall_control();
+    let block_ref = format!("{record_id}/{}", b0.id().0);
+
+    // 1. Full read
+    let call = recall_call(serde_json::json!({ "id": block_ref }));
+    let result = tool.execute(&call, &control, None).await;
+    assert_eq!(result.status, ToolResultStatus::Succeeded);
+    let content = match &result.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    assert!(lines[0].contains(&block_ref));
+    assert!(lines[0].contains(" user/message "));
+    assert!(lines[0].contains(&format!("{} chars", cjk_text.chars().count())));
+    assert_eq!(lines[1], cjk_text);
+
+    // 2. Character paging with CJK
+    let call_paged = recall_call(serde_json::json!({
+        "id": block_ref,
+        "offset": 0,
+        "limit": 5,
+    }));
+    let result_paged = tool.execute(&call_paged, &control, None).await;
+    let paged_content = match &result_paged.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    let paged_lines: Vec<&str> = paged_content.lines().collect();
+    assert_eq!(paged_lines[1], "你好世界！");
+    assert_eq!(
+        paged_lines[2],
+        format!("more: recall id={block_ref} offset=5")
+    );
+
+    // 3. Offset past the end
+    let call_past = recall_call(serde_json::json!({
+        "id": block_ref,
+        "offset": 1000,
+    }));
+    let result_past = tool.execute(&call_past, &control, None).await;
+    let past_content = match &result_past.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    let past_lines: Vec<&str> = past_content.lines().collect();
+    assert_eq!(past_lines.len(), 1); // Header only, empty text slice, no more line
+}
+
+#[tokio::test]
+async fn test_be07_recall_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _runtime, tool) = setup_recall_test(dir.path());
+
+    // Record 1 (older)
+    let b_res = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            BlockId::new(uuid::Uuid::now_v7()),
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::json!("Alpha query result data")),
+        )),
+        BlockMeta::default(),
+    );
+    let b_change = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolChange(causa::kernel::ToolChange::between(&[], &[])),
+        BlockMeta::default(),
+    );
+    let mut context = Context::new();
+    context
+        .edit()
+        .append(vec![b_res.clone(), b_change.clone()])
+        .commit()
+        .unwrap();
+
+    let r1_id = super::history::new_record_id();
+    let r1_rewrite = super::history::Rewrite {
+        record_id: r1_id.clone(),
+        trigger: super::HistoryTrigger::Auto,
+        kind: super::history::RewriteKind::Summarize,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements: vec![super::history::PlannedReplacement {
+            range: 0..2,
+            with: vec![ContextBlock::text(
+                BlockId::new(uuid::Uuid::now_v7()),
+                Role::User,
+                "b1",
+            )],
+        }],
+    };
+    store.commit_rewrite(&mut context, r1_rewrite).unwrap();
+
+    // Record 2 (newer)
+    let b_user = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::User,
+        "User says Alpha test here\nsecond line of Alpha",
+    );
+    let b_call = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "test_tool",
+            serde_json::json!({"cmd": "alpha"}),
+        )),
+        BlockMeta::default(),
+    );
+    context
+        .edit()
+        .append(vec![b_user.clone(), b_call.clone()])
+        .commit()
+        .unwrap();
+
+    let r2_id = super::history::new_record_id();
+    let r2_rewrite = super::history::Rewrite {
+        record_id: r2_id.clone(),
+        trigger: super::HistoryTrigger::Auto,
+        kind: super::history::RewriteKind::Summarize,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements: vec![super::history::PlannedReplacement {
+            range: 1..3,
+            with: vec![ContextBlock::text(
+                BlockId::new(uuid::Uuid::now_v7()),
+                Role::User,
+                "b2",
+            )],
+        }],
+    };
+    store.commit_rewrite(&mut context, r2_rewrite).unwrap();
+
+    let control = recall_control();
+
+    // 1. Default case-insensitive search: newest record first, inside record last block first
+    // Expected order of hits matching "alpha":
+    // R2: b_call (tool_call), then b_user (message)
+    // R1: b_res (tool_result)
+    let call = recall_call(serde_json::json!({ "query": "alpha" }));
+    let result = tool.execute(&call, &control, None).await;
+    assert_eq!(result.status, ToolResultStatus::Succeeded);
+    let content = match &result.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    let hits: Vec<&str> = content.split("\n\n").collect();
+    assert_eq!(hits.len(), 3);
+    assert!(hits[0].contains(&format!("{r2_id}/{}", b_call.id().0)));
+    assert!(hits[0].contains(" assistant/tool_call"));
+    assert!(hits[1].contains(&format!("{r2_id}/{}", b_user.id().0)));
+    assert!(hits[1].contains(" user/message"));
+    assert!(hits[1].contains("L1: User says Alpha test here"));
+    assert!(hits[1].contains("L2: second line of Alpha"));
+    assert!(hits[2].contains(&format!("{r1_id}/{}", b_res.id().0)));
+    assert!(hits[2].contains(" tool/tool_result"));
+
+    // 2. Case-sensitive search: "Alpha" matches b_user and b_res, but not b_call (lowercase cmd)
+    let call_cs = recall_call(serde_json::json!({ "query": "Alpha", "case_sensitive": true }));
+    let res_cs = tool.execute(&call_cs, &control, None).await;
+    let content_cs = match &res_cs.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    let hits_cs: Vec<&str> = content_cs.split("\n\n").collect();
+    assert_eq!(hits_cs.len(), 2);
+    assert!(hits_cs[0].contains(&format!("{r2_id}/{}", b_user.id().0)));
+    assert!(hits_cs[1].contains(&format!("{r1_id}/{}", b_res.id().0)));
+
+    // 3. Role filter: only "tool"
+    let call_role = recall_call(serde_json::json!({ "query": "alpha", "role": "tool" }));
+    let res_role = tool.execute(&call_role, &control, None).await;
+    let content_role = match &res_role.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    let hits_role: Vec<&str> = content_role.split("\n\n").collect();
+    assert_eq!(hits_role.len(), 1);
+    assert!(hits_role[0].contains(&format!("{r1_id}/{}", b_res.id().0)));
+
+    // 4. Kind filter: only "tool_call"
+    let call_kind = recall_call(serde_json::json!({ "query": "alpha", "kind": "tool_call" }));
+    let res_kind = tool.execute(&call_kind, &control, None).await;
+    let content_kind = match &res_kind.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    let hits_kind: Vec<&str> = content_kind.split("\n\n").collect();
+    assert_eq!(hits_kind.len(), 1);
+    assert!(hits_kind[0].contains(&format!("{r2_id}/{}", b_call.id().0)));
+
+    // 5. Context option
+    let call_ctx =
+        recall_call(serde_json::json!({ "query": "Alpha", "role": "user", "context": 1 }));
+    let res_ctx = tool.execute(&call_ctx, &control, None).await;
+    let content_ctx = match &res_ctx.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    assert!(content_ctx.contains(&format!(
+        "  after: {r2_id}/{} assistant/tool_call: ",
+        b_call.id().0
+    )));
+
+    // 6. Limit and more hits note
+    let call_lim = recall_call(serde_json::json!({ "query": "alpha", "limit": 1 }));
+    let res_lim = tool.execute(&call_lim, &control, None).await;
+    let content_lim = match &res_lim.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    assert!(content_lim.contains("more hits exist; suggest narrowing query"));
+
+    // 7. No hit message
+    let call_none = recall_call(serde_json::json!({ "query": "definitely_not_in_any_record" }));
+    let res_none = tool.execute(&call_none, &control, None).await;
+    let content_none = match &res_none.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    assert_eq!(content_none, "no hits found for query");
+
+    // 8. Unreadable record listed at the end
+    let r3_id = super::history::new_record_id();
+    let r3_rewrite = super::history::Rewrite {
+        record_id: r3_id.clone(),
+        trigger: super::HistoryTrigger::Auto,
+        kind: super::history::RewriteKind::Summarize,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements: vec![super::history::PlannedReplacement {
+            range: 0..1,
+            with: vec![ContextBlock::text(
+                BlockId::new(uuid::Uuid::now_v7()),
+                Role::User,
+                "b3",
+            )],
+        }],
+    };
+    context
+        .edit()
+        .append(vec![ContextBlock::text(
+            BlockId::new(uuid::Uuid::now_v7()),
+            Role::User,
+            "to_delete",
+        )])
+        .commit()
+        .unwrap();
+    store.commit_rewrite(&mut context, r3_rewrite).unwrap();
+    // Delete r3's file
+    store.remove(&r3_id);
+
+    let call_unreadable = recall_call(serde_json::json!({ "query": "alpha" }));
+    let res_unreadable = tool.execute(&call_unreadable, &control, None).await;
+    let content_unreadable = match &res_unreadable.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    assert!(content_unreadable.contains(&format!("unreadable: {r3_id}")));
+    assert!(content_unreadable.contains(&format!("{r2_id}/{}", b_call.id().0)));
+}
+
+#[tokio::test]
+async fn test_be07_recall_regex_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _runtime, tool) = setup_recall_test(dir.path());
+    let error_line = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::Assistant,
+        "build output\nerror[E0308]: mismatched types\nwarning: unused import",
+    );
+    let other = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::User,
+        "Error codes like E0308 come from rustc",
+    );
+    let mut context = Context::new();
+    context
+        .edit()
+        .append(vec![error_line.clone(), other.clone()])
+        .commit()
+        .unwrap();
+    let record_id = super::history::new_record_id();
+    store
+        .commit_rewrite(
+            &mut context,
+            super::history::Rewrite {
+                record_id: record_id.clone(),
+                trigger: super::HistoryTrigger::Manual,
+                kind: super::history::RewriteKind::Summarize,
+                estimate_before: 500,
+                estimate_after: 100,
+                replacements: vec![super::history::PlannedReplacement {
+                    range: 0..2,
+                    with: vec![ContextBlock::text(
+                        BlockId::new(uuid::Uuid::now_v7()),
+                        Role::User,
+                        "brief",
+                    )],
+                }],
+            },
+        )
+        .unwrap();
+    let control = recall_control();
+    let text = |result: &causa::kernel::ToolResultPayload| match &result.output.content {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    };
+
+    // A pattern anchored at the line start only matches the compiler line.
+    let anchored = tool
+        .execute(
+            &recall_call(serde_json::json!({ "query": r"^error\[E\d{4}\]", "regex": true })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(anchored.status, ToolResultStatus::Succeeded);
+    let anchored = text(&anchored);
+    assert!(anchored.contains(&format!("{record_id}/{}", error_line.id().0)));
+    assert!(anchored.contains("L2: error[E0308]: mismatched types"));
+    assert!(!anchored.contains(&other.id().0.to_string()));
+
+    // Case-insensitive by default; case_sensitive narrows it.
+    let insensitive = text(
+        &tool
+            .execute(
+                &recall_call(serde_json::json!({ "query": r"^error", "regex": true })),
+                &control,
+                None,
+            )
+            .await,
+    );
+    assert!(insensitive.contains(&other.id().0.to_string()));
+    let sensitive = text(
+        &tool
+            .execute(
+                &recall_call(
+                    serde_json::json!({ "query": r"^error", "regex": true, "case_sensitive": true }),
+                ),
+                &control,
+                None,
+            )
+            .await,
+    );
+    assert!(!sensitive.contains(&other.id().0.to_string()));
+    assert!(sensitive.contains(&error_line.id().0.to_string()));
+
+    // Without regex the same text is a literal and finds nothing.
+    let literal = text(
+        &tool
+            .execute(
+                &recall_call(serde_json::json!({ "query": r"^error\[E\d{4}\]" })),
+                &control,
+                None,
+            )
+            .await,
+    );
+    assert_eq!(literal, "no hits found for query");
+
+    // Invalid, overlong and misplaced regex options are failed calls.
+    for (arguments, message) in [
+        (
+            serde_json::json!({ "query": "(unclosed", "regex": true }),
+            "invalid regular expression",
+        ),
+        (
+            serde_json::json!({ "query": "a".repeat(1_001), "regex": true }),
+            "longer than 1000 characters",
+        ),
+        (
+            serde_json::json!({ "id": record_id, "regex": true }),
+            "apply only to a query",
+        ),
+    ] {
+        let result = tool.execute(&recall_call(arguments), &control, None).await;
+        assert_eq!(result.status, ToolResultStatus::Failed);
+        assert!(
+            result.output.content["error"]
+                .as_str()
+                .unwrap()
+                .contains(message)
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_be07_recall_next_layer_pointers() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _runtime, tool) = setup_recall_test(dir.path());
+    let control = recall_control();
+
+    // R1: Summarize record, inserts brief B1
+    let orig1 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::User,
+        "initial message",
+    );
+    let orig2 = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::Assistant,
+        "initial reply",
+    );
+    let mut context = Context::new();
+    context
+        .edit()
+        .append(vec![orig1.clone(), orig2.clone()])
+        .commit()
+        .unwrap();
+
+    let b1 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "brief B1");
+    let r1_id = super::history::new_record_id();
+    let r1_rewrite = super::history::Rewrite {
+        record_id: r1_id.clone(),
+        trigger: super::HistoryTrigger::Auto,
+        kind: super::history::RewriteKind::Summarize,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements: vec![super::history::PlannedReplacement {
+            range: 0..2,
+            with: vec![b1.clone()],
+        }],
+    };
+    store.commit_rewrite(&mut context, r1_rewrite).unwrap();
+
+    // E: Elide record, replaces tool result T with shortened T2
+    let t = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            BlockId::new(uuid::Uuid::now_v7()),
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::json!("long tool result to be shortened")),
+        )),
+        BlockMeta::default(),
+    );
+    context.edit().append(vec![t.clone()]).commit().unwrap();
+
+    let t2 = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            t.id(),
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::json!("shortened T2")),
+        )),
+        BlockMeta::default(),
+    );
+    let e_id = super::history::new_record_id();
+    let e_rewrite = super::history::Rewrite {
+        record_id: e_id.clone(),
+        trigger: super::HistoryTrigger::Auto,
+        kind: super::history::RewriteKind::Elide,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements: vec![super::history::PlannedReplacement {
+            range: 1..2,
+            with: vec![t2.clone()],
+        }],
+    };
+    store.commit_rewrite(&mut context, e_rewrite).unwrap();
+
+    // R2: Summarize record that removes T2 among other blocks
+    let r2_extra = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "user extra");
+    context
+        .edit()
+        .append(vec![r2_extra.clone()])
+        .commit()
+        .unwrap();
+
+    let r2_id = super::history::new_record_id();
+    let r2_brief = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "r2 brief");
+    let r2_rewrite = super::history::Rewrite {
+        record_id: r2_id.clone(),
+        trigger: super::HistoryTrigger::Auto,
+        kind: super::history::RewriteKind::Summarize,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements: vec![super::history::PlannedReplacement {
+            range: 1..3, // removes T2 and r2_extra
+            with: vec![r2_brief.clone()],
+        }],
+    };
+    store.commit_rewrite(&mut context, r2_rewrite).unwrap();
+
+    // M: Merge record that removes B1 (and another brief) and inserts B3
+    let another_brief = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::User,
+        "another brief",
+    );
+    context
+        .edit()
+        .append(vec![another_brief.clone()])
+        .commit()
+        .unwrap();
+
+    let b3 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "merged B3");
+    let m_id = super::history::new_record_id();
+    let m_rewrite = super::history::Rewrite {
+        record_id: m_id.clone(),
+        trigger: super::HistoryTrigger::Auto,
+        kind: super::history::RewriteKind::Merge,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements: vec![super::history::PlannedReplacement {
+            range: 0..1, // removes B1
+            with: vec![b3.clone()],
+        }],
+    };
+    store.commit_rewrite(&mut context, m_rewrite).unwrap();
+
+    // 1. Listing M marks B1 with original: recall id=R1
+    let call_m = recall_call(serde_json::json!({ "id": m_id }));
+    let res_m = tool.execute(&call_m, &control, None).await;
+    let content_m = match &res_m.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    assert!(content_m.contains(&format!("{m_id}/{}", b1.id().0)));
+    assert!(content_m.contains(&format!("original: recall id={r1_id}")));
+
+    // 2. Listing R2 marks T2 with original: recall id=E
+    let call_r2 = recall_call(serde_json::json!({ "id": r2_id }));
+    let res_r2 = tool.execute(&call_r2, &control, None).await;
+    let content_r2 = match &res_r2.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    assert!(content_r2.contains(&format!("{r2_id}/{}", t2.id().0)));
+    assert!(content_r2.contains(&format!("original: recall id={e_id}")));
+
+    // 3. Listing R1 shows plain originals carrying NO original line (negative case)
+    let call_r1 = recall_call(serde_json::json!({ "id": r1_id }));
+    let res_r1 = tool.execute(&call_r1, &control, None).await;
+    let content_r1 = match &res_r1.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    assert!(content_r1.contains(&format!("{r1_id}/{}", orig1.id().0)));
+    assert!(content_r1.contains(&format!("{r1_id}/{}", orig2.id().0)));
+    assert!(!content_r1.contains("original: recall id="));
+
+    // 4. Reading B1 directly also carries original: recall id=R1
+    let call_read_b1 = recall_call(serde_json::json!({ "id": format!("{m_id}/{}", b1.id().0) }));
+    let res_read_b1 = tool.execute(&call_read_b1, &control, None).await;
+    let content_read_b1 = match &res_read_b1.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    assert!(content_read_b1.contains(&format!("original: recall id={r1_id}")));
+}
+
+#[tokio::test]
+async fn test_be07_recall_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _runtime, tool) = setup_recall_test(dir.path());
+    let control = recall_control();
+
+    let orig = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "test");
+    let mut context = Context::new();
+    context.edit().append(vec![orig.clone()]).commit().unwrap();
+
+    let rec_id = super::history::new_record_id();
+    let rewrite = super::history::Rewrite {
+        record_id: rec_id.clone(),
+        trigger: super::HistoryTrigger::Auto,
+        kind: super::history::RewriteKind::Summarize,
+        estimate_before: 100,
+        estimate_after: 20,
+        replacements: vec![super::history::PlannedReplacement {
+            range: 0..1,
+            with: vec![ContextBlock::text(
+                BlockId::new(uuid::Uuid::now_v7()),
+                Role::User,
+                "b",
+            )],
+        }],
+    };
+    store.commit_rewrite(&mut context, rewrite).unwrap();
+
+    // 1. Neither id nor query
+    let res = tool
+        .execute(&recall_call(serde_json::json!({})), &control, None)
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+    assert!(
+        res.output
+            .content
+            .to_string()
+            .contains("must provide exactly one of 'id' or 'query'")
+    );
+
+    // 2. Both id and query
+    let res = tool
+        .execute(
+            &recall_call(serde_json::json!({ "id": rec_id, "query": "q" })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+    assert!(
+        res.output
+            .content
+            .to_string()
+            .contains("must provide exactly one of 'id' or 'query'")
+    );
+
+    // 3. Empty query
+    let res = tool
+        .execute(
+            &recall_call(serde_json::json!({ "query": "" })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+    assert!(
+        res.output
+            .content
+            .to_string()
+            .contains("search query cannot be empty")
+    );
+
+    // 4. Malformed id
+    let res = tool
+        .execute(
+            &recall_call(serde_json::json!({ "id": "not-a-uuid" })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+    assert!(
+        res.output
+            .content
+            .to_string()
+            .contains("not a canonical UUID")
+    );
+
+    let res = tool
+        .execute(
+            &recall_call(serde_json::json!({ "id": "not-a-uuid/also-bad" })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+    assert!(
+        res.output
+            .content
+            .to_string()
+            .contains("not a canonical UUID")
+    );
+
+    // 5. Unknown record
+    let unknown_uuid = uuid::Uuid::now_v7().to_string();
+    let res = tool
+        .execute(
+            &recall_call(serde_json::json!({ "id": unknown_uuid })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+    assert!(
+        res.output
+            .content
+            .to_string()
+            .contains("not in this session's history index")
+    );
+
+    // 6. Block not in record
+    let other_block_id = uuid::Uuid::now_v7().to_string();
+    let res = tool
+        .execute(
+            &recall_call(serde_json::json!({ "id": format!("{rec_id}/{other_block_id}") })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+    assert!(
+        res.output
+            .content
+            .to_string()
+            .contains("not among the originals of history record")
+    );
+
+    // 7. Out-of-range limit values
+    let res = tool
+        .execute(
+            &recall_call(serde_json::json!({ "id": rec_id, "limit": 0 })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+    let res = tool
+        .execute(
+            &recall_call(serde_json::json!({ "id": rec_id, "limit": 201 })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+
+    let res = tool
+        .execute(
+            &recall_call(
+                serde_json::json!({ "id": format!("{rec_id}/{}", orig.id().0), "limit": 0 }),
+            ),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+    let res = tool
+        .execute(
+            &recall_call(
+                serde_json::json!({ "id": format!("{rec_id}/{}", orig.id().0), "limit": 12001 }),
+            ),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+
+    let res = tool
+        .execute(
+            &recall_call(serde_json::json!({ "query": "q", "limit": 0 })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+    let res = tool
+        .execute(
+            &recall_call(serde_json::json!({ "query": "q", "limit": 21 })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+
+    let res = tool
+        .execute(
+            &recall_call(serde_json::json!({ "query": "q", "context": 4 })),
+            &control,
+            None,
+        )
+        .await;
+    assert_eq!(res.status, ToolResultStatus::Failed);
+
+    // Verify no file paths in any error output
+    assert!(!res.output.content.to_string().contains(".history"));
+    assert!(!res.output.content.to_string().contains('/'));
+}
+
+#[tokio::test]
+async fn test_be07_recall_output_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, _runtime, tool) = setup_recall_test(dir.path());
+    let control = recall_control();
+
+    // Append 1000 index entries without files so search produces > 70 KiB of unreadable notes
+    for _ in 0..1000 {
+        store.append(HistoryRecordEntry {
+            record_id: super::history::new_record_id(),
+            created_at_ms: 1_700_000_000_000,
+            trigger: super::HistoryTrigger::Auto,
+            kind: super::history::RewriteKind::Summarize,
+            removed_block_count: 1,
+            inserted_block_ids: vec![],
+        });
+    }
+
+    let call = recall_call(serde_json::json!({ "query": "anything" }));
+    let res = tool.execute(&call, &control, None).await;
+    assert_eq!(res.status, ToolResultStatus::Succeeded);
+    assert_eq!(res.output.truncation, causa::kernel::Truncation::Middle);
+    let content = match &res.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    assert!(content.len() <= super::recall::MAX_OUTPUT_BYTES);
+    assert!(content.contains("bytes omitted; page with offset/limit"));
+
+    // Direct unit verification of cap_output
+    let (capped, trunc) = super::recall::cap_output("x".repeat(80 * 1024));
+    assert_eq!(trunc, causa::kernel::Truncation::Middle);
+    assert!(capped.len() <= super::recall::MAX_OUTPUT_BYTES);
+    assert!(capped.contains("bytes omitted; page with offset/limit"));
+}
+
+#[tokio::test]
+async fn test_be07_recall_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_store, _runtime, tool) = setup_recall_test(dir.path());
+
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    let cancelled_control = CallControl::new(token, None);
+
+    let call = recall_call(serde_json::json!({ "query": "anything" }));
+    let res = tool.execute(&call, &cancelled_control, None).await;
+    assert_eq!(res.status, ToolResultStatus::Cancelled);
+}
+
+/// Releases a test gate when dropped, so a failed assertion cannot leave a
+/// worker paused and hang runtime shutdown.
+struct ReleaseGate(Arc<crate::tools::TestGate>);
+
+impl Drop for ReleaseGate {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// Starts a search whose worker pauses at `gate`, and waits until it is paused.
+async fn paused_recall(
+    tool: &Arc<super::RecallTool>,
+    gate: &Arc<crate::tools::TestGate>,
+    control: CallControl,
+) -> tokio::task::JoinHandle<causa::kernel::ToolResultPayload> {
+    *tool.gate.lock().unwrap() = Some(gate.clone());
+    let task = tokio::spawn({
+        let tool = tool.clone();
+        async move {
+            tool.execute(
+                &recall_call(serde_json::json!({ "query": "anything" })),
+                &control,
+                None,
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), gate.reached.notified())
+        .await
+        .unwrap();
+    task
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_be07_recall_stops_in_flight_on_cancel_deadline_and_drop() {
+    let wait = std::time::Duration::from_secs(3);
+    // Each case settles its reporter, so each gets its own tool.
+    let fresh = || {
+        let dir = tempfile::tempdir().unwrap();
+        let (_store, _runtime, tool) = setup_recall_test(dir.path());
+        let gate = crate::tools::TestGate::new(false);
+        (dir, Arc::new(tool), ReleaseGate(gate.clone()), gate)
+    };
+
+    // Cancelled while the worker runs: returns Cancelled without waiting for it.
+    let (_dir, tool, _release, gate) = fresh();
+    let token = CancellationToken::new();
+    let task = paused_recall(&tool, &gate, CallControl::new(token.clone(), None)).await;
+    token.cancel();
+    let result = tokio::time::timeout(wait, task).await.unwrap().unwrap();
+    assert_eq!(result.status, ToolResultStatus::Cancelled);
+    gate.release();
+    tokio::time::timeout(wait, tool.reporter().drain())
+        .await
+        .unwrap();
+
+    // Past its deadline while the worker runs: returns TimedOut.
+    let (_dir, tool, _release, gate) = fresh();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    let task = paused_recall(
+        &tool,
+        &gate,
+        CallControl::new(CancellationToken::new(), Some(deadline)),
+    )
+    .await;
+    let result = tokio::time::timeout(wait, task).await.unwrap().unwrap();
+    assert_eq!(result.status, ToolResultStatus::TimedOut);
+    gate.release();
+    tokio::time::timeout(wait, tool.reporter().drain())
+        .await
+        .unwrap();
+
+    // Dropped while the worker runs: the worker ends once released.
+    let (_dir, tool, _release, gate) = fresh();
+    let task = paused_recall(&tool, &gate, recall_control()).await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    gate.release();
+    tokio::time::timeout(wait, tool.reporter().drain())
+        .await
+        .unwrap();
 }

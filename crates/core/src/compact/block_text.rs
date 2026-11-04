@@ -6,7 +6,6 @@
 use causa::kernel::{BlockContent, ContentPart, ContextBlock};
 
 /// Render a single Context block into its deterministic plain text representation.
-#[allow(dead_code)]
 pub(crate) fn block_to_text(block: &ContextBlock) -> String {
     match block.content() {
         BlockContent::Message { parts, .. } => {

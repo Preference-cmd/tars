@@ -774,7 +774,7 @@ impl TestGate {
             changed: std::sync::Condvar::new(),
         })
     }
-    pub(super) fn pause(&self, before_return: bool) {
+    pub(crate) fn pause(&self, before_return: bool) {
         if self.before_return != before_return {
             return;
         }
