@@ -77,7 +77,7 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
 }
 
 pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
-    let (writer, pending, attempted) = {
+    let (writer, pending, attempted, history_store) = {
         let mut state = entry.lock();
         state.save_requested = false;
         let attempted = state.pending_attempted;
@@ -89,10 +89,16 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
             material_version: entry.version(&state),
         };
         entry.changed();
+        let history_store = state
+            .owner
+            .as_ref()
+            .and_then(|o| o.compaction())
+            .and_then(|c| c.history());
         (
             state.writer.clone().expect("persistent writer"),
             pending,
             attempted,
+            history_store,
         )
     };
     // Both the supervisor and blocking closure own the writer. Dropping a wait
@@ -104,6 +110,7 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
                 CommitResolution::NotApplied => {}
             }
         }
+        check_artifact_references(&pending.record, history_store.as_deref())?;
         writer.commit(&pending)
     })
     .await;
@@ -220,4 +227,58 @@ pub(super) async fn io<T: Send + 'static>(
     .await
     .map_err(|error| ApplicationError::Faulted(format!("storage task failed: {error}")))?
     .map_err(Into::into)
+}
+
+/// Deep check of the record's history artifact references before it is
+/// written: each must name a record in the record's own index whose file
+/// still exists and holds that original block. Runs on the blocking pool.
+fn check_artifact_references(
+    record: &SavedSessionRecord,
+    history: Option<&crate::compact::history::HistoryStore>,
+) -> Result<(), crate::store::StoreError> {
+    for block in record.context.blocks() {
+        let causa::kernel::BlockContent::ToolResult(result) = block.content() else {
+            continue;
+        };
+        let Some(artifact) = &result.output.artifact else {
+            continue;
+        };
+        let refused = |source: std::io::Error| {
+            crate::store::StoreError::References(Arc::new(
+                crate::material::MaterialError::ReferenceUnavailable {
+                    block_id: block.id(),
+                    source,
+                },
+            ))
+        };
+        let invalid = |reason: String| {
+            refused(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("history artifact reference {}: {reason}", artifact.id),
+            ))
+        };
+        let (record_id, block_id) = crate::compact::history::parse_artifact_id(&artifact.id)
+            .map_err(|reason| invalid(reason.into()))?;
+        if !record
+            .history
+            .iter()
+            .any(|entry| entry.record_id == record_id)
+        {
+            return Err(invalid(
+                "the record is not in this session's history index".into(),
+            ));
+        }
+        let history =
+            history.ok_or_else(|| invalid("this session keeps no history records".into()))?;
+        history
+            .verify_artifact_reference(record_id, block_id)
+            .map_err(|error| match error {
+                crate::store::StoreError::Io(source) => refused(std::io::Error::new(
+                    source.kind(),
+                    format!("history artifact reference {}: {source}", artifact.id),
+                )),
+                other => invalid(other.to_string()),
+            })?;
+    }
+    Ok(())
 }

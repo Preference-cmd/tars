@@ -138,6 +138,14 @@ impl CompactionRuntime {
         self.history.clone()
     }
 
+    /// Artifact store backed by this session's rewrite records.
+    #[allow(dead_code)]
+    pub(crate) fn artifacts(&self) -> Option<super::HistoryArtifacts> {
+        self.history
+            .as_ref()
+            .map(|history| super::HistoryArtifacts::new(history.clone()))
+    }
+
     /// Reader for the current estimator state.
     pub(crate) fn usage(&self) -> Arc<UsageTracker> {
         self.usage.clone()
@@ -250,6 +258,7 @@ impl CompactionRuntime {
         if text.is_empty() {
             return Err(CompactionAbandon::EmptySummary);
         }
+        let record_id = super::history::new_record_id();
         let summary_id = summary::new_block_id();
         let text = summary::summary_text(text, user_text);
         let new_blocks = summary::replacement_blocks(old_blocks, summary_id, &text);
@@ -261,6 +270,7 @@ impl CompactionRuntime {
             return Err(CompactionAbandon::NoShrink);
         }
         Ok(Rewrite {
+            record_id,
             trigger,
             kind: RewriteKind::Summarize,
             estimate_before,

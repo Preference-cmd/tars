@@ -22,6 +22,8 @@
 //! file is always written before the Context is replaced; an abandoned attempt
 //! leaves the Context untouched and is cleaned up on the next open.
 
+pub(crate) mod artifacts;
+pub(crate) mod block_text;
 pub(crate) mod estimate;
 pub(crate) mod expansion;
 pub(crate) mod history;
@@ -32,6 +34,8 @@ pub(crate) mod summary;
 use causa::kernel::{BlockContent, ContentPart, ContextBlock, Role};
 use serde::{Deserialize, Serialize};
 
+pub(crate) use artifacts::HistoryArtifacts;
+pub(crate) use block_text::block_to_text;
 pub(crate) use expansion::expand_conversation;
 pub use expansion::{
     BlockStatus, ExpandedBlock, ExpandedConversation, ExpansionCursor, ExpansionStep, RewriteMark,

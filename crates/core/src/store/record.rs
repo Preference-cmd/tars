@@ -180,7 +180,7 @@ impl SavedSessionRecord {
             )));
         }
         crate::compact::history::validate_index(&self.history)?;
-        crate::material::validate_references(&self.context, None)
+        crate::material::validate_references(&self.context, Some(&self.history), None)
             .map_err(|e| StoreError::References(Arc::new(e)))
     }
 }

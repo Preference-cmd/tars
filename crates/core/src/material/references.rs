@@ -16,6 +16,17 @@ type ReferenceValidator<'a> = dyn FnMut(MaterialReference<'_>) -> io::Result<()>
 
 pub(crate) fn validate(
     context: &Context,
+    validator: Option<&mut ReferenceValidator<'_>>,
+) -> Result<(), MaterialError> {
+    validate_with_history(context, None, validator)
+}
+
+/// Like [`validate`], but a tool result's artifact reference to an original
+/// block of a rewrite record listed in `history` is accepted without reading
+/// any file. Every other reference goes through `validator` as usual.
+pub(crate) fn validate_with_history(
+    context: &Context,
+    history: Option<&[crate::compact::HistoryRecordEntry]>,
     mut validator: Option<&mut ReferenceValidator<'_>>,
 ) -> Result<(), MaterialError> {
     let mut check = |block_id: BlockId, reference| match validator.as_mut() {
@@ -36,7 +47,9 @@ pub(crate) fn validate(
                 for media in &result.media {
                     check(block.id(), MaterialReference::Media(media))?;
                 }
-                if let Some(artifact) = &result.output.artifact {
+                if let Some(artifact) = &result.output.artifact
+                    && !history.is_some_and(|history| indexed(history, &artifact.id))
+                {
                     check(block.id(), MaterialReference::Artifact(artifact))?;
                 }
             }
@@ -44,4 +57,10 @@ pub(crate) fn validate(
         }
     }
     Ok(())
+}
+
+/// Whether `id` is `<record id>/<block id>` with the record in `history`.
+fn indexed(history: &[crate::compact::HistoryRecordEntry], id: &str) -> bool {
+    crate::compact::history::parse_artifact_id(id)
+        .is_ok_and(|(record_id, _)| history.iter().any(|entry| entry.record_id == record_id))
 }

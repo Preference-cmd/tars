@@ -799,8 +799,376 @@ async fn transient_sessions_have_no_compaction() {
     until(|| session.status().active_work.is_none()).await;
     assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 0);
     assert!(!history_dir(store.path(), &id).exists());
+    assert!(session.artifacts().is_none());
     assert!(matches!(
         session.compact().await,
         Err(ApplicationError::CompactionUnavailable)
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be06_saved_context_tool_result_artifact_reference_roundtrip_reads_zero_records() {
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("Summary brief text.".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+    let session = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(None),
+            Context::new(),
+        ))
+        .await
+        .unwrap();
+    let receipt = session
+        .submit(SubmitRequest {
+            request_key: "k1".into(),
+            blocks: vec![text_block(1_200), text_block(1_200)],
+        })
+        .unwrap();
+    finished(&session, &receipt.work).await;
+    session.wait_saved().await.unwrap();
+
+    let outcome = session.compact().await.unwrap();
+    session.wait_saved().await.unwrap();
+    let record_id = outcome.record.record_id;
+
+    let history_doc = session.read_history_record(&record_id).unwrap();
+    let orig_block = &history_doc.replacements[0].originals[0];
+    let orig_block_id = orig_block.id().0;
+    let orig_text = crate::compact::block_to_text(orig_block);
+
+    assert!(session.artifacts().is_some());
+    use causa::kernel::ArtifactStore;
+    let artifacts = session.artifacts().unwrap();
+    let data = artifacts
+        .read(&format!("{record_id}/{orig_block_id}"), None)
+        .await
+        .unwrap();
+    assert_eq!(data, orig_text.as_bytes());
+
+    let call_id = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
+    let call_block = ContextBlock::new(
+        call_id,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "echo",
+            serde_json::json!({}),
+        )),
+        Default::default(),
+    );
+    let mut output = causa::kernel::ToolOutput::new(serde_json::Value::String("short note".into()));
+    output.artifact = Some(causa::kernel::ArtifactRef::new(
+        format!("{record_id}/{orig_block_id}"),
+        orig_text.len(),
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let result_block = ContextBlock::new(
+        causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            output,
+        )),
+        Default::default(),
+    );
+
+    let mut blocks = session.read_materials().unwrap().context.blocks().to_vec();
+    blocks.push(call_block);
+    blocks.push(result_block.clone());
+    let version = session.read_materials().unwrap().version;
+    session.edit(version, blocks).unwrap();
+    session.wait_saved().await.unwrap();
+
+    let target = session.target().clone();
+    host.close(&target, ClosePolicy::Save).await.unwrap();
+
+    // Reopen session: context still carries reference, reads ZERO record files
+    let reopened = host.open(target.conversation_id().clone()).await.unwrap();
+    assert_eq!(
+        reopened.record_reads(),
+        0,
+        "reopening must read zero record files"
+    );
+    let materials = reopened.read_materials().unwrap();
+    assert_eq!(
+        reopened.record_reads(),
+        0,
+        "reading materials must read zero record files"
+    );
+
+    let found_result = materials
+        .context
+        .blocks()
+        .iter()
+        .find(|b| b.id() == result_block.id())
+        .expect("result block must be present");
+    let causa::kernel::BlockContent::ToolResult(res) = found_result.content() else {
+        panic!("expected ToolResult");
+    };
+    let art_ref = res
+        .output
+        .artifact
+        .as_ref()
+        .expect("artifact must be preserved");
+    assert_eq!(art_ref.id, format!("{record_id}/{orig_block_id}"));
+    assert_eq!(art_ref.size_bytes, orig_text.len());
+    assert_eq!(art_ref.kind, causa::kernel::ArtifactKind::FullOutput);
+    assert!(art_ref.persisted);
+
+    host.close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be06_save_refused_for_unindexed_record_or_foreign_session() {
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("Summary.".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+
+    // Session 1: compacted, has history record
+    let s1 = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(None),
+            Context::new(),
+        ))
+        .await
+        .unwrap();
+    let r1 = s1
+        .submit(SubmitRequest {
+            request_key: "s1-k1".into(),
+            blocks: vec![text_block(1_200)],
+        })
+        .unwrap();
+    finished(&s1, &r1.work).await;
+    s1.wait_saved().await.unwrap();
+    let outcome1 = s1.compact().await.unwrap();
+    s1.wait_saved().await.unwrap();
+    let s1_record_id = outcome1.record.record_id;
+    let s1_orig_id = s1.read_history_record(&s1_record_id).unwrap().replacements[0].originals[0]
+        .id()
+        .0;
+
+    // Session 2: uncompacted, tries to reference session 1's record
+    let s2 = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(None),
+            Context::new(),
+        ))
+        .await
+        .unwrap();
+    let before_record = saved_record(store.path(), s2.target().conversation_id().as_str());
+
+    let call_id = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
+    let call_block = ContextBlock::new(
+        call_id,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "echo",
+            serde_json::json!({}),
+        )),
+        Default::default(),
+    );
+    let mut output = causa::kernel::ToolOutput::new(serde_json::Value::String("val".into()));
+    output.artifact = Some(causa::kernel::ArtifactRef::new(
+        format!("{s1_record_id}/{s1_orig_id}"),
+        10,
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let result_block = ContextBlock::new(
+        causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            output,
+        )),
+        Default::default(),
+    );
+
+    let version = s2.read_materials().unwrap().version;
+    let edit_res = s2.edit(version, vec![call_block, result_block]);
+    assert!(
+        matches!(edit_res, Err(ApplicationError::Store(_))),
+        "referencing another session's record must be refused"
+    );
+
+    // Stored record remains unchanged
+    let after_record = saved_record(store.path(), s2.target().conversation_id().as_str());
+    assert_eq!(before_record, after_record);
+
+    host.close(&s1.target(), ClosePolicy::Save).await.unwrap();
+    host.close(&s2.target(), ClosePolicy::Save).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be06_save_refused_for_missing_block() {
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("Summary.".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+
+    let session = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(None),
+            Context::new(),
+        ))
+        .await
+        .unwrap();
+    let receipt = session
+        .submit(SubmitRequest {
+            request_key: "k1".into(),
+            blocks: vec![text_block(1_200)],
+        })
+        .unwrap();
+    finished(&session, &receipt.work).await;
+    session.wait_saved().await.unwrap();
+    let outcome = session.compact().await.unwrap();
+    session.wait_saved().await.unwrap();
+    let record_id = outcome.record.record_id;
+    let stored_before = saved_record(store.path(), session.target().conversation_id().as_str());
+
+    // Block ID not in record originals
+    let call_id = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
+    let call_block = ContextBlock::new(
+        call_id,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "echo",
+            serde_json::json!({}),
+        )),
+        Default::default(),
+    );
+    let random_block_id = uuid::Uuid::now_v7();
+    let mut output = causa::kernel::ToolOutput::new(serde_json::Value::String("val".into()));
+    output.artifact = Some(causa::kernel::ArtifactRef::new(
+        format!("{record_id}/{random_block_id}"),
+        10,
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let result_block = ContextBlock::new(
+        causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            output,
+        )),
+        Default::default(),
+    );
+
+    let mut blocks = session.read_materials().unwrap().context.blocks().to_vec();
+    blocks.push(call_block);
+    blocks.push(result_block);
+    let version = session.read_materials().unwrap().version;
+    session.edit(version, blocks).unwrap();
+    let save_err = session.wait_saved().await.unwrap_err();
+    assert!(
+        matches!(save_err, ApplicationError::SaveBlocked(_)),
+        "save must be blocked when referenced block is not among originals"
+    );
+    let stored_after = saved_record(store.path(), session.target().conversation_id().as_str());
+    assert_eq!(
+        stored_before, stored_after,
+        "stored record must remain unchanged"
+    );
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be06_save_refused_for_deleted_record_file() {
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("Summary.".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+
+    let session = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(None),
+            Context::new(),
+        ))
+        .await
+        .unwrap();
+    let receipt = session
+        .submit(SubmitRequest {
+            request_key: "k1".into(),
+            blocks: vec![text_block(1_200)],
+        })
+        .unwrap();
+    finished(&session, &receipt.work).await;
+    session.wait_saved().await.unwrap();
+    let outcome = session.compact().await.unwrap();
+    session.wait_saved().await.unwrap();
+    let record_id = outcome.record.record_id;
+    let orig_id = session
+        .read_history_record(&record_id)
+        .unwrap()
+        .replacements[0]
+        .originals[0]
+        .id()
+        .0;
+
+    // Attach valid reference first and save successfully
+    let call_id = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
+    let call_block = ContextBlock::new(
+        call_id,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "echo",
+            serde_json::json!({}),
+        )),
+        Default::default(),
+    );
+    let mut output = causa::kernel::ToolOutput::new(serde_json::Value::String("val".into()));
+    output.artifact = Some(causa::kernel::ArtifactRef::new(
+        format!("{record_id}/{orig_id}"),
+        10,
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let result_block = ContextBlock::new(
+        causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            output,
+        )),
+        Default::default(),
+    );
+
+    let mut blocks = session.read_materials().unwrap().context.blocks().to_vec();
+    blocks.push(call_block);
+    blocks.push(result_block);
+    let version = session.read_materials().unwrap().version;
+    session.edit(version, blocks).unwrap();
+    session.wait_saved().await.unwrap();
+
+    let stored_before = saved_record(store.path(), session.target().conversation_id().as_str());
+
+    // Now delete the record file
+    let id = session.target().conversation_id().as_str().to_owned();
+    let rec_file = history_dir(store.path(), &id).join(format!("{record_id}.json"));
+    std::fs::remove_file(&rec_file).unwrap();
+
+    // Now trigger another save by appending another block
+    let mut new_blocks = session.read_materials().unwrap().context.blocks().to_vec();
+    new_blocks.push(text_block(10));
+    let version2 = session.read_materials().unwrap().version;
+    session.edit(version2, new_blocks).unwrap();
+
+    let save_err = session.wait_saved().await.unwrap_err();
+    assert!(
+        matches!(save_err, ApplicationError::SaveBlocked(_)),
+        "save must be blocked when referenced record file is missing from disk: {save_err}"
+    );
+    let stored_after = saved_record(store.path(), session.target().conversation_id().as_str());
+    assert_eq!(
+        stored_before, stored_after,
+        "stored record must remain untouched"
+    );
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
 }

@@ -662,6 +662,17 @@ impl ManagedSession {
             .map_err(|error| ApplicationError::Store(Arc::new(error)))
     }
 
+    /// Artifact store backed by this session's rewrite records.
+    #[allow(dead_code)]
+    pub(crate) fn artifacts(&self) -> Option<crate::compact::HistoryArtifacts> {
+        let state = self.entry.lock();
+        state
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.compaction())
+            .and_then(|runtime| runtime.artifacts())
+    }
+
     /// Number of record files this session has read.
     #[cfg(test)]
     pub(crate) fn record_reads(&self) -> usize {

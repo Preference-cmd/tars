@@ -11,6 +11,7 @@ use super::HistoryTrigger;
 use crate::store::StoreError;
 use causa::kernel::{BlockId, Context, ContextBlock};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -70,6 +71,37 @@ pub struct RangeReplacement {
     pub inserted_ids: Vec<BlockId>,
 }
 
+/// Allocate a new canonical UUIDv7 identity for a history rewrite record.
+pub(crate) fn new_record_id() -> String {
+    uuid::Uuid::now_v7().to_string()
+}
+
+/// Returns whether `s` is a canonical lowercase hyphenated UUID.
+pub(crate) fn is_canonical_uuid(s: &str) -> bool {
+    match uuid::Uuid::parse_str(s) {
+        Ok(uuid) => uuid.hyphenated().to_string() == s,
+        Err(_) => false,
+    }
+}
+
+/// Parse a history artifact ID in `<record id>/<block id>` format.
+///
+/// Both IDs must be canonical lowercase hyphenated UUIDs.
+pub(crate) fn parse_artifact_id(id: &str) -> Result<(&str, BlockId), &'static str> {
+    let Some((record_id, block_id)) = id.split_once('/') else {
+        return Err("artifact id must be in the form <record id>/<block id>");
+    };
+    if !is_canonical_uuid(record_id) {
+        return Err("record id is not a canonical UUID");
+    }
+    match uuid::Uuid::parse_str(block_id) {
+        Ok(uuid) if uuid.hyphenated().to_string() == block_id => {
+            Ok((record_id, BlockId::new(uuid)))
+        }
+        _ => Err("block id is not a canonical UUID"),
+    }
+}
+
 /// One planned replacement with its inserted blocks ready to apply to a Context.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PlannedReplacement {
@@ -85,6 +117,8 @@ pub(crate) struct PlannedReplacement {
 /// originals are exactly the blocks the edit removes.
 #[derive(Clone, Debug)]
 pub(crate) struct Rewrite {
+    /// Canonical UUID of this rewrite record.
+    pub(crate) record_id: String,
     /// What asked for this rewrite.
     pub(crate) trigger: HistoryTrigger,
     /// What kind of rewrite this is.
@@ -203,11 +237,19 @@ pub struct HistoryRecordEntry {
     pub inserted_block_ids: Vec<BlockId>,
 }
 
+/// Bound on the number of records whose original block ID sets are cached.
+///
+/// Each entry holds only the 16-byte IDs of one record's originals; records
+/// never change after they are written, so an entry stays valid until the
+/// record is removed.
+const MAX_CACHED_ORIGINAL_IDS: usize = 512;
+
 /// The history directory and the record-backed index for one conversation.
 pub(crate) struct HistoryStore {
     directory: PathBuf,
     conversation_id: String,
     entries: Mutex<Vec<HistoryRecordEntry>>,
+    original_ids: Mutex<HashMap<String, HashSet<BlockId>>>,
     #[cfg(test)]
     read_count: AtomicUsize,
 }
@@ -223,6 +265,7 @@ impl HistoryStore {
             directory: history_directory(sessions_directory, conversation_id),
             conversation_id: conversation_id.to_owned(),
             entries: Mutex::new(entries),
+            original_ids: Mutex::new(HashMap::new()),
             #[cfg(test)]
             read_count: AtomicUsize::new(0),
         }
@@ -234,6 +277,108 @@ impl HistoryStore {
             .lock()
             .expect("history index has no callbacks")
             .clone()
+    }
+
+    /// Whether this session's history index contains the given record ID.
+    pub(crate) fn has_record(&self, record_id: &str) -> bool {
+        self.entries
+            .lock()
+            .expect("history index has no callbacks")
+            .iter()
+            .any(|entry| entry.record_id == record_id)
+    }
+
+    fn cache_original_ids(&self, record: &HistoryRecord) {
+        let ids = record
+            .replacements
+            .iter()
+            .flat_map(|replacement| &replacement.originals)
+            .map(ContextBlock::id)
+            .collect();
+        let mut cache = self.original_ids.lock().expect("cache has no callbacks");
+        if cache.len() >= MAX_CACHED_ORIGINAL_IDS
+            && !cache.contains_key(&record.record_id)
+            && let Some(evicted) = cache.keys().next().cloned()
+        {
+            cache.remove(&evicted);
+        }
+        cache.insert(record.record_id.clone(), ids);
+    }
+
+    fn uncache(&self, record_id: &str) {
+        self.original_ids
+            .lock()
+            .expect("cache has no callbacks")
+            .remove(record_id);
+    }
+
+    /// Check that an indexed record file still exists before trusting it.
+    fn indexed_record_file(&self, record_id: &str) -> Result<(), StoreError> {
+        if !self.has_record(record_id) {
+            return Err(StoreError::InvalidHistory(format!(
+                "record {record_id} is not in this session's history index"
+            )));
+        }
+        if !fs::metadata(self.record_path(record_id))?.is_file() {
+            return Err(StoreError::InvalidHistory(format!(
+                "history record {record_id} is not a file"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Verify that an indexed record file exists and has `block_id` among its
+    /// originals. The original IDs are cached, so an unchanged reference costs
+    /// one metadata call per save instead of a full record read.
+    pub(crate) fn verify_artifact_reference(
+        &self,
+        record_id: &str,
+        block_id: BlockId,
+    ) -> Result<(), StoreError> {
+        self.indexed_record_file(record_id)?;
+        let cached = self
+            .original_ids
+            .lock()
+            .expect("cache has no callbacks")
+            .get(record_id)
+            .map(|ids| ids.contains(&block_id));
+        let found = match cached {
+            Some(found) => found,
+            None => {
+                let record = self.read(record_id)?;
+                self.cache_original_ids(&record);
+                record
+                    .replacements
+                    .iter()
+                    .flat_map(|replacement| &replacement.originals)
+                    .any(|original| original.id() == block_id)
+            }
+        };
+        if found {
+            Ok(())
+        } else {
+            Err(missing_block(record_id, block_id))
+        }
+    }
+
+    /// Read the text of one original block of an indexed record (see
+    /// [`super::block_to_text`]). The record file is read on every call.
+    #[allow(dead_code)] // The recall tool reads through this.
+    pub(crate) fn read_original_block_text(
+        &self,
+        record_id: &str,
+        block_id: BlockId,
+    ) -> Result<String, StoreError> {
+        self.indexed_record_file(record_id)?;
+        let record = self.read(record_id)?;
+        self.cache_original_ids(&record);
+        record
+            .replacements
+            .iter()
+            .flat_map(|replacement| &replacement.originals)
+            .find(|original| original.id() == block_id)
+            .map(super::block_to_text)
+            .ok_or_else(|| missing_block(record_id, block_id))
     }
 
     /// Number of record files read through this store.
@@ -292,6 +437,18 @@ impl HistoryStore {
         context: &mut Context,
         rewrite: Rewrite,
     ) -> Result<HistoryRecordEntry, RewriteError> {
+        if !is_canonical_uuid(&rewrite.record_id) {
+            return Err(RewriteError::Rejected(format!(
+                "record identity is not a canonical UUID: {}",
+                rewrite.record_id
+            )));
+        }
+        if self.has_record(&rewrite.record_id) {
+            return Err(RewriteError::Rejected(format!(
+                "record {} is already in the history index",
+                rewrite.record_id
+            )));
+        }
         let record = self.record_for(context.blocks(), &rewrite)?;
         self.write(&record)?;
         let mut edit = context.edit();
@@ -302,6 +459,7 @@ impl HistoryStore {
             self.remove(&record.record_id);
             return Err(RewriteError::Rejected(format!("{:?}", failure.reason)));
         }
+        self.cache_original_ids(&record);
         let entry = record.index_entry();
         self.append(entry.clone());
         Ok(entry)
@@ -345,7 +503,7 @@ impl HistoryStore {
         Ok(HistoryRecord {
             format: HISTORY_FORMAT.to_owned(),
             conversation_id: self.conversation_id.clone(),
-            record_id: uuid::Uuid::now_v7().to_string(),
+            record_id: rewrite.record_id.clone(),
             created_at_ms: now_ms(),
             trigger: rewrite.trigger,
             kind: rewrite.kind,
@@ -398,6 +556,7 @@ impl HistoryStore {
 
     /// Drop one index entry after its Context edit turned out not to happen.
     pub(crate) fn remove_entry(&self, record_id: &str) {
+        self.uncache(record_id);
         self.entries
             .lock()
             .expect("history index has no callbacks")
@@ -406,12 +565,20 @@ impl HistoryStore {
 
     /// Delete one record file, ignoring a file that is already gone.
     pub(crate) fn remove(&self, record_id: &str) {
+        self.uncache(record_id);
         let _ = fs::remove_file(self.record_path(record_id));
     }
 
     fn record_path(&self, record_id: &str) -> PathBuf {
         self.directory.join(format!("{record_id}.json"))
     }
+}
+
+fn missing_block(record_id: &str, block_id: BlockId) -> StoreError {
+    StoreError::InvalidHistory(format!(
+        "block {} is not among the originals of history record {record_id}",
+        block_id.0
+    ))
 }
 
 /// History directory for one conversation under the sessions directory.

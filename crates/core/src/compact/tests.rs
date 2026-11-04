@@ -1027,6 +1027,7 @@ fn summarize_rewrite(
     replacements: Vec<super::history::PlannedReplacement>,
 ) -> super::history::Rewrite {
     super::history::Rewrite {
+        record_id: super::history::new_record_id(),
         trigger: HistoryTrigger::Auto,
         kind: RewriteKind::Summarize,
         estimate_before: 500,
@@ -1322,6 +1323,53 @@ async fn test_be03_whole_context_compaction_structure_triggers_and_abandon_condi
         empty_res.unwrap_err(),
         super::CompactionAbandon::EmptySummary
     );
+}
+
+#[tokio::test]
+async fn test_be06_planned_summary_commits_under_the_record_id_allocated_before_the_brief() {
+    struct BriefGateway;
+    #[async_trait::async_trait]
+    impl ModelGateway for BriefGateway {
+        async fn invoke(
+            &self,
+            _: &ModelRequest,
+            _: &CallControl,
+        ) -> Result<ModelOutput, ModelInvokeError> {
+            Ok(summary_output("brief of the earlier work"))
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = CompactionRuntime::new(
+        &definition(Some(1_000), None),
+        &"conversation-record-id".into(),
+        Some(directory.path()),
+        Vec::new(),
+        None,
+        None,
+        Arc::new(BriefGateway),
+        Arc::new(UsageTracker::default()),
+    )
+    .unwrap();
+    let mut context = Context::from_blocks(vec![big_block(2_000)]).unwrap();
+    let control = CallControl::new(causa::kernel::CancellationToken::new(), None);
+    let rewrite = runtime
+        .plan(
+            &context,
+            &causa::kernel::ModelRef::new("fixture"),
+            &causa::kernel::GenerationOptions::default(),
+            HistoryTrigger::Manual,
+            None,
+            &control,
+        )
+        .await
+        .unwrap();
+    let allocated = rewrite.record_id.clone();
+    assert!(super::history::is_canonical_uuid(&allocated));
+    let entry = runtime.commit_rewrite(&mut context, rewrite).unwrap();
+    assert_eq!(entry.record_id, allocated);
+    let record = runtime.history().unwrap().read(&allocated).unwrap();
+    assert_eq!(record.record_id, allocated);
+    assert_eq!(record.index_entry(), entry);
 }
 
 #[test]
@@ -1817,4 +1865,378 @@ fn cursor_adopts_a_rewrite_and_continues_with_the_older_records() {
     cursor.adopt(newest);
     assert_eq!(cursor.unread(), 1, "an adopted record needs no read");
     assert_eq!(cursor.next(), ExpansionStep::NeedRecord(ids[0].clone()));
+}
+
+#[test]
+fn test_be06_block_to_text_all_kinds() {
+    use super::block_text::block_to_text;
+    use causa::kernel::{
+        BlockContent, BlockId, BlockMeta, ContentPart, ContextBlock, MediaRef, Role, SealedPart,
+        TextPayload, ToolCallPayload, ToolChange, ToolDefinition, ToolOutput, ToolResultPayload,
+        ToolResultStatus,
+    };
+
+    // 1. Message with text, media (with name and without name), and sealed
+    let msg_block = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::Message {
+            role: Role::Assistant,
+            parts: vec![
+                ContentPart::Text(TextPayload::new("First line of message")),
+                ContentPart::Media(
+                    MediaRef::new("image/png", "sha256:abcd").with_name("photo.png"),
+                ),
+                ContentPart::Media(MediaRef::new("audio/mp3", "sha256:ef01")),
+                ContentPart::Sealed(SealedPart::new(
+                    "openai",
+                    serde_json::json!({"reasoning": "secret"}),
+                )),
+                ContentPart::Text(TextPayload::new("Second text part")),
+            ],
+        },
+        BlockMeta::default(),
+    );
+    let rendered_msg = block_to_text(&msg_block);
+    assert_eq!(
+        rendered_msg,
+        "First line of message\n[media image/png photo.png]\n[media audio/mp3 sha256:ef01]\nSecond text part"
+    );
+
+    // 2. ToolCall
+    let call_block = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolCall(ToolCallPayload::new(
+            "test_tool",
+            serde_json::json!({
+                "path": "file.txt",
+                "count": 42
+            }),
+        )),
+        BlockMeta::default(),
+    );
+    let rendered_call = block_to_text(&call_block);
+    let expected_args = serde_json::to_string_pretty(&serde_json::json!({
+        "path": "file.txt",
+        "count": 42
+    }))
+    .unwrap();
+    assert_eq!(rendered_call, format!("call test_tool\n{expected_args}"));
+
+    // 3. ToolResult: string content as-is
+    let res_str_block = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolResult(ToolResultPayload::new(
+            call_block.id(),
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::Value::String(
+                "raw output text\nsecond line".into(),
+            )),
+        )),
+        BlockMeta::default(),
+    );
+    assert_eq!(
+        block_to_text(&res_str_block),
+        "raw output text\nsecond line"
+    );
+
+    // ToolResult: non-string pretty JSON with media
+    let res_json_block = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolResult(
+            ToolResultPayload::new(
+                call_block.id(),
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({"status": "ok", "items": [1, 2]})),
+            )
+            .with_media(vec![
+                MediaRef::new("image/jpeg", "ref-1234"),
+                MediaRef::new("image/png", "ref-5678").with_name("chart.png"),
+            ]),
+        ),
+        BlockMeta::default(),
+    );
+    let expected_json =
+        serde_json::to_string_pretty(&serde_json::json!({"status": "ok", "items": [1, 2]}))
+            .unwrap();
+    assert_eq!(
+        block_to_text(&res_json_block),
+        format!("{expected_json}\n[media image/jpeg ref-1234]\n[media image/png chart.png]")
+    );
+
+    // 4. ToolChange
+    let change_block = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolChange(ToolChange::new(
+            vec![
+                ToolDefinition::new("tool_a", "desc a", serde_json::json!({})),
+                ToolDefinition::new("tool_b", "desc b", serde_json::json!({})),
+            ],
+            vec!["tool_c".into()],
+        )),
+        BlockMeta::default(),
+    );
+    let rendered_change = block_to_text(&change_block);
+    assert!(rendered_change.contains("tool_a"));
+    assert!(rendered_change.contains("tool_b"));
+    assert!(rendered_change.contains("tool_c"));
+    assert!(
+        !rendered_change.contains('\n'),
+        "ToolChange description must be a single line"
+    );
+}
+
+#[tokio::test]
+async fn test_be06_history_artifacts_read_range_and_errors() {
+    use super::HistoryTrigger;
+    use super::artifacts::HistoryArtifacts;
+    use super::history::{HistoryStore, PlannedReplacement, Rewrite, RewriteKind};
+    use causa::kernel::{
+        ArtifactHint, ArtifactKind, ArtifactStore, BlockContent, BlockId, BlockMeta, ContentPart,
+        Context, ContextBlock, MediaRef, Role, StoreError, TextPayload, ToolCallPayload,
+        ToolOutput, ToolResultPayload, ToolResultStatus,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(HistoryStore::new(
+        dir.path(),
+        "conversation-be06",
+        Vec::new(),
+    ));
+    let artifacts = HistoryArtifacts::new(store.clone());
+
+    let b0 = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::Message {
+            role: Role::User,
+            parts: vec![
+                ContentPart::Text(TextPayload::new("user prompt")),
+                ContentPart::Media(MediaRef::new("image/png", "img-1").with_name("spec.png")),
+            ],
+        },
+        BlockMeta::default(),
+    );
+    let b1 = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolCall(ToolCallPayload::new(
+            "search",
+            serde_json::json!({"q": "rust"}),
+        )),
+        BlockMeta::default(),
+    );
+    let b2 = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolResult(ToolResultPayload::new(
+            b1.id(),
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::Value::String("string search output".into())),
+        )),
+        BlockMeta::default(),
+    );
+    let b3 = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolResult(
+            ToolResultPayload::new(
+                b1.id(),
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({"found": 3})),
+            )
+            .with_media(vec![MediaRef::new("application/pdf", "report.pdf")]),
+        ),
+        BlockMeta::default(),
+    );
+
+    let mut context = Context::new();
+    let edit = context
+        .edit()
+        .append(vec![b0.clone(), b1.clone(), b2.clone(), b3.clone()]);
+    edit.commit().unwrap();
+
+    let brief = ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        Role::User,
+        "compact brief",
+    );
+    let record_id = super::history::new_record_id();
+    let rewrite = Rewrite {
+        record_id: record_id.clone(),
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
+        estimate_before: 1000,
+        estimate_after: 200,
+        replacements: vec![PlannedReplacement {
+            range: 0..4,
+            with: vec![brief.clone()],
+        }],
+    };
+
+    store.commit_rewrite(&mut context, rewrite).unwrap();
+
+    // Verify reading with range = None returns exact block-to-text bytes for each original
+    for block in &[&b0, &b1, &b2, &b3] {
+        let expected_text = super::block_to_text(block);
+        let id = format!("{record_id}/{}", block.id().0);
+        let bytes = artifacts
+            .read(&id, None)
+            .await
+            .expect("read should succeed");
+        assert_eq!(String::from_utf8(bytes).unwrap(), expected_text);
+    }
+
+    // Range testing on b2
+    let b2_text = super::block_to_text(&b2);
+    let b2_bytes = b2_text.as_bytes();
+    let b2_id = format!("{record_id}/{}", b2.id().0);
+    let len = b2_bytes.len() as u64;
+
+    // Exact subslice
+    let slice = artifacts.read(&b2_id, Some(2..7)).await.unwrap();
+    assert_eq!(slice, &b2_bytes[2..7]);
+
+    // Clamped end: end past length is clamped
+    let clamped = artifacts.read(&b2_id, Some(3..(len + 50))).await.unwrap();
+    assert_eq!(clamped, &b2_bytes[3..]);
+
+    // start > len fails with StoreError::Read
+    let err_start_gt_len = artifacts
+        .read(&b2_id, Some((len + 1)..(len + 10)))
+        .await
+        .unwrap_err();
+    assert!(matches!(err_start_gt_len, StoreError::Read(_)));
+
+    // start > end fails with StoreError::Read
+    let err_start_gt_end = artifacts
+        .read(&b2_id, Some(std::ops::Range { start: 10, end: 5 }))
+        .await
+        .unwrap_err();
+    assert!(matches!(err_start_gt_end, StoreError::Read(_)));
+
+    // Errors:
+    // 1. Malformed id
+    let err_malformed = artifacts.read("not-a-valid-id", None).await.unwrap_err();
+    assert!(matches!(err_malformed, StoreError::Read(_)));
+
+    // 2. Record id not in index while a file with that name exists in history directory
+    let stray_id = uuid::Uuid::now_v7().to_string();
+    let stray_path = dir
+        .path()
+        .join("conversation-be06.history")
+        .join(format!("{stray_id}.json"));
+    std::fs::write(&stray_path, b"{}").unwrap();
+    let err_not_in_index = artifacts
+        .read(&format!("{stray_id}/{}", b0.id().0), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err_not_in_index, StoreError::Read(_)));
+
+    // 3. Block id not in record (e.g. brief id or random UUID)
+    let err_missing_block = artifacts
+        .read(&format!("{record_id}/{}", brief.id().0), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err_missing_block, StoreError::Read(_)));
+    let random_block_id = uuid::Uuid::now_v7();
+    let err_random_block = artifacts
+        .read(&format!("{record_id}/{random_block_id}"), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err_random_block, StoreError::Read(_)));
+
+    // 4. Record in index but file deleted
+    let record_file = dir
+        .path()
+        .join("conversation-be06.history")
+        .join(format!("{record_id}.json"));
+    std::fs::remove_file(&record_file).unwrap();
+    let err_file_deleted = artifacts
+        .read(&format!("{record_id}/{}", b0.id().0), None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err_file_deleted, StoreError::Read(_)));
+
+    // 5. persist always fails with StoreError::Persist
+    let hint = ArtifactHint::new("tool", b1.id(), ArtifactKind::FullOutput);
+    let err_persist = artifacts.persist(b"data", hint).await.unwrap_err();
+    assert!(matches!(err_persist, StoreError::Persist(_)));
+    assert!(
+        err_persist
+            .to_string()
+            .contains("history artifacts are written only by context rewrites")
+    );
+}
+
+#[test]
+fn test_be06_record_id_allocation_and_commit_rewrite_validation() {
+    use super::HistoryTrigger;
+    use super::history::{HistoryStore, PlannedReplacement, Rewrite, RewriteError, RewriteKind};
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = HistoryStore::new(dir.path(), "conversation-rec-alloc", Vec::new());
+
+    let b0 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "msg");
+    let mut context = Context::new();
+    context.edit().append(vec![b0.clone()]).commit().unwrap();
+
+    let brief = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "brief");
+    let allocated_id = super::history::new_record_id();
+    let rewrite = Rewrite {
+        record_id: allocated_id.clone(),
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
+        estimate_before: 100,
+        estimate_after: 50,
+        replacements: vec![PlannedReplacement {
+            range: 0..1,
+            with: vec![brief.clone()],
+        }],
+    };
+
+    let entry = store
+        .commit_rewrite(&mut context, rewrite)
+        .expect("commit should succeed");
+    assert_eq!(entry.record_id, allocated_id);
+    let written_file = dir
+        .path()
+        .join("conversation-rec-alloc.history")
+        .join(format!("{allocated_id}.json"));
+    assert!(written_file.exists());
+
+    // Duplicate record id is rejected without leaving a new file
+    let b1 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "another");
+    let brief2 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "brief2");
+    context.edit().append(vec![b1.clone()]).commit().unwrap();
+
+    let dup_rewrite = Rewrite {
+        record_id: allocated_id.clone(),
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
+        estimate_before: 100,
+        estimate_after: 50,
+        replacements: vec![PlannedReplacement {
+            range: 1..2,
+            with: vec![brief2.clone()],
+        }],
+    };
+    let err_dup = store.commit_rewrite(&mut context, dup_rewrite).unwrap_err();
+    assert!(matches!(err_dup, RewriteError::Rejected(_)));
+
+    // Non-canonical record id is rejected without leaving a file
+    let bad_id = "NOT-A-CANONICAL-UUID";
+    let bad_file = dir
+        .path()
+        .join("conversation-rec-alloc.history")
+        .join(format!("{bad_id}.json"));
+    let bad_rewrite = Rewrite {
+        record_id: bad_id.to_string(),
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
+        estimate_before: 100,
+        estimate_after: 50,
+        replacements: vec![PlannedReplacement {
+            range: 1..2,
+            with: vec![brief2.clone()],
+        }],
+    };
+    let err_bad = store.commit_rewrite(&mut context, bad_rewrite).unwrap_err();
+    assert!(matches!(err_bad, RewriteError::Rejected(_)));
+    assert!(!bad_file.exists());
 }

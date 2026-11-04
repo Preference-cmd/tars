@@ -15,7 +15,7 @@ pub use file::{
     load_with_references, save, save_new, save_with_references,
 };
 pub use references::MaterialReference;
-pub(crate) use references::validate as validate_references;
+pub(crate) use references::validate_with_history as validate_references;
 pub(crate) use vocabulary::decode as decode_stored;
 
 #[cfg(test)]
