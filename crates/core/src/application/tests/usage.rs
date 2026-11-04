@@ -143,17 +143,18 @@ async fn us04_compaction_calls_and_conversation_counts_remain_separate() {
 
     let session = host
         .create(PreparedCreate::persistent(
-            compacting_definition(Some(1_000)),
-            Context::new(),
+            compacting_definition(Some(FIXTURE_WINDOW)),
+            earlier_conversation(),
         ))
         .await
         .unwrap();
 
-    // Submit work that triggers automatic compaction
+    // Submit work that triggers automatic compaction. Its own input is
+    // protected there and left for the manual compaction below.
     let receipt = session
         .submit(SubmitRequest {
             request_key: "first".into(),
-            blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+            blocks: vec![text_block(1_500)],
         })
         .unwrap();
     finished(&session, &receipt.work).await;
@@ -718,8 +719,8 @@ async fn us08_compaction_followed_by_save_and_reopen_keeps_totals_without_reset(
 
     let session = host
         .create(PreparedCreate::persistent(
-            compacting_definition(Some(1_000)),
-            Context::new(),
+            compacting_definition(Some(FIXTURE_WINDOW)),
+            earlier_conversation(),
         ))
         .await
         .unwrap();
@@ -729,7 +730,7 @@ async fn us08_compaction_followed_by_save_and_reopen_keeps_totals_without_reset(
     let receipt = session
         .submit(SubmitRequest {
             request_key: "first".into(),
-            blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+            blocks: short_request(),
         })
         .unwrap();
     finished(&session, &receipt.work).await;

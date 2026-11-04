@@ -1,9 +1,11 @@
 //! Long-session context compaction and history expansion.
 //!
 //! A session's materials only grow, so a long conversation eventually exceeds
-//! the model's context window. Compaction replaces the current Context with a
-//! summary written by the same model, and keeps the replaced original blocks as
-//! one read-only rewrite record beside the session record.
+//! the model's context window. Compaction replaces an older part of the
+//! Context with a brief written by the same model, keeps the newest material
+//! verbatim, and keeps the replaced original blocks as one read-only rewrite
+//! record beside the session record. The leading system blocks and the tool
+//! state are never rewritten.
 //!
 //! The pieces are deliberately split:
 //!
@@ -12,7 +14,10 @@
 //! - `expansion` expands the current Context into the full conversation.
 //! - `estimate` turns a Context into a conservative token estimate and wraps
 //!   the model gateway to remember the upstream-reported prompt size.
-//! - `summary` builds the summary instruction and reads the model's answer.
+//! - `segment` decides what a summary replaces: the head it keeps, the cut
+//!   point of the retained tail and the protected blocks.
+//! - `summary` builds the brief instruction, the brief request material and
+//!   the brief block.
 //! - `runtime` holds the running settings, the force flag and the pairing of a
 //!   written record with the replaced Context.
 //! - `preparer` is the Causa `ContextPreparer` installed per work; it decides
@@ -30,9 +35,10 @@ pub(crate) mod history;
 pub(crate) mod preparer;
 pub(crate) mod recall;
 pub(crate) mod runtime;
+pub(crate) mod segment;
 pub(crate) mod summary;
 
-use causa::kernel::{BlockContent, ContentPart, ContextBlock, Role, TextPayload};
+use causa::kernel::TextPayload;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use artifacts::HistoryArtifacts;
@@ -65,6 +71,9 @@ pub enum CompactionAbandon {
     EditRejected,
     /// The session has no persistent history directory.
     Unavailable,
+    /// The leading system blocks and tool declarations alone are over half
+    /// the trigger line, so no summary could help; reported once per session.
+    PrefixTooLarge,
 }
 
 impl CompactionAbandon {
@@ -78,6 +87,7 @@ impl CompactionAbandon {
             Self::UnwritableHistory => "unwritable_history",
             Self::EditRejected => "edit_rejected",
             Self::Unavailable => "unavailable",
+            Self::PrefixTooLarge => "prefix_too_large",
         }
     }
 }
@@ -140,32 +150,6 @@ impl HistoryTrigger {
             Self::Unknown => "unknown",
         }
     }
-}
-
-/// Verbatim user-role text of one submitted request, when it carries any.
-///
-/// Only used to keep the current turn's request visible in a mid-turn summary;
-/// empty requests (continuing the current material) return `None`.
-pub fn user_request_text(blocks: &[ContextBlock]) -> Option<String> {
-    let mut messages: Vec<String> = Vec::new();
-    for block in blocks {
-        let BlockContent::Message { role, parts } = block.content() else {
-            continue;
-        };
-        if *role != Role::User {
-            continue;
-        }
-        let mut text = String::new();
-        for part in parts {
-            if let ContentPart::Text(payload) = part {
-                text.push_str(&payload.0);
-            }
-        }
-        if !text.trim().is_empty() {
-            messages.push(text);
-        }
-    }
-    (!messages.is_empty()).then(|| messages.join("\n\n"))
 }
 
 /// Prefix of the model-facing note on a shortened tool result.

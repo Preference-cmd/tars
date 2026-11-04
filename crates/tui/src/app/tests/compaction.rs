@@ -270,20 +270,23 @@ async fn automatic_compaction_inside_a_work_keeps_the_old_conversation_visible()
     let dir = tempfile::tempdir().unwrap();
     let mut app = app(dir.path());
     let server = Server::new().await;
-    // A small window and threshold make the first submitted request compact.
-    let mut definition = history_definition(Some(1_000));
+    // A 2,000-token trigger line, above twice the `recall` declaration every
+    // persistent session carries. The earlier conversation (about 1,000
+    // tokens) and the request (about 850) cross it together; the request is
+    // protected, so the earlier conversation is what gets summarized.
+    let mut definition = history_definition(Some(4_000));
     definition.endpoint = Some(server.endpoint.clone());
     definition.auto_compact = true;
-    definition.compact_threshold = 10;
+    definition.compact_threshold = 50;
     create_in_view(
         &mut app,
         definition,
-        text_context("existing conversation before the work"),
+        text_context(&"existing conversation before the work ".repeat(80)),
     )
     .await;
 
     app.event(Event::Paste(
-        "this request is long enough to trigger compaction ".repeat(100),
+        "this request is long enough to trigger compaction ".repeat(50),
     ));
     app.event(ctrl('s'));
     // The summary call is a non-streaming request and answers immediately; the
@@ -323,15 +326,15 @@ async fn automatic_compaction_inside_a_work_keeps_the_old_conversation_visible()
             .is_some_and(|summary| summary.contains("fixture summary")),
         "the new current Context is the folded summary"
     );
-    // The status bar reports the estimate against the frozen 1k window.
+    // The status bar reports the estimate against the frozen 4k window.
     let usage = app.entries[0]
         .session
         .as_ref()
         .unwrap()
         .context_usage()
         .unwrap();
-    assert!(usage.estimate_tokens < 1_000, "{usage:?}");
+    assert!(usage.estimate_tokens < 2_000, "{usage:?}");
     let view = screen(&app);
     assert!(view.contains("ctx "), "{view}");
-    assert!(view.contains("/ 1k"), "{view}");
+    assert!(view.contains("/ 4k"), "{view}");
 }

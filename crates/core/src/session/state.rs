@@ -99,7 +99,7 @@ impl Shared {
             state.faulted = true;
         }
         if let Some(runtime) = &self.compaction {
-            runtime.set_current_request(None);
+            runtime.clear_current_work_inputs();
             if context_window_exceeded(&result) {
                 // One forced compaction on the session's next round, even with
                 // automatic compaction switched off; failure does not retry.

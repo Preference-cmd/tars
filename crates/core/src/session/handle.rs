@@ -158,7 +158,7 @@ impl SessionHandle {
             before_publish: Mutex::new(None),
         });
         if let Some(runtime) = &self.shared.compaction {
-            runtime.set_current_request(crate::compact::user_request_text(&original_blocks));
+            runtime.set_current_work_inputs(&original_blocks);
         }
         state
             .keys

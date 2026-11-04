@@ -5,6 +5,7 @@ use super::history::{
     HISTORY_FORMAT, HistoryRecord, HistoryStore, RangeReplacement, RewriteKind, validate_index,
 };
 use super::preparer::CompactionPreparer;
+use super::segment;
 use super::summary;
 use super::{CompactionRuntime, HistoryRecordEntry, HistoryTrigger};
 use crate::definition::{CredentialRef, Provider, SessionDefinition};
@@ -19,6 +20,8 @@ use causa::runtime::{ToolExecutor, ToolExecutorOptions, TurnLimits, TurnRunOptio
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
+
+mod partial;
 
 fn definition(context_window: Option<u64>, max_tokens: Option<u32>) -> SessionDefinition {
     SessionDefinition {
@@ -325,12 +328,12 @@ async fn compaction_keeps_the_bound_tool_declaration_and_causa_accepts_the_frame
     let mut context = Context::new();
     context
         .edit()
-        .append([tool_change("alpha"), big_block(1_200)])
+        .append([tool_change("alpha"), big_block(3_000)])
         .commit()
         .unwrap();
     let (mut session, runtime) = build_session(
         directory.path(),
-        definition(Some(100), None),
+        definition(Some(1_000), None),
         context,
         gateway,
         tracker,
@@ -357,6 +360,7 @@ async fn compaction_keeps_the_bound_tool_declaration_and_causa_accepts_the_frame
     let blocks = session
         .with_context(|context| context.blocks().to_vec())
         .unwrap();
+    assert_eq!(blocks.len(), 3, "{blocks:?}");
     assert!(matches!(blocks[0].content(), BlockContent::ToolChange(_)));
     assert_eq!(
         blocks[1].meta().source.as_deref(),
@@ -374,7 +378,7 @@ async fn compaction_keeps_the_bound_tool_declaration_and_causa_accepts_the_frame
 }
 
 #[tokio::test]
-async fn a_later_round_keeps_the_submitted_request_verbatim_in_the_summary() {
+async fn a_later_round_keeps_the_submitted_request_as_its_own_block_after_the_brief() {
     let directory = tempfile::tempdir().unwrap();
     let summary_calls = Arc::new(AtomicUsize::new(0));
     let summary_inputs = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -395,14 +399,11 @@ async fn a_later_round_keeps_the_submitted_request_verbatim_in_the_summary() {
     );
     let handle = session.handle();
     let request_text = "please call the alpha fixture tool";
+    let request = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, request_text);
     let receipt = handle
         .submit(SubmitRequest {
             request_key: "in-turn".into(),
-            blocks: vec![ContextBlock::text(
-                BlockId::new(uuid::Uuid::now_v7()),
-                Role::User,
-                request_text,
-            )],
+            blocks: vec![request.clone()],
         })
         .unwrap();
     let observation = handle
@@ -416,56 +417,53 @@ async fn a_later_round_keeps_the_submitted_request_verbatim_in_the_summary() {
         &**result,
         crate::session::WorkResult::Run(causa::runtime::TurnResult::Completed { .. })
     ));
+    // Round 1 compacts the large tool result.
     assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
     let inputs = summary_inputs.lock().unwrap().clone();
     let last = inputs.last().expect("one summary request");
-    let instruction = last.last().expect("instruction block");
-    let BlockContent::Message { parts, .. } = instruction.content() else {
-        panic!("instruction is a message")
-    };
-    let text = parts
-        .iter()
-        .find_map(|part| match part {
-            ContentPart::Text(payload) => Some(payload.0.clone()),
-            _ => None,
-        })
-        .expect("instruction text");
-    assert!(
-        text.contains(request_text),
-        "round 1 keeps the original request: {text}"
-    );
-    // The replacement carries the request verbatim too, so the rest of the
-    // turn does not depend on the brief restating it.
+    // The brief request is the normal frame up to the cut point: the
+    // declaration, then the request, then the round's tool material.
+    assert!(matches!(last[0].content(), BlockContent::ToolChange(_)));
+    assert_eq!(last[1], request, "the request stands where it stood");
+    let text = message_text(last.last().expect("instruction block"));
+    assert!(text.contains("request still in progress"), "{text}");
+    assert!(!text.contains(request_text), "{text}");
+    // The request stays as its own block, with its own id, right after the
+    // brief; the brief does not copy it.
     let blocks = session
         .with_context(|context| context.blocks().to_vec())
         .unwrap();
-    let summary_text = blocks
+    let brief = blocks
         .iter()
-        .find(|block| block.meta().source.as_deref() == Some(summary::SUMMARY_SOURCE))
-        .and_then(|block| match block.content() {
-            BlockContent::Message { parts, .. } => parts.iter().find_map(|part| match part {
-                ContentPart::Text(payload) => Some(payload.0.clone()),
-                _ => None,
-            }),
-            _ => None,
-        })
-        .expect("summary block text");
+        .position(|block| block.meta().source.as_deref() == Some(summary::SUMMARY_SOURCE))
+        .expect("brief block");
+    assert_eq!(blocks[brief + 1], request);
+    let summary_text = message_text(&blocks[brief]);
     assert!(
         summary_text.contains("Goal: continue with the fixture tool."),
         "{summary_text}"
     );
-    assert!(
-        summary_text.contains(&format!(
-            "The user's current request, verbatim:\n---\n{request_text}\n---"
-        )),
-        "{summary_text}"
-    );
+    assert!(!summary_text.contains(request_text), "{summary_text}");
     let last_line = summary_text.lines().last().unwrap();
     assert!(
         last_line.starts_with("Original messages: recall id="),
         "{summary_text}"
     );
     session.shutdown().await;
+}
+
+/// The text of a message block.
+fn message_text(block: &ContextBlock) -> String {
+    let BlockContent::Message { parts, .. } = block.content() else {
+        panic!("not a message: {block:?}")
+    };
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Text(payload) => Some(payload.0.as_str()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -645,29 +643,30 @@ fn summary_trimming_drops_the_earliest_blocks_and_orphan_results() {
         Default::default(),
     );
     let blocks = vec![big_block(900), call, result, big_block(900)];
-    let trimmed = summary::trim_to_limit(&blocks, 10);
+    // Trimming restarts only at a cut point, so a result never loses its call.
+    let trimmed = summary::request_material(&blocks, 0, blocks.len(), &[], Some(10));
     assert!(
         trimmed
             .iter()
             .all(|block| !matches!(block.content(), BlockContent::ToolResult(_))),
-        "an orphan result is not sent"
+        "an orphan result is not sent: {trimmed:?}"
     );
-    // Replacement blocks declare the current tools and mark the summary.
-    let replacement =
-        summary::replacement_blocks(&blocks, BlockId::new(uuid::Uuid::now_v7()), "brief");
-    assert_eq!(replacement.len(), 1);
+    let last_fits = segment::blocks_estimate(&blocks[3..]);
+    let trimmed = summary::request_material(&blocks, 0, blocks.len(), &[], Some(last_fits));
+    assert_eq!(trimmed.len(), 1, "restarts at the last user message");
+    assert_eq!(trimmed[0].id(), blocks[3].id());
+    // The brief marks its provenance; a tool declaration is restated only
+    // when the summarized part changed the tool state.
+    let brief = summary::summary_block(BlockId::new(uuid::Uuid::now_v7()), "brief");
     assert_eq!(
-        replacement[0].meta().source.as_deref(),
+        brief.meta().source.as_deref(),
         Some(summary::SUMMARY_SOURCE)
     );
+    assert!(segment::tool_delta(&[], &blocks).is_none());
     let with_tools = vec![tool_change("alpha")];
-    let replacement =
-        summary::replacement_blocks(&with_tools, BlockId::new(uuid::Uuid::now_v7()), "brief");
-    assert_eq!(replacement.len(), 2);
-    assert!(matches!(
-        replacement[0].content(),
-        BlockContent::ToolChange(_)
-    ));
+    let delta = segment::tool_delta(&[], &with_tools).expect("full declaration");
+    assert_eq!(causa::kernel::current_tools(&[delta])[0].name, "alpha");
+    assert!(segment::tool_delta(&with_tools, &with_tools).is_none());
 }
 
 #[test]
@@ -676,32 +675,57 @@ fn trimmed_summary_input_starts_with_the_tool_declaration_and_a_user_message() {
         |text: &str| ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::Assistant, text);
     let user =
         |text: &str| ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, text);
+    let alpha = tool_change("alpha");
     let blocks = vec![
+        big_block(900),
+        alpha.clone(),
+        assistant("first answer"),
+        user("second question"),
+        assistant("second answer"),
+    ];
+    // The cut falls after the large first message, which also held the
+    // declaration; the dropped declaration is restated first.
+    let trimmed = summary::request_material(&blocks, 0, blocks.len(), &[], Some(200));
+    assert_eq!(trimmed.len(), 3, "{trimmed:?}");
+    let BlockContent::ToolChange(_) = trimmed[0].content() else {
+        panic!("the dropped declaration is restated first")
+    };
+    assert_ne!(trimmed[0].id(), alpha.id());
+    assert_eq!(causa::kernel::current_tools(&trimmed)[0].name, "alpha");
+    let BlockContent::Message { role, .. } = trimmed[1].content() else {
+        panic!("a message follows the declaration")
+    };
+    assert_eq!(role, &Role::User);
+    assert_eq!(trimmed[1].id(), blocks[3].id());
+    // The head is never trimmed: a declaration in the head stays as it is.
+    let head = vec![
         tool_change("alpha"),
         big_block(900),
         assistant("first answer"),
         user("second question"),
         assistant("second answer"),
     ];
-    // The cut falls after the large first message, on an assistant block.
-    let trimmed = summary::trim_to_limit(&blocks, 200);
-    assert_eq!(trimmed.len(), 3, "{trimmed:?}");
-    let BlockContent::ToolChange(_) = trimmed[0].content() else {
-        panic!("the dropped declaration is restated first")
-    };
-    assert_eq!(causa::kernel::current_tools(&trimmed)[0].name, "alpha");
-    let BlockContent::Message { role, .. } = trimmed[1].content() else {
-        panic!("a message follows the declaration")
-    };
-    assert_eq!(*role, Role::User);
-    assert_eq!(trimmed[1].id(), blocks[3].id());
+    let head_end = segment::head_end(&head);
+    assert_eq!(head_end, 1);
+    let trimmed = summary::request_material(&head, head_end, head.len(), &[], Some(200));
+    assert_eq!(
+        trimmed.iter().map(ContextBlock::id).collect::<Vec<_>>(),
+        vec![head[0].id(), head[3].id(), head[4].id()]
+    );
     // Nothing is restated when the input already fits.
-    assert_eq!(summary::trim_to_limit(&blocks, 10_000).len(), blocks.len());
+    assert_eq!(
+        summary::request_material(&blocks, 0, blocks.len(), &[], Some(10_000)),
+        blocks
+    );
+    assert_eq!(
+        summary::request_material(&blocks, 0, blocks.len(), &[], None),
+        blocks
+    );
 }
 
 #[test]
-fn instruction_is_structured_and_carries_the_current_request() {
-    let text = summary::instruction(None);
+fn instruction_is_structured_and_marks_the_request_in_progress() {
+    let text = summary::instruction(false);
     for heading in [
         "Goal:",
         "Decisions:",
@@ -712,9 +736,14 @@ fn instruction_is_structured_and_carries_the_current_request() {
     ] {
         assert!(text.contains(heading), "missing {heading}");
     }
-    assert!(!text.contains("verbatim:"));
-    let with_request = summary::instruction(Some("finish the fixture"));
-    assert!(with_request.contains("finish the fixture"));
+    assert!(text.starts_with("Prepare a continuation brief"));
+    assert!(text.contains("Earlier briefs above are background"));
+    assert!(text.contains("The most recent messages are kept verbatim after the brief."));
+    assert!(!text.contains("In progress"));
+    let with_request = summary::instruction(true);
+    assert!(with_request.contains("section \"In progress\""));
+    assert!(with_request.contains("request still in progress"));
+    assert!(with_request.contains("do not copy it"));
 }
 
 #[test]
@@ -1213,39 +1242,6 @@ fn test_be01_shared_commit_path_v1_1_format_multi_range_and_abandonment() {
 
 #[tokio::test]
 async fn test_be03_whole_context_compaction_structure_triggers_and_abandon_conditions() {
-    // 1. Structure: whole-context replacement replaces 0..len, kept tail empty,
-    // result is tool declaration + one continuation brief.
-    let original_blocks = vec![
-        tool_change("fixture_tool"),
-        ContextBlock::text(
-            BlockId::new(uuid::Uuid::now_v7()),
-            Role::User,
-            "User prompt 1",
-        ),
-        ContextBlock::text(
-            BlockId::new(uuid::Uuid::now_v7()),
-            Role::Assistant,
-            "Assistant reply 1",
-        ),
-    ];
-    let summary_id = BlockId::new(uuid::Uuid::now_v7());
-    let replacement =
-        summary::replacement_blocks(&original_blocks, summary_id, "Goal: carry out task.");
-    assert_eq!(replacement.len(), 2);
-    assert!(matches!(
-        replacement[0].content(),
-        BlockContent::ToolChange(_)
-    ));
-    assert_eq!(
-        causa::kernel::current_tools(&replacement)[0].name,
-        "fixture_tool"
-    );
-    assert_eq!(
-        replacement[1].meta().source.as_deref(),
-        Some(summary::SUMMARY_SOURCE)
-    );
-    assert_eq!(replacement[1].id(), summary_id);
-
     // 2. Triggers: Auto, Manual, Passive
     let directory = tempfile::tempdir().unwrap();
     let tracker = Arc::new(UsageTracker::default());
@@ -1272,6 +1268,52 @@ async fn test_be03_whole_context_compaction_structure_triggers_and_abandon_condi
     runtime.request_force();
     assert_eq!(runtime.trigger_for(10), Some(HistoryTrigger::Passive));
 
+    // 1. Structure: when no tail fits the budget, the summary replaces
+    // everything after the head. A declaration in the head stays as it is,
+    // so no new one is needed; the result is the head plus one brief.
+    let original_blocks = vec![
+        tool_change("fixture_tool"),
+        ContextBlock::text(
+            BlockId::new(uuid::Uuid::now_v7()),
+            Role::User,
+            "User prompt 1 ".repeat(100),
+        ),
+        ContextBlock::text(
+            BlockId::new(uuid::Uuid::now_v7()),
+            Role::Assistant,
+            "Assistant reply 1",
+        ),
+    ];
+    let mut whole = Context::from_blocks(original_blocks.clone()).unwrap();
+    let control = CallControl::new(causa::kernel::CancellationToken::new(), None);
+    let rewrite = runtime
+        .plan(
+            &whole,
+            &causa::kernel::ModelRef::new("fixture"),
+            &causa::kernel::GenerationOptions::default(),
+            HistoryTrigger::Manual,
+            &control,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rewrite.replacements.len(), 1);
+    assert_eq!(rewrite.replacements[0].range, 1..3);
+    assert_eq!(rewrite.replacements[0].with.len(), 1);
+    let summary_id = rewrite.replacements[0].with[0].id();
+    runtime.commit_rewrite(&mut whole, rewrite).unwrap();
+    let replaced = whole.blocks();
+    assert_eq!(replaced.len(), 2);
+    assert_eq!(replaced[0], original_blocks[0], "the head keeps its block");
+    assert_eq!(
+        causa::kernel::current_tools(replaced)[0].name,
+        "fixture_tool"
+    );
+    assert_eq!(
+        replaced[1].meta().source.as_deref(),
+        Some(summary::SUMMARY_SOURCE)
+    );
+    assert_eq!(replaced[1].id(), summary_id);
+
     // 3. Abandon conditions:
     // a. Unpaired materials abandon
     let unpaired_context = Context::from_blocks(vec![ContextBlock::new(
@@ -1280,14 +1322,12 @@ async fn test_be03_whole_context_compaction_structure_triggers_and_abandon_condi
         Default::default(),
     )])
     .unwrap();
-    let control = CallControl::new(causa::kernel::CancellationToken::new(), None);
     let plan_res = runtime
         .plan(
             &unpaired_context,
             &causa::kernel::ModelRef::new("fixture"),
             &causa::kernel::GenerationOptions::default(),
             HistoryTrigger::Manual,
-            None,
             &control,
         )
         .await;
@@ -1326,7 +1366,6 @@ async fn test_be03_whole_context_compaction_structure_triggers_and_abandon_condi
             &causa::kernel::ModelRef::new("fixture"),
             &causa::kernel::GenerationOptions::default(),
             HistoryTrigger::Manual,
-            None,
             &control,
         )
         .await;
@@ -1369,7 +1408,6 @@ async fn test_be06_planned_summary_commits_under_the_record_id_allocated_before_
             &causa::kernel::ModelRef::new("fixture"),
             &causa::kernel::GenerationOptions::default(),
             HistoryTrigger::Manual,
-            None,
             &control,
         )
         .await

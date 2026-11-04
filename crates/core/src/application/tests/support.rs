@@ -285,6 +285,43 @@ pub(super) fn compacting_definition(context_window: Option<u64>) -> SessionDefin
     definition
 }
 
+/// Window for compaction fixtures, in tokens.
+///
+/// Every persistent session declares `recall`, about 440 estimated tokens,
+/// and compaction gives up when that fixed prefix is over half the trigger
+/// line (70% of the window). The line therefore has to stay above twice the
+/// declaration.
+pub(super) const FIXTURE_WINDOW: u64 = 2_000;
+
+/// Material an earlier work left behind: three large user messages and an
+/// answer, about 1,400 estimated tokens.
+///
+/// A work's own input is protected from its compaction, so a fixture that
+/// compacts needs material from before the work. With the `recall`
+/// declaration it crosses the trigger line of [`FIXTURE_WINDOW`].
+pub(super) fn earlier_conversation() -> Context {
+    Context::from_blocks(vec![
+        text_block(1_200),
+        text_block(1_200),
+        text_block(1_200),
+        ContextBlock::text(
+            BlockId::new(uuid::Uuid::now_v7()),
+            causa::kernel::Role::Assistant,
+            "earlier answer",
+        ),
+    ])
+    .unwrap()
+}
+
+/// A short request for the work that compacts the earlier conversation.
+pub(super) fn short_request() -> Vec<ContextBlock> {
+    vec![ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::Role::User,
+        "continue the fixture task",
+    )]
+}
+
 /// One user message whose size makes the byte-based estimator predictable.
 pub(super) fn text_block(bytes: usize) -> ContextBlock {
     ContextBlock::text(

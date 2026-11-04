@@ -34,7 +34,7 @@ Both stdin and stdout must be interactive terminals. At least 30×12; below that
 | Help / full status and error details | `/help` / `/status`; ↑↓ or PageUp/PageDown to scroll |
 | Full tool calls/results | `/tools` or F6; ↑↓ / PageUp/PageDown to scroll |
 | Automatic compaction | `/auto_compact` reports switch, threshold, window and estimate; `/auto_compact on` / `off` changes the switch; `/auto_compact 10..95` sets the threshold and turns it on |
-| Compact now | `/compact` replaces the current Context with a model-written brief and saves it |
+| Compact now | `/compact` replaces the older part of the current Context with a model-written brief, keeps the newest messages, and saves it |
 | Summary | `/summary` shows the current summary block in full |
 | Handle materials after interruption | `/repair` or F7; `a` previews the original result, `r` previews removal, Enter applies and saves (for 0.5 seconds after a new preview arrives, Enter and other panel keys are ignored while Esc and scrolling still work, and the notice is dimmed) |
 | Open the selected record | F3 |

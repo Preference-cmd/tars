@@ -9,9 +9,7 @@ use super::CompactionProgress;
 use super::estimate;
 use super::runtime::CompactionRuntime;
 use crate::session::ToolReporter;
-use causa::kernel::{
-    CallControl, Context, ContextFrame, ContextPreparer, PrepareError, RoundId, RoundInfo,
-};
+use causa::kernel::{CallControl, Context, ContextFrame, ContextPreparer, PrepareError, RoundInfo};
 use std::sync::Arc;
 
 /// One work's compaction decision point.
@@ -42,7 +40,12 @@ impl ContextPreparer for CompactionPreparer {
     ) -> Result<ContextFrame, PrepareError> {
         let bytes = estimate::context_bytes(context);
         let estimate_tokens = self.runtime.usage().estimate(bytes);
-        let Some(trigger) = self.runtime.trigger_for(estimate_tokens) else {
+        // The fixed prefix never shrinks: once it was reported as too large,
+        // later rounds go out unchanged without another attempt.
+        let trigger = (!self.runtime.prefix_too_large_reported())
+            .then(|| self.runtime.trigger_for(estimate_tokens))
+            .flatten();
+        let Some(trigger) = trigger else {
             self.runtime.note_prepare(bytes);
             return Ok(context.frame());
         };
@@ -53,26 +56,16 @@ impl ContextPreparer for CompactionPreparer {
                 estimate_before: estimate_tokens,
             },
         );
-        // Only a later round of the same work has an in-progress request that
-        // the brief has to carry verbatim; the first round's input is already
-        // part of the material being summarized.
-        let user_text = (round.invocation_id.round_id != RoundId(0))
-            .then(|| self.runtime.current_request())
-            .flatten();
         let plan = self
             .runtime
-            .plan(
-                context,
-                round.model,
-                round.generation,
-                trigger,
-                user_text.as_deref(),
-                control,
-            )
+            .plan(context, round.model, round.generation, trigger, control)
             .await;
         let rewrite = match plan {
             Ok(rewrite) => rewrite,
             Err(reason) => {
+                if reason == super::CompactionAbandon::PrefixTooLarge {
+                    self.runtime.note_prefix_too_large_reported();
+                }
                 self.report(round, CompactionProgress::Abandoned { trigger, reason });
                 self.runtime.note_prepare(bytes);
                 return Ok(context.frame());

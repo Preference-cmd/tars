@@ -1,22 +1,23 @@
 //! Running compaction settings, planning and the history hand-off.
 //!
-//! A plan is built in this order: decide on the summary request, obtain the
-//! model's brief, build the replacement blocks and estimate the result. The
+//! A plan is built in this order: find the head, the retained tail and the
+//! protected blocks, ask the model for a brief of the interval between them,
+//! build the replacements around the protected blocks and estimate the result. The
 //! plan is a [`Rewrite`]; the shared commit path writes and fsyncs its record,
 //! edits the Context and only then appends the index entry.
 
 use super::estimate::{self, UsageTracker};
-use super::history::{
-    HistoryRecordEntry, HistoryStore, PlannedReplacement, Rewrite, RewriteError, RewriteKind,
-};
+use super::history::{HistoryRecordEntry, HistoryStore, Rewrite, RewriteError, RewriteKind};
+use super::segment;
 use super::summary::{self, SUMMARY_MAX_TOKENS};
 use super::{CompactionAbandon, HistoryTrigger};
 use crate::definition::SessionDefinition;
 use crate::session::ConversationId;
 use causa::kernel::{
-    BlockContent, CallControl, Context, GenerationOptions, InvocationId, ModelGateway, ModelRef,
-    ModelRequest, RoundId, TurnId,
+    BlockContent, BlockId, CallControl, Context, ContextBlock, GenerationOptions, InvocationId,
+    ModelGateway, ModelRef, ModelRequest, RoundId, TurnId,
 };
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -39,7 +40,8 @@ pub(crate) struct CompactionRuntime {
     history: Option<Arc<HistoryStore>>,
     usage: Arc<UsageTracker>,
     force: AtomicBool,
-    current_request: Mutex<Option<String>>,
+    current_work_inputs: Mutex<HashSet<BlockId>>,
+    prefix_too_large_reported: AtomicBool,
     gateway: Arc<dyn ModelGateway>,
     model: ModelRef,
     generation: GenerationOptions,
@@ -79,7 +81,8 @@ impl CompactionRuntime {
             history: Some(history),
             usage,
             force: AtomicBool::new(false),
-            current_request: Mutex::new(None),
+            current_work_inputs: Mutex::new(HashSet::new()),
+            prefix_too_large_reported: AtomicBool::new(false),
             gateway,
             model: options.model,
             generation: options.generation,
@@ -151,20 +154,42 @@ impl CompactionRuntime {
         self.usage.clone()
     }
 
-    /// Remember the user's submitted request text for in-turn summaries.
-    pub(crate) fn set_current_request(&self, text: Option<String>) {
+    /// Protect the input blocks of the work that was just accepted.
+    ///
+    /// They keep their ids and stay in place whenever a summary in this work
+    /// covers them, so the request being answered is never paraphrased away.
+    pub(crate) fn set_current_work_inputs(&self, blocks: &[ContextBlock]) {
         *self
-            .current_request
+            .current_work_inputs
             .lock()
-            .expect("request text has no callbacks") = text;
+            .expect("work inputs have no callbacks") =
+            blocks.iter().map(ContextBlock::id).collect();
     }
 
-    /// The current work's submitted request text, when it had one.
-    pub(crate) fn current_request(&self) -> Option<String> {
-        self.current_request
+    /// Stop protecting the finished work's input blocks.
+    pub(crate) fn clear_current_work_inputs(&self) {
+        self.current_work_inputs
             .lock()
-            .expect("request text has no callbacks")
+            .expect("work inputs have no callbacks")
+            .clear();
+    }
+
+    fn current_work_inputs(&self) -> HashSet<BlockId> {
+        self.current_work_inputs
+            .lock()
+            .expect("work inputs have no callbacks")
             .clone()
+    }
+
+    /// Whether automatic compaction already reported a too-large fixed prefix.
+    pub(crate) fn prefix_too_large_reported(&self) -> bool {
+        self.prefix_too_large_reported.load(Ordering::SeqCst)
+    }
+
+    /// Note that a too-large fixed prefix was reported; later rounds skip
+    /// compaction quietly, since the prefix never changes.
+    pub(crate) fn note_prefix_too_large_reported(&self) {
+        self.prefix_too_large_reported.store(true, Ordering::SeqCst);
     }
 
     /// Ask for one forced compaction after the provider reported an overflow.
@@ -197,38 +222,59 @@ impl CompactionRuntime {
         self.usage.note_prepare_bytes(bytes);
     }
 
-    /// Plan one whole-Context compaction: summary request and replacement.
+    /// Plan one summary of the oldest material after the head.
     ///
-    /// Nothing is written and the Context is untouched; the caller hands the
-    /// returned rewrite to [`Self::commit_rewrite`].
+    /// The interval runs from the end of the head (fixed prefix and brief
+    /// chain) to the cut point `k` that keeps the newest material within the
+    /// retained-tail budget; protected blocks inside it stay. Nothing is
+    /// written and the Context is untouched; the caller hands the returned
+    /// rewrite to [`Self::commit_rewrite`].
     pub(crate) async fn plan(
         &self,
         context: &Context,
         model: &ModelRef,
         generation: &GenerationOptions,
         trigger: HistoryTrigger,
-        user_text: Option<&str>,
         control: &CallControl,
     ) -> Result<Rewrite, CompactionAbandon> {
         if self.history.is_none() {
             return Err(CompactionAbandon::Unavailable);
         }
-        let old_blocks = context.blocks();
-        if has_unpaired_tools(old_blocks) {
+        let blocks = context.blocks();
+        if has_unpaired_tools(blocks) {
             return Err(CompactionAbandon::UnpairedMaterials);
         }
-        let estimate_before = self.usage.estimate(estimate::context_bytes(context));
-        // When the old material itself is over the window the summary request
-        // would be refused too; drop the earliest material until it fits.
-        let mut request_blocks: Vec<causa::kernel::ContextBlock> =
-            if self.window.is_some_and(|window| estimate_before > window) {
-                let window = self.window.expect("checked window");
-                let limit = u128::from(window) * u128::from(TRIM_TARGET_PERCENT) / 100;
-                summary::trim_to_limit(old_blocks, u64::try_from(limit).unwrap_or(u64::MAX))
-            } else {
-                old_blocks.to_vec()
-            };
-        request_blocks.push(summary::instruction_block(summary::instruction(user_text)));
+        let head_end = segment::head_end(blocks);
+        let (_, threshold) = self.settings();
+        let budget = segment::retained_tail_budget(
+            self.window,
+            threshold,
+            segment::fixed_prefix_estimate(blocks),
+        )
+        .map_err(|_| CompactionAbandon::PrefixTooLarge)?;
+        let k = segment::tail_start(blocks, head_end, budget);
+        let protected =
+            segment::protected_positions(blocks, head_end, k, &self.current_work_inputs());
+        // Protected blocks stay and declarations are only folded, so an
+        // interval of nothing else has nothing to summarize.
+        let summarizable = (head_end..k).any(|index| {
+            !protected.contains(&index)
+                && !matches!(blocks[index].content(), BlockContent::ToolChange(_))
+        });
+        if !summarizable {
+            return Err(CompactionAbandon::NoShrink);
+        }
+
+        // When the material itself is over the window the brief request would
+        // be refused too; drop the earliest interval blocks until it fits.
+        let limit = self.window.map(|window| {
+            u64::try_from(u128::from(window) * u128::from(TRIM_TARGET_PERCENT) / 100)
+                .unwrap_or(u64::MAX)
+        });
+        let mut request_blocks = summary::request_material(blocks, head_end, k, &protected, limit);
+        request_blocks.push(summary::instruction_block(summary::instruction(
+            !protected.is_empty(),
+        )));
         let mut request = ModelRequest::new(
             InvocationId {
                 turn_id: TurnId::new(format!("compaction-{}", uuid::Uuid::now_v7())),
@@ -258,27 +304,47 @@ impl CompactionRuntime {
         if text.is_empty() {
             return Err(CompactionAbandon::EmptySummary);
         }
+
         let record_id = super::history::new_record_id();
-        let summary_id = summary::new_block_id();
-        let text = summary::summary_text(text, user_text, &record_id);
-        let new_blocks = summary::replacement_blocks(old_blocks, summary_id, &text);
-        let new_bytes = serde_json::to_vec(&new_blocks)
-            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
-            .unwrap_or(u64::MAX);
-        let estimate_after = estimate::estimate_bytes(new_bytes);
-        if estimate_after >= estimate_before {
+        let brief = summary::summary_block(
+            summary::new_block_id(),
+            &summary::summary_text(text, &record_id),
+        );
+        // The interval's tool changes, folded into one declaration before the
+        // brief, keep the frame's tool state exactly as it was.
+        let mut new_blocks: Vec<ContextBlock> =
+            segment::tool_delta(&blocks[..head_end], &blocks[..k])
+                .into_iter()
+                .collect();
+        new_blocks.push(brief);
+        let inserted_bytes = segment::blocks_bytes(&new_blocks);
+        let replacements = segment::replacements(blocks, head_end, k, &protected, new_blocks);
+
+        // Compare like with like: serialized sizes before and after the edit.
+        let removed_bytes = (head_end..k)
+            .filter(|index| !protected.contains(index))
+            .fold(0u64, |total, index| {
+                total.saturating_add(segment::block_bytes(&blocks[index]))
+            });
+        let before_bytes = segment::blocks_bytes(blocks);
+        let after_bytes = before_bytes
+            .saturating_sub(removed_bytes)
+            .saturating_add(inserted_bytes);
+        if after_bytes >= before_bytes {
             return Err(CompactionAbandon::NoShrink);
         }
+        // The calibrated estimate minus what the edit saves, so both numbers
+        // are on the same scale.
+        let estimate_before = self.usage.estimate(estimate::context_bytes(context));
+        let estimate_after =
+            estimate_before.saturating_sub(estimate::estimate_bytes(before_bytes - after_bytes));
         Ok(Rewrite {
             record_id,
             trigger,
             kind: RewriteKind::Summarize,
             estimate_before,
             estimate_after,
-            replacements: vec![PlannedReplacement {
-                range: 0..old_blocks.len(),
-                with: new_blocks,
-            }],
+            replacements,
         })
     }
 
@@ -312,7 +378,6 @@ impl CompactionRuntime {
             &self.model,
             &self.generation,
             HistoryTrigger::Manual,
-            None,
             control,
         )
         .await

@@ -6,13 +6,21 @@
 //! originals of its own range, recursively: an original may itself have been
 //! inserted by an older rewrite.
 //!
+//! A summary that protected a block put it back unchanged as the last
+//! inserted block of the range that starts at it, so the block is both an
+//! original and an inserted block of that range. Such a range is matched in
+//! two pieces: the new blocks stand for nothing older than the protected
+//! block, and the protected block stands for itself and the originals after
+//! it. A later rewrite may separate the two pieces, and several rewrites may
+//! put the same block back; the newest of them owns it first.
+//!
 //! [`ExpansionCursor`] does the walk without reading files: it stops at each
 //! record it needs and continues once the caller supplies it. A display can
 //! therefore read records in the background, one at a time, only as far as
 //! it scrolls. [`expand_conversation`] drives a cursor with a read function.
 
 use super::HistoryTrigger;
-use super::history::{HistoryRecord, HistoryRecordEntry, RewriteKind};
+use super::history::{HistoryRecord, HistoryRecordEntry, RangeReplacement, RewriteKind};
 use crate::store::StoreError;
 use causa::kernel::{BlockId, ContextBlock};
 use serde::{Deserialize, Serialize};
@@ -107,11 +115,16 @@ pub struct ExpandedConversation {
 }
 
 enum Item {
-    /// A block that may still be an inserted block of an older record.
-    Expand(ContextBlock),
+    /// A block that may still be an inserted block of an older record. A
+    /// status here replaces the frame's: a protected block that a rewrite put
+    /// back keeps the status it has outside that rewrite.
+    Expand(ContextBlock, Option<BlockStatus>),
     /// A block shown as it stands.
     Show(ExpandedBlock),
 }
+
+/// Adjacent inserted blocks of one record, each with its status where it stands.
+type Run = Vec<(ContextBlock, BlockStatus)>;
 
 struct Frame {
     /// Items in reading order; the newest is taken from the end.
@@ -126,7 +139,7 @@ struct Waiting {
     owner: usize,
     /// The inserted run to replace, or none for a record reached only by its
     /// place in the index (an older record behind an unreadable one).
-    run: Option<Vec<ContextBlock>>,
+    run: Option<Run>,
 }
 
 /// Expansion that a caller drives one step at a time, newest first.
@@ -138,7 +151,8 @@ struct Waiting {
 /// continue past a missing file.
 pub struct ExpansionCursor {
     index: Vec<HistoryRecordEntry>,
-    owners: HashMap<BlockId, usize>,
+    /// Index positions of the records that inserted each block, oldest first.
+    owners: HashMap<BlockId, Vec<usize>>,
     stack: Vec<Frame>,
     reached: Vec<bool>,
     supplied: Vec<bool>,
@@ -155,16 +169,20 @@ impl ExpansionCursor {
     ///
     /// `index` is the session's record index in creation order.
     pub fn new(blocks: &[ContextBlock], index: Vec<HistoryRecordEntry>) -> Self {
-        let mut owners = HashMap::new();
+        let mut owners: HashMap<BlockId, Vec<usize>> = HashMap::new();
         for (position, entry) in index.iter().enumerate() {
             for id in &entry.inserted_block_ids {
-                owners.entry(*id).or_insert(position);
+                owners.entry(*id).or_default().push(position);
             }
         }
         let count = index.len();
         Self {
             stack: vec![Frame {
-                items: blocks.iter().cloned().map(Item::Expand).collect(),
+                items: blocks
+                    .iter()
+                    .cloned()
+                    .map(|block| Item::Expand(block, None))
+                    .collect(),
                 below: count,
                 status: BlockStatus::Original,
             }],
@@ -191,7 +209,7 @@ impl ExpansionCursor {
     pub fn adopt(&mut self, entry: HistoryRecordEntry) {
         let position = self.index.len();
         for id in &entry.inserted_block_ids {
-            self.owners.entry(*id).or_insert(position);
+            self.owners.entry(*id).or_default().push(position);
         }
         self.consumed.push(entry.inserted_block_ids.len());
         self.index.push(entry);
@@ -224,26 +242,26 @@ impl ExpansionCursor {
                 self.stack.pop();
                 continue;
             };
-            let block = match item {
+            let (block, status) = match item {
                 Item::Show(expanded) => return ExpansionStep::Block(Box::new(expanded)),
-                Item::Expand(block) => block,
+                Item::Expand(block, status) => {
+                    (block, status.unwrap_or_else(|| frame.status.clone()))
+                }
             };
             let below = frame.below;
-            let owner_of = |id: BlockId| owners.get(&id).copied().filter(|p| *p < below);
+            let owner_of = |id: BlockId| newest_owner(owners, id, below);
             let Some(owner) = owner_of(block.id()) else {
-                return ExpansionStep::Block(Box::new(ExpandedBlock {
-                    status: frame.status.clone(),
-                    block,
-                }));
+                return ExpansionStep::Block(Box::new(ExpandedBlock { status, block }));
             };
-            let mut run = vec![block];
-            while let Some(Item::Expand(previous)) = frame.items.last()
+            let mut run = vec![(block, status)];
+            while let Some(Item::Expand(previous, _)) = frame.items.last()
                 && owner_of(previous.id()) == Some(owner)
             {
-                let Some(Item::Expand(previous)) = frame.items.pop() else {
+                let Some(Item::Expand(previous, status)) = frame.items.pop() else {
                     unreachable!("checked above");
                 };
-                run.push(previous);
+                let status = status.unwrap_or_else(|| frame.status.clone());
+                run.push((previous, status));
             }
             run.reverse();
             self.reached[owner] = true;
@@ -282,7 +300,7 @@ impl ExpansionCursor {
     }
 
     /// Expand one run of `owner`, or wait for its record.
-    fn start(&mut self, owner: usize, run: Option<Vec<ContextBlock>>) {
+    fn start(&mut self, owner: usize, run: Option<Run>) {
         let Some(record) = self.records.get(&owner).cloned() else {
             self.waiting = Some(Waiting { owner, run });
             return;
@@ -294,7 +312,7 @@ impl ExpansionCursor {
             Err(_) => run
                 .unwrap_or_default()
                 .into_iter()
-                .map(|block| {
+                .map(|(block, _)| {
                     Item::Show(ExpandedBlock {
                         status: BlockStatus::Unreadable(record_id.clone()),
                         block,
@@ -311,11 +329,19 @@ impl ExpansionCursor {
                 }));
                 match run {
                     Some(run) => self.match_run(&record, &run),
+                    // Put-back blocks stand elsewhere in the conversation;
+                    // only the removed originals belong here.
                     None => record
                         .replacements
                         .iter()
-                        .flat_map(|replacement| replacement.originals.iter().cloned())
-                        .map(Item::Expand)
+                        .flat_map(|replacement| {
+                            replacement
+                                .originals
+                                .iter()
+                                .filter(|block| !replacement.inserted_ids.contains(&block.id()))
+                                .cloned()
+                        })
+                        .map(|block| Item::Expand(block, None))
                         .collect(),
                 }
             }
@@ -334,42 +360,51 @@ impl ExpansionCursor {
         }
     }
 
-    /// Replace each range's inserted blocks in `run` with that range's originals.
+    /// Replace each piece of inserted blocks in `run` with its originals.
     ///
-    /// The run may hold several adjacent ranges of one record; each is matched
-    /// by its own inserted ids. A block no range describes is shown as it is.
-    fn match_run(&mut self, record: &HistoryRecord, run: &[ContextBlock]) -> Vec<Item> {
+    /// The run may hold several adjacent ranges of one record, or one piece
+    /// of a range whose protected block a later rewrite moved away; each
+    /// piece is matched by its own inserted ids. A block no piece describes
+    /// is shown as it is.
+    fn match_run(
+        &mut self,
+        record: &HistoryRecord,
+        run: &[(ContextBlock, BlockStatus)],
+    ) -> Vec<Item> {
+        let pieces: Vec<Piece<'_>> = record.replacements.iter().flat_map(pieces).collect();
         let mut newest_first = Vec::new();
         let mut end = run.len();
         let mut stray = false;
         while end > 0 {
             let tail = &run[..end];
-            let matched = record.replacements.iter().find(|replacement| {
-                let inserted = &replacement.inserted_ids;
-                !inserted.is_empty()
-                    && inserted.len() <= tail.len()
-                    && tail[tail.len() - inserted.len()..]
+            let matched = pieces.iter().find(|piece| {
+                !piece.inserted.is_empty()
+                    && piece.inserted.len() <= tail.len()
+                    && tail[tail.len() - piece.inserted.len()..]
                         .iter()
-                        .map(ContextBlock::id)
-                        .eq(inserted.iter().copied())
+                        .map(|(block, _)| block.id())
+                        .eq(piece.inserted.iter().copied())
             });
             match matched {
-                Some(replacement) => {
-                    newest_first.extend(
-                        replacement
-                            .originals
+                Some(piece) => {
+                    let start = end - piece.inserted.len();
+                    newest_first.extend(piece.originals.iter().rev().map(|block| {
+                        // A put-back block keeps the status of the block that
+                        // stands for it; the others were removed here.
+                        let kept = piece
+                            .inserted
                             .iter()
-                            .rev()
-                            .cloned()
-                            .map(Item::Expand),
-                    );
-                    end -= replacement.inserted_ids.len();
+                            .position(|id| *id == block.id())
+                            .map(|position| run[start + position].1.clone());
+                        Item::Expand(block.clone(), kept)
+                    }));
+                    end = start;
                 }
                 None => {
                     stray = true;
                     newest_first.push(Item::Show(ExpandedBlock {
                         status: BlockStatus::Unreadable(record.record_id.clone()),
-                        block: tail[end - 1].clone(),
+                        block: tail[end - 1].0.clone(),
                     }));
                     end -= 1;
                 }
@@ -385,6 +420,49 @@ impl ExpansionCursor {
         newest_first.reverse();
         newest_first
     }
+}
+
+/// The newest record older than `below` that inserted `id`.
+fn newest_owner(owners: &HashMap<BlockId, Vec<usize>>, id: BlockId, below: usize) -> Option<usize> {
+    owners
+        .get(&id)
+        .and_then(|positions| positions.iter().rev().find(|&&p| p < below).copied())
+}
+
+/// Inserted ids that together stand for some originals of one range.
+struct Piece<'a> {
+    inserted: &'a [BlockId],
+    originals: &'a [ContextBlock],
+}
+
+/// Split one range at its put-back block, if it has one.
+///
+/// A summary puts a protected block back as the last inserted block of the
+/// range that starts at it. The new blocks before it stand for nothing older
+/// than it; the block stands for itself and the originals after it.
+fn pieces(replacement: &RangeReplacement) -> Vec<Piece<'_>> {
+    let inserted = &replacement.inserted_ids[..];
+    let originals = &replacement.originals[..];
+    let kept = inserted
+        .last()
+        .is_some_and(|last| originals.first().is_some_and(|first| first.id() == *last));
+    if !kept {
+        return vec![Piece {
+            inserted,
+            originals,
+        }];
+    }
+    let (new, put_back) = inserted.split_at(inserted.len() - 1);
+    vec![
+        Piece {
+            inserted: new,
+            originals: &[],
+        },
+        Piece {
+            inserted: put_back,
+            originals,
+        },
+    ]
 }
 
 /// Expand the current Context into the full conversation.

@@ -1,13 +1,14 @@
-//! Summary instruction, request input trimming and replacement block building.
+//! Brief instruction, brief request material and brief block building.
 //!
-//! The summary call uses the session's own model and render options through the
-//! same public gateway, adds no tools and returns plain text. A summary replaces
-//! the whole Context: one tool declaration matching the bound tools plus one
-//! user-role message marked with `tars:compaction`.
+//! The brief call uses the session's own model, tools and render options
+//! through the same public gateway and keeps only the returned text. Its
+//! material is the normal request up to the cut point `k` followed by one
+//! instruction, so almost all of it hits the provider's prompt cache. The
+//! brief that comes back is one user-role message marked with
+//! `tars:compaction`; [`super::segment`] decides where it goes.
 
-use causa::kernel::{
-    BlockContent, BlockId, BlockMeta, ContextBlock, Role, ToolChange, ToolDefinition, current_tools,
-};
+use super::segment;
+use causa::kernel::{BlockContent, BlockId, BlockMeta, ContextBlock, Role};
 
 /// Upper bound on generated summary tokens; the session output limit wins when
 /// it is smaller. Candidates keep this a constant until real data exists.
@@ -19,10 +20,14 @@ pub(crate) const SUMMARY_PREFIX: &str = "The conversation before this point was 
 /// Block provenance marking a TARS-written summary; only TARS reads it.
 pub const SUMMARY_SOURCE: &str = "tars:compaction";
 
-/// Structured instruction appended after the old material.
-pub(crate) fn instruction(current_request: Option<&str>) -> String {
+/// Structured instruction appended after the material to summarize.
+///
+/// `request_in_progress` is set when the current work's request lies in the
+/// summarized interval; it stays verbatim after the brief, so the model is
+/// told not to copy it and to say what of it is already done.
+pub(crate) fn instruction(request_in_progress: bool) -> String {
     let mut text = String::from(
-        "Prepare a continuation brief for the conversation above. Rewrite it as a compact, self-contained working brief that lets you continue the task without seeing the original messages.\n\n\
+        "Prepare a continuation brief for the conversation above. Rewrite it as a compact, self-contained working brief that lets you continue the task without seeing the original messages. Earlier briefs above are background: cover only the conversation after them and do not repeat them. The most recent messages are kept verbatim after the brief.\n\n\
          Use these sections:\n\
          - Goal: what the user wants and any constraints.\n\
          - Decisions: what was decided and why.\n\
@@ -36,109 +41,77 @@ pub(crate) fn instruction(current_request: Option<&str>) -> String {
          - Do not mention that this is a summary or that the conversation was condensed.\n\
          - Output only the brief.",
     );
-    if let Some(request) = current_request {
-        text.push_str("\n\nThe user's current request, verbatim:\n---\n");
-        text.push_str(request);
+    if request_in_progress {
         text.push_str(
-            "\n---\nMake sure the brief gives you everything needed to continue this request.",
+            "\n\nThe last user message above is the request still in progress. It stays verbatim right after the brief, so do not copy it. End the brief with a section \"In progress\" listing what of that request is already done.",
         );
     }
     text
 }
 
-/// Token estimate of one block list, serialized the same way as the context.
-fn blocks_estimate(blocks: &[ContextBlock]) -> u64 {
-    let mut bytes: u64 = 0;
-    for block in blocks {
-        let size = serde_json::to_vec(block)
-            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
-            .unwrap_or(u64::MAX);
-        bytes = bytes.saturating_add(size);
-    }
-    super::estimate::estimate_bytes(bytes)
-}
-
-/// Drop the earliest blocks until the input fits `limit` tokens.
+/// Material of the brief request: `blocks[..k]`, trimmed when it is over
+/// `limit` tokens.
 ///
-/// The kept part starts at a user message and is preceded by the tool
-/// declaration in effect at the cut. A tool result whose call was dropped is
-/// dropped too, so the summary request keeps valid pairing. When nothing fits,
-/// the instruction alone is sent.
-pub(crate) fn trim_to_limit(blocks: &[ContextBlock], limit: u64) -> Vec<ContextBlock> {
-    if blocks_estimate(blocks) <= limit {
-        return blocks.to_vec();
-    }
-    let sizes: Vec<u64> = blocks
-        .iter()
-        .map(|block| {
-            serde_json::to_vec(block)
-                .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
-                .unwrap_or(u64::MAX)
-        })
-        .collect();
-    let mut total: u64 = sizes.iter().copied().sum();
-    let mut start = 0usize;
-    while start < blocks.len() && total.div_ceil(3) > limit {
-        total = total.saturating_sub(sizes[start]);
-        start += 1;
-    }
-    // Providers expect the first message to come from the user, so the kept
-    // material starts at the first user message after the cut.
-    while start < blocks.len()
-        && !matches!(
-            blocks[start].content(),
-            BlockContent::Message {
-                role: Role::User,
-                ..
-            }
-        )
-    {
-        start += 1;
-    }
-    let retained = &blocks[start..];
-    // A dropped declaration leaves its later result unpaired; drop those too.
-    let retained_calls = retained
-        .iter()
-        .filter_map(|block| match block.content() {
-            BlockContent::ToolCall(_) => Some(block.id()),
-            _ => None,
-        })
-        .collect::<std::collections::HashSet<_>>();
-    // The cut may drop the declaration the kept calls refer to. Declare the
-    // set in effect at the cut; later changes in the kept part still apply.
-    let declaration = (start > 0)
-        .then(|| tool_change_block(&blocks[..start]))
-        .flatten();
-    declaration
-        .into_iter()
-        .chain(
-            retained
+/// Trimming never drops the head or a protected block. It drops the earliest
+/// interval blocks up to a cut point, so no kept result loses its call, and
+/// declares the tool changes the dropped part made. When the head carries no
+/// user message, the kept part starts at one, as providers expect. When
+/// nothing fits, only the head, the declaration and the protected blocks are
+/// sent. The dropped blocks are still summarized away and kept in the record.
+pub(crate) fn request_material(
+    blocks: &[ContextBlock],
+    head_end: usize,
+    k: usize,
+    protected: &[usize],
+    limit: Option<u64>,
+) -> Vec<ContextBlock> {
+    let full = &blocks[..k];
+    let Some(limit) = limit.filter(|&limit| segment::blocks_estimate(full) > limit) else {
+        return full.to_vec();
+    };
+    let head = &blocks[..head_end];
+    let head_has_user = head.iter().any(is_user_message);
+    let candidate = |restart: usize| {
+        let mut material = head.to_vec();
+        material.extend(segment::tool_delta(head, &blocks[..restart]));
+        material.extend(
+            protected
                 .iter()
-                .filter(|block| match block.content() {
-                    BlockContent::ToolResult(result) => {
-                        retained_calls.contains(&result.call_block_id)
-                    }
-                    _ => true,
-                })
-                .cloned(),
-        )
-        .collect()
-}
-
-/// A fresh tool declaration equal to the current effective set, if any.
-pub(crate) fn tool_change_block(blocks: &[ContextBlock]) -> Option<ContextBlock> {
-    let tools: Vec<ToolDefinition> = current_tools(blocks);
-    if tools.is_empty() {
-        return None;
+                .filter(|&&index| index < restart)
+                .map(|&index| blocks[index].clone()),
+        );
+        material.extend_from_slice(&blocks[restart..k]);
+        material
+    };
+    for restart in head_end + 1..k {
+        if !segment::is_cut_point(blocks, restart) {
+            continue;
+        }
+        let material = candidate(restart);
+        let first_message = material[head_end..]
+            .iter()
+            .find(|block| matches!(block.content(), BlockContent::Message { .. }));
+        if !head_has_user && !first_message.is_some_and(is_user_message) {
+            continue;
+        }
+        if segment::blocks_estimate(&material) <= limit {
+            return material;
+        }
     }
-    Some(ContextBlock::new(
-        new_block_id(),
-        BlockContent::ToolChange(ToolChange::between(&[], &tools)),
-        BlockMeta::default(),
-    ))
+    candidate(k)
 }
 
-/// The instruction message appended after the old material.
+fn is_user_message(block: &ContextBlock) -> bool {
+    matches!(
+        block.content(),
+        BlockContent::Message {
+            role: Role::User,
+            ..
+        }
+    )
+}
+
+/// The instruction message appended after the material.
 pub(crate) fn instruction_block(text: String) -> ContextBlock {
     ContextBlock::new(
         new_block_id(),
@@ -147,7 +120,7 @@ pub(crate) fn instruction_block(text: String) -> ContextBlock {
     )
 }
 
-/// The replacement summary message.
+/// The brief message.
 pub(crate) fn summary_block(id: BlockId, text: &str) -> ContextBlock {
     ContextBlock::new(
         id,
@@ -156,38 +129,12 @@ pub(crate) fn summary_block(id: BlockId, text: &str) -> ContextBlock {
     )
 }
 
-/// The summary text, ending with the current request verbatim when the
-/// compaction happens inside a turn, followed by the recall pointer line.
-///
-/// The model was asked to cover the request, but a brief may paraphrase it;
-/// the later rounds of the same turn need the exact wording.
-pub(crate) fn summary_text(brief: &str, current_request: Option<&str>, record_id: &str) -> String {
-    let pointer = format!("Original messages: recall id={record_id}");
-    match current_request {
-        Some(request) => {
-            format!(
-                "{brief}\n\nThe user's current request, verbatim:\n---\n{request}\n---\n\n{pointer}"
-            )
-        }
-        None => format!("{brief}\n\n{pointer}"),
-    }
+/// The brief text followed by the recall pointer line.
+pub(crate) fn summary_text(brief: &str, record_id: &str) -> String {
+    format!("{brief}\n\nOriginal messages: recall id={record_id}")
 }
 
-/// Build the replacement block list: optional tool declaration plus summary.
-pub(crate) fn replacement_blocks(
-    old_blocks: &[ContextBlock],
-    summary_id: BlockId,
-    summary_text: &str,
-) -> Vec<ContextBlock> {
-    let mut blocks = Vec::with_capacity(2);
-    if let Some(tool_change) = tool_change_block(old_blocks) {
-        blocks.push(tool_change);
-    }
-    blocks.push(summary_block(summary_id, summary_text));
-    blocks
-}
-
-/// Fresh block identity for summary and tool-declaration blocks.
+/// Fresh block identity for brief blocks.
 pub(crate) fn new_block_id() -> BlockId {
     BlockId::new(uuid::Uuid::now_v7())
 }

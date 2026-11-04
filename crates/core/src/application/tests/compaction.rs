@@ -20,15 +20,16 @@ async fn auto_compaction_replaces_the_context_and_saves_one_record() {
     host.set_test_gateway(as_gateway(&gateway));
     let session = host
         .create(PreparedCreate::persistent(
-            compacting_definition(Some(1_000)),
-            Context::new(),
+            compacting_definition(Some(FIXTURE_WINDOW)),
+            earlier_conversation(),
         ))
         .await
         .unwrap();
+    let request = short_request();
     let receipt = session
         .submit(SubmitRequest {
             request_key: "first".into(),
-            blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+            blocks: request.clone(),
         })
         .unwrap();
     finished(&session, &receipt.work).await;
@@ -36,11 +37,11 @@ async fn auto_compaction_replaces_the_context_and_saves_one_record() {
     assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 1);
     assert_eq!(gateway.main_calls.load(Ordering::SeqCst), 1);
     let usage = session.context_usage().unwrap();
-    assert_eq!(usage.context_window, Some(1_000));
+    assert_eq!(usage.context_window, Some(FIXTURE_WINDOW));
     assert!(usage.auto_compact);
     assert_eq!(usage.compact_threshold, 70);
     assert!(
-        usage.estimate_tokens < 1_000,
+        usage.estimate_tokens < FIXTURE_WINDOW,
         "the compacted material is far below the window: {}",
         usage.estimate_tokens
     );
@@ -51,11 +52,14 @@ async fn auto_compaction_replaces_the_context_and_saves_one_record() {
     assert_eq!(history.len(), 1);
     assert_eq!(history[0]["trigger"], "auto");
     let blocks = record["context"]["blocks"].as_array().unwrap();
-    // The replacement summary followed by the model's final answer.
-    assert_eq!(blocks.len(), 3);
+    // The folded tool declaration and the brief, then the work's request,
+    // kept with its own id, and the model's final answer.
+    assert_eq!(blocks.len(), 4, "{blocks:?}");
+    assert_eq!(blocks[0]["content"]["shape"], "tool_change");
     assert_eq!(blocks[1]["meta"]["source"], "tars:compaction");
     assert_eq!(blocks[1]["content"]["value"]["role"], "user");
-    assert_eq!(blocks[2]["content"]["value"]["role"], "assistant");
+    assert_eq!(blocks[2]["id"], request[0].id().0.to_string());
+    assert_eq!(blocks[3]["content"]["value"]["role"], "assistant");
 
     let record_id_value = history[0]["record_id"]
         .as_str()
@@ -73,8 +77,11 @@ async fn auto_compaction_replaces_the_context_and_saves_one_record() {
             .iter()
             .flat_map(|r| &r.originals)
             .count(),
-        4
+        6,
+        "the earlier four blocks, then the request and the declaration after it"
     );
+    // The request was put back, so the index counts five removed blocks.
+    assert_eq!(history[0]["removed_block_count"], 5);
     assert_eq!(document.trigger, crate::compact::HistoryTrigger::Auto);
     assert_eq!(session.history().len(), 1);
 
@@ -92,8 +99,8 @@ async fn abandoned_summary_keeps_the_context_and_leaves_no_history() {
         host.set_test_gateway(as_gateway(&gateway));
         let session = host
             .create(PreparedCreate::persistent(
-                compacting_definition(Some(1_000)),
-                Context::new(),
+                compacting_definition(Some(FIXTURE_WINDOW)),
+                earlier_conversation(),
             ))
             .await
             .unwrap();
@@ -101,7 +108,7 @@ async fn abandoned_summary_keeps_the_context_and_leaves_no_history() {
         let receipt = session
             .submit(SubmitRequest {
                 request_key: "first".into(),
-                blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+                blocks: short_request(),
             })
             .unwrap();
         finished(&session, &receipt.work).await;
@@ -117,8 +124,8 @@ async fn abandoned_summary_keeps_the_context_and_leaves_no_history() {
         );
         assert_eq!(
             record["context"]["blocks"].as_array().unwrap().len(),
-            5,
-            "three submitted blocks and the final answer"
+            7,
+            "the four earlier blocks, the request, its tool declaration and the final answer"
         );
         let mut abandoned = 0;
         while let Ok(event) = progress.try_recv() {
@@ -165,7 +172,9 @@ async fn overflow_refusal_forces_one_compaction_with_auto_off() {
     let first = session
         .submit(SubmitRequest {
             request_key: "overflow".into(),
-            blocks: vec![text_block(200)],
+            // Large enough that a brief in its place saves more than the
+            // restated tool declaration costs.
+            blocks: vec![text_block(3_000)],
         })
         .unwrap();
     finished(&session, &first.work).await;
@@ -192,67 +201,147 @@ async fn overflow_refusal_forces_one_compaction_with_auto_off() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_second_compaction_feeds_the_old_summary_into_the_next_request() {
+async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_after_it() {
+    use crate::compact::BlockStatus;
+    use crate::compact::summary::SUMMARY_SOURCE;
     let store = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(store.path().into()));
     let gateway = scripted(SummaryBehavior::Text(
         "Goal: continue the fixture work. Next steps: finish.".into(),
     ));
+    // Byte-based estimates, so the sizes below decide each trigger.
+    gateway.main_without_usage.store(true, Ordering::SeqCst);
     host.set_test_gateway(as_gateway(&gateway));
+    // A 1,200-token trigger line. The first work compacts the seeded
+    // conversation and keeps its own 500-token input; the second work's
+    // 200-token input brings that input back over the line.
     let mut definition = compacting_definition(Some(3_000));
     definition.compact_threshold = 40;
     let session = host
-        .create(PreparedCreate::persistent(definition, Context::new()))
+        .create(PreparedCreate::persistent(
+            definition,
+            earlier_conversation(),
+        ))
         .await
         .unwrap();
-    for key in ["one", "two"] {
-        let receipt = session
-            .submit(SubmitRequest {
-                request_key: key.into(),
-                blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
-            })
-            .unwrap();
-        finished(&session, &receipt.work).await;
-        session.wait_saved().await.unwrap();
-    }
-    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 2);
-    let (request_count, carries_previous_summary) = {
-        let inputs = gateway.summary_inputs.lock().unwrap();
-        (
-            inputs.len(),
-            inputs[1].iter().any(|block| {
-                block.meta().source.as_deref() == Some(crate::compact::summary::SUMMARY_SOURCE)
-            }),
-        )
-    };
-    assert_eq!(request_count, 2);
-    assert!(
-        carries_previous_summary,
-        "the previous summary is part of the second summary request"
-    );
-    let id = session.target().conversation_id().as_str().to_owned();
-    let record = saved_record(store.path(), &id);
-    let history = record["history"].as_array().unwrap();
-    assert_eq!(history.len(), 2);
-    assert_eq!(
-        record["context"]["blocks"].as_array().unwrap().len(),
-        3,
-        "one summary and the final answer"
-    );
-    let second_id = history[1]["record_id"]
-        .as_str()
-        .or_else(|| history[1]["id"].as_str())
+    let seeded: Vec<BlockId> = session
+        .read_materials()
+        .unwrap()
+        .context
+        .blocks()
+        .iter()
+        .map(ContextBlock::id)
+        .collect();
+    let first = vec![text_block(1_500)];
+    let first_id = first[0].id();
+    let receipt = session
+        .submit(SubmitRequest {
+            request_key: "one".into(),
+            blocks: first,
+        })
         .unwrap();
-    let document = session.read_history_record(second_id).unwrap();
+    finished(&session, &receipt.work).await;
+    session.wait_saved().await.unwrap();
+    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 1);
+    let after_first = session.read_materials().unwrap().context;
+    let after_first = after_first.blocks();
+    // [tool declaration, S1, first request, first answer]
+    assert_eq!(after_first.len(), 4);
+    let brief_one = after_first[1].clone();
+    assert_eq!(brief_one.meta().source.as_deref(), Some(SUMMARY_SOURCE));
+    assert_eq!(after_first[2].id(), first_id);
+    let first_answer = after_first[3].id();
+    let first_declaration = after_first[0].id();
+
+    let second = vec![text_block(600)];
+    let second_id = second[0].id();
+    let receipt = session
+        .submit(SubmitRequest {
+            request_key: "two".into(),
+            blocks: second,
+        })
+        .unwrap();
+    finished(&session, &receipt.work).await;
+    session.wait_saved().await.unwrap();
+    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 2);
+
+    // The second request is the normal material followed by the
+    // instruction: the first brief comes along as background, unchanged.
+    let request: Vec<BlockId> = {
+        let inputs = gateway.summary_inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert!(
+            inputs[1]
+                .iter()
+                .any(|block| block.id() == brief_one.id() && *block == brief_one)
+        );
+        inputs[1].iter().map(ContextBlock::id).collect()
+    };
     assert_eq!(
-        document
-            .replacements
-            .iter()
-            .flat_map(|r| &r.originals)
-            .count(),
-        6,
-        "the previous summary, the first answer and the three new blocks"
+        request[..request.len() - 1],
+        [
+            first_declaration,
+            brief_one.id(),
+            first_id,
+            first_answer,
+            second_id
+        ]
     );
+
+    let context = session.read_materials().unwrap().context;
+    let blocks = context.blocks();
+    assert_eq!(
+        blocks.len(),
+        5,
+        "[declaration, S1, S2, second request, answer]"
+    );
+    assert_eq!(blocks[0].id(), first_declaration);
+    assert_eq!(blocks[1], brief_one, "the first brief is never rewritten");
+    assert_eq!(blocks[2].meta().source.as_deref(), Some(SUMMARY_SOURCE));
+    assert_ne!(blocks[2].id(), brief_one.id());
+    assert_eq!(blocks[3].id(), second_id);
+
+    let history = session.history();
+    assert_eq!(history.len(), 2);
+    let second_record = session.read_history_record(&history[1].record_id).unwrap();
+    let originals: Vec<BlockId> = second_record
+        .replacements
+        .iter()
+        .flat_map(|r| &r.originals)
+        .map(ContextBlock::id)
+        .collect();
+    assert_eq!(
+        originals,
+        [first_id, first_answer, second_id],
+        "the first work and the protected request it put back; never the head"
+    );
+    assert_eq!(history[1].removed_block_count, 2);
+
+    // Expansion puts every original back in order, each marked by the
+    // record that removed it.
+    let expanded = session.expanded_conversation(None).unwrap();
+    assert!(expanded.unreadable_records.is_empty());
+    let one = BlockStatus::Summarized(history[0].record_id.clone());
+    let two = BlockStatus::Summarized(history[1].record_id.clone());
+    let shown: Vec<(BlockId, BlockStatus)> = expanded
+        .blocks
+        .iter()
+        .map(|block| (block.block.id(), block.status.clone()))
+        .collect();
+    let mut expected: Vec<(BlockId, BlockStatus)> =
+        seeded.iter().map(|id| (*id, one.clone())).collect();
+    expected.push((first_id, two.clone()));
+    assert_eq!(&shown[..5], &expected[..]);
+    // The first work's tool declaration sat after its request.
+    assert_eq!(shown[5].1, one);
+    assert!(matches!(
+        expanded.blocks[5].block.content(),
+        causa::kernel::BlockContent::ToolChange(_)
+    ));
+    assert_eq!(shown[6], (first_answer, two));
+    assert_eq!(shown[7], (second_id, BlockStatus::Original));
+    assert_eq!(shown[8], (blocks[4].id(), BlockStatus::Original));
+    assert_eq!(shown.len(), 9);
     host.close(&session.target(), ClosePolicy::Save)
         .await
         .unwrap();
@@ -266,30 +355,55 @@ async fn over_limit_material_is_trimmed_for_the_summary_but_kept_in_history() {
         "Goal: continue. Next steps: finish the fixture work.".into(),
     ));
     host.set_test_gateway(as_gateway(&gateway));
+    // About 3,000 tokens of earlier material, over the 1,400-token limit of a
+    // brief request (70% of the window).
+    let earlier = vec![
+        text_block(3_000),
+        text_block(3_000),
+        text_block(3_000),
+        ContextBlock::text(
+            BlockId::new(uuid::Uuid::now_v7()),
+            causa::kernel::Role::Assistant,
+            "earlier answer",
+        ),
+    ];
+    let earlier_ids: Vec<BlockId> = earlier.iter().map(ContextBlock::id).collect();
+    let request = short_request();
+    let request_id = request[0].id();
     let session = host
         .create(PreparedCreate::persistent(
-            compacting_definition(Some(300)),
-            Context::new(),
+            compacting_definition(Some(FIXTURE_WINDOW)),
+            Context::from_blocks(earlier).unwrap(),
         ))
         .await
         .unwrap();
     let receipt = session
         .submit(SubmitRequest {
             request_key: "huge".into(),
-            blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+            blocks: request,
         })
         .unwrap();
     finished(&session, &receipt.work).await;
     session.wait_saved().await.unwrap();
-    let summary_input_blocks = {
+    let input = {
         let inputs = gateway.summary_inputs.lock().unwrap();
-        (inputs.len(), inputs[0].len())
+        assert_eq!(inputs.len(), 1);
+        inputs[0].clone()
     };
-    assert_eq!(summary_input_blocks.0, 1);
+    let (material, _instruction) = input.split_at(input.len() - 1);
     assert!(
-        summary_input_blocks.1 <= 2,
-        "the summary request drops material until it fits the window"
+        crate::compact::segment::blocks_estimate(material) <= FIXTURE_WINDOW * 70 / 100,
+        "the summary request drops material until it fits"
     );
+    let sent: Vec<BlockId> = material.iter().map(ContextBlock::id).collect();
+    for dropped in &earlier_ids[..3] {
+        assert!(!sent.contains(dropped), "the earliest messages are dropped");
+    }
+    assert!(
+        sent.contains(&request_id),
+        "the protected request is always sent"
+    );
+
     let id = session.target().conversation_id().as_str().to_owned();
     let record = saved_record(store.path(), &id);
     let history = record["history"].as_array().unwrap();
@@ -299,16 +413,24 @@ async fn over_limit_material_is_trimmed_for_the_summary_but_kept_in_history() {
         .or_else(|| history[0]["id"].as_str())
         .unwrap();
     let document = session.read_history_record(record_id_value).unwrap();
+    let originals: Vec<BlockId> = document
+        .replacements
+        .iter()
+        .flat_map(|r| &r.originals)
+        .map(ContextBlock::id)
+        .collect();
     assert_eq!(
-        document
-            .replacements
-            .iter()
-            .flat_map(|r| &r.originals)
-            .count(),
-        4,
-        "the history record keeps the complete old material"
+        originals.len(),
+        6,
+        "the earlier material, the request and its tool declaration"
     );
-    assert!(document.estimate_before >= document.estimate_after);
+    for kept in &earlier_ids {
+        assert!(
+            originals.contains(kept),
+            "the history record keeps the dropped material"
+        );
+    }
+    assert!(document.estimate_before > document.estimate_after);
     host.close(&session.target(), ClosePolicy::Save)
         .await
         .unwrap();
@@ -322,15 +444,15 @@ async fn cancelling_the_summary_leaves_the_context_and_history_untouched() {
     host.set_test_gateway(as_gateway(&gateway));
     let session = host
         .create(PreparedCreate::persistent(
-            compacting_definition(Some(1_000)),
-            Context::new(),
+            compacting_definition(Some(FIXTURE_WINDOW)),
+            earlier_conversation(),
         ))
         .await
         .unwrap();
     let receipt = session
         .submit(SubmitRequest {
             request_key: "blocked".into(),
-            blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+            blocks: short_request(),
         })
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), gateway.entered.notified())
@@ -350,8 +472,8 @@ async fn cancelling_the_summary_leaves_the_context_and_history_untouched() {
     );
     assert_eq!(
         record["context"]["blocks"].as_array().unwrap().len(),
-        4,
-        "cancellation returns the untouched material"
+        6,
+        "cancellation returns the untouched material: the earlier blocks, the request and its tool declaration"
     );
     assert_eq!(
         std::fs::read_dir(history_dir(store.path(), &id))
@@ -374,8 +496,8 @@ async fn unwritable_history_abandons_the_compaction_and_keeps_the_round() {
     host.set_test_gateway(as_gateway(&gateway));
     let session = host
         .create(PreparedCreate::persistent(
-            compacting_definition(Some(1_000)),
-            Context::new(),
+            compacting_definition(Some(FIXTURE_WINDOW)),
+            earlier_conversation(),
         ))
         .await
         .unwrap();
@@ -385,7 +507,7 @@ async fn unwritable_history_abandons_the_compaction_and_keeps_the_round() {
     let receipt = session
         .submit(SubmitRequest {
             request_key: "first".into(),
-            blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+            blocks: short_request(),
         })
         .unwrap();
     finished(&session, &receipt.work).await;
@@ -399,8 +521,8 @@ async fn unwritable_history_abandons_the_compaction_and_keeps_the_round() {
     );
     assert_eq!(
         record["context"]["blocks"].as_array().unwrap().len(),
-        5,
-        "the round still went out with the original material"
+        7,
+        "the round still went out with the original material and its final answer"
     );
     std::fs::remove_file(history_dir(store.path(), &id)).unwrap();
     host.close(&session.target(), ClosePolicy::Save)
@@ -416,15 +538,17 @@ async fn reopening_restores_settings_and_cleans_unreferenced_records() {
     host.set_test_gateway(as_gateway(&gateway));
     let session = host
         .create(PreparedCreate::persistent(
-            compacting_definition(Some(1_000)),
-            Context::new(),
+            compacting_definition(Some(FIXTURE_WINDOW)),
+            earlier_conversation(),
         ))
         .await
         .unwrap();
+    let request = short_request();
+    let request_id = request[0].id();
     let receipt = session
         .submit(SubmitRequest {
             request_key: "first".into(),
-            blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+            blocks: request,
         })
         .unwrap();
     finished(&session, &receipt.work).await;
@@ -455,7 +579,7 @@ async fn reopening_restores_settings_and_cleans_unreferenced_records() {
     let settings = reopened.compaction_settings().unwrap();
     assert!(settings.auto_compact);
     assert_eq!(settings.compact_threshold, 70);
-    assert_eq!(settings.context_window, Some(1_000));
+    assert_eq!(settings.context_window, Some(FIXTURE_WINDOW));
     assert_eq!(reopened.history().len(), 1);
     // Opening and reading the current materials read no record file; the
     // expansion reads the one record it reaches.
@@ -471,7 +595,16 @@ async fn reopening_restores_settings_and_cleans_unreferenced_records() {
             block.status == crate::compact::BlockStatus::Summarized(record_id_value.clone())
         })
         .count();
-    assert_eq!(summarized, 4);
+    // The four earlier blocks and the first tool declaration were
+    // summarized; the request was protected and still stands as it was.
+    assert_eq!(summarized, 5);
+    let kept: Vec<_> = expanded
+        .blocks
+        .iter()
+        .filter(|block| block.block.id() == request_id)
+        .map(|block| block.status.clone())
+        .collect();
+    assert_eq!(kept, vec![crate::compact::BlockStatus::Original]);
     assert_eq!(
         reopened
             .read_history_record(&record_id_value)
@@ -480,7 +613,8 @@ async fn reopening_restores_settings_and_cleans_unreferenced_records() {
             .iter()
             .flat_map(|r| &r.originals)
             .count(),
-        4
+        6,
+        "the summarized blocks and the protected request it put back"
     );
     // A deleted referenced record is reported on read, not at open.
     std::fs::remove_file(history_dir(store.path(), &id).join(format!("{record_id_value}.json")))
@@ -569,14 +703,26 @@ async fn unknown_window_disables_auto_compaction_but_manual_compaction_works() {
     let session = host
         .create(PreparedCreate::persistent(
             compacting_definition(None),
-            Context::new(),
+            // About 30,000 estimated tokens, over the 20,000-token tail that
+            // applies when the window is unknown.
+            Context::from_blocks(vec![
+                text_block(30_000),
+                text_block(30_000),
+                text_block(30_000),
+                ContextBlock::text(
+                    BlockId::new(uuid::Uuid::now_v7()),
+                    causa::kernel::Role::Assistant,
+                    "earlier answer",
+                ),
+            ])
+            .unwrap(),
         ))
         .await
         .unwrap();
     let receipt = session
         .submit(SubmitRequest {
             request_key: "first".into(),
-            blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+            blocks: short_request(),
         })
         .unwrap();
     finished(&session, &receipt.work).await;
@@ -594,8 +740,8 @@ async fn unknown_window_disables_auto_compaction_but_manual_compaction_works() {
     assert_eq!(history[0]["trigger"], "manual");
     assert_eq!(
         record["context"]["blocks"].as_array().unwrap().len(),
-        2,
-        "manual compaction replaces the whole material"
+        6,
+        "the brief, then the newest material under 20,000 tokens kept verbatim: the third message, the earlier answer, the request, its tool declaration and the answer"
     );
     let record_id_value = history[0]["record_id"]
         .as_str()
@@ -609,7 +755,8 @@ async fn unknown_window_disables_auto_compaction_but_manual_compaction_works() {
             .iter()
             .flat_map(|r| &r.originals)
             .count(),
-        5
+        2,
+        "the first two earlier messages"
     );
     host.close(&session.target(), ClosePolicy::Save)
         .await
@@ -618,37 +765,48 @@ async fn unknown_window_disables_auto_compaction_but_manual_compaction_works() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_output_reserve_triggers_compaction_below_the_threshold() {
-    let store = tempfile::tempdir().unwrap();
-    let host = SessionHost::new(Some(store.path().into()));
-    let gateway = scripted(SummaryBehavior::Text("reserve summary".into()));
-    host.set_test_gateway(as_gateway(&gateway));
-    let mut definition = compacting_definition(Some(1_000));
-    definition.compact_threshold = 95;
-    definition.max_tokens = Some(900);
-    let session = host
-        .create(PreparedCreate::persistent(definition, Context::new()))
-        .await
-        .unwrap();
-    let receipt = session
-        .submit(SubmitRequest {
-            request_key: "reserve".into(),
-            blocks: vec![text_block(600)],
-        })
-        .unwrap();
-    finished(&session, &receipt.work).await;
-    session.wait_saved().await.unwrap();
-    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 1);
-    let id = session.target().conversation_id().as_str().to_owned();
-    assert_eq!(
-        saved_record(store.path(), &id)["history"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    host.close(&session.target(), ClosePolicy::Save)
-        .await
-        .unwrap();
+    // The trigger line is 2,850 tokens and the request, about 1,900, stays
+    // under it, so only the 1,200-token output reserve can cross the
+    // 3,000-token window.
+    for (max_tokens, expected_summaries) in [(None, 0), (Some(1_200), 1)] {
+        let store = tempfile::tempdir().unwrap();
+        let host = SessionHost::new(Some(store.path().into()));
+        let gateway = scripted(SummaryBehavior::Text("reserve summary".into()));
+        host.set_test_gateway(as_gateway(&gateway));
+        let mut definition = compacting_definition(Some(3_000));
+        definition.compact_threshold = 95;
+        definition.max_tokens = max_tokens;
+        let session = host
+            .create(PreparedCreate::persistent(
+                definition,
+                earlier_conversation(),
+            ))
+            .await
+            .unwrap();
+        let receipt = session
+            .submit(SubmitRequest {
+                request_key: "reserve".into(),
+                blocks: short_request(),
+            })
+            .unwrap();
+        finished(&session, &receipt.work).await;
+        session.wait_saved().await.unwrap();
+        assert_eq!(
+            gateway.summary_calls.load(Ordering::SeqCst),
+            expected_summaries,
+            "max_tokens {max_tokens:?}"
+        );
+        let id = session.target().conversation_id().as_str().to_owned();
+        assert_eq!(
+            saved_record(store.path(), &id)["history"]
+                .as_array()
+                .map_or(0, Vec::len),
+            expected_summaries
+        );
+        host.close(&session.target(), ClosePolicy::Save)
+            .await
+            .unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -661,17 +819,17 @@ async fn an_abandoned_summary_does_not_become_the_usage_base() {
     host.set_test_gateway(as_gateway(&gateway));
     let session = host
         .create(PreparedCreate::persistent(
-            compacting_definition(Some(1_000)),
+            compacting_definition(Some(FIXTURE_WINDOW)),
             Context::new(),
         ))
         .await
         .unwrap();
+    // The first work stays under the 1,400-token line with the `recall`
+    // declaration; the second crosses it, and its 5,000-byte summary is larger
+    // than the first work it would replace, so it is abandoned.
     for (key, blocks) in [
-        ("small", vec![text_block(30)]),
-        (
-            "large",
-            vec![text_block(1_200), text_block(1_200), text_block(1_200)],
-        ),
+        ("under-the-line", vec![text_block(2_400)]),
+        ("over-the-line", vec![text_block(600)]),
     ] {
         let receipt = session
             .submit(SubmitRequest {
@@ -683,6 +841,7 @@ async fn an_abandoned_summary_does_not_become_the_usage_base() {
         session.wait_saved().await.unwrap();
     }
     assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 1);
+    assert!(session.history().is_empty(), "the summary was abandoned");
     let bytes = session
         .read_materials()
         .map(|snapshot| crate::compact::estimate::context_bytes(&snapshot.context))
@@ -706,15 +865,15 @@ async fn a_summary_that_does_not_shrink_is_abandoned() {
     host.set_test_gateway(as_gateway(&gateway));
     let session = host
         .create(PreparedCreate::persistent(
-            compacting_definition(Some(1_000)),
-            Context::new(),
+            compacting_definition(Some(FIXTURE_WINDOW)),
+            earlier_conversation(),
         ))
         .await
         .unwrap();
     let receipt = session
         .submit(SubmitRequest {
             request_key: "no-shrink".into(),
-            blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+            blocks: short_request(),
         })
         .unwrap();
     finished(&session, &receipt.work).await;
@@ -730,8 +889,8 @@ async fn a_summary_that_does_not_shrink_is_abandoned() {
     );
     assert_eq!(
         record["context"]["blocks"].as_array().unwrap().len(),
-        5,
-        "the original material and the final answer"
+        7,
+        "the original material, its tool declaration and the final answer"
     );
     host.close(&session.target(), ClosePolicy::Save)
         .await
@@ -780,8 +939,8 @@ async fn transient_sessions_have_no_compaction() {
     host.set_test_gateway(as_gateway(&gateway));
     let session = host
         .create(PreparedCreate::transient(
-            compacting_definition(Some(1_000)),
-            Context::new(),
+            compacting_definition(Some(FIXTURE_WINDOW)),
+            earlier_conversation(),
         ))
         .await
         .unwrap();
@@ -790,7 +949,7 @@ async fn transient_sessions_have_no_compaction() {
     let receipt = session
         .submit(SubmitRequest {
             request_key: "transient".into(),
-            blocks: vec![text_block(1_200), text_block(1_200), text_block(1_200)],
+            blocks: short_request(),
         })
         .unwrap();
     finished(&session, &receipt.work).await;
@@ -1704,6 +1863,69 @@ async fn test_be07_reopen_without_recall_appends_tool_change_and_succeeds() {
     assert!(tc_blocks.len() >= 2);
 
     host.close(&reopened.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be28_a_fixed_prefix_over_half_the_line_is_reported_once_and_refused_manually() {
+    use crate::compact::{CompactionAbandon, CompactionProgress};
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("never asked".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+    // A 1,400-token line; the 1,200-byte system prompt and the `recall`
+    // declaration together are over its half.
+    let mut blocks = vec![ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::Role::System,
+        "s".repeat(1_200),
+    )];
+    blocks.extend(earlier_conversation().blocks().iter().cloned());
+    let session = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(Some(FIXTURE_WINDOW)),
+            Context::from_blocks(blocks).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let mut progress = session.subscribe_progress();
+    for key in ["first", "second"] {
+        let receipt = session
+            .submit(SubmitRequest {
+                request_key: key.into(),
+                blocks: short_request(),
+            })
+            .unwrap();
+        finished(&session, &receipt.work).await;
+        session.wait_saved().await.unwrap();
+    }
+    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(gateway.main_calls.load(Ordering::SeqCst), 2);
+    let (mut started, mut too_large) = (0, 0);
+    while let Ok(event) = progress.try_recv() {
+        if let crate::session::ProgressUpdate::Compaction(update) = &event.update {
+            match update {
+                CompactionProgress::Started { .. } => started += 1,
+                CompactionProgress::Abandoned {
+                    reason: CompactionAbandon::PrefixTooLarge,
+                    ..
+                } => too_large += 1,
+                other => panic!("unexpected compaction progress {other:?}"),
+            }
+        }
+    }
+    assert_eq!((started, too_large), (1, 1), "reported once per session");
+    for _ in 0..2 {
+        let refused = session.compact().await.unwrap_err();
+        assert!(
+            matches!(&refused, crate::application::ApplicationError::Compaction(reason) if reason == "prefix_too_large"),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 0);
+    assert!(session.history().is_empty());
+    host.close(&session.target(), ClosePolicy::Save)
         .await
         .unwrap();
 }

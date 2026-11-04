@@ -59,7 +59,9 @@ impl RewriteKind {
 /// One range replaced in the Context: the removed blocks and what took their place.
 ///
 /// Every replacement inserts at least one block; expansion puts the originals
-/// back where that inserted run stands.
+/// back where that inserted run stands. A block a summary protected is both
+/// an original and an inserted block of its range: it was put back unchanged,
+/// with its own id, and does not count as removed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RangeReplacement {
@@ -209,7 +211,16 @@ impl HistoryRecord {
             created_at_ms: self.created_at_ms,
             trigger: self.trigger,
             kind: self.kind,
-            removed_block_count: self.replacements.iter().map(|r| r.originals.len()).sum(),
+            removed_block_count: self
+                .replacements
+                .iter()
+                .map(|r| {
+                    r.originals
+                        .iter()
+                        .filter(|block| !r.inserted_ids.contains(&block.id()))
+                        .count()
+                })
+                .sum(),
             inserted_block_ids: self
                 .replacements
                 .iter()
