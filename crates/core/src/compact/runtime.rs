@@ -3,9 +3,11 @@
 //! A plan is built in this order: find the head, the retained tail and the
 //! protected blocks, ask the model for a brief of the interval between them,
 //! build the replacements around the protected blocks, remove sealed items
-//! from the replies after the change and estimate the result. A plan is a
-//! [`Rewrite`]; the shared commit path writes and fsyncs its record, edits
-//! the Context and only then appends the index entry.
+//! from the replies after the change and estimate the result. After a
+//! summary the brief chain may be merged, which is a second plan and a
+//! second record. A plan is a [`Rewrite`]; the shared commit path writes and
+//! fsyncs its record, edits the Context and only then appends the index
+//! entry.
 
 use super::estimate::{self, UsageTracker};
 use super::history::{
@@ -316,6 +318,73 @@ impl CompactionRuntime {
         )
     }
 
+    /// Whether the brief chain is due to be merged after a summary.
+    pub(crate) fn needs_merge(&self, context: &Context) -> bool {
+        let (_, threshold) = self.settings();
+        self.history.is_some()
+            && segment::chain_needs_merge(context.blocks(), self.window, threshold)
+    }
+
+    /// Plan the merge of the brief chain into one brief.
+    ///
+    /// The request is the head (fixed prefix and chain) followed by the merge
+    /// instruction. The chain and the tool declarations between its briefs
+    /// are replaced by one declaration of their changes and the merged brief,
+    /// whose last line lists a recall id for each brief it replaces. The
+    /// fixed prefix is untouched.
+    pub(crate) async fn plan_merge(
+        &self,
+        context: &Context,
+        model: &ModelRef,
+        generation: &GenerationOptions,
+        trigger: HistoryTrigger,
+        control: &CallControl,
+    ) -> Result<Rewrite, CompactionAbandon> {
+        if self.history.is_none() {
+            return Err(CompactionAbandon::Unavailable);
+        }
+        let blocks = context.blocks();
+        let (start, end) = (segment::fixed_prefix_end(blocks), segment::head_end(blocks));
+        let briefs: Vec<BlockId> = segment::chain_briefs(blocks)
+            .into_iter()
+            .map(ContextBlock::id)
+            .collect();
+        if briefs.len() < 2 {
+            return Err(CompactionAbandon::NoShrink);
+        }
+        let mut request_blocks = blocks[..end].to_vec();
+        request_blocks.push(summary::instruction_block(summary::merge_instruction()));
+        let text = self
+            .brief(request_blocks, model, generation, control)
+            .await?;
+
+        let record_id = super::history::new_record_id();
+        let merged = summary::summary_block(
+            summary::new_block_id(),
+            &summary::merged_text(&text, &record_id, &briefs),
+        );
+        let mut new_blocks: Vec<ContextBlock> =
+            segment::tool_delta(&blocks[..start], &blocks[..end])
+                .into_iter()
+                .collect();
+        new_blocks.push(merged);
+        let replacements = sealed::strip_after(
+            blocks,
+            start,
+            vec![PlannedReplacement {
+                range: start..end,
+                with: new_blocks,
+            }],
+        );
+        self.rewrite(
+            context,
+            record_id,
+            trigger,
+            RewriteKind::Merge,
+            replacements,
+        )
+    }
+
     /// Ask the session's model for a brief and keep only its text.
     async fn brief(
         &self,
@@ -419,6 +488,30 @@ impl CompactionRuntime {
         .await
     }
 
+    /// Plan the merge that follows a manual summary, on the Context the
+    /// summary would leave. None when no merge is due or it was abandoned:
+    /// the summary still goes ahead.
+    pub(crate) async fn manual_merge_plan(
+        &self,
+        summary: &Rewrite,
+        context: &Context,
+        control: &CallControl,
+    ) -> Option<Rewrite> {
+        let after = summary.preview(context)?;
+        if !self.needs_merge(&after) {
+            return None;
+        }
+        self.plan_merge(
+            &after,
+            &self.model,
+            &self.generation,
+            HistoryTrigger::Manual,
+            control,
+        )
+        .await
+        .ok()
+    }
+
     /// Undo a committed rewrite whose Context was then not saved.
     pub(crate) fn rollback_record(&self, record_id: &str) {
         if let Some(history) = &self.history {
@@ -439,7 +532,11 @@ pub struct CompactionOutcome {
     pub estimate_after: u64,
     /// Index entry of the rewrite record that holds the replaced material.
     pub record: HistoryRecordEntry,
-    /// The brief now standing for the replaced material.
+    /// Index entry of the merge that followed, when the brief chain was over
+    /// its budget; `estimate_after` then describes the Context after it.
+    pub merged: Option<HistoryRecordEntry>,
+    /// The brief now standing for the replaced material: the new brief, or
+    /// the merged one.
     pub brief: BlockId,
 }
 

@@ -4,8 +4,9 @@
 //! the model's context window. Compaction replaces an older part of the
 //! Context with a brief written by the same model, keeps the newest material
 //! verbatim, and keeps the replaced original blocks as one read-only rewrite
-//! record beside the session record. The leading system blocks and the tool
-//! state are never rewritten.
+//! record beside the session record. Briefs collect into a chain after the
+//! fixed prefix; a chain grown too long is merged into one brief. The leading
+//! system blocks and the tool state are never rewritten.
 //!
 //! The pieces are deliberately split:
 //!
@@ -18,8 +19,8 @@
 //!   point of the retained tail and the protected blocks.
 //! - `sealed` removes provider items such as thinking from the replies after
 //!   a rewrite, since they are bound to the prefix they followed.
-//! - `summary` builds the brief instruction, the brief request material and
-//!   the brief block.
+//! - `summary` builds the brief and merge instructions, the brief request
+//!   material and the brief block.
 //! - `runtime` holds the running settings, the force flag and the pairing of a
 //!   written record with the replaced Context.
 //! - `preparer` is the Causa `ContextPreparer` installed per work; it decides

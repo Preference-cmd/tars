@@ -31,7 +31,7 @@ pub(super) async fn compact(
     managed_execution::report_open_notices(&session);
     let mut value = json!({
         "status": "not_started", "conversation_id": id, "trigger": null,
-        "estimate_before": null, "estimate_after": null, "record_id": null, "summary_block_id": null, "blocks": null, "saved": false,
+        "estimate_before": null, "estimate_after": null, "record_id": null, "merge_record_id": null, "summary_block_id": null, "blocks": null, "saved": false,
         "revision": null, "error": null, "save_error": null, "recovery_file": null,
         "recovery_importable": null, "recovery_error": null, "close_error": null,
     });
@@ -54,13 +54,19 @@ pub(super) async fn compact(
             value["record_id"] = json!(outcome.record.record_id);
             value["summary_block_id"] = json!(summary_block_id);
             value["blocks"] = json!(outcome.record.removed_block_count);
+            let merged = outcome.merged.as_ref().map(|merge| merge.record_id.clone());
+            value["merge_record_id"] = json!(merged);
+            let merged = merged
+                .map(|record| format!(" · briefs merged -> record {record}"))
+                .unwrap_or_default();
             text = format!(
-                "Compacted ({}): ~{} -> ~{} tokens · {} blocks -> record {} · summary block {}\n",
+                "Compacted ({}): ~{} -> ~{} tokens · {} blocks -> record {}{} · summary block {}\n",
                 outcome.trigger.name(),
                 outcome.estimate_before,
                 outcome.estimate_after,
                 outcome.record.removed_block_count,
                 outcome.record.record_id,
+                merged,
                 summary_block_id,
             );
             match session.wait_saved().await {

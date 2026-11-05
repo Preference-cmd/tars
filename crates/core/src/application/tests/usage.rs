@@ -192,11 +192,27 @@ async fn us04_compaction_calls_and_conversation_counts_remain_separate() {
     assert_eq!(work_usage.combined().calls.succeeded, 2);
     assert_eq!(work_usage.model_rounds, 1);
 
-    // Now trigger manual compaction when idle
-    assert!(session.compact().await.is_ok());
+    // Now trigger manual compaction when idle. Its brief makes a chain of
+    // two, over this small window's chain budget, so a merge follows: one
+    // more compaction call.
+    let outcome = session.compact().await.unwrap();
+    assert!(outcome.merged.is_some());
+    // The outcome names the merged brief, the only one left in the chain.
+    let context = session.read_materials().unwrap().context;
+    let briefs: Vec<_> = context
+        .blocks()
+        .iter()
+        .filter(|block| block.meta().source.as_deref() == Some("tars:compaction"))
+        .collect();
+    assert_eq!(briefs.len(), 1);
+    assert_eq!(briefs[0].id(), outcome.brief);
+    assert!(
+        !outcome.record.inserted_block_ids.contains(&outcome.brief),
+        "the merge replaced the summary's own brief"
+    );
 
     let usage_after_manual = session.session_usage().expect("session usage present");
-    assert_eq!(usage_after_manual.compaction.calls.succeeded, 2);
+    assert_eq!(usage_after_manual.compaction.calls.succeeded, 3);
     // Conversation counts completely unchanged by manual compaction
     assert_eq!(usage_after_manual.conversation.calls.succeeded, 1);
     assert_eq!(

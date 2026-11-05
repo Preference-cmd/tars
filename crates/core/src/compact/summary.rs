@@ -1,4 +1,4 @@
-//! Brief instruction, brief request material and brief block building.
+//! Brief and merge instructions, brief request material and brief blocks.
 //!
 //! The brief call uses the session's own model, tools and render options
 //! through the same public gateway and keeps only the returned text. Its
@@ -47,6 +47,37 @@ pub(crate) fn instruction(request_in_progress: bool) -> String {
         );
     }
     text
+}
+
+/// Instruction appended after the head when the brief chain is merged.
+///
+/// It starts like the brief instruction, so a fixture or a log reads both as
+/// brief requests.
+pub(crate) fn merge_instruction() -> String {
+    String::from(
+        "Prepare a continuation brief by merging the working briefs above into one. Each covers an earlier part of the conversation, oldest first; together they are everything before the messages that follow them. Keep what is still needed to continue, let later briefs override earlier ones, and drop what later work superseded.\n\n\
+         Use these sections:\n\
+         - Goal: what the user wants and any constraints.\n\
+         - Decisions: what was decided and why.\n\
+         - Progress: completed, in progress and blocked work.\n\
+         - Next steps: what remains to be done.\n\
+         - Relevant files: paths, commands, identifiers and error text, reproduced verbatim.\n\
+         - Important context: anything else needed to continue.\n\n\
+         Rules:\n\
+         - Preserve paths, commands, identifiers and error text exactly.\n\
+         - Keep any section \"In progress\" of the latest brief.\n\
+         - Do not mention that this is a summary or that briefs were merged.\n\
+         - Output only the brief.",
+    )
+}
+
+/// The merged brief followed by one recall id per brief it replaces.
+pub(crate) fn merged_text(brief: &str, record_id: &str, briefs: &[BlockId]) -> String {
+    let ids: Vec<String> = briefs
+        .iter()
+        .map(|id| format!("recall id={record_id}/{}", id.0))
+        .collect();
+    format!("{brief}\n\nEarlier briefs: {}", ids.join(", "))
 }
 
 /// Material of the brief request: `blocks[..k]`, trimmed when it is over

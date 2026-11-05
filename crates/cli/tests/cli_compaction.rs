@@ -646,6 +646,7 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
     assert!(first["estimate_before"].as_u64() > first["estimate_after"].as_u64());
     let first_record = first["record_id"].as_str().unwrap().to_owned();
     let first_summary = first["summary_block_id"].as_str().unwrap().to_owned();
+    assert_eq!(first["merge_record_id"], json!(null));
     let saved = record(&store, &id);
     assert_eq!(saved["context"]["blocks"].as_array().unwrap().len(), 2);
     assert_eq!(saved["context"]["blocks"][1]["id"], json!(first_summary));
@@ -689,6 +690,7 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
         text.contains(&format!("summary block {second_summary}")),
         "the newest brief is reported: {text}"
     );
+    assert!(!text.contains("briefs merged"), "{text}");
 
     let full = cli()
         .args([

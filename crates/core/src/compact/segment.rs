@@ -35,6 +35,13 @@ pub(crate) const RETAINED_TAIL_SHARE: u64 = 4;
 /// below the line to be worth a model call.
 pub(crate) const PREFIX_LIMIT_SHARE: u64 = 2;
 
+/// The chain gets at most this fraction (1/8) of the trigger line minus the
+/// fixed prefix before its briefs are merged into one.
+pub(crate) const CHAIN_SHARE: u64 = 8;
+
+/// The chain is merged once it holds more briefs than this.
+pub(crate) const MAX_CHAIN_BRIEFS: usize = 8;
+
 /// Serialized size of one block, the unit every estimate here is built from.
 pub(crate) fn block_bytes(block: &ContextBlock) -> u64 {
     serde_json::to_vec(block)
@@ -142,6 +149,11 @@ pub(crate) fn fixed_prefix_estimate(blocks: &[ContextBlock]) -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PrefixTooLarge;
 
+/// The trigger line: `window × threshold%` tokens.
+fn trigger_line(window: u64, threshold_percent: u8) -> u64 {
+    u64::try_from(u128::from(window) * u128::from(threshold_percent) / 100).unwrap_or(u64::MAX)
+}
+
 /// Token budget of the retained tail.
 ///
 /// With a known window the trigger line is `window × threshold%`; the tail
@@ -156,12 +168,23 @@ pub(crate) fn retained_tail_budget(
     let Some(window) = window else {
         return Ok(RETAINED_TAIL_CAP);
     };
-    let line =
-        u64::try_from(u128::from(window) * u128::from(threshold_percent) / 100).unwrap_or(u64::MAX);
+    let line = trigger_line(window, threshold_percent);
     if fixed_prefix > line / PREFIX_LIMIT_SHARE {
         return Err(PrefixTooLarge);
     }
     Ok(RETAINED_TAIL_CAP.min(line.saturating_sub(fixed_prefix) / RETAINED_TAIL_SHARE))
+}
+
+/// Token budget of the brief chain: `(line − prefix) / 8`, or none when the
+/// window is unknown and only the number of briefs counts.
+pub(crate) fn chain_budget(
+    window: Option<u64>,
+    threshold_percent: u8,
+    fixed_prefix: u64,
+) -> Option<u64> {
+    window.map(|window| {
+        trigger_line(window, threshold_percent).saturating_sub(fixed_prefix) / CHAIN_SHARE
+    })
 }
 
 /// The briefs of the chain, in order.
@@ -170,6 +193,28 @@ pub(crate) fn chain_briefs(blocks: &[ContextBlock]) -> Vec<&ContextBlock> {
         .iter()
         .filter(|block| is_brief(block))
         .collect()
+}
+
+/// Whether the brief chain should be merged into one brief: it holds at
+/// least two briefs, and more than [`MAX_CHAIN_BRIEFS`] of them or more
+/// tokens than the chain budget.
+pub(crate) fn chain_needs_merge(
+    blocks: &[ContextBlock],
+    window: Option<u64>,
+    threshold_percent: u8,
+) -> bool {
+    let briefs = chain_briefs(blocks);
+    if briefs.len() < 2 {
+        return false;
+    }
+    if briefs.len() > MAX_CHAIN_BRIEFS {
+        return true;
+    }
+    let bytes = briefs.iter().fold(0u64, |total, block| {
+        total.saturating_add(block_bytes(block))
+    });
+    chain_budget(window, threshold_percent, fixed_prefix_estimate(blocks))
+        .is_some_and(|budget| estimate::estimate_bytes(bytes) > budget)
 }
 
 /// Whether position `index` may start the retained tail.

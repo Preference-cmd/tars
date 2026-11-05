@@ -212,11 +212,12 @@ async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_afte
     // Byte-based estimates, so the sizes below decide each trigger.
     gateway.main_without_usage.store(true, Ordering::SeqCst);
     host.set_test_gateway(as_gateway(&gateway));
-    // A 1,200-token trigger line. The first work compacts the seeded
-    // conversation and keeps its own 500-token input; the second work's
-    // 200-token input brings that input back over the line.
-    let mut definition = compacting_definition(Some(3_000));
-    definition.compact_threshold = 40;
+    // A 3,800-token trigger line, so the chain budget, (line − prefix) / 8,
+    // holds two briefs and no merge follows. The first work compacts the
+    // seeded conversation and keeps its own 2,200-token input; the second
+    // work's 1,000-token input brings that input back over the line.
+    let mut definition = compacting_definition(Some(4_000));
+    definition.compact_threshold = 95;
     let session = host
         .create(PreparedCreate::persistent(
             definition,
@@ -232,7 +233,7 @@ async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_afte
         .iter()
         .map(ContextBlock::id)
         .collect();
-    let first = vec![text_block(1_500)];
+    let first = vec![text_block(6_600)];
     let first_id = first[0].id();
     let receipt = session
         .submit(SubmitRequest {
@@ -253,7 +254,7 @@ async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_afte
     let first_answer = after_first[3].id();
     let first_declaration = after_first[0].id();
 
-    let second = vec![text_block(600)];
+    let second = vec![text_block(3_000)];
     let second_id = second[0].id();
     let receipt = session
         .submit(SubmitRequest {
@@ -342,6 +343,126 @@ async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_afte
     assert_eq!(shown[7], (second_id, BlockStatus::Original));
     assert_eq!(shown[8], (blocks[4].id(), BlockStatus::Original));
     assert_eq!(shown.len(), 9);
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be13_an_automatic_summary_that_overfills_the_chain_is_followed_by_a_merge() {
+    use crate::compact::{CompactionProgress, RewriteKind};
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text(
+        "Goal: continue the fixture work. Next steps: finish.".into(),
+    ));
+    gateway.main_without_usage.store(true, Ordering::SeqCst);
+    host.set_test_gateway(as_gateway(&gateway));
+    // A 1,200-token line gives the chain about 95 tokens, less than one
+    // brief, so the second summary makes a chain of two that is merged.
+    let mut definition = compacting_definition(Some(3_000));
+    definition.compact_threshold = 40;
+    let session = host
+        .create(PreparedCreate::persistent(
+            definition,
+            earlier_conversation(),
+        ))
+        .await
+        .unwrap();
+    let mut progress = session.subscribe_progress();
+    let mut requests = Vec::new();
+    for (key, bytes) in [("one", 1_500), ("two", 600)] {
+        let input = vec![text_block(bytes)];
+        requests.push(input[0].id());
+        let receipt = session
+            .submit(SubmitRequest {
+                request_key: key.into(),
+                blocks: input,
+            })
+            .unwrap();
+        finished(&session, &receipt.work).await;
+        session.wait_saved().await.unwrap();
+    }
+    // Two briefs and the merge.
+    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 3);
+    let history = session.history();
+    let kinds: Vec<RewriteKind> = history.iter().map(|entry| entry.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            RewriteKind::Summarize,
+            RewriteKind::Summarize,
+            RewriteKind::Merge
+        ]
+    );
+
+    // [one declaration, the merged brief, second request, answer]
+    let context = session.read_materials().unwrap().context;
+    let blocks = context.blocks();
+    assert_eq!(blocks.len(), 4, "{blocks:?}");
+    assert!(matches!(
+        blocks[0].content(),
+        causa::kernel::BlockContent::ToolChange(_)
+    ));
+    assert_eq!(
+        blocks[1].meta().source.as_deref(),
+        Some(crate::compact::SUMMARY_SOURCE)
+    );
+    assert_eq!(blocks[2].id(), requests[1]);
+
+    // The merge request is the chain and the instruction; the merge record
+    // holds the chain it replaced.
+    let merge_request = gateway.summary_inputs.lock().unwrap()[2].clone();
+    let merge_record = session.read_history_record(&history[2].record_id).unwrap();
+    let chain: Vec<BlockId> = merge_record.replacements[0]
+        .originals
+        .iter()
+        .map(ContextBlock::id)
+        .collect();
+    assert_eq!(chain.len(), 3, "the declaration and two briefs");
+    let sent: Vec<BlockId> = merge_request.iter().map(ContextBlock::id).collect();
+    assert_eq!(sent[..3], chain[..]);
+    assert_eq!(sent.len(), 4);
+    assert_eq!(
+        merge_record.replacements[0].inserted_ids,
+        [blocks[0].id(), blocks[1].id()]
+    );
+
+    // Each step reported itself: three attempts, three records.
+    let (mut started, mut records) = (0, Vec::new());
+    while let Ok(event) = progress.try_recv() {
+        if let crate::session::ProgressUpdate::Compaction(update) = &event.update {
+            match update {
+                CompactionProgress::Started { .. } => started += 1,
+                CompactionProgress::Finished { record, .. } => records.push(record.clone()),
+                other => panic!("unexpected compaction progress {other:?}"),
+            }
+        }
+    }
+    assert_eq!(started, 3);
+    let indexed: Vec<String> = history
+        .iter()
+        .map(|entry| entry.record_id.clone())
+        .collect();
+    assert_eq!(records, indexed);
+
+    // Expanded, the whole conversation comes back once, in order.
+    let expanded = session.expanded_conversation(None).unwrap();
+    assert!(expanded.unreadable_records.is_empty());
+    let shown: Vec<BlockId> = expanded
+        .blocks
+        .iter()
+        .map(|block| block.block.id())
+        .collect();
+    assert_eq!(shown.iter().filter(|id| **id == requests[0]).count(), 1);
+    assert_eq!(shown.iter().filter(|id| **id == requests[1]).count(), 1);
+    assert!(
+        expanded
+            .blocks
+            .iter()
+            .all(|block| block.block.meta().source.as_deref()
+                != Some(crate::compact::SUMMARY_SOURCE))
+    );
     host.close(&session.target(), ClosePolicy::Save)
         .await
         .unwrap();
@@ -732,6 +853,7 @@ async fn unknown_window_disables_auto_compaction_but_manual_compaction_works() {
     let outcome = session.compact().await.unwrap();
     assert_eq!(outcome.trigger, crate::compact::HistoryTrigger::Manual);
     assert!(outcome.estimate_after < outcome.estimate_before);
+    assert!(outcome.merged.is_none());
     assert_eq!(
         session.read_materials().unwrap().context.blocks()[0].id(),
         outcome.brief,

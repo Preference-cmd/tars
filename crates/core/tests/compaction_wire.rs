@@ -1,16 +1,17 @@
-//! Partial compaction on the wire: the fixed prefix, the brief request and
-//! the next round after a summary, on all three protocols.
+//! Partial compaction on the wire: the fixed prefix, the brief request, the
+//! merge of the brief chain and the next round after them, on all three
+//! protocols.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 #[path = "common/workspace_http.rs"]
 mod http;
 
-use causa::kernel::{BlockContent, BlockId, Context, ContextBlock, Role};
+use causa::kernel::{BlockContent, BlockId, BlockMeta, Context, ContextBlock, Role};
 use http::{Fixture, Reply};
 use serde_json::Value;
 use std::time::Duration;
 use tars_core::application::{PreparedCreate, SessionHost, text_input};
-use tars_core::compact::SUMMARY_SOURCE;
+use tars_core::compact::{HistoryRecord, RewriteKind, SUMMARY_SOURCE};
 use tars_core::definition::{CredentialRef, Provider, SessionDefinition, WorkspaceTool};
 use tars_core::session::{SubmitRequest, WorkState};
 
@@ -21,6 +22,7 @@ const PROTOCOLS: [(&str, Provider); 3] = [
 ];
 
 const BRIEF: &str = "Goal: finish the wire fixture. Progress: the marker was read once.";
+const MERGED: &str = "Goal: finish the wire fixture. Progress: merged from three briefs.";
 const REQUEST: &str = "Read the marker twice, then answer.";
 
 fn definition(provider: Provider, endpoint: &str, root: &std::path::Path) -> SessionDefinition {
@@ -61,17 +63,41 @@ fn block(role: Role, text: String) -> ContextBlock {
 
 /// What one work that compacts in round 2 sent and left behind.
 struct Run {
-    /// Request bodies: round 0, round 1, the brief request, round 2.
+    /// Request bodies: round 0, round 1, the brief request, then the merge
+    /// request when the chain was seeded, and round 2.
     bodies: Vec<Value>,
     system: Vec<ContextBlock>,
     earlier: Vec<ContextBlock>,
+    /// Briefs seeded into the chain before the work.
+    seeded: Vec<ContextBlock>,
     request: BlockId,
     context: Context,
+    /// Originals of the summary record.
     removed: Vec<BlockId>,
     ranges: usize,
+    records: Vec<HistoryRecord>,
+}
+
+/// A brief as an earlier compaction would have left it.
+fn seeded_brief(index: usize) -> ContextBlock {
+    ContextBlock::new(
+        causa::runtime::new_block_id(),
+        BlockContent::text(
+            Role::User,
+            format!("Seeded brief {index}. {}", "earlier work ".repeat(80)),
+        ),
+        BlockMeta::from_source(SUMMARY_SOURCE),
+    )
 }
 
 async fn run(name: &str, provider: Provider, with_system: bool) -> Run {
+    run_with(name, provider, with_system, false).await
+}
+
+/// One work that compacts in round 2. With `chain`, two briefs of about
+/// 350 tokens each are seeded after the system blocks; with the new brief
+/// the chain is over its budget, (6,000 − prefix) / 8, and is merged.
+async fn run_with(name: &str, provider: Provider, with_system: bool, chain: bool) -> Run {
     let root = tempfile::tempdir().unwrap();
     // One long line, about 1,000 tokens per read.
     std::fs::write(
@@ -79,16 +105,16 @@ async fn run(name: &str, provider: Provider, with_system: bool) -> Run {
         format!("{}\n", "m".repeat(3_000)),
     )
     .unwrap();
-    let fixture = Fixture::new(
-        name,
-        vec![
-            Reply::Read("marker.txt"),
-            Reply::Read("marker.txt"),
-            Reply::Summary(BRIEF),
-            Reply::Answer,
-        ],
-        None,
-    );
+    let mut replies = vec![
+        Reply::Read("marker.txt"),
+        Reply::Read("marker.txt"),
+        Reply::Summary(BRIEF),
+    ];
+    if chain {
+        replies.push(Reply::Summary(MERGED));
+    }
+    replies.push(Reply::Answer);
+    let fixture = Fixture::new(name, replies, None);
     let system = if with_system {
         vec![
             block(Role::System, "You are the compaction wire fixture.".into()),
@@ -97,11 +123,22 @@ async fn run(name: &str, provider: Provider, with_system: bool) -> Run {
     } else {
         Vec::new()
     };
+    let seeded: Vec<ContextBlock> = if chain {
+        (0..2).map(seeded_brief).collect()
+    } else {
+        Vec::new()
+    };
+    // The seeded chain takes the place of part of the earlier question, so
+    // the rounds cross the line at the same point.
     let earlier = vec![
-        block(Role::User, "earlier question ".repeat(620)),
+        block(
+            Role::User,
+            "earlier question ".repeat(if chain { 490 } else { 620 }),
+        ),
         block(Role::Assistant, "earlier answer".into()),
     ];
     let mut blocks = system.clone();
+    blocks.extend(seeded.iter().cloned());
     blocks.extend(earlier.iter().cloned());
     let store = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(store.path().to_owned()));
@@ -136,14 +173,24 @@ async fn run(name: &str, provider: Provider, with_system: bool) -> Run {
         .iter()
         .map(|raw| serde_json::from_slice(raw).unwrap())
         .collect();
-    assert_eq!(bodies.len(), 4, "{name}: two reads, one brief, one answer");
+    let briefs = if chain { 2 } else { 1 };
+    assert_eq!(
+        bodies.len(),
+        3 + briefs,
+        "{name}: two reads, the brief requests, one answer"
+    );
     let history = session.history();
-    assert_eq!(history.len(), 1, "{name}");
-    let record = session.read_history_record(&history[0].record_id).unwrap();
+    assert_eq!(history.len(), briefs, "{name}");
+    let records: Vec<HistoryRecord> = history
+        .iter()
+        .map(|entry| session.read_history_record(&entry.record_id).unwrap())
+        .collect();
+    let record = &records[0];
     Run {
         bodies,
         system,
         earlier,
+        seeded,
         request: request_id,
         context: session.read_materials().unwrap().context,
         removed: record
@@ -152,6 +199,7 @@ async fn run(name: &str, provider: Provider, with_system: bool) -> Run {
             .flat_map(|replacement| replacement.originals.iter().map(ContextBlock::id))
             .collect(),
         ranges: record.replacements.len(),
+        records,
     }
 }
 
@@ -358,5 +406,101 @@ async fn test_be26_the_brief_request_is_the_previous_round_up_to_the_cut_point()
             "{name}"
         );
         assert_eq!(brief["model"], previous["model"], "{name}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be13_a_chain_over_its_budget_is_merged_and_the_next_round_renders() {
+    for (name, provider) in PROTOCOLS {
+        let run = run_with(name, provider, true, true).await;
+        let kinds: Vec<RewriteKind> = run.records.iter().map(|record| record.kind).collect();
+        assert_eq!(
+            kinds,
+            [RewriteKind::Summarize, RewriteKind::Merge],
+            "{name}"
+        );
+
+        // [system, system, declaration, merged brief, request, call, result, answer]
+        let blocks = run.context.blocks();
+        assert_eq!(blocks.len(), 8, "{name}: {blocks:?}");
+        assert!(
+            matches!(blocks[2].content(), BlockContent::ToolChange(_)),
+            "{name}"
+        );
+        assert_eq!(blocks[4].id(), run.request, "{name}");
+        let merged = serde_json::to_string(&blocks[3]).unwrap();
+        assert!(merged.contains(MERGED), "{name}");
+        let merge = &run.records[1];
+        for old in &run.seeded {
+            assert!(
+                merged.contains(&format!("recall id={}/{}", merge.record_id, old.id().0)),
+                "{name}: the merged brief points to each old one"
+            );
+        }
+        // The merge record holds the chain: both seeded briefs, the
+        // declaration the summary added and its brief.
+        let originals = &merge.replacements[0].originals;
+        assert_eq!(originals.len(), 4, "{name}");
+        assert_eq!(originals[..2], run.seeded[..], "{name}");
+
+        // The merge request is the head and the instruction; the next round
+        // went out with the merged brief only and was accepted.
+        let merge_request = run.bodies[3].to_string();
+        assert!(
+            merge_request.contains("merging the working briefs"),
+            "{name}"
+        );
+        assert!(merge_request.contains("Seeded brief 1"), "{name}");
+        assert!(!merge_request.contains("earlier question"), "{name}");
+        let round_two = run.bodies[4].to_string();
+        assert!(round_two.contains(MERGED), "{name}");
+        assert!(!round_two.contains("Seeded brief"), "{name}");
+        assert!(!round_two.contains(BRIEF), "{name}");
+        assert!(
+            round_two.find(MERGED).unwrap() < round_two.find(REQUEST).unwrap(),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be25_the_system_prompt_and_tools_render_the_same_after_a_merge() {
+    for (name, provider) in PROTOCOLS {
+        let run = run_with(name, provider, true, true).await;
+        let blocks = run.context.blocks();
+        assert_eq!(
+            &blocks[..2],
+            &run.system[..],
+            "{name}: same ids and content"
+        );
+        for record in &run.records {
+            for replacement in &record.replacements {
+                for system in &run.system {
+                    assert!(
+                        !replacement
+                            .originals
+                            .iter()
+                            .any(|block| block.id() == system.id()),
+                        "{name}"
+                    );
+                }
+            }
+        }
+        let prompt = system_prompt(provider, &run.bodies[1]);
+        assert!(
+            prompt
+                .to_string()
+                .contains("You are the compaction wire fixture."),
+            "{name}: {prompt}"
+        );
+        // Before the summary, the merge request and the round after it.
+        for body in &run.bodies[3..] {
+            assert_eq!(prompt, system_prompt(provider, body), "{name}");
+            assert_eq!(
+                without_cache_control(run.bodies[1]["tools"].clone()),
+                without_cache_control(body["tools"].clone()),
+                "{name}: the tool declarations render the same"
+            );
+        }
     }
 }

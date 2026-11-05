@@ -715,6 +715,9 @@ impl ManagedSession {
 
     /// Replace the current materials with a model-written brief and save it.
     ///
+    /// When the brief chain is then over its budget it is merged too, as a
+    /// second record.
+    ///
     /// Refused while the session is busy or being saved, and while interrupted
     /// material still needs repair. A dropped future releases the compaction
     /// barrier; a record file written before the save failed is cleaned up on the next open.
@@ -762,6 +765,9 @@ impl ManagedSession {
                 return Err(ApplicationError::Compaction(reason.name().to_owned()));
             }
         };
+        let merge = runtime
+            .manual_merge_plan(&rewrite, &context, &control)
+            .await;
         let mut state = self.entry.lock();
         if state.lifecycle != Lifecycle::Open || state.closing.is_some() {
             return Err(if state.lifecycle == Lifecycle::Closed {
@@ -773,7 +779,7 @@ impl ManagedSession {
         if self.entry.version(&state) != version {
             return Err(ApplicationError::StaleMaterial);
         }
-        let (trigger, estimate_before, estimate_after) = (
+        let (trigger, estimate_before, mut estimate_after) = (
             rewrite.trigger,
             rewrite.estimate_before,
             rewrite.estimate_after,
@@ -785,11 +791,21 @@ impl ManagedSession {
                 return Err(ApplicationError::Compaction(reason.name().to_owned()));
             }
         };
+        // A merge that cannot be committed leaves the summary on its own.
+        let merged = merge.and_then(|merge| {
+            let after = merge.estimate_after;
+            let entry = runtime.commit_rewrite(&mut candidate, merge).ok()?;
+            estimate_after = after;
+            Some(entry)
+        });
         let brief = crate::compact::segment::chain_briefs(candidate.blocks())
             .last()
             .map(|block| block.id())
             .expect("a committed summary leaves a brief in the chain");
         if let Err(error) = self.commit_materials(&mut state, candidate) {
+            if let Some(merged) = &merged {
+                runtime.rollback_record(&merged.record_id);
+            }
             runtime.rollback_record(&record.record_id);
             return Err(error);
         }
@@ -800,6 +816,7 @@ impl ManagedSession {
             estimate_before,
             estimate_after,
             record,
+            merged,
             brief,
         })
     }

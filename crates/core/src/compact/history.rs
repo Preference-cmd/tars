@@ -133,6 +133,21 @@ pub(crate) struct Rewrite {
     pub(crate) replacements: Vec<PlannedReplacement>,
 }
 
+impl Rewrite {
+    /// The Context this rewrite would leave, without writing its record.
+    ///
+    /// Used to plan a merge before the summary it follows is committed.
+    pub(crate) fn preview(&self, context: &Context) -> Option<Context> {
+        let mut copy = context.clone();
+        let mut edit = copy.edit();
+        for replacement in &self.replacements {
+            edit = edit.replace(replacement.range.clone(), replacement.with.clone());
+        }
+        edit.commit().ok()?;
+        Some(copy)
+    }
+}
+
 /// Why the shared commit path did not change the Context.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RewriteError {
