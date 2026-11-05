@@ -338,3 +338,146 @@ async fn automatic_compaction_inside_a_work_keeps_the_old_conversation_visible()
     assert!(view.contains("ctx "), "{view}");
     assert!(view.contains("/ 4k"), "{view}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_materials_view_after_successful_compacted_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    let server = Server::new().await;
+    create(&mut app, &server.endpoint).await;
+    app.event(Event::Paste("recorded before compaction ".repeat(200)));
+    app.event(ctrl('s'));
+    until(&mut app, |_| server.requests.lock().unwrap().len() == 1).await;
+    server.release.add_permits(1);
+    until(&mut app, |app| app.entries[0].execution == "Completed").await;
+    until(&mut app, |app| {
+        matches!(
+            app.entries[0].session.as_ref().unwrap().status().save,
+            SaveStatus::Saved { .. }
+        )
+    })
+    .await;
+
+    let key = app.entries[0].key.clone();
+    let session = app.entries[0].session.as_ref().unwrap().clone();
+
+    let old_view = crate::app::jobs::MaterialView::read(&session).unwrap();
+    let old_version = old_view.version.clone();
+    // The app loads the saved materials on its own; wait until it shows them.
+    until(&mut app, |app| {
+        app.entries[0].material_version.as_ref() == Some(&old_version) && !app.entries[0].refreshing
+    })
+    .await;
+
+    let outcome = session.compact().await.unwrap();
+    let compacted_view = crate::app::jobs::MaterialView::read(&session).unwrap();
+    let compacted_version = compacted_view.version.clone();
+    assert_ne!(old_version, compacted_version);
+
+    app.complete(crate::app::jobs::Message::Compacted(
+        key.clone(),
+        Ok(crate::app::jobs::CompactedReload {
+            outcome,
+            view: compacted_view,
+        }),
+    ));
+
+    assert_eq!(
+        app.entries[0].material_version.as_ref(),
+        Some(&compacted_version)
+    );
+    assert_eq!(
+        app.entries[0].requested_material_version.as_ref(),
+        Some(&compacted_version)
+    );
+    assert!(
+        app.entries[0]
+            .transcript
+            .text
+            .contains("Context summary · collapsed")
+    );
+
+    app.complete(crate::app::jobs::Message::Materials(
+        key.clone(),
+        Ok(old_view),
+    ));
+
+    assert_eq!(
+        app.entries[0].material_version.as_ref(),
+        Some(&compacted_version)
+    );
+    assert!(
+        app.entries[0]
+            .transcript
+            .text
+            .contains("Context summary · collapsed")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn materials_view_delivered_while_compacting_is_ignored_and_failed_compaction_reloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    let server = Server::new().await;
+    create(&mut app, &server.endpoint).await;
+
+    until(&mut app, |app| {
+        app.entries[0].material_version.is_some()
+            && app.entries[0].requested_material_version.is_some()
+    })
+    .await;
+
+    let key = app.entries[0].key.clone();
+    let session = app.entries[0].session.as_ref().unwrap().clone();
+    let initial_version = app.entries[0].material_version.clone().unwrap();
+
+    app.entries[0].busy = Some("compacting");
+
+    let view = crate::app::jobs::MaterialView::read(&session).unwrap();
+    app.complete(crate::app::jobs::Message::Materials(key.clone(), Ok(view)));
+
+    assert_eq!(app.entries[0].busy, Some("compacting"));
+    assert_eq!(app.entries[0].requested_material_version, None);
+    assert!(!app.entries[0].refreshing);
+
+    let reads_before = app.entries[0].material_reads;
+
+    app.complete(crate::app::jobs::Message::Compacted(
+        key.clone(),
+        Err("compaction failed".into()),
+    ));
+
+    assert_eq!(app.entries[0].busy, None);
+    assert_eq!(app.entries[0].requested_material_version, None);
+
+    app.poll();
+    assert_eq!(
+        app.entries[0].requested_material_version,
+        Some(initial_version.clone())
+    );
+    assert_eq!(app.entries[0].material_reads, reads_before + 1);
+    assert!(app.entries[0].refreshing);
+
+    // Also verify panic path resets requested_material_version so subsequent polls read again
+    let view = crate::app::jobs::MaterialView::read(&session).unwrap();
+    app.entries[0].busy = Some("compacting");
+    app.complete(crate::app::jobs::Message::Materials(key.clone(), Ok(view)));
+    assert_eq!(app.entries[0].requested_material_version, None);
+
+    let reads_before_panic = app.entries[0].material_reads;
+    app.complete(crate::app::jobs::Message::JobPanicked(
+        Some(key.clone()),
+        crate::app::jobs::JobKind::Compact,
+        "controlled compact panic".into(),
+    ));
+
+    assert_eq!(app.entries[0].busy, None);
+    assert_eq!(app.entries[0].requested_material_version, None);
+
+    app.poll();
+    assert_eq!(
+        app.entries[0].requested_material_version,
+        Some(initial_version)
+    );
+    assert_eq!(app.entries[0].material_reads, reads_before_panic + 1);
+}

@@ -378,6 +378,22 @@ impl App {
                     }
                     match result {
                         Ok(view) => {
+                            // A read started before `/compact` would show the old
+                            // materials; the compaction result reloads them.
+                            if entry.busy == Some("compacting") {
+                                entry.requested_material_version = None;
+                                return;
+                            }
+                            // The requested version is already on screen (installed by a
+                            // reload such as compaction), so another version came from an
+                            // earlier read. A newer one dropped here is read again once the
+                            // save status moves past the requested version.
+                            if entry.requested_material_version.is_some()
+                                && entry.material_version == entry.requested_material_version
+                                && Some(&view.version) != entry.requested_material_version.as_ref()
+                            {
+                                return;
+                            }
                             // A rewrite made live replaced the conversation that
                             // is on screen, so its rows are adopted instead of
                             // being read again.
@@ -594,6 +610,7 @@ impl App {
                         }
                         JobKind::Compact => {
                             clear_busy(entry, "compacting");
+                            entry.requested_material_version = None;
                             entry.notice = message.clone();
                         }
                         JobKind::Wrapping => {

@@ -231,11 +231,11 @@ impl HistoryView {
             _ => {
                 self.cursor = Some(ExpansionCursor::new(&prefix, index.clone()));
                 self.pieces.clear();
-                self.needed = None;
                 self.loading = None;
                 self.finished = false;
             }
         }
+        self.needed = self.advance();
         self.known = index.len();
         self.hints
             .retain(|id, _| index.iter().any(|entry| &entry.record_id == id));
@@ -540,6 +540,21 @@ mod tests {
         assert_eq!(view.earlier(), 1);
         let read = view.next_read(true).unwrap();
         assert_eq!(read.record, OLDER);
+    }
+
+    #[test]
+    fn a_live_compaction_with_no_older_records_finishes_history() {
+        let chain = chain();
+        let mut view = HistoryView::new();
+        view.refresh(vec![], vec![], None);
+        let previous = Arc::new(Transcript {
+            text: "first words on screen\n\n".into(),
+            ..Transcript::default()
+        });
+        view.note_hint(OLDER.into(), HistoryTrigger::Manual, 150_000, 6_000);
+        view.refresh(index(&chain.records[..1]), vec![], Some(previous));
+        assert_eq!(view.earlier(), 0);
+        assert!(!view.has_earlier());
     }
 
     #[test]
