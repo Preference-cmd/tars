@@ -22,7 +22,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Trigger percentage used when the old context itself exceeds the window.
+/// Share of the window a brief request is trimmed to when its material is
+/// over the whole window.
 const TRIM_TARGET_PERCENT: u64 = 70;
 
 #[derive(Clone, Copy, Debug)]
@@ -265,12 +266,16 @@ impl CompactionRuntime {
             return Err(CompactionAbandon::NoShrink);
         }
 
-        // When the material itself is over the window the brief request would
-        // be refused too; drop the earliest interval blocks until it fits.
-        let limit = self.window.map(|window| {
-            u64::try_from(u128::from(window) * u128::from(TRIM_TARGET_PERCENT) / 100)
-                .unwrap_or(u64::MAX)
-        });
+        // Only material over the whole window would be refused; it is then
+        // trimmed from its earliest interval blocks to 70% of the window,
+        // which leaves room for the brief.
+        let limit = self
+            .window
+            .filter(|&window| self.usage.estimate(segment::blocks_bytes(&blocks[..k])) > window)
+            .map(|window| {
+                u64::try_from(u128::from(window) * u128::from(TRIM_TARGET_PERCENT) / 100)
+                    .unwrap_or(u64::MAX)
+            });
         let mut request_blocks = summary::request_material(blocks, head_end, k, &protected, limit);
         request_blocks.push(summary::instruction_block(summary::instruction(
             !protected.is_empty(),

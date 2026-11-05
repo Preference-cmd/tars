@@ -620,3 +620,55 @@ fn replacements_put_each_protected_block_back_with_its_own_id() {
         }]
     );
 }
+
+/// The material of the first brief request of a manual plan.
+async fn first_request(
+    window: u64,
+    earlier_bytes: usize,
+) -> (Vec<ContextBlock>, Vec<ContextBlock>) {
+    let directory = tempfile::tempdir().unwrap();
+    let inputs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let gateway = Arc::new(ToolThenDone {
+        main_calls: AtomicUsize::new(0),
+        summary_calls: Arc::new(AtomicUsize::new(0)),
+        summary_inputs: inputs.clone(),
+        tool_call_first: false,
+        cache_read_tokens: None,
+    }) as Arc<dyn ModelGateway>;
+    let runtime = CompactionRuntime::new(
+        &definition(Some(window), None),
+        &"conversation-trim".into(),
+        Some(directory.path()),
+        Vec::new(),
+        None,
+        None,
+        gateway,
+        Arc::new(UsageTracker::default()),
+    )
+    .unwrap();
+    let blocks = vec![
+        user(&"e".repeat(earlier_bytes)),
+        assistant("a0"),
+        user("u"),
+        assistant("a"),
+    ];
+    let context = Context::from_blocks(blocks.clone()).unwrap();
+    plan(&runtime, &context).await.unwrap();
+    let request = inputs.lock().unwrap()[0].clone();
+    (blocks, request)
+}
+
+#[tokio::test]
+async fn a_brief_request_is_trimmed_only_when_its_material_is_over_the_window() {
+    // A 3,000-token window: about 2,400 tokens of material up to the tail is
+    // over 70% of it but within it, so the request keeps all of it.
+    let (blocks, request) = first_request(3_000, 7_200).await;
+    assert_eq!(ids(&request[..2]), ids(&blocks[..2]), "{request:?}");
+    assert_eq!(request.len(), 3, "the material and the instruction");
+    // About 3,400 tokens is over the window: the earliest block is left out.
+    let (blocks, request) = first_request(3_000, 10_000).await;
+    assert!(
+        request.iter().all(|block| block.id() != blocks[0].id()),
+        "{request:?}"
+    );
+}

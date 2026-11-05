@@ -355,8 +355,8 @@ async fn over_limit_material_is_trimmed_for_the_summary_but_kept_in_history() {
         "Goal: continue. Next steps: finish the fixture work.".into(),
     ));
     host.set_test_gateway(as_gateway(&gateway));
-    // About 3,000 tokens of earlier material, over the 1,400-token limit of a
-    // brief request (70% of the window).
+    // About 3,000 tokens of earlier material: over the 2,000-token window, so
+    // the brief request is trimmed to 70% of it.
     let earlier = vec![
         text_block(3_000),
         text_block(3_000),
