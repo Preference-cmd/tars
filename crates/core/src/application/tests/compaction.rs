@@ -732,6 +732,11 @@ async fn unknown_window_disables_auto_compaction_but_manual_compaction_works() {
     let outcome = session.compact().await.unwrap();
     assert_eq!(outcome.trigger, crate::compact::HistoryTrigger::Manual);
     assert!(outcome.estimate_after < outcome.estimate_before);
+    assert_eq!(
+        session.read_materials().unwrap().context.blocks()[0].id(),
+        outcome.brief,
+        "the outcome names the new brief"
+    );
     session.wait_saved().await.unwrap();
     let id = session.target().conversation_id().as_str().to_owned();
     let record = saved_record(store.path(), &id);

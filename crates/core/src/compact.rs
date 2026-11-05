@@ -16,6 +16,8 @@
 //!   the model gateway to remember the upstream-reported prompt size.
 //! - `segment` decides what a summary replaces: the head it keeps, the cut
 //!   point of the retained tail and the protected blocks.
+//! - `sealed` removes provider items such as thinking from the replies after
+//!   a rewrite, since they are bound to the prefix they followed.
 //! - `summary` builds the brief instruction, the brief request material and
 //!   the brief block.
 //! - `runtime` holds the running settings, the force flag and the pairing of a
@@ -35,6 +37,7 @@ pub(crate) mod history;
 pub(crate) mod preparer;
 pub(crate) mod recall;
 pub(crate) mod runtime;
+pub(crate) mod sealed;
 pub(crate) mod segment;
 pub(crate) mod summary;
 

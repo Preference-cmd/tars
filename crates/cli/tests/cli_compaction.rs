@@ -684,6 +684,11 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
     let blocks = saved["context"]["blocks"].as_array().unwrap();
     assert_eq!(blocks.len(), 3, "declaration and the two briefs");
     assert_eq!(blocks[1]["id"], json!(first_summary));
+    let second_summary = blocks[2]["id"].as_str().unwrap();
+    assert!(
+        text.contains(&format!("summary block {second_summary}")),
+        "the newest brief is reported: {text}"
+    );
 
     let full = cli()
         .args([

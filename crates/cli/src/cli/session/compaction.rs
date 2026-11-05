@@ -46,12 +46,7 @@ pub(super) async fn compact(
         }
         Ok(outcome) => {
             policy = ClosePolicy::Save;
-            let summary_block_id = outcome
-                .record
-                .inserted_block_ids
-                .last()
-                .map(|id| id.0.to_string())
-                .unwrap_or_default();
+            let summary_block_id = outcome.brief.0.to_string();
             value["status"] = json!("compacted");
             value["trigger"] = json!(outcome.trigger.name());
             value["estimate_before"] = json!(outcome.estimate_before);

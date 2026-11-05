@@ -164,6 +164,14 @@ pub(crate) fn retained_tail_budget(
     Ok(RETAINED_TAIL_CAP.min(line.saturating_sub(fixed_prefix) / RETAINED_TAIL_SHARE))
 }
 
+/// The briefs of the chain, in order.
+pub(crate) fn chain_briefs(blocks: &[ContextBlock]) -> Vec<&ContextBlock> {
+    blocks[fixed_prefix_end(blocks)..head_end(blocks)]
+        .iter()
+        .filter(|block| is_brief(block))
+        .collect()
+}
+
 /// Whether position `index` may start the retained tail.
 ///
 /// A cut point is a user message, or the first block after a completed tool

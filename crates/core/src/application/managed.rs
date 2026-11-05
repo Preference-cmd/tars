@@ -785,6 +785,10 @@ impl ManagedSession {
                 return Err(ApplicationError::Compaction(reason.name().to_owned()));
             }
         };
+        let brief = crate::compact::segment::chain_briefs(candidate.blocks())
+            .last()
+            .map(|block| block.id())
+            .expect("a committed summary leaves a brief in the chain");
         if let Err(error) = self.commit_materials(&mut state, candidate) {
             runtime.rollback_record(&record.record_id);
             return Err(error);
@@ -796,6 +800,7 @@ impl ManagedSession {
             estimate_before,
             estimate_after,
             record,
+            brief,
         })
     }
 

@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 mod partial;
+mod thinking;
 
 fn definition(context_window: Option<u64>, max_tokens: Option<u32>) -> SessionDefinition {
     SessionDefinition {

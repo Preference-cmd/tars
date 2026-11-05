@@ -14,6 +14,11 @@
 //! it. A later rewrite may separate the two pieces, and several rewrites may
 //! put the same block back; the newest of them owns it first.
 //!
+//! A rewrite also removes sealed items, such as thinking, from the replies
+//! after its first change. Those originals keep the status of the replies
+//! that replaced them, and only the pieces that summarized something carry
+//! the record's divider.
+//!
 //! [`ExpansionCursor`] does the walk without reading files: it stops at each
 //! record it needs and continues once the caller supplies it. A display can
 //! therefore read records in the background, one at a time, only as far as
@@ -320,29 +325,40 @@ impl ExpansionCursor {
                 })
                 .collect(),
             Ok(record) => {
-                self.queued.push_back(ExpansionStep::Rewrite(RewriteMark {
+                let mark = ExpansionStep::Rewrite(RewriteMark {
                     record_id: record_id.clone(),
                     trigger: record.trigger,
                     kind: record.kind,
                     estimate_before: record.estimate_before,
                     estimate_after: record.estimate_after,
-                }));
+                });
                 match run {
-                    Some(run) => self.match_run(&record, &run),
+                    Some(run) => {
+                        let (items, marked) = self.match_run(&record, &run);
+                        // The divider belongs with the brief, not with each
+                        // reply whose thinking the same rewrite removed.
+                        if marked {
+                            self.queued.push_front(mark);
+                        }
+                        items
+                    }
                     // Put-back blocks stand elsewhere in the conversation;
                     // only the removed originals belong here.
-                    None => record
-                        .replacements
-                        .iter()
-                        .flat_map(|replacement| {
-                            replacement
-                                .originals
-                                .iter()
-                                .filter(|block| !replacement.inserted_ids.contains(&block.id()))
-                                .cloned()
-                        })
-                        .map(|block| Item::Expand(block, None))
-                        .collect(),
+                    None => {
+                        self.queued.push_back(mark);
+                        record
+                            .replacements
+                            .iter()
+                            .flat_map(|replacement| {
+                                replacement
+                                    .originals
+                                    .iter()
+                                    .filter(|block| !replacement.inserted_ids.contains(&block.id()))
+                                    .cloned()
+                            })
+                            .map(|block| Item::Expand(block, None))
+                            .collect()
+                    }
                 }
             }
         };
@@ -366,15 +382,19 @@ impl ExpansionCursor {
     /// of a range whose protected block a later rewrite moved away; each
     /// piece is matched by its own inserted ids. A block no piece describes
     /// is shown as it is.
+    ///
+    /// Also returns whether the run needs the record's divider: it does
+    /// unless every piece only removed sealed items from replies.
     fn match_run(
         &mut self,
         record: &HistoryRecord,
         run: &[(ContextBlock, BlockStatus)],
-    ) -> Vec<Item> {
+    ) -> (Vec<Item>, bool) {
         let pieces: Vec<Piece<'_>> = record.replacements.iter().flat_map(pieces).collect();
         let mut newest_first = Vec::new();
         let mut end = run.len();
         let mut stray = false;
+        let mut marked = false;
         while end > 0 {
             let tail = &run[..end];
             let matched = pieces.iter().find(|piece| {
@@ -388,6 +408,11 @@ impl ExpansionCursor {
             match matched {
                 Some(piece) => {
                     let start = end - piece.inserted.len();
+                    let inserted = &run[start..end];
+                    // Originals that only lost sealed items still stand
+                    // where the replies that replaced them stand.
+                    let stripped = is_stripped(piece, inserted);
+                    marked |= !stripped;
                     newest_first.extend(piece.originals.iter().rev().map(|block| {
                         // A put-back block keeps the status of the block that
                         // stands for it; the others were removed here.
@@ -395,13 +420,15 @@ impl ExpansionCursor {
                             .inserted
                             .iter()
                             .position(|id| *id == block.id())
-                            .map(|position| run[start + position].1.clone());
+                            .map(|position| inserted[position].1.clone())
+                            .or_else(|| stripped.then(|| inserted[0].1.clone()));
                         Item::Expand(block.clone(), kept)
                     }));
                     end = start;
                 }
                 None => {
                     stray = true;
+                    marked = true;
                     newest_first.push(Item::Show(ExpandedBlock {
                         status: BlockStatus::Unreadable(record.record_id.clone()),
                         block: tail[end - 1].0.clone(),
@@ -418,8 +445,24 @@ impl ExpansionCursor {
                 }));
         }
         newest_first.reverse();
-        newest_first
+        (newest_first, marked)
     }
+}
+
+/// Whether a piece only removed sealed items: it inserts no brief and no
+/// tool declaration, and every block it removed is a reply with sealed items
+/// (a reply stripped of its thinking, or a thinking-only block).
+fn is_stripped(piece: &Piece<'_>, inserted: &[(ContextBlock, BlockStatus)]) -> bool {
+    !inserted.is_empty()
+        && inserted.iter().all(|(block, _)| {
+            !super::segment::is_brief(block)
+                && !matches!(block.content(), causa::kernel::BlockContent::ToolChange(_))
+        })
+        && piece
+            .originals
+            .iter()
+            .filter(|block| !piece.inserted.contains(&block.id()))
+            .all(super::sealed::has_sealed)
 }
 
 /// The newest record older than `below` that inserted `id`.

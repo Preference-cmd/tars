@@ -16,23 +16,23 @@ use causa::kernel::{
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn text(role: Role, body: &str) -> ContextBlock {
+pub(super) fn text(role: Role, body: &str) -> ContextBlock {
     ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), role, body)
 }
 
-fn user(body: &str) -> ContextBlock {
+pub(super) fn user(body: &str) -> ContextBlock {
     text(Role::User, body)
 }
 
-fn assistant(body: &str) -> ContextBlock {
+pub(super) fn assistant(body: &str) -> ContextBlock {
     text(Role::Assistant, body)
 }
 
-fn system(body: &str) -> ContextBlock {
+pub(super) fn system(body: &str) -> ContextBlock {
     text(Role::System, body)
 }
 
-fn call(name: &str) -> ContextBlock {
+pub(super) fn call(name: &str) -> ContextBlock {
     ContextBlock::new(
         BlockId::new(uuid::Uuid::now_v7()),
         BlockContent::ToolCall(ToolCallPayload::new(name, serde_json::json!({}))),
@@ -40,7 +40,7 @@ fn call(name: &str) -> ContextBlock {
     )
 }
 
-fn result(call: &ContextBlock, output: &str) -> ContextBlock {
+pub(super) fn result(call: &ContextBlock, output: &str) -> ContextBlock {
     ContextBlock::new(
         BlockId::new(uuid::Uuid::now_v7()),
         BlockContent::ToolResult(ToolResultPayload::new(
@@ -52,16 +52,16 @@ fn result(call: &ContextBlock, output: &str) -> ContextBlock {
     )
 }
 
-fn ids(blocks: &[ContextBlock]) -> Vec<BlockId> {
+pub(super) fn ids(blocks: &[ContextBlock]) -> Vec<BlockId> {
     blocks.iter().map(ContextBlock::id).collect()
 }
 
-fn brief(body: &str) -> ContextBlock {
+pub(super) fn brief(body: &str) -> ContextBlock {
     summary::summary_block(summary::new_block_id(), body)
 }
 
 /// A runtime over a fresh history directory whose summaries answer text.
-fn runtime(
+pub(super) fn runtime(
     directory: &std::path::Path,
     window: Option<u64>,
 ) -> (Arc<CompactionRuntime>, Arc<AtomicUsize>) {
@@ -87,7 +87,7 @@ fn runtime(
     (runtime, summary_calls)
 }
 
-async fn plan(
+pub(super) async fn plan(
     runtime: &CompactionRuntime,
     context: &Context,
 ) -> Result<Rewrite, CompactionAbandon> {

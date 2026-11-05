@@ -2,15 +2,18 @@
 //!
 //! A plan is built in this order: find the head, the retained tail and the
 //! protected blocks, ask the model for a brief of the interval between them,
-//! build the replacements around the protected blocks and estimate the result. The
-//! plan is a [`Rewrite`]; the shared commit path writes and fsyncs its record,
-//! edits the Context and only then appends the index entry.
+//! build the replacements around the protected blocks, remove sealed items
+//! from the replies after the change and estimate the result. A plan is a
+//! [`Rewrite`]; the shared commit path writes and fsyncs its record, edits
+//! the Context and only then appends the index entry.
 
 use super::estimate::{self, UsageTracker};
-use super::history::{HistoryRecordEntry, HistoryStore, Rewrite, RewriteError, RewriteKind};
-use super::segment;
+use super::history::{
+    HistoryRecordEntry, HistoryStore, PlannedReplacement, Rewrite, RewriteError, RewriteKind,
+};
 use super::summary::{self, SUMMARY_MAX_TOKENS};
 use super::{CompactionAbandon, HistoryTrigger};
+use super::{sealed, segment};
 use crate::definition::SessionDefinition;
 use crate::session::ConversationId;
 use causa::kernel::{
@@ -253,7 +256,10 @@ impl CompactionRuntime {
             segment::fixed_prefix_estimate(blocks),
         )
         .map_err(|_| CompactionAbandon::PrefixTooLarge)?;
-        let k = segment::tail_start(blocks, head_end, budget);
+        let k = sealed::tail_start_outside_open_loop(
+            blocks,
+            segment::tail_start(blocks, head_end, budget),
+        );
         let protected =
             segment::protected_positions(blocks, head_end, k, &self.current_work_inputs());
         // Protected blocks stay and declarations are only folded, so an
@@ -280,14 +286,50 @@ impl CompactionRuntime {
         request_blocks.push(summary::instruction_block(summary::instruction(
             !protected.is_empty(),
         )));
+        let text = self
+            .brief(request_blocks, model, generation, control)
+            .await?;
+
+        let record_id = super::history::new_record_id();
+        let brief = summary::summary_block(
+            summary::new_block_id(),
+            &summary::summary_text(&text, &record_id),
+        );
+        // The interval's tool changes, folded into one declaration before the
+        // brief, keep the frame's tool state exactly as it was.
+        let mut new_blocks: Vec<ContextBlock> =
+            segment::tool_delta(&blocks[..head_end], &blocks[..k])
+                .into_iter()
+                .collect();
+        new_blocks.push(brief);
+        let replacements = sealed::strip_after(
+            blocks,
+            head_end,
+            segment::replacements(blocks, head_end, k, &protected, new_blocks),
+        );
+        self.rewrite(
+            context,
+            record_id,
+            trigger,
+            RewriteKind::Summarize,
+            replacements,
+        )
+    }
+
+    /// Ask the session's model for a brief and keep only its text.
+    async fn brief(
+        &self,
+        blocks: Vec<ContextBlock>,
+        model: &ModelRef,
+        generation: &GenerationOptions,
+        control: &CallControl,
+    ) -> Result<String, CompactionAbandon> {
         let mut request = ModelRequest::new(
             InvocationId {
                 turn_id: TurnId::new(format!("compaction-{}", uuid::Uuid::now_v7())),
                 round_id: RoundId(0),
             },
-            causa::kernel::ContextFrame {
-                blocks: request_blocks,
-            },
+            causa::kernel::ContextFrame { blocks },
             model.clone(),
         );
         let mut generation = generation.clone();
@@ -309,44 +351,33 @@ impl CompactionRuntime {
         if text.is_empty() {
             return Err(CompactionAbandon::EmptySummary);
         }
+        Ok(text.to_owned())
+    }
 
-        let record_id = super::history::new_record_id();
-        let brief = summary::summary_block(
-            summary::new_block_id(),
-            &summary::summary_text(text, &record_id),
-        );
-        // The interval's tool changes, folded into one declaration before the
-        // brief, keep the frame's tool state exactly as it was.
-        let mut new_blocks: Vec<ContextBlock> =
-            segment::tool_delta(&blocks[..head_end], &blocks[..k])
-                .into_iter()
-                .collect();
-        new_blocks.push(brief);
-        let inserted_bytes = segment::blocks_bytes(&new_blocks);
-        let replacements = segment::replacements(blocks, head_end, k, &protected, new_blocks);
-
+    /// The rewrite of `replacements`, or `NoShrink` when it does not make the
+    /// Context smaller.
+    fn rewrite(
+        &self,
+        context: &Context,
+        record_id: String,
+        trigger: HistoryTrigger,
+        kind: RewriteKind,
+        replacements: Vec<PlannedReplacement>,
+    ) -> Result<Rewrite, CompactionAbandon> {
         // Compare like with like: serialized sizes before and after the edit.
-        let removed_bytes = (head_end..k)
-            .filter(|index| !protected.contains(index))
-            .fold(0u64, |total, index| {
-                total.saturating_add(segment::block_bytes(&blocks[index]))
-            });
-        let before_bytes = segment::blocks_bytes(blocks);
-        let after_bytes = before_bytes
-            .saturating_sub(removed_bytes)
-            .saturating_add(inserted_bytes);
-        if after_bytes >= before_bytes {
+        let (removed, inserted) = sealed::replaced_bytes(context.blocks(), &replacements);
+        if inserted >= removed {
             return Err(CompactionAbandon::NoShrink);
         }
         // The calibrated estimate minus what the edit saves, so both numbers
         // are on the same scale.
         let estimate_before = self.usage.estimate(estimate::context_bytes(context));
         let estimate_after =
-            estimate_before.saturating_sub(estimate::estimate_bytes(before_bytes - after_bytes));
+            estimate_before.saturating_sub(estimate::estimate_bytes(removed - inserted));
         Ok(Rewrite {
             record_id,
             trigger,
-            kind: RewriteKind::Summarize,
+            kind,
             estimate_before,
             estimate_after,
             replacements,
@@ -408,6 +439,8 @@ pub struct CompactionOutcome {
     pub estimate_after: u64,
     /// Index entry of the rewrite record that holds the replaced material.
     pub record: HistoryRecordEntry,
+    /// The brief now standing for the replaced material.
+    pub brief: BlockId,
 }
 
 /// Whether the material still has declarations without answers.
