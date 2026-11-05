@@ -8,44 +8,114 @@ use unicode_width::UnicodeWidthStr;
 pub(crate) struct Transcript {
     pub text: String,
     pub tool_details: Vec<String>,
-    /// Full text of the current Context's summary block, when it has one.
+    /// Full text of the current Context's summary blocks (the brief chain), when it has any.
     ///
-    /// The current material collapses that block to one row; the panel opened
-    /// by `/summary` reads this raw copy instead of the rendered rows.
+    /// The current material collapses those blocks to folded rows; the panel opened
+    /// by `/summary` reads this raw copy (the whole chain, oldest first) instead of the rendered rows.
     pub summary: Option<String>,
-    /// Number of leading Context blocks that a rewrite inserted.
-    ///
-    /// Those blocks stand for history; the history view expands them.
-    pub history_blocks: usize,
-    /// Byte offset in `text` where the blocks after `history_blocks` begin.
-    ///
-    /// When a later rewrite replaces this whole Context, the rows from here
-    /// on are the replaced conversation and are adopted without a read.
-    pub history_start: usize,
+    /// Range of blocks in the Context that form the history run.
+    pub history_range: Range<usize>,
 }
 
 impl Transcript {
-    /// The current Context, marking its leading blocks that `index` inserted.
+    /// The current Context, splitting off its fixed prefix and the history run.
     pub fn from_materials(
         context: &Context,
         index: &[tars_core::compact::HistoryRecordEntry],
     ) -> Self {
+        let blocks = context.blocks();
+        let fixed_end = tars_core::compact::fixed_prefix_end(blocks);
+        let fixed_prefix = &blocks[..fixed_end];
+
         let inserted = index
             .iter()
             .flat_map(|entry| entry.inserted_block_ids.iter().copied())
             .collect::<std::collections::HashSet<_>>();
-        let blocks = context.blocks();
-        let history_blocks = blocks
-            .iter()
-            .take_while(|block| inserted.contains(&block.id()))
-            .count();
-        let mut head = Self::build(&blocks[..history_blocks], true);
-        let tail = Self::build(&blocks[history_blocks..], true);
-        head.history_blocks = history_blocks;
-        head.history_start = head.text.len();
+
+        let history_run_len = if index.is_empty() {
+            0
+        } else {
+            let candidates = &blocks[fixed_end..];
+            let mut len = 0;
+            while len < candidates.len() {
+                let block = &candidates[len];
+                if inserted.contains(&block.id()) {
+                    len += 1;
+                } else if matches!(block.content(), BlockContent::ToolChange(_)) {
+                    // A ToolChange that no index entry inserted is part of the run
+                    // only if a brief comes after it in the run; otherwise the run ends before it.
+                    let has_following_brief = {
+                        let mut found = false;
+                        for future in &candidates[len + 1..] {
+                            if future.meta().source.as_deref()
+                                == Some(tars_core::compact::SUMMARY_SOURCE)
+                            {
+                                found = true;
+                                break;
+                            }
+                            if !inserted.contains(&future.id())
+                                && !matches!(future.content(), BlockContent::ToolChange(_))
+                            {
+                                break;
+                            }
+                        }
+                        found
+                    };
+                    if has_following_brief {
+                        len += 1;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            len
+        };
+
+        let history_run = &blocks[fixed_end..fixed_end + history_run_len];
+        let current_part = &blocks[fixed_end + history_run_len..];
+
+        // 1. Fixed prefix (leading system text blocks)
+        let mut head = Self::build(fixed_prefix, true);
+
+        // 2. The brief chain in history_run: one folded row per brief, and collect their bodies into summary
+        for block in history_run {
+            if block.meta().source.as_deref() == Some(tars_core::compact::SUMMARY_SOURCE) {
+                if let BlockContent::Message { parts, .. } = block.content() {
+                    let mut body = String::new();
+                    for part in parts {
+                        if let ContentPart::Text(value) = part {
+                            body.push_str(&value.0);
+                        }
+                    }
+                    if let Some(existing) = &mut head.summary {
+                        existing.push_str("\n\n");
+                        existing.push_str(&body);
+                    } else {
+                        head.summary = Some(body);
+                    }
+                }
+                head.text
+                    .push_str("● Context summary · collapsed · /summary shows the full text\n\n");
+            }
+            // Put-back U, stripped replies, and ToolChange in history_run are NOT rendered in current material:
+            // the history expansion shows their originals.
+        }
+
+        // 3. Current part (blocks after history_run)
+        let tail = Self::build(current_part, true);
         head.text.push_str(&tail.text);
         head.tool_details.extend(tail.tool_details);
-        head.summary = head.summary.or(tail.summary);
+        if let Some(tail_summary) = tail.summary {
+            if let Some(existing) = &mut head.summary {
+                existing.push_str("\n\n");
+                existing.push_str(&tail_summary);
+            } else {
+                head.summary = Some(tail_summary);
+            }
+        }
+        head.history_range = fixed_end..fixed_end + history_run_len;
         head
     }
 
@@ -58,7 +128,7 @@ impl Transcript {
     fn build(blocks: &[ContextBlock], collapse_summary: bool) -> Self {
         let mut text = String::new();
         let mut tool_details = Vec::new();
-        let mut summary_text = None;
+        let mut summary_text: Option<String> = None;
         for block in blocks {
             // The offered tool set is configuration the runner records, not
             // conversation; it has no transcript entry.
@@ -74,7 +144,10 @@ impl Transcript {
                         body.push_str(&value.0);
                     }
                 }
-                if summary_text.is_none() {
+                if let Some(existing) = &mut summary_text {
+                    existing.push_str("\n\n");
+                    existing.push_str(&body);
+                } else {
                     summary_text = Some(body);
                 }
                 if collapse_summary {
@@ -145,8 +218,7 @@ impl Transcript {
             text,
             tool_details,
             summary: summary_text,
-            history_blocks: 0,
-            history_start: 0,
+            history_range: 0..0,
         }
     }
 }
@@ -251,5 +323,87 @@ mod tests {
         assert!(!transcript.text.contains('\u{2066}'));
         assert!(!transcript.text.contains('\u{2028}'));
         assert!(transcript.text.contains("    tabbed"));
+    }
+
+    #[test]
+    fn tool_change_without_following_brief_is_not_part_of_history_run() {
+        use causa::kernel::{BlockMeta, ContentPart, TextPayload, ToolChange, ToolDefinition};
+        use tars_core::compact::{HistoryRecordEntry, HistoryTrigger, RewriteKind};
+
+        let brief = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::Message {
+                role: Role::Assistant,
+                parts: vec![ContentPart::Text(TextPayload::new("brief text"))],
+            },
+            BlockMeta::from_source(tars_core::compact::SUMMARY_SOURCE),
+        );
+
+        let uninserted_tool_change = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolChange(ToolChange::between(
+                &[],
+                &[ToolDefinition::new(
+                    "custom_tool",
+                    "description",
+                    serde_json::json!({}),
+                )],
+            )),
+            Default::default(),
+        );
+
+        let stripped_reply = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::Message {
+                role: Role::Assistant,
+                parts: vec![ContentPart::Text(TextPayload::new("stripped reply text"))],
+            },
+            Default::default(),
+        );
+
+        let user_block = ContextBlock::text(
+            causa::runtime::new_block_id(),
+            Role::User,
+            "tail user message",
+        );
+
+        let entry = HistoryRecordEntry {
+            record_id: "0190a000-0000-7000-8000-000000000001".into(),
+            created_at_ms: 1,
+            trigger: HistoryTrigger::Auto,
+            kind: RewriteKind::Summarize,
+            removed_block_count: 2,
+            inserted_block_ids: vec![brief.id(), stripped_reply.id()],
+        };
+
+        // Case 1: [brief, uninserted_tool_change, stripped_reply, user_block]
+        // The uninserted ToolChange has NO brief following it in the run.
+        // Rule: the run must end before it! So history_range is 0..1 (brief only).
+        let context1 = Context::from_blocks(vec![
+            brief.clone(),
+            uninserted_tool_change.clone(),
+            stripped_reply.clone(),
+            user_block.clone(),
+        ])
+        .unwrap();
+        let transcript1 = Transcript::from_materials(&context1, std::slice::from_ref(&entry));
+        assert_eq!(transcript1.history_range, 0..1);
+        assert!(transcript1.text.contains("stripped reply text"));
+        assert!(transcript1.text.contains("tail user message"));
+
+        // Case 2: [uninserted_tool_change, brief, stripped_reply, user_block]
+        // The uninserted ToolChange DOES have a brief following it in the run.
+        // Rule: it is part of the run! So history_range is 0..3.
+        let context2 = Context::from_blocks(vec![
+            uninserted_tool_change,
+            brief,
+            stripped_reply,
+            user_block,
+        ])
+        .unwrap();
+        let transcript2 = Transcript::from_materials(&context2, &[entry]);
+        assert_eq!(transcript2.history_range, 0..3);
+        assert!(!transcript2.text.contains("stripped reply text"));
+        assert!(transcript2.text.contains("tail user message"));
     }
 }

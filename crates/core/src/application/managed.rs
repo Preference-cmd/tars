@@ -642,17 +642,22 @@ impl ManagedSession {
         &self,
         record_id: &str,
     ) -> Result<crate::compact::HistoryRecord, ApplicationError> {
-        let history = {
+        let (history, cached) = {
             let state = self.entry.lock();
             let runtime = state
                 .owner
                 .as_ref()
                 .and_then(|owner| owner.compaction())
                 .ok_or(ApplicationError::CompactionUnavailable)?;
-            runtime
+            let history = runtime
                 .history()
-                .ok_or(ApplicationError::CompactionUnavailable)?
+                .ok_or(ApplicationError::CompactionUnavailable)?;
+            let cached = history.get_written_record(record_id);
+            (history, cached)
         };
+        if let Some(record) = cached {
+            return Ok((*record).clone());
+        }
         history
             .read(record_id)
             .map_err(|error| ApplicationError::Store(Arc::new(error)))
@@ -667,6 +672,18 @@ impl ManagedSession {
             .as_ref()
             .and_then(|owner| owner.compaction())
             .and_then(|runtime| runtime.artifacts())
+    }
+
+    /// History rewrite records written by this session in this process.
+    pub fn written_history_records(&self) -> Vec<Arc<crate::compact::HistoryRecord>> {
+        let state = self.entry.lock();
+        state
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.compaction())
+            .and_then(|runtime| runtime.history())
+            .map(|history| history.written_records())
+            .unwrap_or_default()
     }
 
     /// Number of record files this session has read.

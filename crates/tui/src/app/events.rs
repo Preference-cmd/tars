@@ -361,6 +361,7 @@ impl App {
                             let next = (offset + page).min(end);
                             (next < end).then_some(next)
                         };
+                        entry.scroll_anchor = None;
                         if key.code == KeyCode::PageUp && at_top {
                             entry.request_earlier_history();
                         }

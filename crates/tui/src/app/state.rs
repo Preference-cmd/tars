@@ -122,6 +122,12 @@ impl PendingApproval {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct ScrollAnchor {
+    pub(super) index: usize,
+    pub(super) rows: Vec<String>,
+}
+
 pub(crate) struct Entry {
     pub(super) key: Key,
     pub title: Option<String>,
@@ -145,6 +151,7 @@ pub(crate) struct Entry {
     pub(crate) history_rows: Option<Rows>,
     /// Scroll position to restore after earlier conversation is inserted above.
     pub(super) history_anchor: Option<Option<usize>>,
+    pub(super) scroll_anchor: Option<ScrollAnchor>,
     #[cfg(test)]
     pub(super) record_reads: usize,
     pub(super) progress: Option<super::progress::ProgressFeed>,
@@ -186,6 +193,7 @@ impl Entry {
             history: super::history::HistoryView::new(),
             history_rows: None,
             history_anchor: None,
+            scroll_anchor: None,
             #[cfg(test)]
             record_reads: 0,
             progress: None,

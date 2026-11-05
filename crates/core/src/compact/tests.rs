@@ -1902,23 +1902,6 @@ fn cursor_continues_past_an_unreadable_record_with_the_older_ones() {
 }
 
 #[test]
-fn cursor_adopts_a_rewrite_and_continues_with_the_older_records() {
-    use super::expansion::{ExpansionCursor, ExpansionStep};
-    let directory = tempfile::tempdir().unwrap();
-    let store = HistoryStore::new(directory.path(), "conversation-adopt", Vec::new());
-    let (_, _, ids) = whole_context_chain(&store, 2);
-    let mut entries = store.entries();
-    let newest = entries.pop().unwrap();
-    // A display opened before the newest rewrite: its prefix is the older brief.
-    let prefix = store.read(&ids[1]).unwrap().replacements[0].originals[..1].to_vec();
-    let mut cursor = ExpansionCursor::new(&prefix, entries);
-    assert_eq!(cursor.unread(), 1);
-    cursor.adopt(newest);
-    assert_eq!(cursor.unread(), 1, "an adopted record needs no read");
-    assert_eq!(cursor.next(), ExpansionStep::NeedRecord(ids[0].clone()));
-}
-
-#[test]
 fn test_be06_block_to_text_all_kinds() {
     use super::block_text::block_to_text;
     use causa::kernel::{

@@ -44,20 +44,7 @@ impl Entry {
             }
             return;
         }
-        if let ProgressUpdate::Compaction(update) = &event.update {
-            // Advisory only: a finished attempt still needs the reloaded index
-            // before its divider can be displayed, but its estimates describe
-            // the rewrite adopted from the rows already on screen.
-            if let tars_core::compact::CompactionProgress::Finished {
-                trigger,
-                estimate_before,
-                estimate_after,
-                record,
-            } = update
-            {
-                self.history
-                    .note_hint(record.clone(), *trigger, *estimate_before, *estimate_after);
-            }
+        if matches!(&event.update, ProgressUpdate::Compaction(_)) {
             return;
         }
         if let Some(current) = &self.preview.invocation

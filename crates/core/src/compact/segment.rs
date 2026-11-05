@@ -98,7 +98,7 @@ pub(crate) fn is_brief(block: &ContextBlock) -> bool {
 /// Tool declarations inside the run do not end it, as in Causa's rendering,
 /// where a `ToolChange` is not a segment. A Context that does not start with
 /// a system block has no fixed-prefix blocks.
-pub(crate) fn fixed_prefix_end(blocks: &[ContextBlock]) -> usize {
+pub fn fixed_prefix_end(blocks: &[ContextBlock]) -> usize {
     let mut end = 0;
     for (index, block) in blocks.iter().enumerate() {
         if is_system_text(block) {

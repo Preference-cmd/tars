@@ -14,6 +14,8 @@ pub(super) struct MaterialView {
     pub(super) history: Vec<HistoryRecordEntry>,
     /// The Context's leading blocks that a rewrite inserted.
     pub(super) prefix: Vec<causa::kernel::ContextBlock>,
+    /// Rewrite records known in memory.
+    pub(super) records: Vec<Arc<HistoryRecord>>,
 }
 
 impl MaterialView {
@@ -23,12 +25,14 @@ impl MaterialView {
             .read_materials()
             .map_err(|error| error.to_string())?;
         let transcript = Transcript::from_materials(&snapshot.context, &snapshot.history);
-        let prefix = snapshot.context.blocks()[..transcript.history_blocks].to_vec();
+        let prefix = snapshot.context.blocks()[transcript.history_range.clone()].to_vec();
+        let records = session.written_history_records();
         Ok(Self {
             version: snapshot.version,
             transcript: Arc::new(transcript),
             history: snapshot.history,
             prefix,
+            records,
         })
     }
 }
@@ -394,13 +398,16 @@ impl App {
                             {
                                 return;
                             }
-                            // A rewrite made live replaced the conversation that
-                            // is on screen, so its rows are adopted instead of
-                            // being read again.
-                            let previous = entry.transcript.clone();
-                            entry
-                                .history
-                                .refresh(view.history, view.prefix, Some(previous));
+                            // A rewrite made live supplies its rewrite records in
+                            // memory, so history is expanded without file reads.
+                            let rebuilt =
+                                entry
+                                    .history
+                                    .refresh(view.history, view.prefix, &view.records);
+                            if rebuilt {
+                                entry.capture_scroll_anchor();
+                                entry.history_anchor = None;
+                            }
                             entry.material_version = Some(view.version);
                             entry.material_retry_after = None;
                             entry.transcript = view.transcript;
@@ -434,23 +441,20 @@ impl App {
                     match result {
                         Ok(reload) => {
                             let outcome = reload.outcome;
-                            entry.history.note_hint(
-                                outcome.record.record_id.clone(),
-                                outcome.trigger,
-                                outcome.estimate_before,
-                                outcome.estimate_after,
-                            );
                             let view = reload.view;
-                            let previous = entry.transcript.clone();
-                            entry
-                                .history
-                                .refresh(view.history, view.prefix, Some(previous));
+                            let rebuilt =
+                                entry
+                                    .history
+                                    .refresh(view.history, view.prefix, &view.records);
+                            if rebuilt {
+                                entry.capture_scroll_anchor();
+                                entry.history_anchor = None;
+                            }
                             entry.material_version = Some(view.version.clone());
                             entry.requested_material_version = Some(view.version);
                             entry.material_retry_after = None;
                             entry.transcript = view.transcript;
                             entry.rows = None;
-                            entry.history_anchor = None;
                             entry.notice = format!(
                                 "Compacted ({}, {} → {} tokens); the replaced conversation remains above",
                                 outcome.trigger.name(),
@@ -466,7 +470,9 @@ impl App {
                 let width = self.view_width;
                 if let Some(entry) = self.entry_mut(&key) {
                     entry.wrapping = false;
-                    if Arc::ptr_eq(&rows.transcript, &entry.transcript) && rows.width == width {
+                    let accepted =
+                        Arc::ptr_eq(&rows.transcript, &entry.transcript) && rows.width == width;
+                    if accepted {
                         entry.rows = Some(rows);
                     }
                     let previous = entry
@@ -494,6 +500,9 @@ impl App {
                             }
                         }
                         None => entry.history_rows = None,
+                    }
+                    if accepted {
+                        entry.restore_scroll_anchor();
                     }
                 }
             }

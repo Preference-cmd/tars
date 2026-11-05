@@ -104,12 +104,22 @@ pub(super) struct Server {
 }
 impl Server {
     pub async fn new() -> Self {
+        Self::with_options(None).await
+    }
+
+    pub async fn with_streaming_rounds(rounds: Vec<Vec<String>>) -> Self {
+        Self::with_options(Some(rounds)).await
+    }
+
+    async fn with_options(streaming_rounds: Option<Vec<Vec<String>>>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
         let release = Arc::new(Semaphore::new(0));
         let barrier = release.clone();
+        let streaming_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rounds_arc = streaming_rounds.map(Arc::new);
         let task = tokio::spawn(async move {
             // Owned children are aborted when the listener task is aborted.
             let mut children = tokio::task::JoinSet::new();
@@ -126,6 +136,8 @@ impl Server {
                 }
                 let captured = captured.clone();
                 let barrier = barrier.clone();
+                let streaming_counter = streaming_counter.clone();
+                let rounds_arc = rounds_arc.clone();
                 children.spawn(async move {
                     let mut data = Vec::new();
                     let (header_end, content_len) = loop {
@@ -199,12 +211,22 @@ impl Server {
                             .await;
                         return;
                     }
-                    let prefix = r#"data: {"id":"fixture","choices":[{"index":0,"delta":{"content":"你好，terminal 👩‍💻"},"finish_reason":null}]}"#.to_owned() + "\n\n";
-                    let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await;
-                    let _ = socket.write_all(format!("{:x}\r\n{prefix}\r\n", prefix.len()).as_bytes()).await;
-                    barrier.acquire().await.unwrap().forget();
-                    let suffix = "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-                    let _ = socket.write_all(format!("{:x}\r\n{suffix}\r\n0\r\n\r\n", suffix.len()).as_bytes()).await;
+                    if let Some(rounds) = &rounds_arc {
+                        let round = streaming_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let chunks = rounds.get(round).or_else(|| rounds.last()).cloned().unwrap_or_default();
+                        let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await;
+                        for chunk in chunks {
+                            let _ = socket.write_all(format!("{:x}\r\n{}\r\n", chunk.len(), chunk).as_bytes()).await;
+                        }
+                        let _ = socket.write_all(b"0\r\n\r\n").await;
+                    } else {
+                        let prefix = r#"data: {"id":"fixture","choices":[{"index":0,"delta":{"content":"你好，terminal 👩‍💻"},"finish_reason":null}]}"#.to_owned() + "\n\n";
+                        let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").await;
+                        let _ = socket.write_all(format!("{:x}\r\n{prefix}\r\n", prefix.len()).as_bytes()).await;
+                        barrier.acquire().await.unwrap().forget();
+                        let suffix = "data: {\"id\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+                        let _ = socket.write_all(format!("{:x}\r\n{suffix}\r\n0\r\n\r\n", suffix.len()).as_bytes()).await;
+                    }
                 });
             }
         });

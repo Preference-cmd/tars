@@ -126,6 +126,8 @@ enum Item {
     Expand(ContextBlock, Option<BlockStatus>),
     /// A block shown as it stands.
     Show(ExpandedBlock),
+    /// A rewrite divider emitted at this point in the expansion.
+    Rewrite(RewriteMark),
 }
 
 /// Adjacent inserted blocks of one record, each with its status where it stands.
@@ -202,24 +204,9 @@ impl ExpansionCursor {
         }
     }
 
-    /// Number of index entries whose record was neither supplied nor adopted.
+    /// Number of index entries whose record was not supplied.
     pub fn unread(&self) -> usize {
         self.supplied.iter().filter(|supplied| !**supplied).count()
-    }
-
-    /// Register a rewrite whose originals the caller already shows.
-    ///
-    /// Used when a rewrite replaced material that was on screen: the caller
-    /// keeps those rows and this cursor continues with what is older.
-    pub fn adopt(&mut self, entry: HistoryRecordEntry) {
-        let position = self.index.len();
-        for id in &entry.inserted_block_ids {
-            self.owners.entry(*id).or_default().push(position);
-        }
-        self.consumed.push(entry.inserted_block_ids.len());
-        self.index.push(entry);
-        self.reached.push(true);
-        self.supplied.push(true);
     }
 
     /// The next step, newest first.
@@ -248,6 +235,7 @@ impl ExpansionCursor {
                 continue;
             };
             let (block, status) = match item {
+                Item::Rewrite(mark) => return ExpansionStep::Rewrite(mark),
                 Item::Show(expanded) => return ExpansionStep::Block(Box::new(expanded)),
                 Item::Expand(block, status) => {
                     (block, status.unwrap_or_else(|| frame.status.clone()))
@@ -279,6 +267,14 @@ impl ExpansionCursor {
     /// A failure is the reason the record cannot be read. A record the cursor
     /// is not waiting for is ignored.
     pub fn supply(&mut self, record_id: &str, record: Result<HistoryRecord, String>) {
+        self.supply_arc(record_id, record.map(Arc::new));
+    }
+
+    /// Supply the record the last [`ExpansionStep::NeedRecord`] asked for as an [`Arc`].
+    ///
+    /// A failure is the reason the record cannot be read. A record the cursor
+    /// is not waiting for is ignored.
+    pub fn supply_arc(&mut self, record_id: &str, record: Result<Arc<HistoryRecord>, String>) {
         let Some(waiting) = self
             .waiting
             .take_if(|waiting| self.index[waiting.owner].record_id == record_id)
@@ -288,7 +284,7 @@ impl ExpansionCursor {
         self.supplied[waiting.owner] = true;
         let record = record.and_then(|record| {
             if record.record_id == record_id {
-                Ok(Arc::new(record))
+                Ok(record)
             } else {
                 Err("record identity does not match the index".to_owned())
             }
@@ -325,28 +321,19 @@ impl ExpansionCursor {
                 })
                 .collect(),
             Ok(record) => {
-                let mark = ExpansionStep::Rewrite(RewriteMark {
+                let mark = RewriteMark {
                     record_id: record_id.clone(),
                     trigger: record.trigger,
                     kind: record.kind,
                     estimate_before: record.estimate_before,
                     estimate_after: record.estimate_after,
-                });
+                };
                 match run {
-                    Some(run) => {
-                        let (items, marked) = self.match_run(&record, &run);
-                        // The divider belongs with the brief, not with each
-                        // reply whose thinking the same rewrite removed.
-                        if marked {
-                            self.queued.push_front(mark);
-                        }
-                        items
-                    }
+                    Some(run) => self.match_run(&record, &run, mark),
                     // Put-back blocks stand elsewhere in the conversation;
                     // only the removed originals belong here.
                     None => {
-                        self.queued.push_back(mark);
-                        record
+                        let mut items: Vec<Item> = record
                             .replacements
                             .iter()
                             .flat_map(|replacement| {
@@ -357,7 +344,9 @@ impl ExpansionCursor {
                                     .cloned()
                             })
                             .map(|block| Item::Expand(block, None))
-                            .collect()
+                            .collect();
+                        items.push(Item::Rewrite(mark));
+                        items
                     }
                 }
             }
@@ -383,18 +372,19 @@ impl ExpansionCursor {
     /// piece is matched by its own inserted ids. A block no piece describes
     /// is shown as it is.
     ///
-    /// Also returns whether the run needs the record's divider: it does
-    /// unless every piece only removed sealed items from replies.
+    /// The divider mark is placed right after the newest piece that summarized
+    /// something; stripped-only pieces after it come after the divider.
     fn match_run(
         &mut self,
         record: &HistoryRecord,
         run: &[(ContextBlock, BlockStatus)],
-    ) -> (Vec<Item>, bool) {
+        mark: RewriteMark,
+    ) -> Vec<Item> {
         let pieces: Vec<Piece<'_>> = record.replacements.iter().flat_map(pieces).collect();
         let mut newest_first = Vec::new();
         let mut end = run.len();
         let mut stray = false;
-        let mut marked = false;
+        let mut mark_to_insert = Some(mark);
         while end > 0 {
             let tail = &run[..end];
             let matched = pieces.iter().find(|piece| {
@@ -412,7 +402,9 @@ impl ExpansionCursor {
                     // Originals that only lost sealed items still stand
                     // where the replies that replaced them stand.
                     let stripped = is_stripped(piece, inserted);
-                    marked |= !stripped;
+                    if !stripped && let Some(m) = mark_to_insert.take() {
+                        newest_first.push(Item::Rewrite(m));
+                    }
                     newest_first.extend(piece.originals.iter().rev().map(|block| {
                         // A put-back block keeps the status of the block that
                         // stands for it; the others were removed here.
@@ -428,7 +420,9 @@ impl ExpansionCursor {
                 }
                 None => {
                     stray = true;
-                    marked = true;
+                    if let Some(m) = mark_to_insert.take() {
+                        newest_first.push(Item::Rewrite(m));
+                    }
                     newest_first.push(Item::Show(ExpandedBlock {
                         status: BlockStatus::Unreadable(record.record_id.clone()),
                         block: tail[end - 1].0.clone(),
@@ -445,7 +439,7 @@ impl ExpansionCursor {
                 }));
         }
         newest_first.reverse();
-        (newest_first, marked)
+        newest_first
     }
 }
 

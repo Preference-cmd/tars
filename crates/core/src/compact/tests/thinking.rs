@@ -444,3 +444,98 @@ async fn test_be24_a_thinking_only_reply_after_a_tool_result_puts_the_result_bac
     expected.extend(std::iter::repeat_n(BlockStatus::Original, 8));
     assert_eq!(statuses, expected);
 }
+
+#[test]
+fn divider_stands_after_summarized_piece_before_stripped_tail_reply() {
+    use super::super::HistoryTrigger;
+    use super::super::expansion::{ExpandedBlock, RewriteMark};
+    use super::super::history::{HistoryRecord, RangeReplacement, RewriteKind};
+    let u1 = user("U1 summarized");
+    let a1 = assistant("A1 summarized");
+    let brief = brief("summary of U1 and A1");
+    let a2_orig = reply("A2 thinking", "A2 answer");
+    let a2_stripped = assistant("A2 answer");
+    let u2_tail = user("U2 tail message");
+
+    let record = HistoryRecord {
+        format: super::super::history::HISTORY_FORMAT.into(),
+        conversation_id: "conversation".into(),
+        record_id: "0190a000-0000-7000-8000-000000000011".into(),
+        created_at_ms: 100,
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
+        estimate_before: 10_000,
+        estimate_after: 5_000,
+        replacements: vec![
+            RangeReplacement {
+                range: 0..2,
+                originals: vec![u1.clone(), a1.clone()],
+                inserted_ids: vec![brief.id()],
+            },
+            RangeReplacement {
+                range: 2..3,
+                originals: vec![a2_orig.clone()],
+                inserted_ids: vec![a2_stripped.id()],
+            },
+        ],
+    };
+    let entry = record.index_entry();
+    let blocks = vec![brief, a2_stripped, u2_tail.clone()];
+    let mut cursor = ExpansionCursor::new(&blocks, vec![entry]);
+
+    // 1. Newest block is the tail after stripped reply:
+    assert_eq!(
+        cursor.next(),
+        ExpansionStep::Block(Box::new(ExpandedBlock {
+            status: BlockStatus::Original,
+            block: u2_tail,
+        }))
+    );
+
+    // 2. Cursor reaches the run [brief, a2_stripped] and needs the record:
+    assert_eq!(
+        cursor.next(),
+        ExpansionStep::NeedRecord(record.record_id.clone())
+    );
+    cursor.supply(&record.record_id, Ok(record.clone()));
+
+    // 3. Newest in run is a2_stripped, which stands after the divider:
+    assert_eq!(
+        cursor.next(),
+        ExpansionStep::Block(Box::new(ExpandedBlock {
+            status: BlockStatus::Original,
+            block: a2_orig,
+        }))
+    );
+
+    // 4. Divider stands right after the summarized piece:
+    assert_eq!(
+        cursor.next(),
+        ExpansionStep::Rewrite(RewriteMark {
+            record_id: record.record_id.clone(),
+            trigger: HistoryTrigger::Auto,
+            kind: RewriteKind::Summarize,
+            estimate_before: 10_000,
+            estimate_after: 5_000,
+        })
+    );
+
+    // 5. Originals of the summarized piece:
+    assert_eq!(
+        cursor.next(),
+        ExpansionStep::Block(Box::new(ExpandedBlock {
+            status: BlockStatus::Summarized(record.record_id.clone()),
+            block: a1,
+        }))
+    );
+    assert_eq!(
+        cursor.next(),
+        ExpansionStep::Block(Box::new(ExpandedBlock {
+            status: BlockStatus::Summarized(record.record_id),
+            block: u1,
+        }))
+    );
+
+    // 6. End:
+    assert_eq!(cursor.next(), ExpansionStep::End);
+}

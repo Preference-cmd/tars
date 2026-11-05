@@ -11,13 +11,13 @@ use super::HistoryTrigger;
 use crate::store::StoreError;
 use causa::kernel::{BlockId, Context, ContextBlock};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Wire format of one history rewrite record document.
@@ -270,12 +270,20 @@ pub struct HistoryRecordEntry {
 /// record is removed.
 const MAX_CACHED_ORIGINAL_IDS: usize = 512;
 
+/// Bound on the number of records written by this process cached in memory per session.
+///
+/// Limits heap memory for sessions that perform many rewrites.
+const MAX_CACHED_WRITTEN_RECORDS: usize = 64;
+
+type WrittenRecordCache = (VecDeque<String>, HashMap<String, Arc<HistoryRecord>>);
+
 /// The history directory and the record-backed index for one conversation.
 pub(crate) struct HistoryStore {
     directory: PathBuf,
     conversation_id: String,
     entries: Mutex<Vec<HistoryRecordEntry>>,
     original_ids: Mutex<HashMap<String, HashSet<BlockId>>>,
+    written_records: Mutex<WrittenRecordCache>,
     #[cfg(test)]
     read_count: AtomicUsize,
 }
@@ -292,6 +300,7 @@ impl HistoryStore {
             conversation_id: conversation_id.to_owned(),
             entries: Mutex::new(entries),
             original_ids: Mutex::new(HashMap::new()),
+            written_records: Mutex::new((VecDeque::new(), HashMap::new())),
             #[cfg(test)]
             read_count: AtomicUsize::new(0),
         }
@@ -336,6 +345,46 @@ impl HistoryStore {
             .lock()
             .expect("cache has no callbacks")
             .remove(record_id);
+    }
+
+    fn cache_written_record(&self, record: Arc<HistoryRecord>) {
+        let mut written = self
+            .written_records
+            .lock()
+            .expect("written records cache has no callbacks");
+        let (order, records) = &mut *written;
+        if !records.contains_key(&record.record_id) {
+            while records.len() >= MAX_CACHED_WRITTEN_RECORDS {
+                if let Some(evicted) = order.pop_front() {
+                    records.remove(&evicted);
+                } else {
+                    break;
+                }
+            }
+            order.push_back(record.record_id.clone());
+        }
+        records.insert(record.record_id.clone(), record);
+    }
+
+    /// Return all rewrite records written by this process for this session.
+    pub(crate) fn written_records(&self) -> Vec<Arc<HistoryRecord>> {
+        self.written_records
+            .lock()
+            .expect("written records cache has no callbacks")
+            .1
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    /// Return a rewrite record written by this process for this session by its ID, if cached.
+    pub(crate) fn get_written_record(&self, record_id: &str) -> Option<Arc<HistoryRecord>> {
+        self.written_records
+            .lock()
+            .expect("written records cache has no callbacks")
+            .1
+            .get(record_id)
+            .cloned()
     }
 
     /// Check that an indexed record file still exists before trusting it.
@@ -419,7 +468,7 @@ impl HistoryStore {
     /// Number of record files read through this store.
     #[cfg(test)]
     pub(crate) fn read_count(&self) -> usize {
-        self.read_count.load(Ordering::SeqCst)
+        self.read_count.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Write one rewrite record document and fsync it.
@@ -484,7 +533,7 @@ impl HistoryStore {
                 rewrite.record_id
             )));
         }
-        let record = self.record_for(context.blocks(), &rewrite)?;
+        let record = Arc::new(self.record_for(context.blocks(), &rewrite)?);
         self.write(&record)?;
         let mut edit = context.edit();
         for replacement in rewrite.replacements {
@@ -495,6 +544,7 @@ impl HistoryStore {
             return Err(RewriteError::Rejected(format!("{:?}", failure.reason)));
         }
         self.cache_original_ids(&record);
+        self.cache_written_record(record.clone());
         let entry = record.index_entry();
         self.append(entry.clone());
         Ok(entry)
@@ -592,6 +642,13 @@ impl HistoryStore {
     /// Drop one index entry after its Context edit turned out not to happen.
     pub(crate) fn remove_entry(&self, record_id: &str) {
         self.uncache(record_id);
+        let mut written = self
+            .written_records
+            .lock()
+            .expect("written records cache has no callbacks");
+        written.1.remove(record_id);
+        written.0.retain(|id| id != record_id);
+        drop(written);
         self.entries
             .lock()
             .expect("history index has no callbacks")
@@ -601,6 +658,13 @@ impl HistoryStore {
     /// Delete one record file, ignoring a file that is already gone.
     pub(crate) fn remove(&self, record_id: &str) {
         self.uncache(record_id);
+        let mut written = self
+            .written_records
+            .lock()
+            .expect("written records cache has no callbacks");
+        written.1.remove(record_id);
+        written.0.retain(|id| id != record_id);
+        drop(written);
         let _ = fs::remove_file(self.record_path(record_id));
     }
 

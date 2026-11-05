@@ -56,6 +56,7 @@ pub use history::{HistoryRecord, HistoryRecordEntry, RangeReplacement, RewriteKi
 pub(crate) use recall::RecallTool;
 pub use runtime::CompactionOutcome;
 pub(crate) use runtime::CompactionRuntime;
+pub use segment::fixed_prefix_end;
 pub use summary::SUMMARY_SOURCE;
 
 /// Why a compaction attempt was abandoned before editing the Context.
