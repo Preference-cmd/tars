@@ -51,6 +51,14 @@ impl ContextPreparer for CompactionPreparer {
             self.runtime.note_prepare(bytes);
             return Ok(context.frame());
         };
+        // An automatic summary rejected as `no_shrink` is not repeated while
+        // a brief of its size still could not shrink the Context; such rounds
+        // go out unchanged without a report, like those after a too-large
+        // prefix.
+        if trigger == super::HistoryTrigger::Auto && self.runtime.summary_cannot_shrink(context) {
+            self.runtime.note_prepare(bytes);
+            return Ok(context.frame());
+        }
         self.report(
             round,
             CompactionProgress::Started {

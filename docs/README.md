@@ -24,6 +24,8 @@ TARS exists to validate and improve Causa; the application is the vehicle for va
 
 2026-11-05: The TUI shows a partial rewrite made during the session without reading record files. The conversation is the history expansion of the current Context: the fixed prefix stays at the top of the current part, and a request or reply that a rewrite put back or stripped of its thinking is shown once, through the expansion. Records written in this process (up to 64) are kept in memory and replayed when the record index changes, including a summary followed by a merge and an automatic compaction inside a work; reopening and loading all history shows the same conversation. A rewrite's divider now stands right after the material it summarized, before replies it only stripped. A rebuild while the user is scrolled up keeps the viewed rows in place, and `/summary` shows every brief in the chain, oldest first.
 
+2026-11-05: Two checks avoid wasted brief calls. A brief or merge reply that calls a tool is abandoned as `tool_call`, even when it also has text, and both instructions now ask for text only. After an automatic summary is abandoned as `no_shrink` once its brief came back, later automatic rounds skip the brief call while a brief of that size still could not make the edit smaller, for example when the request in progress is most of the Context; forced and manual compaction are not affected.
+
 ## Code structure
 
 | Path | Current responsibility |

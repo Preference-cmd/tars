@@ -64,6 +64,8 @@ pub use summary::SUMMARY_SOURCE;
 pub enum CompactionAbandon {
     /// The summary came back empty or blank.
     EmptySummary,
+    /// The brief reply called a tool, so it is not a finished brief.
+    ToolCall,
     /// The replacement estimate is not smaller than the estimate before it.
     NoShrink,
     /// The summary model call failed or was stopped by the turn's control.
@@ -86,6 +88,7 @@ impl CompactionAbandon {
     pub const fn name(self) -> &'static str {
         match self {
             Self::EmptySummary => "empty_summary",
+            Self::ToolCall => "tool_call",
             Self::NoShrink => "no_shrink",
             Self::RequestFailed => "request_failed",
             Self::UnpairedMaterials => "unpaired_materials",

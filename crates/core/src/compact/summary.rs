@@ -39,7 +39,7 @@ pub(crate) fn instruction(request_in_progress: bool) -> String {
          - Preserve paths, commands, identifiers and error text exactly.\n\
          - Quote any question the user asked that is still unanswered.\n\
          - Do not mention that this is a summary or that the conversation was condensed.\n\
-         - Output only the brief.",
+         - Output only the brief, as text; do not call any tool.",
     );
     if request_in_progress {
         text.push_str(
@@ -67,7 +67,7 @@ pub(crate) fn merge_instruction() -> String {
          - Preserve paths, commands, identifiers and error text exactly.\n\
          - Keep any section \"In progress\" of the latest brief.\n\
          - Do not mention that this is a summary or that briefs were merged.\n\
-         - Output only the brief.",
+         - Output only the brief, as text; do not call any tool.",
     )
 }
 

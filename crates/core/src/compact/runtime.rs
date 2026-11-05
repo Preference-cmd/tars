@@ -48,6 +48,7 @@ pub(crate) struct CompactionRuntime {
     force: AtomicBool,
     current_work_inputs: Mutex<HashSet<BlockId>>,
     prefix_too_large_reported: AtomicBool,
+    rejected_brief_bytes: Mutex<Option<u64>>,
     gateway: Arc<dyn ModelGateway>,
     model: ModelRef,
     generation: GenerationOptions,
@@ -89,6 +90,7 @@ impl CompactionRuntime {
             force: AtomicBool::new(false),
             current_work_inputs: Mutex::new(HashSet::new()),
             prefix_too_large_reported: AtomicBool::new(false),
+            rejected_brief_bytes: Mutex::new(None),
             gateway,
             model: options.model,
             generation: options.generation,
@@ -198,6 +200,37 @@ impl CompactionRuntime {
         self.prefix_too_large_reported.store(true, Ordering::SeqCst);
     }
 
+    /// Whether an automatic summary would not shrink the Context.
+    ///
+    /// True when an earlier automatic summary was rejected as `no_shrink`
+    /// after its model call and a brief of that size would still not make
+    /// the planned edit smaller. The check needs no model call; once the
+    /// interval grows past the rejected brief, summaries are tried again. A
+    /// summary that cannot be planned at all is left to [`Self::plan`].
+    pub(crate) fn summary_cannot_shrink(&self, context: &Context) -> bool {
+        let Some(rejected) = *self
+            .rejected_brief_bytes
+            .lock()
+            .expect("rejected brief size has no callbacks")
+        else {
+            return false;
+        };
+        let blocks = context.blocks();
+        let Ok(interval) = self.summary_interval(blocks) else {
+            return false;
+        };
+        // Size the edit with an empty brief, then count the rejected brief
+        // in its place.
+        let empty = summary::summary_block(summary::new_block_id(), "");
+        let empty_bytes = segment::block_bytes(&empty);
+        let (removed, inserted) =
+            sealed::replaced_bytes(blocks, &summary_replacements(blocks, &interval, empty));
+        inserted
+            .saturating_sub(empty_bytes)
+            .saturating_add(rejected)
+            >= removed
+    }
+
     /// Ask for one forced compaction after the provider reported an overflow.
     pub(crate) fn request_force(&self) {
         if self.window.is_some() {
@@ -247,6 +280,66 @@ impl CompactionRuntime {
             return Err(CompactionAbandon::Unavailable);
         }
         let blocks = context.blocks();
+        let interval = self.summary_interval(blocks)?;
+        let SummaryInterval {
+            head_end,
+            k,
+            ref protected,
+        } = interval;
+
+        // Only material over the whole window would be refused; it is then
+        // trimmed from its earliest interval blocks to 70% of the window,
+        // which leaves room for the brief.
+        let limit = self
+            .window
+            .filter(|&window| self.usage.estimate(segment::blocks_bytes(&blocks[..k])) > window)
+            .map(|window| {
+                u64::try_from(u128::from(window) * u128::from(TRIM_TARGET_PERCENT) / 100)
+                    .unwrap_or(u64::MAX)
+            });
+        let mut request_blocks = summary::request_material(blocks, head_end, k, protected, limit);
+        request_blocks.push(summary::instruction_block(summary::instruction(
+            !protected.is_empty(),
+        )));
+        let text = self
+            .brief(request_blocks, model, generation, control)
+            .await?;
+
+        let record_id = super::history::new_record_id();
+        let brief = summary::summary_block(
+            summary::new_block_id(),
+            &summary::summary_text(&text, &record_id),
+        );
+        let brief_bytes = segment::block_bytes(&brief);
+        let replacements = summary_replacements(blocks, &interval, brief);
+        let rewrite = self.rewrite(
+            context,
+            record_id,
+            trigger,
+            RewriteKind::Summarize,
+            replacements,
+        );
+        // Later automatic rounds skip the call until the interval outgrows
+        // this brief; see `summary_cannot_shrink`.
+        if trigger == HistoryTrigger::Auto && matches!(rewrite, Err(CompactionAbandon::NoShrink)) {
+            *self
+                .rejected_brief_bytes
+                .lock()
+                .expect("rejected brief size has no callbacks") = Some(brief_bytes);
+        }
+        rewrite
+    }
+
+    /// The interval a summary would replace, or why there is none.
+    ///
+    /// It runs from the end of the head to the cut point `k` that keeps the
+    /// newest material within the retained-tail budget, outside a tool round
+    /// whose replies carry sealed items; the running work's inputs inside it
+    /// are protected.
+    fn summary_interval(
+        &self,
+        blocks: &[ContextBlock],
+    ) -> Result<SummaryInterval, CompactionAbandon> {
         if has_unpaired_tools(blocks) {
             return Err(CompactionAbandon::UnpairedMaterials);
         }
@@ -273,49 +366,11 @@ impl CompactionRuntime {
         if !summarizable {
             return Err(CompactionAbandon::NoShrink);
         }
-
-        // Only material over the whole window would be refused; it is then
-        // trimmed from its earliest interval blocks to 70% of the window,
-        // which leaves room for the brief.
-        let limit = self
-            .window
-            .filter(|&window| self.usage.estimate(segment::blocks_bytes(&blocks[..k])) > window)
-            .map(|window| {
-                u64::try_from(u128::from(window) * u128::from(TRIM_TARGET_PERCENT) / 100)
-                    .unwrap_or(u64::MAX)
-            });
-        let mut request_blocks = summary::request_material(blocks, head_end, k, &protected, limit);
-        request_blocks.push(summary::instruction_block(summary::instruction(
-            !protected.is_empty(),
-        )));
-        let text = self
-            .brief(request_blocks, model, generation, control)
-            .await?;
-
-        let record_id = super::history::new_record_id();
-        let brief = summary::summary_block(
-            summary::new_block_id(),
-            &summary::summary_text(&text, &record_id),
-        );
-        // The interval's tool changes, folded into one declaration before the
-        // brief, keep the frame's tool state exactly as it was.
-        let mut new_blocks: Vec<ContextBlock> =
-            segment::tool_delta(&blocks[..head_end], &blocks[..k])
-                .into_iter()
-                .collect();
-        new_blocks.push(brief);
-        let replacements = sealed::strip_after(
-            blocks,
+        Ok(SummaryInterval {
             head_end,
-            segment::replacements(blocks, head_end, k, &protected, new_blocks),
-        );
-        self.rewrite(
-            context,
-            record_id,
-            trigger,
-            RewriteKind::Summarize,
-            replacements,
-        )
+            k,
+            protected,
+        })
     }
 
     /// Whether the brief chain is due to be merged after a summary.
@@ -415,6 +470,11 @@ impl CompactionRuntime {
             .invoke(&request, control)
             .await
             .map_err(|_| CompactionAbandon::RequestFailed)?;
+        // A reply that calls a tool did not finish a brief, even when some
+        // text came before the call.
+        if output.response.tool_calls().next().is_some() {
+            return Err(CompactionAbandon::ToolCall);
+        }
         let text = output.response.text();
         let text = text.trim();
         if text.is_empty() {
@@ -469,6 +529,12 @@ impl CompactionRuntime {
                 RewriteError::Store(_) => CompactionAbandon::UnwritableHistory,
             })?;
         self.usage.reset();
+        // The Context changed shape, so the rejected brief no longer predicts
+        // the next summary.
+        *self
+            .rejected_brief_bytes
+            .lock()
+            .expect("rejected brief size has no callbacks") = None;
         Ok(entry)
     }
 
@@ -519,6 +585,42 @@ impl CompactionRuntime {
             history.remove_entry(record_id);
         }
     }
+}
+
+/// Where a summary cuts: the end of the head, the tail start `k` and the
+/// protected positions between them.
+struct SummaryInterval {
+    head_end: usize,
+    k: usize,
+    protected: Vec<usize>,
+}
+
+/// The replacements of a summary over `interval` with `brief` standing for it.
+///
+/// The interval's tool changes, folded into one declaration before the brief,
+/// keep the frame's tool state exactly as it was; sealed items are removed
+/// from the replies after the change.
+fn summary_replacements(
+    blocks: &[ContextBlock],
+    interval: &SummaryInterval,
+    brief: ContextBlock,
+) -> Vec<PlannedReplacement> {
+    let mut new_blocks: Vec<ContextBlock> =
+        segment::tool_delta(&blocks[..interval.head_end], &blocks[..interval.k])
+            .into_iter()
+            .collect();
+    new_blocks.push(brief);
+    sealed::strip_after(
+        blocks,
+        interval.head_end,
+        segment::replacements(
+            blocks,
+            interval.head_end,
+            interval.k,
+            &interval.protected,
+            new_blocks,
+        ),
+    )
 }
 
 /// The public fact returned to a manual compaction caller.

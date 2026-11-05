@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+mod brief_reply;
 mod merge;
 mod partial;
 mod thinking;
