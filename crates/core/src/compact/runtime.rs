@@ -149,8 +149,7 @@ impl CompactionRuntime {
         self.history.clone()
     }
 
-    /// Artifact store backed by this session's rewrite records.
-    #[allow(dead_code)]
+    /// Artifact store backed by this session's rewrite records and `.artifacts/` directory.
     pub(crate) fn artifacts(&self) -> Option<super::HistoryArtifacts> {
         self.history
             .as_ref()

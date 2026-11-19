@@ -40,8 +40,6 @@ pub enum BlockStatus {
     Original,
     /// A block removed by a summarize or merge rewrite (record id).
     Summarized(String),
-    /// A block removed by an elide rewrite (record id).
-    Elided(String),
     /// A block inserted by a rewrite whose record cannot be read (record id).
     ///
     /// The inserted block itself is shown in place of the originals.
@@ -53,7 +51,6 @@ impl std::fmt::Display for BlockStatus {
         match self {
             Self::Original => write!(f, "original"),
             Self::Summarized(id) => write!(f, "summarized ({id})"),
-            Self::Elided(id) => write!(f, "elided ({id})"),
             Self::Unreadable(id) => write!(f, "unreadable ({id})"),
         }
     }
@@ -62,7 +59,7 @@ impl std::fmt::Display for BlockStatus {
 /// One block in an expanded conversation with its provenance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpandedBlock {
-    /// Whether this block is original, summarized, elided or from an unreadable record.
+    /// Whether this block is original, summarized or from an unreadable record.
     #[serde(flatten)]
     pub status: BlockStatus,
     /// The block content and metadata.
@@ -352,7 +349,6 @@ impl ExpansionCursor {
             }
         };
         let status = match self.index[owner].kind {
-            RewriteKind::Elide => BlockStatus::Elided(record_id),
             RewriteKind::Summarize | RewriteKind::Merge => BlockStatus::Summarized(record_id),
         };
         self.stack.push(Frame {

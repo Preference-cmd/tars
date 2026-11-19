@@ -1308,3 +1308,191 @@ fn test_be09_cli_recovery_export_drops_own_reference_and_is_importable() {
         recovered_context.blocks().len()
     );
 }
+
+#[test]
+fn test_be17_cli_session_history_marks_spilled_artifact_id_text_and_json() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = folder.path().join("store");
+    let fixture = Fixture::new(2);
+    let id = create(&store, &fixture.endpoint, &COMPACTING);
+    seed(&fixture, &store, &id, "initial message");
+
+    let rec_file = record_path(&store, &id);
+    let mut rec_json: Value = serde_json::from_slice(&fs::read(&rec_file).unwrap()).unwrap();
+    let art_uuid = causa::runtime::new_block_id().0.to_string();
+    let art_id = format!("artifact:{art_uuid}");
+    let art_dir = store.join("sessions").join(format!("{id}.artifacts"));
+    fs::create_dir_all(&art_dir).unwrap();
+    fs::write(art_dir.join(&art_uuid), b"full spilled output").unwrap();
+
+    let call_id = causa::runtime::new_block_id();
+    let res_id = causa::runtime::new_block_id();
+    let call_block = causa::kernel::ContextBlock::new(
+        call_id,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "read_file",
+            serde_json::json!({"path": "big.rs"}),
+        )),
+        causa::kernel::BlockMeta::default(),
+    );
+    let mut out = causa::kernel::ToolOutput::new(serde_json::Value::String(format!(
+        "head\n[... output spilled: 19 bytes; full output: recall id={art_id} ...]\ntail"
+    )));
+    out.truncation = causa::kernel::Truncation::Middle;
+    out.artifact = Some(causa::kernel::ArtifactRef::new(
+        art_id.clone(),
+        19,
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let res_block = causa::kernel::ContextBlock::new(
+        res_id,
+        causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            out,
+        )),
+        causa::kernel::BlockMeta::default(),
+    );
+    let blocks = rec_json["context"]["blocks"].as_array_mut().unwrap();
+    blocks.push(serde_json::to_value(&call_block).unwrap());
+    blocks.push(serde_json::to_value(&res_block).unwrap());
+    fs::write(&rec_file, serde_json::to_vec(&rec_json).unwrap()).unwrap();
+
+    // 1. Human text mode marks the spilled artifact id on the tool result line
+    let text_out = cli()
+        .args(["session", "history", &id, "--no-config", "--store"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(text_out.status.success(), "{text_out:?}");
+    let text = String::from_utf8_lossy(&text_out.stdout);
+    assert!(
+        text.contains(&format!(
+            "[tool result · original] Succeeded · declaration {} · {art_id}",
+            call_id.0
+        )),
+        "{text}"
+    );
+
+    // 2. --json mode carries artifact_id and preserves ExpandedBlock deserialization
+    let json_out = cli()
+        .args([
+            "session",
+            "history",
+            &id,
+            "--no-config",
+            "--json",
+            "--store",
+        ])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(json_out.status.success(), "{json_out:?}");
+    let expanded = history_blocks(&json_out);
+    assert!(!expanded.is_empty());
+    let json_lines: Vec<Value> = String::from_utf8(json_out.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(
+        json_lines
+            .iter()
+            .any(|v| v.get("artifact_id").and_then(|s| s.as_str()) == Some(art_id.as_str())),
+        "JSON history must include artifact_id: {json_lines:?}"
+    );
+}
+
+#[test]
+fn test_be16_cli_export_materials_drops_spilled_artifact_and_imports() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = folder.path().join("store");
+    let fixture = Fixture::new(1);
+    let id = create(&store, &fixture.endpoint, &COMPACTING);
+    seed(&fixture, &store, &id, "initial message");
+
+    let rec_file = record_path(&store, &id);
+    let mut rec_json: Value = serde_json::from_slice(&fs::read(&rec_file).unwrap()).unwrap();
+    let art_uuid = causa::runtime::new_block_id().0.to_string();
+    let art_id = format!("artifact:{art_uuid}");
+    let art_dir = store.join("sessions").join(format!("{id}.artifacts"));
+    fs::create_dir_all(&art_dir).unwrap();
+    fs::write(art_dir.join(&art_uuid), b"full spilled output").unwrap();
+
+    let call_id = causa::runtime::new_block_id();
+    let res_id = causa::runtime::new_block_id();
+    let call_block = causa::kernel::ContextBlock::new(
+        call_id,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "read_file",
+            serde_json::json!({}),
+        )),
+        causa::kernel::BlockMeta::default(),
+    );
+    let mut out = causa::kernel::ToolOutput::new(serde_json::Value::String(format!(
+        "head\n[... output spilled; recall id={art_id} ...]\ntail"
+    )));
+    out.truncation = causa::kernel::Truncation::Middle;
+    out.artifact = Some(causa::kernel::ArtifactRef::new(
+        art_id,
+        19,
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let res_block = causa::kernel::ContextBlock::new(
+        res_id,
+        causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            out,
+        )),
+        causa::kernel::BlockMeta::default(),
+    );
+    let blocks = rec_json["context"]["blocks"].as_array_mut().unwrap();
+    blocks.push(serde_json::to_value(&call_block).unwrap());
+    blocks.push(serde_json::to_value(&res_block).unwrap());
+    fs::write(&rec_file, serde_json::to_vec(&rec_json).unwrap()).unwrap();
+
+    let exported = folder.path().join("exported_spilled.json");
+    let export = cli()
+        .args(["session", "export-materials", "--record"])
+        .arg(&rec_file)
+        .arg("--output")
+        .arg(&exported)
+        .output()
+        .unwrap();
+    assert!(export.status.success(), "{export:?}");
+
+    let material = tars_core::material::load(&exported).unwrap();
+    let exported_res = material
+        .blocks()
+        .iter()
+        .find_map(|b| match b.content() {
+            causa::kernel::BlockContent::ToolResult(r) => Some(r),
+            _ => None,
+        })
+        .expect("exported tool result present");
+    assert!(exported_res.output.artifact.is_none());
+    assert!(
+        exported_res
+            .notes
+            .iter()
+            .any(|n| n.0 == tars_core::material::DETACHED_HISTORY_NOTE)
+    );
+
+    let imported_store = folder.path().join("imported_spilled");
+    let imported_id = create(
+        &imported_store,
+        "http://127.0.0.1:1/unused",
+        &["--load", exported.to_str().unwrap()],
+    );
+    let imported_record = record(&imported_store, &imported_id);
+    assert_eq!(
+        imported_record["context"]["blocks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        material.blocks().len()
+    );
+}

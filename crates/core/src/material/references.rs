@@ -28,13 +28,16 @@ pub(crate) fn validate(
 }
 
 /// Like [`validate`], but a tool result's artifact reference to an original
-/// block of a rewrite record listed in `history` is accepted without reading
-/// any file. Every other reference goes through `validator` as usual.
+/// block of a rewrite record listed in `history` (or, when `validator` is `None`,
+/// a syntactically valid spilled `artifact:<uuid>` reference whose on-disk file is
+/// verified at save/repair time) is accepted without reading any file. Every other
+/// reference goes through `validator` as usual.
 pub(crate) fn validate_with_history(
     context: &Context,
     history: Option<&[crate::compact::HistoryRecordEntry]>,
     mut validator: Option<&mut ReferenceValidator<'_>>,
 ) -> Result<(), MaterialError> {
+    let has_validator = validator.is_some();
     let mut check = |block_id: BlockId, reference| match validator.as_mut() {
         None => Err(MaterialError::ReferenceValidationRequired { block_id }),
         Some(validate) => validate(reference)
@@ -53,10 +56,14 @@ pub(crate) fn validate_with_history(
                 for media in &result.media {
                     check(block.id(), MaterialReference::Media(media))?;
                 }
-                if let Some(artifact) = &result.output.artifact
-                    && !history.is_some_and(|history| indexed(history, &artifact.id))
-                {
-                    check(block.id(), MaterialReference::Artifact(artifact))?;
+                if let Some(artifact) = &result.output.artifact {
+                    let allowed_without_io = history.is_some_and(|history| {
+                        indexed(history, &artifact.id)
+                            || (!has_validator && is_spilled_artifact(&artifact.id))
+                    });
+                    if !allowed_without_io {
+                        check(block.id(), MaterialReference::Artifact(artifact))?;
+                    }
                 }
             }
             BlockContent::ToolCall(_) | BlockContent::ToolChange(_) => {}
@@ -71,10 +78,16 @@ pub(crate) fn indexed(history: &[crate::compact::HistoryRecordEntry], id: &str) 
         .is_ok_and(|(record_id, _)| history.iter().any(|entry| entry.record_id == record_id))
 }
 
-/// Return a copy of `context` with all artifact references to records in `history` detached.
+/// Whether `id` is a syntactically canonical spilled artifact reference (`artifact:<uuid>`).
+pub(crate) fn is_spilled_artifact(id: &str) -> bool {
+    crate::compact::history::parse_spilled_artifact_id(id).is_ok()
+}
+
+/// Return a copy of `context` with all own-session artifact references detached.
 ///
-/// Every tool result whose `output.artifact.id` parses as `<record id>/<block id>` with
-/// `record_id` listed in `history` has:
+/// Every tool result whose `output.artifact.id` either parses as
+/// `<record id>/<block id>` with `record_id` listed in `history`, or is a
+/// spilled artifact reference `artifact:<uuid>`, has:
 /// - `output.artifact = None`;
 /// - `content`, `truncation`, `meta`, `media`, `status`, `call_block_id` and existing `notes` unchanged;
 /// - one added note ([`DETACHED_HISTORY_NOTE`]) stating that the full original stays in the original
@@ -95,7 +108,7 @@ pub fn detach_history_references(
         .map(|block| match block.content() {
             BlockContent::ToolResult(result) => {
                 if let Some(artifact) = &result.output.artifact
-                    && indexed(history, &artifact.id)
+                    && (indexed(history, &artifact.id) || is_spilled_artifact(&artifact.id))
                 {
                     let mut detached = result.clone();
                     detached.output.artifact = None;

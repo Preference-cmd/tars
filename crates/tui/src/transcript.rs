@@ -4,10 +4,21 @@ use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+/// Metadata for a committed tool result whose full output spilled to `.artifacts/`.
+#[derive(Clone, Debug)]
+pub(crate) struct SpilledToolDetail {
+    pub call_block_id: causa::kernel::BlockId,
+    pub status: causa::kernel::ToolResultStatus,
+    pub artifact_id: String,
+    pub size_bytes: usize,
+    pub preview_json: String,
+}
+
 #[derive(Default)]
 pub(crate) struct Transcript {
     pub text: String,
     pub tool_details: Vec<String>,
+    pub tool_artifacts: Vec<Option<SpilledToolDetail>>,
     /// Full text of the current Context's summary blocks (the brief chain), when it has any.
     ///
     /// The current material collapses those blocks to folded rows; the panel opened
@@ -107,6 +118,7 @@ impl Transcript {
         let tail = Self::build(current_part, true);
         head.text.push_str(&tail.text);
         head.tool_details.extend(tail.tool_details);
+        head.tool_artifacts.extend(tail.tool_artifacts);
         if let Some(tail_summary) = tail.summary {
             if let Some(existing) = &mut head.summary {
                 existing.push_str("\n\n");
@@ -128,6 +140,7 @@ impl Transcript {
     fn build(blocks: &[ContextBlock], collapse_summary: bool) -> Self {
         let mut text = String::new();
         let mut tool_details = Vec::new();
+        let mut tool_artifacts = Vec::new();
         let mut summary_text: Option<String> = None;
         for block in blocks {
             // The offered tool set is configuration the runner records, not
@@ -189,22 +202,53 @@ impl Transcript {
                         display(&call.tool_name),
                         display(&serde_json::to_string_pretty(&call.arguments).unwrap_or_default())
                     ));
+                    tool_artifacts.push(None);
                 }
                 BlockContent::ToolResult(result) => {
                     let body =
                         serde_json::to_string_pretty(&result.output.content).unwrap_or_default();
-                    text.push_str(&format!(
-                        "Tool result · {:?} · {}\n{}\n/tools expands actual material",
-                        result.status,
-                        result.call_block_id.0,
-                        summary(&body)
-                    ));
-                    tool_details.push(format!(
-                        "Result for {} · {:?}\n{}",
-                        result.call_block_id.0,
-                        result.status,
-                        display(&serde_json::to_string_pretty(result).unwrap_or_default())
-                    ));
+                    let preview_json =
+                        display(&serde_json::to_string_pretty(result).unwrap_or_default());
+                    let spilled = result
+                        .output
+                        .artifact
+                        .as_ref()
+                        .filter(|artifact| artifact.id.starts_with("artifact:"));
+                    if let Some(artifact) = spilled {
+                        text.push_str(&format!(
+                            "Tool result · {:?} · {} · spilled preview ({})\n{}\n/tools expands full output",
+                            result.status,
+                            result.call_block_id.0,
+                            display(&artifact.id),
+                            summary(&body)
+                        ));
+                        tool_details.push(format!(
+                            "Result for {} · {:?} · {}\n{}",
+                            result.call_block_id.0,
+                            result.status,
+                            display(&artifact.id),
+                            preview_json
+                        ));
+                        tool_artifacts.push(Some(SpilledToolDetail {
+                            call_block_id: result.call_block_id,
+                            status: result.status.clone(),
+                            artifact_id: artifact.id.clone(),
+                            size_bytes: artifact.size_bytes,
+                            preview_json,
+                        }));
+                    } else {
+                        text.push_str(&format!(
+                            "Tool result · {:?} · {}\n{}\n/tools expands actual material",
+                            result.status,
+                            result.call_block_id.0,
+                            summary(&body)
+                        ));
+                        tool_details.push(format!(
+                            "Result for {} · {:?}\n{}",
+                            result.call_block_id.0, result.status, preview_json
+                        ));
+                        tool_artifacts.push(None);
+                    }
                 }
                 BlockContent::ToolChange(_) => {}
             }
@@ -217,6 +261,7 @@ impl Transcript {
         Self {
             text,
             tool_details,
+            tool_artifacts,
             summary: summary_text,
             history_range: 0..0,
         }

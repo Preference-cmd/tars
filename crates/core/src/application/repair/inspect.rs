@@ -21,9 +21,15 @@ pub(super) struct Scan {
 }
 
 /// Check pairing and references. `history` is the session's rewrite record
-/// index: a tool result's artifact reference to one of its records is
-/// supported, every other artifact or media reference is not.
-pub(super) fn scan(context: &Context, history: &[HistoryRecordEntry]) -> Scan {
+/// index and `artifacts` is the session's artifact store: a tool result's
+/// artifact reference to one of its indexed rewrite records or an existing
+/// readable file in its `.artifacts/` directory is supported; every other
+/// artifact or media reference is not.
+pub(super) fn scan(
+    context: &Context,
+    history: &[HistoryRecordEntry],
+    artifacts: Option<&crate::compact::history::HistoryStore>,
+) -> Scan {
     let mut diagnosis = RepairDiagnosis {
         block_count: context.blocks().len(),
         ..Default::default()
@@ -73,7 +79,17 @@ pub(super) fn scan(context: &Context, history: &[HistoryRecordEntry]) -> Scan {
                 }
                 let unsupported_artifact =
                     result.output.artifact.as_ref().is_some_and(|artifact| {
-                        !crate::material::is_history_reference(history, &artifact.id)
+                        if crate::material::is_history_reference(history, &artifact.id) {
+                            return false;
+                        }
+                        if let Ok(artifact_id) =
+                            crate::compact::history::parse_spilled_artifact_id(&artifact.id)
+                        {
+                            return !artifacts.is_some_and(|store| {
+                                store.verify_spilled_artifact(artifact_id).is_ok()
+                            });
+                        }
+                        true
                     });
                 if !result.media.is_empty() || unsupported_artifact {
                     diagnosis.push(
@@ -168,18 +184,20 @@ pub(super) fn render(
 pub(super) fn diagnose(
     context: &Context,
     history: &[HistoryRecordEntry],
+    artifacts: Option<&crate::compact::history::HistoryStore>,
     definition: &SessionDefinition,
 ) -> RepairDiagnosis {
-    diagnose_frame(context, history, definition, false)
+    diagnose_frame(context, history, artifacts, definition, false)
 }
 
 fn diagnose_frame(
     context: &Context,
     history: &[HistoryRecordEntry],
+    artifacts: Option<&crate::compact::history::HistoryStore>,
     definition: &SessionDefinition,
     require_frame: bool,
 ) -> RepairDiagnosis {
-    let mut scan = scan(context, history);
+    let mut scan = scan(context, history, artifacts);
     // Admission examines the old materials before the new input is appended.
     // Empty/text-only histories need no tool-exchange preflight and may be a
     // valid prefix of the next request even when not sendable on their own.
@@ -202,9 +220,10 @@ fn diagnose_frame(
 pub(super) fn candidate_check(
     context: &Context,
     history: &[HistoryRecordEntry],
+    artifacts: Option<&crate::compact::history::HistoryStore>,
     definition: &SessionDefinition,
 ) -> Result<(), RepairError> {
-    let diagnosis = diagnose_frame(context, history, definition, true);
+    let diagnosis = diagnose_frame(context, history, artifacts, definition, true);
     if diagnosis.is_ready() {
         Ok(())
     } else {
@@ -215,10 +234,11 @@ pub(super) fn candidate_check(
 pub(in crate::application) fn admission_check(
     context: &Context,
     history: &[HistoryRecordEntry],
+    artifacts: Option<&crate::compact::history::HistoryStore>,
 ) -> Result<(), RepairError> {
     // New-key admission only needs the linear material pairing check. Full
     // rendering belongs to inspection/repair, not the synchronous input path.
-    let diagnosis = scan(context, history).diagnosis;
+    let diagnosis = scan(context, history, artifacts).diagnosis;
     if diagnosis.is_ready() {
         Ok(())
     } else {
@@ -245,6 +265,7 @@ impl ManagedSession {
             .clone();
         let owner = state.owner.as_mut().ok_or(ApplicationError::InstanceGone)?;
         let history = owner.history_entries();
+        let artifacts = owner.compaction().and_then(|c| c.history());
         let context = owner.with_context(|context| {
             self.entry.cloned_snapshot();
             context.clone()
@@ -312,7 +333,7 @@ impl ManagedSession {
             })
             .transpose()?;
         drop(state);
-        let diagnosis = diagnose(&context, &history, &definition);
+        let diagnosis = diagnose(&context, &history, artifacts.as_deref(), &definition);
         Ok(RepairInspection {
             version,
             diagnosis,

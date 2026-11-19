@@ -40,9 +40,9 @@ pub(crate) mod recall;
 pub(crate) mod runtime;
 pub(crate) mod sealed;
 pub(crate) mod segment;
+pub(crate) mod spill;
 pub(crate) mod summary;
 
-use causa::kernel::TextPayload;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use artifacts::HistoryArtifacts;
@@ -57,6 +57,7 @@ pub(crate) use recall::RecallTool;
 pub use runtime::CompactionOutcome;
 pub(crate) use runtime::CompactionRuntime;
 pub use segment::fixed_prefix_end;
+pub(crate) use spill::OutputSpillProcessor;
 pub use summary::SUMMARY_SOURCE;
 
 /// Why a compaction attempt was abandoned before editing the Context.
@@ -158,22 +159,6 @@ impl HistoryTrigger {
             Self::Unknown => "unknown",
         }
     }
-}
-
-/// Prefix of the model-facing note on a shortened tool result.
-#[cfg_attr(not(test), allow(dead_code))] // Used by tests today; P4 will use this for result elision.
-pub(crate) const SHORTENED_RESULT_NOTE_PREFIX: &str =
-    "Shortened by compaction; full original: recall id=";
-
-/// Build the model-facing note for a tool result shortened by compaction.
-#[cfg_attr(not(test), allow(dead_code))] // Used by tests today; P4 will use this for result elision.
-pub(crate) fn shortened_result_note(
-    record_id: &str,
-    block_id: impl std::fmt::Display,
-) -> TextPayload {
-    TextPayload::new(format!(
-        "{SHORTENED_RESULT_NOTE_PREFIX}{record_id}/{block_id}"
-    ))
 }
 
 #[cfg(test)]

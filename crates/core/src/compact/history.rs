@@ -9,11 +9,12 @@
 
 use super::HistoryTrigger;
 use crate::store::StoreError;
-use causa::kernel::{BlockId, Context, ContextBlock};
+use causa::kernel::{BlockContent, BlockId, Context, ContextBlock};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,6 +25,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) const HISTORY_FORMAT: &str = "tars-history-v1.1";
 /// One rewrite document is bounded like one session record.
 pub(crate) const MAX_HISTORY_BYTES: usize = 64 * 1024 * 1024;
+/// Prefix identifying spilled tool output artifact references.
+pub(crate) const ARTIFACT_ID_PREFIX: &str = "artifact:";
+/// One spilled artifact file is bounded by the same 64 MiB read limit.
+pub(crate) const MAX_ARTIFACT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Milliseconds since the Unix epoch, or zero when the clock is before it.
 pub(crate) fn now_ms() -> u64 {
@@ -39,8 +44,6 @@ pub(crate) fn now_ms() -> u64 {
 pub enum RewriteKind {
     /// A run of material replaced by a model-written brief.
     Summarize,
-    /// One block (such as a large tool result) replaced in place by a shorter one.
-    Elide,
     /// Several earlier briefs merged into one.
     Merge,
 }
@@ -50,7 +53,6 @@ impl RewriteKind {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Summarize => "summarize",
-            Self::Elide => "elide",
             Self::Merge => "merge",
         }
     }
@@ -102,6 +104,19 @@ pub(crate) fn parse_artifact_id(id: &str) -> Result<(&str, BlockId), &'static st
         }
         _ => Err("block id is not a canonical UUID"),
     }
+}
+
+/// Parse a spilled tool-output artifact ID in `artifact:<artifact id>` format.
+///
+/// The artifact ID must be a canonical lowercase hyphenated UUID.
+pub(crate) fn parse_spilled_artifact_id(id: &str) -> Result<&str, &'static str> {
+    let Some(artifact_id) = id.strip_prefix(ARTIFACT_ID_PREFIX) else {
+        return Err("spilled artifact id must start with 'artifact:'");
+    };
+    if !is_canonical_uuid(artifact_id) {
+        return Err("artifact id is not a canonical UUID");
+    }
+    Ok(artifact_id)
 }
 
 /// One planned replacement with its inserted blocks ready to apply to a Context.
@@ -173,7 +188,7 @@ pub struct HistoryRecord {
     pub created_at_ms: u64,
     /// What triggered this rewrite.
     pub trigger: HistoryTrigger,
-    /// What kind of rewrite was performed (`summarize`, `elide`, `merge`).
+    /// What kind of rewrite was performed (`summarize`, `merge`).
     pub kind: RewriteKind,
     /// Estimated request size before the replacement.
     pub estimate_before: u64,
@@ -255,7 +270,7 @@ pub struct HistoryRecordEntry {
     pub created_at_ms: u64,
     /// What triggered the rewrite.
     pub trigger: HistoryTrigger,
-    /// The kind of rewrite (`summarize`, `elide`, `merge`).
+    /// The kind of rewrite (`summarize`, `merge`).
     pub kind: RewriteKind,
     /// Number of blocks removed by this rewrite.
     pub removed_block_count: usize,
@@ -280,16 +295,19 @@ type WrittenRecordCache = (VecDeque<String>, HashMap<String, Arc<HistoryRecord>>
 /// The history directory and the record-backed index for one conversation.
 pub(crate) struct HistoryStore {
     directory: PathBuf,
+    artifacts_dir: PathBuf,
     conversation_id: String,
     entries: Mutex<Vec<HistoryRecordEntry>>,
     original_ids: Mutex<HashMap<String, HashSet<BlockId>>>,
     written_records: Mutex<WrittenRecordCache>,
     #[cfg(test)]
     read_count: AtomicUsize,
+    #[cfg(test)]
+    artifact_read_count: AtomicUsize,
 }
 
 impl HistoryStore {
-    /// Bind one conversation's history directory to its restored index.
+    /// Bind one conversation's history and artifact directories to its restored index.
     pub(crate) fn new(
         sessions_directory: &Path,
         conversation_id: &str,
@@ -297,12 +315,15 @@ impl HistoryStore {
     ) -> Self {
         Self {
             directory: history_directory(sessions_directory, conversation_id),
+            artifacts_dir: artifacts_directory(sessions_directory, conversation_id),
             conversation_id: conversation_id.to_owned(),
             entries: Mutex::new(entries),
             original_ids: Mutex::new(HashMap::new()),
             written_records: Mutex::new((VecDeque::new(), HashMap::new())),
             #[cfg(test)]
             read_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            artifact_read_count: AtomicUsize::new(0),
         }
     }
 
@@ -469,6 +490,122 @@ impl HistoryStore {
     #[cfg(test)]
     pub(crate) fn read_count(&self) -> usize {
         self.read_count.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Number of spilled artifact files read through this store.
+    #[cfg(test)]
+    pub(crate) fn artifact_read_count(&self) -> usize {
+        self.artifact_read_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Atomically persist one spilled tool-output artifact and fsync it.
+    pub(crate) fn persist_spilled_artifact(&self, data: &[u8]) -> Result<String, StoreError> {
+        if data.len() > MAX_ARTIFACT_BYTES {
+            return Err(StoreError::InvalidHistory(format!(
+                "artifact exceeds the {MAX_ARTIFACT_BYTES}-byte limit"
+            )));
+        }
+        fs::create_dir_all(&self.artifacts_dir)?;
+        let artifact_id = new_record_id();
+        let path = self.artifacts_dir.join(&artifact_id);
+        let mut pending = tempfile::Builder::new()
+            .prefix(".pending-")
+            .tempfile_in(&self.artifacts_dir)?;
+        pending.write_all(data)?;
+        pending.as_file().sync_all()?;
+        pending.persist_noclobber(&path).map_err(|error| {
+            if error.error.kind() == io::ErrorKind::AlreadyExists {
+                StoreError::InvalidHistory(format!("artifact {artifact_id} already exists"))
+            } else {
+                error.error.into()
+            }
+        })?;
+        sync_directory(&self.artifacts_dir);
+        Ok(artifact_id)
+    }
+
+    /// Read bytes from one spilled artifact in this session's `.artifacts/` directory.
+    pub(crate) fn read_spilled_artifact(
+        &self,
+        artifact_id: &str,
+        range: Option<Range<u64>>,
+    ) -> Result<Vec<u8>, StoreError> {
+        if !is_canonical_uuid(artifact_id) {
+            return Err(StoreError::InvalidHistory(format!(
+                "artifact id is not a canonical UUID: {artifact_id}"
+            )));
+        }
+        let path = self.artifacts_dir.join(artifact_id);
+        let mut file = File::open(&path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(StoreError::InvalidHistory(format!(
+                "artifact {artifact_id} is not a file"
+            )));
+        }
+        let len = metadata.len();
+        if len > MAX_ARTIFACT_BYTES as u64 {
+            return Err(StoreError::HistoryTooLarge {
+                limit: MAX_ARTIFACT_BYTES,
+            });
+        }
+        let bytes = match range {
+            None => {
+                let mut buf = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+                (&mut file)
+                    .take(MAX_ARTIFACT_BYTES as u64 + 1)
+                    .read_to_end(&mut buf)?;
+                if buf.len() > MAX_ARTIFACT_BYTES {
+                    return Err(StoreError::HistoryTooLarge {
+                        limit: MAX_ARTIFACT_BYTES,
+                    });
+                }
+                buf
+            }
+            Some(range) => {
+                if range.start > len || range.start > range.end {
+                    return Err(StoreError::InvalidHistory(format!(
+                        "invalid byte range {}..{} for artifact length {len}",
+                        range.start, range.end
+                    )));
+                }
+                let clamped_end = range.end.min(len);
+                let count = clamped_end - range.start;
+                file.seek(SeekFrom::Start(range.start))?;
+                let mut buf = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+                (&mut file).take(count).read_to_end(&mut buf)?;
+                buf
+            }
+        };
+        #[cfg(test)]
+        self.artifact_read_count.fetch_add(1, Ordering::SeqCst);
+        Ok(bytes)
+    }
+
+    /// Verify that a spilled artifact exists in this session's `.artifacts/`
+    /// directory, is a regular readable file, and fits the 64 MiB limit.
+    /// Does not read file contents.
+    pub(crate) fn verify_spilled_artifact(&self, artifact_id: &str) -> Result<(), StoreError> {
+        if !is_canonical_uuid(artifact_id) {
+            return Err(StoreError::InvalidHistory(format!(
+                "artifact id is not a canonical UUID: {artifact_id}"
+            )));
+        }
+        let path = self.artifacts_dir.join(artifact_id);
+        let file = File::open(&path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(StoreError::InvalidHistory(format!(
+                "artifact {artifact_id} is not a file"
+            )));
+        }
+        if metadata.len() > MAX_ARTIFACT_BYTES as u64 {
+            return Err(StoreError::HistoryTooLarge {
+                limit: MAX_ARTIFACT_BYTES,
+            });
+        }
+        Ok(())
     }
 
     /// Write one rewrite record document and fsync it.
@@ -685,6 +822,11 @@ pub(crate) fn history_directory(sessions_directory: &Path, conversation_id: &str
     sessions_directory.join(format!("{conversation_id}.history"))
 }
 
+/// Spilled tool-output artifact directory for one conversation under the sessions directory.
+pub(crate) fn artifacts_directory(sessions_directory: &Path, conversation_id: &str) -> PathBuf {
+    sessions_directory.join(format!("{conversation_id}.artifacts"))
+}
+
 /// Remove unreferenced record files without requiring a bound store.
 pub(crate) fn cleanup_records(
     sessions_directory: &Path,
@@ -695,6 +837,102 @@ pub(crate) fn cleanup_records(
         &history_directory(sessions_directory, conversation_id),
         entries,
     )
+}
+
+/// Collect spilled artifact UUIDs referenced by `blocks`.
+fn collect_spilled_artifact_ids(blocks: &[ContextBlock], into: &mut HashSet<String>) {
+    for block in blocks {
+        if let BlockContent::ToolResult(result) = block.content()
+            && let Some(artifact) = &result.output.artifact
+            && let Ok(artifact_id) = parse_spilled_artifact_id(&artifact.id)
+        {
+            into.insert(artifact_id.to_owned());
+        }
+    }
+}
+
+/// Read one history record from disk for orphan artifact scanning without
+/// incrementing a bound store's read counter. Ignores missing or corrupt records
+/// so opening still succeeds and reports them on expansion.
+fn read_record_for_cleanup(
+    history_dir: &Path,
+    conversation_id: &str,
+    record_id: &str,
+) -> Option<HistoryRecord> {
+    if canonical_record_id(record_id).is_err() {
+        return None;
+    }
+    let path = history_dir.join(format!("{record_id}.json"));
+    let file = File::open(&path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len > MAX_HISTORY_BYTES as u64 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    file.take(MAX_HISTORY_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_HISTORY_BYTES {
+        return None;
+    }
+    let record: HistoryRecord = serde_json::from_slice(&bytes).ok()?;
+    record.validate(conversation_id, record_id).ok()?;
+    Some(record)
+}
+
+/// Remove unreferenced spilled artifact files under the session write lock.
+///
+/// An artifact is kept if it is referenced by the saved `context` or by any
+/// original block inside an indexed rewrite record. Only reads rewrite records
+/// when `.artifacts/` contains a file not already referenced by `context`.
+pub(crate) fn cleanup_artifacts(
+    sessions_directory: &Path,
+    conversation_id: &str,
+    entries: &[HistoryRecordEntry],
+    context: Option<&Context>,
+) -> Result<(), StoreError> {
+    let dir = artifacts_directory(sessions_directory, conversation_id);
+    let listing = match fs::read_dir(&dir) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut files = Vec::new();
+    for entry in listing {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        files.push((name, entry.path()));
+    }
+    if files.is_empty() {
+        return Ok(());
+    }
+    let mut referenced = HashSet::new();
+    if let Some(context) = context {
+        collect_spilled_artifact_ids(context.blocks(), &mut referenced);
+    }
+    if files.iter().any(|(name, _)| !referenced.contains(name)) && !entries.is_empty() {
+        let history_dir = history_directory(sessions_directory, conversation_id);
+        for entry in entries {
+            if let Some(record) =
+                read_record_for_cleanup(&history_dir, conversation_id, &entry.record_id)
+            {
+                for replacement in &record.replacements {
+                    collect_spilled_artifact_ids(&replacement.originals, &mut referenced);
+                }
+            }
+        }
+    }
+    for (name, path) in files {
+        if !referenced.contains(&name) {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
 
 fn cleanup_directory(directory: &Path, entries: &[HistoryRecordEntry]) -> Result<(), StoreError> {

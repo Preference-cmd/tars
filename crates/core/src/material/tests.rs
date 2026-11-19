@@ -411,3 +411,53 @@ fn test_be09_detach_history_references_unit() {
     assert_eq!(res1_again.notes[1].0, DETACHED_HISTORY_NOTE);
     assert_eq!(detached_again.blocks(), detached.blocks());
 }
+
+#[test]
+fn test_be16_detach_history_references_drops_spilled_artifacts_and_preserves_preview() {
+    let spilled_id = format!("artifact:{}", uuid::Uuid::now_v7());
+    let call_id = new_block_id();
+    let result_id = new_block_id();
+    let preview_text =
+        format!("head line\n[... output spilled; recall id={spilled_id} ...]\ntail line");
+
+    let mut output = ToolOutput::new(serde_json::Value::String(preview_text.clone()));
+    output.truncation = causa::kernel::Truncation::Middle;
+    output.artifact = Some(ArtifactRef::new(
+        spilled_id,
+        24_000,
+        ArtifactKind::FullOutput,
+        true,
+    ));
+    let payload = ToolResultPayload::new(call_id, ToolResultStatus::Succeeded, output);
+    let context = Context::from_blocks(vec![ContextBlock::new(
+        result_id,
+        BlockContent::ToolResult(payload),
+        BlockMeta::default(),
+    )])
+    .unwrap();
+
+    // Standalone material save rejects unvalidated spilled artifact references.
+    let dir = tempfile::tempdir().unwrap();
+    let raw_path = dir.path().join("raw.json");
+    assert!(matches!(
+        save(&raw_path, &context),
+        Err(MaterialError::ReferenceValidationRequired { .. })
+    ));
+
+    // Detaching removes the artifact reference while preserving preview + adding note.
+    let detached = detach_history_references(&context, &[]);
+    let BlockContent::ToolResult(res) = detached.blocks()[0].content() else {
+        panic!("expected ToolResult");
+    };
+    assert!(res.output.artifact.is_none());
+    assert_eq!(res.output.truncation, causa::kernel::Truncation::Middle);
+    assert_eq!(res.output.content.as_str(), Some(preview_text.as_str()));
+    assert_eq!(res.notes.len(), 1);
+    assert_eq!(res.notes[0].0, DETACHED_HISTORY_NOTE);
+
+    // Detached context saves and loads cleanly.
+    let exported_path = dir.path().join("exported.json");
+    save(&exported_path, &detached).unwrap();
+    let loaded = load(&exported_path).unwrap();
+    assert_eq!(loaded.blocks(), detached.blocks());
+}

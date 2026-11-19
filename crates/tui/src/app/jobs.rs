@@ -75,6 +75,7 @@ pub(super) enum Message {
     ),
     Materials(Key, Result<MaterialView, String>),
     HistoryLoaded(Key, String, Result<HistoryRecord, String>),
+    ToolArtifactsLoaded(Key, Option<MaterialVersion>, Vec<String>, usize),
     Compacted(Key, Result<CompactedReload, String>),
     Wrapped(Key, Rows, Option<Rows>),
     Retried(Key, Result<SaveStatus, ApplicationError>),
@@ -100,6 +101,7 @@ pub(super) enum JobKind {
     Export,
     Materials,
     HistoryRead,
+    ToolArtifacts,
     Compact,
     Wrapping,
     Repair(causa::kernel::BlockId),
@@ -435,6 +437,30 @@ impl App {
                     }
                 }
             }
+            Message::ToolArtifactsLoaded(key, version, lines, reads) => {
+                #[cfg(not(test))]
+                let _ = reads;
+                if let Some(entry) = self.entry_mut(&key) {
+                    #[cfg(test)]
+                    {
+                        entry.artifact_reads = entry.artifact_reads.saturating_add(reads);
+                    }
+                    if entry.material_version == version
+                        && self
+                            .entries
+                            .get(self.selected)
+                            .is_some_and(|selected| selected.key == key)
+                        && let Some(super::commands::Panel::Info {
+                            title,
+                            lines: panel_lines,
+                            ..
+                        }) = &mut self.panel
+                        && title == "Recorded tool materials · viewing never executes"
+                    {
+                        *panel_lines = lines;
+                    }
+                }
+            }
             Message::Compacted(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     entry.busy = None;
@@ -615,6 +641,9 @@ impl App {
                         }
                         JobKind::HistoryRead => {
                             entry.history.cancel_read();
+                            entry.notice = message.clone();
+                        }
+                        JobKind::ToolArtifacts => {
                             entry.notice = message.clone();
                         }
                         JobKind::Compact => {

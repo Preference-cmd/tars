@@ -370,20 +370,131 @@ impl App {
     }
 
     pub(super) fn show_tools(&mut self) {
-        let mut lines = Vec::new();
-        if let Some(entry) = self.entries.get(self.selected) {
-            lines.extend(entry.transcript.tool_details.iter().cloned());
+        const TOOLS_PANEL_TITLE: &str = "Recorded tool materials · viewing never executes";
+        let Some(entry) = self.entries.get(self.selected) else {
+            self.panel = Some(Panel::Info {
+                title: TOOLS_PANEL_TITLE.into(),
+                lines: vec![
+                    "No committed tool materials. Returned pending results may not be committed."
+                        .into(),
+                ],
+                scroll: 0,
+            });
+            return;
+        };
+        let has_spilled = entry.transcript.tool_artifacts.iter().any(Option::is_some);
+        if !has_spilled {
+            let mut lines = entry.transcript.tool_details.clone();
+            if lines.is_empty() {
+                lines.push(
+                    "No committed tool materials. Returned pending results may not be committed."
+                        .into(),
+                );
+            }
+            self.panel = Some(Panel::Info {
+                title: TOOLS_PANEL_TITLE.into(),
+                lines,
+                scroll: 0,
+            });
+            return;
         }
-        if lines.is_empty() {
-            lines.push(
-                "No committed tool materials. Returned pending results may not be committed."
-                    .into(),
-            );
+        let Some(session) = entry.session.clone() else {
+            let lines = entry
+                .transcript
+                .tool_details
+                .iter()
+                .zip(entry.transcript.tool_artifacts.iter())
+                .map(|(detail, artifact)| match artifact {
+                    Some(spilled) => format!(
+                        "Result for {} · {:?} · {}\nFull artifact cannot be read (session is not open); showing model-facing preview:\n{}",
+                        spilled.call_block_id.0,
+                        spilled.status,
+                        crate::transcript::display(&spilled.artifact_id),
+                        spilled.preview_json
+                    ),
+                    None => detail.clone(),
+                })
+                .collect();
+            self.panel = Some(Panel::Info {
+                title: TOOLS_PANEL_TITLE.into(),
+                lines,
+                scroll: 0,
+            });
+            return;
+        };
+
+        let mut initial_lines = Vec::with_capacity(entry.transcript.tool_details.len());
+        for (detail, artifact) in entry
+            .transcript
+            .tool_details
+            .iter()
+            .zip(entry.transcript.tool_artifacts.iter())
+        {
+            match artifact {
+                Some(spilled) => initial_lines.push(format!(
+                    "Result for {} · {:?} · {}\nLoading full output from {}...\n{}",
+                    spilled.call_block_id.0,
+                    spilled.status,
+                    crate::transcript::display(&spilled.artifact_id),
+                    crate::transcript::display(&spilled.artifact_id),
+                    spilled.preview_json
+                )),
+                None => initial_lines.push(detail.clone()),
+            }
         }
         self.panel = Some(Panel::Info {
-            title: "Recorded tool materials · viewing never executes".into(),
-            lines,
+            title: TOOLS_PANEL_TITLE.into(),
+            lines: initial_lines,
             scroll: 0,
+        });
+
+        let key = entry.key.clone();
+        let version = entry.material_version.clone();
+        let transcript = entry.transcript.clone();
+        self.spawn_job(Some(key.clone()), super::jobs::JobKind::ToolArtifacts, async move {
+            let result = super::jobs::blocking(move || {
+                let mut lines = Vec::with_capacity(transcript.tool_details.len());
+                let mut reads = 0usize;
+                for (detail, artifact) in transcript
+                    .tool_details
+                    .iter()
+                    .zip(transcript.tool_artifacts.iter())
+                {
+                    match artifact {
+                        Some(spilled) => {
+                            reads += 1;
+                            match session.read_spilled_artifact(&spilled.artifact_id) {
+                                Ok(full_text) => lines.push(format!(
+                                    "Result for {} · {:?} · {}\nModel sees spilled preview only · full output from {} ({} bytes):\n{}\n\nModel-facing preview:\n{}",
+                                    spilled.call_block_id.0,
+                                    spilled.status,
+                                    crate::transcript::display(&spilled.artifact_id),
+                                    crate::transcript::display(&spilled.artifact_id),
+                                    spilled.size_bytes,
+                                    crate::transcript::display(&full_text),
+                                    spilled.preview_json,
+                                )),
+                                Err(error) => lines.push(format!(
+                                    "Result for {} · {:?} · {}\nFull artifact cannot be read ({}); showing model-facing preview:\n{}",
+                                    spilled.call_block_id.0,
+                                    spilled.status,
+                                    crate::transcript::display(&spilled.artifact_id),
+                                    crate::transcript::display(&error.to_string()),
+                                    spilled.preview_json,
+                                )),
+                            }
+                        }
+                        None => lines.push(detail.clone()),
+                    }
+                }
+                (lines, reads)
+            })
+            .await;
+            let (lines, reads) = match result {
+                Ok(pair) => pair,
+                Err(error) => (vec![format!("Failed to load tool artifacts: {error}")], 0),
+            };
+            super::jobs::Message::ToolArtifactsLoaded(key, version, lines, reads)
         });
     }
     pub(super) fn panel_key(&mut self, key: KeyEvent) {

@@ -432,11 +432,24 @@ pub(crate) fn assemble(
                     .expect("test processors lock");
                 before.extend(extras.iter().cloned());
             }
+            let mut after: Vec<Arc<dyn ToolBatchProcessor>> = Vec::new();
+            let mut artifact_store: Option<Arc<dyn causa::kernel::ArtifactStore>> = None;
+            if let Some(runtime) = &compact_for_work
+                && let Some(artifacts) = runtime.artifacts()
+            {
+                let store: Arc<dyn causa::kernel::ArtifactStore> = Arc::new(artifacts);
+                after.push(Arc::new(crate::compact::OutputSpillProcessor::new(
+                    store.clone(),
+                )));
+                artifact_store = Some(store);
+            }
             async move {
                 let executor = ToolExecutor::new(tools, {
                     let mut options = ToolExecutorOptions::default();
                     options.call_timeout = call_timeout;
                     options.before = before;
+                    options.after = after;
+                    options.artifact_store = artifact_store;
                     options
                 })
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)?;

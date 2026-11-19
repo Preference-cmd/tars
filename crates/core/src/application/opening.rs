@@ -35,9 +35,16 @@ pub(super) async fn initialize(
             .as_ref()
             .map(|record| record.history.clone())
             .unwrap_or_default();
+        let saved_context = record.as_ref().map(|record| record.context.clone());
         let id = entry.target.conversation_id.as_str().to_owned();
         saving::io(host, move || {
-            crate::compact::history::cleanup_records(store.directory(), &id, &history)
+            crate::compact::history::cleanup_records(store.directory(), &id, &history)?;
+            crate::compact::history::cleanup_artifacts(
+                store.directory(),
+                &id,
+                &history,
+                saved_context.as_ref(),
+            )
         })
         .await?;
         record

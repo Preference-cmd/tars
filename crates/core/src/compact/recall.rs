@@ -1,13 +1,18 @@
-//! Built-in `recall` tool reading original material removed by compaction.
+//! Built-in `recall` tool reading original material removed by compaction
+//! or spilled to the session's `.artifacts/` directory.
 //!
-//! Provides three call forms:
+//! Provides four call forms:
 //! 1. List original blocks of a rewrite record by record ID (`id = "<record id>"`).
 //! 2. Read full block text by block reference (`id = "<record id>/<block id>"`).
-//! 3. Search original blocks across all records (`query = "..."`).
+//! 3. Read full spilled tool output by artifact reference (`id = "artifact:<artifact id>"`).
+//! 4. Search original blocks across all records (`query = "..."`).
 
 use super::CompactionRuntime;
 use super::block_text::block_to_text;
-use super::history::{HistoryRecordEntry, HistoryStore, is_canonical_uuid, parse_artifact_id};
+use super::history::{
+    ARTIFACT_ID_PREFIX, HistoryRecordEntry, HistoryStore, is_canonical_uuid, parse_artifact_id,
+    parse_spilled_artifact_id,
+};
 use crate::session::ToolReporter;
 use async_trait::async_trait;
 use causa::kernel::{
@@ -23,12 +28,13 @@ use tokio_util::sync::CancellationToken;
 /// Name of the built-in recall tool advertised to models.
 pub(crate) const TOOL_NAME: &str = "recall";
 
-/// Model-facing description explaining what recall does and its three forms.
+/// Model-facing description explaining what recall does and its call forms.
 pub(crate) const TOOL_DESCRIPTION: &str = "\
-Read back conversation material that compaction removed. \
-id=<record id> lists its original blocks; id=<record id>/<block id> reads one block. \
+Read back conversation material that compaction removed or oversized tool output spilled. \
+id=<record id> lists its original blocks; id=<record id>/<block id> reads one block; \
+id=artifact:<artifact id> reads a spilled tool output artifact. \
 query searches all records, newest first (literal text, or a regex with regex=true). \
-Ids come from brief pointers, listings and search hits.";
+Ids come from tool spill notices, brief pointers, listings and search hits.";
 
 /// Maximum output size in bytes (64 KiB).
 pub(crate) const MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -253,11 +259,11 @@ fn success(call: &ToolCallContext, text: String) -> ToolResultPayload {
     ToolResultPayload::new(call.call_block_id, ToolResultStatus::Succeeded, output)
 }
 
-fn sanitize_store_error(err: &crate::store::StoreError) -> String {
+fn sanitize_store_error(err: &crate::store::StoreError, kind: &str) -> String {
     match err {
         crate::store::StoreError::Io(io) => {
             if io.kind() == std::io::ErrorKind::NotFound {
-                "record file not found".to_string()
+                format!("{kind} file not found")
             } else {
                 format!("I/O error: {}", io.kind())
             }
@@ -266,7 +272,7 @@ fn sanitize_store_error(err: &crate::store::StoreError) -> String {
             let msg = other.to_string();
             // Ensure no path containing slashes is leaked
             if msg.contains('/') || msg.contains('\\') {
-                "record could not be read".to_string()
+                format!("{kind} could not be read")
             } else {
                 msg
             }
@@ -298,6 +304,11 @@ enum Request {
     Read {
         record_id: String,
         block_id: BlockId,
+        offset: usize,
+        limit: usize,
+    },
+    ReadArtifact {
+        artifact_id: String,
         offset: usize,
         limit: usize,
     },
@@ -360,7 +371,18 @@ impl Request {
                 if params.regex.is_some() || params.case_sensitive.is_some() {
                     return Err("regex and case_sensitive apply only to a query".into());
                 }
-                if id.contains('/') {
+                if id.starts_with(ARTIFACT_ID_PREFIX) {
+                    let artifact_id = parse_spilled_artifact_id(&id)?;
+                    let limit = params.limit.unwrap_or(12_000);
+                    if !(1..=12_000).contains(&limit) {
+                        return Err("read limit must be between 1 and 12000".into());
+                    }
+                    Ok(Self::ReadArtifact {
+                        artifact_id: artifact_id.to_owned(),
+                        offset,
+                        limit: limit as usize,
+                    })
+                } else if id.contains('/') {
                     let (record_id, block_id) = parse_artifact_id(&id)?;
                     if !store.has_record(record_id) {
                         return Err(format!(
@@ -430,6 +452,36 @@ enum Outcome {
     Stopped,
 }
 
+fn format_paged_read(
+    reference: &str,
+    header_extra: Option<&str>,
+    pointers: Vec<String>,
+    text: &str,
+    offset: usize,
+    limit: usize,
+) -> String {
+    let total = text.chars().count();
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    let byte_at = |chars: usize| {
+        text.char_indices()
+            .nth(chars)
+            .map_or(text.len(), |(byte, _)| byte)
+    };
+    let (start_byte, end_byte) = (byte_at(start), byte_at(end));
+    let header = match header_extra {
+        Some(extra) => format!("{reference} {extra} ({total} chars, range {start}..{end})"),
+        None => format!("{reference} ({total} chars, range {start}..{end})"),
+    };
+    let mut lines = vec![header];
+    lines.extend(pointers);
+    lines.push(text[start_byte..end_byte].to_string());
+    if end < total {
+        lines.push(format!("more: recall id={reference} offset={end}"));
+    }
+    lines.join("\n")
+}
+
 /// Everything one blocking worker needs.
 struct Worker {
     store: Arc<HistoryStore>,
@@ -456,6 +508,11 @@ impl Worker {
                 offset,
                 limit,
             } => self.read(&record_id, block_id, offset, limit),
+            Request::ReadArtifact {
+                artifact_id,
+                offset,
+                limit,
+            } => self.read_artifact(&artifact_id, offset, limit),
             Request::Search {
                 matcher,
                 context,
@@ -472,11 +529,21 @@ impl Worker {
         }
     }
 
-    /// The `original:` pointer line for a block an earlier rewrite inserted.
-    fn pointer(&self, block_id: BlockId) -> Option<String> {
-        self.inserted
-            .get(&block_id)
-            .map(|record_id| format!("original: recall id={record_id}"))
+    /// Pointer lines for a block:
+    /// - `original: recall id=<record_id>` if an earlier rewrite inserted it;
+    /// - `artifact: recall id=artifact:<artifact_id>` if it is a spilled tool result.
+    fn pointers(&self, block: &ContextBlock) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(record_id) = self.inserted.get(&block.id()) {
+            lines.push(format!("original: recall id={record_id}"));
+        }
+        if let BlockContent::ToolResult(result) = block.content()
+            && let Some(artifact) = &result.output.artifact
+            && parse_spilled_artifact_id(&artifact.id).is_ok()
+        {
+            lines.push(format!("artifact: recall id={}", artifact.id));
+        }
+        lines
     }
 
     fn list(&self, record_id: &str, offset: usize, limit: usize) -> Outcome {
@@ -485,7 +552,7 @@ impl Worker {
             Err(error) => {
                 return Outcome::Failed(format!(
                     "history record {record_id} cannot be read: {}",
-                    sanitize_store_error(&error)
+                    sanitize_store_error(&error, "record")
                 ));
             }
         };
@@ -518,7 +585,7 @@ impl Worker {
                 text.chars().count(),
                 preview(&text)
             ));
-            lines.extend(self.pointer(block.id()));
+            lines.extend(self.pointers(block));
         }
         if end < total {
             lines.push(format!("more: recall id={} offset={end}", record.record_id));
@@ -531,12 +598,12 @@ impl Worker {
             Ok(block) => block,
             // Index and membership refusals name ids only.
             Err(error @ crate::store::StoreError::InvalidHistory(_)) => {
-                return Outcome::Failed(sanitize_store_error(&error));
+                return Outcome::Failed(sanitize_store_error(&error, "record"));
             }
             Err(error) => {
                 return Outcome::Failed(format!(
                     "history record {record_id} cannot be read: {}",
-                    sanitize_store_error(&error)
+                    sanitize_store_error(&error, "record")
                 ));
             }
         };
@@ -544,26 +611,47 @@ impl Worker {
             return Outcome::Stopped;
         }
         let text = block_to_text(&block);
-        let total = text.chars().count();
-        let start = offset.min(total);
-        let end = start.saturating_add(limit).min(total);
-        let byte_at = |chars: usize| {
-            text.char_indices()
-                .nth(chars)
-                .map_or(text.len(), |(byte, _)| byte)
-        };
-        let (start_byte, end_byte) = (byte_at(start), byte_at(end));
         let reference = format!("{record_id}/{}", block_id.0);
-        let mut lines = vec![format!(
-            "{reference} {} ({total} chars, range {start}..{end})",
-            label(&block)
-        )];
-        lines.extend(self.pointer(block_id));
-        lines.push(text[start_byte..end_byte].to_string());
-        if end < total {
-            lines.push(format!("more: recall id={reference} offset={end}"));
+        Outcome::Text(format_paged_read(
+            &reference,
+            Some(&label(&block)),
+            self.pointers(&block),
+            &text,
+            offset,
+            limit,
+        ))
+    }
+
+    fn read_artifact(&self, artifact_id: &str, offset: usize, limit: usize) -> Outcome {
+        let bytes = match self.store.read_spilled_artifact(artifact_id, None) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Outcome::Failed(format!(
+                    "artifact {ARTIFACT_ID_PREFIX}{artifact_id} cannot be read: {}",
+                    sanitize_store_error(&error, "artifact")
+                ));
+            }
+        };
+        if self.stop.stopped() {
+            return Outcome::Stopped;
         }
-        Outcome::Text(lines.join("\n"))
+        let text = match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) => {
+                return Outcome::Failed(format!(
+                    "artifact {ARTIFACT_ID_PREFIX}{artifact_id} is not valid UTF-8 text"
+                ));
+            }
+        };
+        let reference = format!("{ARTIFACT_ID_PREFIX}{artifact_id}");
+        Outcome::Text(format_paged_read(
+            &reference,
+            None,
+            Vec::new(),
+            &text,
+            offset,
+            limit,
+        ))
     }
 
     fn search(
@@ -585,7 +673,10 @@ impl Worker {
             let record = match self.store.read(&entry.record_id) {
                 Ok(record) => record,
                 Err(error) => {
-                    unreadable.push((entry.record_id.clone(), sanitize_store_error(&error)));
+                    unreadable.push((
+                        entry.record_id.clone(),
+                        sanitize_store_error(&error, "record"),
+                    ));
                     continue;
                 }
             };
@@ -623,7 +714,7 @@ impl Worker {
                     let line: String = line.chars().take(PREVIEW_CHARS).collect();
                     lines.push(format!("L{line_number}: {line}"));
                 }
-                lines.extend(self.pointer(block.id()));
+                lines.extend(self.pointers(block));
                 if context > 0 {
                     let before = index.saturating_sub(context)..index;
                     let after = (index + 1)..(index + 1 + context).min(originals.len());
@@ -704,7 +795,7 @@ impl Tool for RecallTool {
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id": { "type": "string", "description": "Record id, or <record id>/<block id>." },
+                    "id": { "type": "string", "description": "Record id, <record id>/<block id>, or artifact:<artifact id>." },
                     "query": { "type": "string", "description": "Text to search for, per line." },
                     "regex": { "type": "boolean", "description": "Query is a regex. Default false." },
                     "case_sensitive": { "type": "boolean", "description": "Default false." },

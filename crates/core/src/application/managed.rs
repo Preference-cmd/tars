@@ -203,8 +203,10 @@ impl ManagedSession {
         }
         let owner = state.owner.as_mut().expect("published owner");
         let history = owner.history_entries();
-        let readiness =
-            owner.with_context(|context| super::repair::admission_check(context, &history));
+        let artifacts = owner.compaction().and_then(|c| c.history());
+        let readiness = owner.with_context(|context| {
+            super::repair::admission_check(context, &history, artifacts.as_deref())
+        });
         let readiness = readiness
             .map_err(ApplicationError::from)
             .and_then(|result| result.map_err(Into::into));
@@ -663,8 +665,8 @@ impl ManagedSession {
             .map_err(|error| ApplicationError::Store(Arc::new(error)))
     }
 
-    /// Artifact store backed by this session's rewrite records.
-    #[allow(dead_code)]
+    /// Artifact store backed by this session's rewrite records and `.artifacts/` directory.
+    #[cfg(test)]
     pub(crate) fn artifacts(&self) -> Option<crate::compact::HistoryArtifacts> {
         let state = self.entry.lock();
         state
@@ -672,6 +674,33 @@ impl ManagedSession {
             .as_ref()
             .and_then(|owner| owner.compaction())
             .and_then(|runtime| runtime.artifacts())
+    }
+
+    /// Read the UTF-8 text of one spilled tool-output artifact (`artifact:<id>` or `<id>`) for display.
+    pub fn read_spilled_artifact(&self, id: &str) -> Result<String, ApplicationError> {
+        let artifact_id = id.strip_prefix("artifact:").unwrap_or(id).to_owned();
+        let history = {
+            let state = self.entry.lock();
+            if state.lifecycle == Lifecycle::Closed {
+                return Err(ApplicationError::Closed);
+            }
+            let runtime = state
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.compaction())
+                .ok_or(ApplicationError::CompactionUnavailable)?;
+            runtime
+                .history()
+                .ok_or(ApplicationError::CompactionUnavailable)?
+        };
+        let bytes = history
+            .read_spilled_artifact(&artifact_id, None)
+            .map_err(|error| ApplicationError::Store(Arc::new(error)))?;
+        String::from_utf8(bytes).map_err(|_| {
+            ApplicationError::Store(Arc::new(crate::store::StoreError::InvalidHistory(format!(
+                "artifact {id} is not valid UTF-8 text"
+            ))))
+        })
     }
 
     /// History rewrite records written by this session in this process.
@@ -696,6 +725,19 @@ impl ManagedSession {
             .and_then(|owner| owner.compaction())
             .and_then(|runtime| runtime.history())
             .map(|history| history.read_count())
+            .unwrap_or(0)
+    }
+
+    /// Number of spilled artifact files this session has read.
+    #[cfg(test)]
+    pub(crate) fn artifact_reads(&self) -> usize {
+        let state = self.entry.lock();
+        state
+            .owner
+            .as_ref()
+            .and_then(|owner| owner.compaction())
+            .and_then(|runtime| runtime.history())
+            .map(|history| history.artifact_read_count())
             .unwrap_or(0)
     }
 
@@ -755,9 +797,10 @@ impl ManagedSession {
                 .ok_or(ApplicationError::CompactionUnavailable)?;
             let owner = state.owner.as_mut().expect("published owner");
             let history = owner.history_entries();
+            let artifacts = owner.compaction().and_then(|c| c.history());
             let readiness = owner.with_context(|context| {
                 self.entry.cloned_snapshot();
-                super::repair::admission_check(context, &history)
+                super::repair::admission_check(context, &history, artifacts.as_deref())
             });
             match readiness {
                 Ok(Ok(())) => {}

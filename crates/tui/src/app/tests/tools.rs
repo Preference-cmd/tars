@@ -366,3 +366,164 @@ async fn save_blocked_after_real_tools_exports_and_retries_original_material_wit
     app.event(ctrl('q'));
     until(&mut app, |a| a.done).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_be17_tui_opens_with_zero_artifact_reads_and_tools_expands_on_demand_and_degrades_when_missing()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("workspace");
+    let many_dir = workspace.join("many");
+    std::fs::create_dir_all(&many_dir).unwrap();
+    let pad = "x".repeat(90);
+    for i in 1..=150 {
+        std::fs::write(many_dir.join(format!("entry-{i:03}-{pad}.txt")), b"").unwrap();
+    }
+
+    let provider = "openai-chat";
+    let fixture = wire::Fixture::with_responses(
+        provider,
+        vec![
+            wire::tool(
+                provider,
+                "list_directory",
+                serde_json::json!({ "path": "many" }),
+                "call-spilled-1",
+            ),
+            wire::answer_with_text(provider, "done listing spilled dir"),
+        ],
+    );
+
+    let mut app1 = app(dir.path());
+    app1.form = Some(Form {
+        fields: [
+            provider.to_owned(),
+            "fixture-model".into(),
+            fixture.endpoint.clone(),
+            "PATH".into(),
+            "120".into(),
+            workspace.display().to_string(),
+            "list_directory".into(),
+            "ask".into(),
+            "".into(),
+            "on".into(),
+        ]
+        .into_iter()
+        .map(|value| TextArea::from([value]))
+        .collect(),
+        ..Form::default()
+    });
+    app1.event(ctrl('s'));
+    until(&mut app1, |a| a.entries[0].session.is_some()).await;
+    let session_id = app1.entries[0].id().to_owned();
+
+    app1.event(Event::Paste("list many".into()));
+    app1.event(key(KeyCode::Enter));
+    until(&mut app1, |a| {
+        a.entries[0].execution == "Completed"
+            && a.entries[0].transcript.tool_details.len() == 2
+            && matches!(
+                a.entries[0].session.as_ref().unwrap().status().save,
+                tars_core::application::SaveStatus::Saved { .. }
+            )
+    })
+    .await;
+
+    let art_id = app1.entries[0]
+        .transcript
+        .tool_artifacts
+        .iter()
+        .flatten()
+        .next()
+        .expect("spilled artifact in transcript")
+        .artifact_id
+        .clone();
+    let preview_text = app1.entries[0].transcript.tool_details[1].clone();
+    let omitted = (1..=150)
+        .map(|i| format!("entry-{i:03}-"))
+        .find(|tag| !preview_text.contains(tag.as_str()))
+        .expect("at least one entry omitted from spilled preview");
+
+    // Close first app to test reopening from disk
+    app1.event(ctrl('q'));
+    until(&mut app1, |a| a.done).await;
+
+    // 1. Reopen in a fresh TUI app: opening must read ZERO .artifacts/ files
+    let mut app2 = app(dir.path());
+    app2.event(key(KeyCode::F(5)));
+    until(&mut app2, |a| !a.entries.is_empty()).await;
+    let idx = app2
+        .entries
+        .iter()
+        .position(|e| e.id() == session_id)
+        .expect("saved session listed");
+    app2.selected = idx;
+    app2.event(key(KeyCode::F(3)));
+    until(&mut app2, |a| {
+        a.entries[idx].session.is_some() && !a.entries[idx].transcript.tool_details.is_empty()
+    })
+    .await;
+
+    assert_eq!(
+        app2.entries[idx].artifact_reads, 0,
+        "opening a session must read 0 .artifacts/ files"
+    );
+    assert!(
+        app2.entries[idx]
+            .transcript
+            .text
+            .contains("spilled preview")
+    );
+    assert!(
+        !app2.entries[idx].transcript.text.contains(&omitted),
+        "main transcript shows preview, not omitted spilled entries"
+    );
+
+    // 2. Press F6 (/tools): reads .artifacts/ on demand, marks model preview note, shows full original
+    app2.event(key(KeyCode::F(6)));
+    until(&mut app2, |a| a.entries[idx].artifact_reads == 1).await;
+    assert!(screen(&app2).contains("Recorded tool materials"));
+    if let Some(crate::app::Panel::Info { lines, .. }) = &app2.panel {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Model sees spilled preview only") && l.contains(&art_id)),
+            "{lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.contains(&omitted)), "{lines:?}");
+    } else {
+        panic!("tools panel missing");
+    }
+    app2.event(key(KeyCode::Esc));
+
+    // 3. Delete the .artifacts/<id> file and press F6 again: degrades to preview + cannot be read
+    let art_dir = dir
+        .path()
+        .join("store")
+        .join("sessions")
+        .join(format!("{session_id}.artifacts"));
+    for entry in std::fs::read_dir(&art_dir).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+
+    app2.event(key(KeyCode::F(6)));
+    until(&mut app2, |a| a.entries[idx].artifact_reads == 2).await;
+    if let Some(crate::app::Panel::Info { lines, .. }) = &app2.panel {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Full artifact cannot be read")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Model-facing preview") || l.contains("output spilled")),
+            "{lines:?}"
+        );
+    } else {
+        panic!("tools panel missing on degraded fallback");
+    }
+    app2.event(key(KeyCode::Esc));
+    app2.event(ctrl('q'));
+    until(&mut app2, |a| a.done).await;
+}

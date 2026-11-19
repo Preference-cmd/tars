@@ -135,7 +135,8 @@ pub(super) async fn compact(
 /// Print the expanded full conversation for a persistent session.
 ///
 /// Rewrites are unfolded recursively and each block is marked original,
-/// summarized, elided or unreadable. `--json` writes one block per line.
+/// summarized or unreadable, and tool results with spilled outputs include
+/// their artifact id. `--json` writes one block per line.
 /// `--last N` prints only the newest N blocks and reads only the records they
 /// need. An unreadable record is reported and the command exits 1 after
 /// printing what it could.
@@ -161,7 +162,14 @@ pub(super) async fn history(
         (|| -> io::Result<()> {
             if json_output {
                 for block in &expansion.blocks {
-                    serde_json::to_writer(&mut out, block).map_err(io::Error::other)?;
+                    let mut value = serde_json::to_value(block).map_err(io::Error::other)?;
+                    if let BlockContent::ToolResult(result) = block.block.content()
+                        && let Some(artifact) = &result.output.artifact
+                        && let Some(object) = value.as_object_mut()
+                    {
+                        object.insert("artifact_id".into(), json!(artifact.id));
+                    }
+                    serde_json::to_writer(&mut out, &value).map_err(io::Error::other)?;
                     writeln!(out)?;
                 }
             } else {
@@ -236,10 +244,16 @@ fn write_expanded_block(out: &mut dyn Write, expanded: &ExpandedBlock) -> io::Re
             )?;
         }
         BlockContent::ToolResult(result) => {
+            let artifact = result
+                .output
+                .artifact
+                .as_ref()
+                .map(|a| format!(" · {}", display(&a.id)))
+                .unwrap_or_default();
             writeln!(
                 out,
-                "[tool result · {}] {:?} · declaration {}",
-                expanded.status, result.status, result.call_block_id.0
+                "[tool result · {}] {:?} · declaration {}{}",
+                expanded.status, result.status, result.call_block_id.0, artifact
             )?;
             writeln!(
                 out,

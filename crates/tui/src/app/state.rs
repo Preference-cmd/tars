@@ -154,6 +154,8 @@ pub(crate) struct Entry {
     pub(super) scroll_anchor: Option<ScrollAnchor>,
     #[cfg(test)]
     pub(super) record_reads: usize,
+    #[cfg(test)]
+    pub(super) artifact_reads: usize,
     pub(super) progress: Option<super::progress::ProgressFeed>,
     pub rows: Option<Rows>,
     pub scroll: Option<usize>,
@@ -196,6 +198,8 @@ impl Entry {
             scroll_anchor: None,
             #[cfg(test)]
             record_reads: 0,
+            #[cfg(test)]
+            artifact_reads: 0,
             progress: None,
             rows: None,
             scroll: None,

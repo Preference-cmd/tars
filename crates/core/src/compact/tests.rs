@@ -24,6 +24,7 @@ use std::time::Duration;
 mod brief_reply;
 mod merge;
 mod partial;
+mod spill;
 mod thinking;
 
 fn definition(context_window: Option<u64>, max_tokens: Option<u32>) -> SessionDefinition {
@@ -1425,7 +1426,7 @@ async fn test_be06_planned_summary_commits_under_the_record_id_allocated_before_
 }
 
 #[test]
-fn test_be04_expansion_fixture_summarize_elide_merge_nesting_and_lazy_reading() {
+fn test_be04_expansion_fixture_summarize_merge_nesting_and_lazy_reading() {
     use super::expansion::{BlockStatus, expand_conversation};
 
     let directory = tempfile::tempdir().unwrap();
@@ -1491,37 +1492,29 @@ fn test_be04_expansion_fixture_summarize_elide_merge_nesting_and_lazy_reading() 
         b7.clone(),
     ];
 
-    // 2. Hand-built records with summarize + elide + merge + nesting:
-    // Record 1 (Elide): Elides B2 (tool result) in place -> replaced by E1
+    // 2. Hand-built records with summarize + merge + nesting:
+    // Record 1 (Summarize): Summarizes B0, B1 -> replaced by S0
     let rec1_id = uuid::Uuid::now_v7().to_string();
-    let e1 = ContextBlock::new(
-        BlockId::new(uuid::Uuid::now_v7()),
-        BlockContent::ToolResult(ToolResultPayload::new(
-            b1.id(),
-            ToolResultStatus::Succeeded,
-            ToolOutput::new(serde_json::json!("[elided]")),
-        )),
-        Default::default(),
-    );
+    let s0 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "Brief 0");
     let rec1 = HistoryRecord {
         format: HISTORY_FORMAT.into(),
         conversation_id: conv_id.into(),
         record_id: rec1_id.clone(),
         created_at_ms: 1000,
         trigger: HistoryTrigger::Auto,
-        kind: RewriteKind::Elide,
+        kind: RewriteKind::Summarize,
         estimate_before: 1000,
         estimate_after: 200,
         replacements: vec![RangeReplacement {
-            range: 2..3,
-            originals: vec![b2.clone()],
-            inserted_ids: vec![e1.id()],
+            range: 0..2,
+            originals: vec![b0.clone(), b1.clone()],
+            inserted_ids: vec![s0.id()],
         }],
     };
 
-    // Record 2 (Summarize - nested): Summarizes B0, B1, E1, B3 -> replaced by S1
+    // Record 2 (Summarize - nested): Summarizes S0, B2, B3 -> replaced by S1
     let rec2_id = uuid::Uuid::now_v7().to_string();
-    let s1 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::System, "Brief 1");
+    let s1 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "Brief 1");
     let rec2 = HistoryRecord {
         format: HISTORY_FORMAT.into(),
         conversation_id: conv_id.into(),
@@ -1532,8 +1525,8 @@ fn test_be04_expansion_fixture_summarize_elide_merge_nesting_and_lazy_reading() 
         estimate_before: 800,
         estimate_after: 150,
         replacements: vec![RangeReplacement {
-            range: 0..4,
-            originals: vec![b0.clone(), b1.clone(), e1.clone(), b3.clone()],
+            range: 0..3,
+            originals: vec![s0.clone(), b2.clone(), b3.clone()],
             inserted_ids: vec![s1.id()],
         }],
     };
@@ -1620,15 +1613,15 @@ fn test_be04_expansion_fixture_summarize_elide_merge_nesting_and_lazy_reading() 
     // Verify block statuses:
     assert_eq!(
         expanded.blocks[0].status,
-        BlockStatus::Summarized(rec2_id.clone())
+        BlockStatus::Summarized(rec1_id.clone())
     );
     assert_eq!(
         expanded.blocks[1].status,
-        BlockStatus::Summarized(rec2_id.clone())
+        BlockStatus::Summarized(rec1_id.clone())
     );
     assert_eq!(
         expanded.blocks[2].status,
-        BlockStatus::Elided(rec1_id.clone())
+        BlockStatus::Summarized(rec2_id.clone())
     );
     assert_eq!(
         expanded.blocks[3].status,
@@ -1670,7 +1663,7 @@ fn test_be04_expansion_fixture_summarize_elide_merge_nesting_and_lazy_reading() 
         expand_conversation(&current_context_blocks, &index, None, |id| store.read(id));
     assert_eq!(corrupted_expansion.unreadable_records.len(), 1);
     assert_eq!(corrupted_expansion.unreadable_records[0].record_id, rec1_id);
-    // The elision stub stands in for its unreadable originals; the rest expands.
+    // The inner summary brief stands in for its unreadable originals; the rest expands.
     let shown = corrupted_expansion
         .blocks
         .iter()
@@ -1679,9 +1672,8 @@ fn test_be04_expansion_fixture_summarize_elide_merge_nesting_and_lazy_reading() 
     assert_eq!(
         shown,
         vec![
-            (b0.id(), BlockStatus::Summarized(rec2_id.clone())),
-            (b1.id(), BlockStatus::Summarized(rec2_id.clone())),
-            (e1.id(), BlockStatus::Unreadable(rec1_id.clone())),
+            (s0.id(), BlockStatus::Unreadable(rec1_id.clone())),
+            (b2.id(), BlockStatus::Summarized(rec2_id.clone())),
             (b3.id(), BlockStatus::Summarized(rec2_id.clone())),
             (b4.id(), BlockStatus::Summarized(rec3_id.clone())),
             (b5.id(), BlockStatus::Summarized(rec3_id.clone())),
@@ -2188,15 +2180,29 @@ async fn test_be06_history_artifacts_read_range_and_errors() {
         .unwrap_err();
     assert!(matches!(err_file_deleted, StoreError::Read(_)));
 
-    // 5. persist always fails with StoreError::Persist
+    // 5. persist writes atomically to .artifacts/ and read returns bytes and ranges
     let hint = ArtifactHint::new("tool", b1.id(), ArtifactKind::FullOutput);
-    let err_persist = artifacts.persist(b"data", hint).await.unwrap_err();
-    assert!(matches!(err_persist, StoreError::Persist(_)));
-    assert!(
-        err_persist
-            .to_string()
-            .contains("history artifacts are written only by context rewrites")
+    let payload = b"spilled full tool output bytes\nline 2";
+    let persisted = artifacts.persist(payload, hint).await.unwrap();
+    assert!(persisted.id.starts_with("artifact:"));
+    assert_eq!(persisted.size_bytes, payload.len());
+    assert_eq!(persisted.kind, ArtifactKind::FullOutput);
+    assert!(persisted.persisted);
+    assert_eq!(artifacts.read(&persisted.id, None).await.unwrap(), payload);
+    assert_eq!(
+        artifacts.read(&persisted.id, Some(8..14)).await.unwrap(),
+        b"full t"
     );
+    let err_spilled_oob = artifacts
+        .read(&persisted.id, Some(1000..1005))
+        .await
+        .unwrap_err();
+    assert!(matches!(err_spilled_oob, StoreError::Read(_)));
+    let err_spilled_malformed = artifacts
+        .read("artifact:not-a-uuid", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(err_spilled_malformed, StoreError::Read(_)));
 }
 
 #[test]
@@ -2276,7 +2282,7 @@ fn test_be06_record_id_allocation_and_commit_rewrite_validation() {
     assert!(!bad_file.exists());
 }
 
-fn setup_recall_test(
+pub(super) fn setup_recall_test(
     dir: &std::path::Path,
 ) -> (
     Arc<super::history::HistoryStore>,
@@ -2316,11 +2322,11 @@ fn setup_recall_test(
     (history, runtime, tool)
 }
 
-fn recall_control() -> CallControl {
+pub(super) fn recall_control() -> CallControl {
     CallControl::new(CancellationToken::new(), None)
 }
 
-fn recall_call(args: serde_json::Value) -> causa::kernel::ToolCallContext {
+pub(super) fn recall_call(args: serde_json::Value) -> causa::kernel::ToolCallContext {
     causa::kernel::ToolCallContext::new(
         BlockId::new(uuid::Uuid::now_v7()),
         causa::kernel::ToolCallPayload::new(super::recall::TOOL_NAME, args),
@@ -2873,32 +2879,28 @@ async fn test_be07_recall_next_layer_pointers() {
     };
     store.commit_rewrite(&mut context, r1_rewrite).unwrap();
 
-    // E: Elide record, replaces tool result T with shortened T2
+    // E: Summarize record replacing tool result T with brief T2
     let t = ContextBlock::new(
         BlockId::new(uuid::Uuid::now_v7()),
         BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
             BlockId::new(uuid::Uuid::now_v7()),
             ToolResultStatus::Succeeded,
-            ToolOutput::new(serde_json::json!("long tool result to be shortened")),
+            ToolOutput::new(serde_json::json!("long tool result to be summarized")),
         )),
         BlockMeta::default(),
     );
     context.edit().append(vec![t.clone()]).commit().unwrap();
 
-    let t2 = ContextBlock::new(
+    let t2 = ContextBlock::text(
         BlockId::new(uuid::Uuid::now_v7()),
-        BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
-            t.id(),
-            ToolResultStatus::Succeeded,
-            ToolOutput::new(serde_json::json!("shortened T2")),
-        )),
-        BlockMeta::default(),
+        Role::User,
+        "summary brief T2",
     );
     let e_id = super::history::new_record_id();
     let e_rewrite = super::history::Rewrite {
         record_id: e_id.clone(),
         trigger: super::HistoryTrigger::Auto,
-        kind: super::history::RewriteKind::Elide,
+        kind: super::history::RewriteKind::Summarize,
         estimate_before: 500,
         estimate_after: 100,
         replacements: vec![super::history::PlannedReplacement {
@@ -2908,11 +2910,28 @@ async fn test_be07_recall_next_layer_pointers() {
     };
     store.commit_rewrite(&mut context, e_rewrite).unwrap();
 
-    // R2: Summarize record that removes T2 among other blocks
-    let r2_extra = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "user extra");
+    // R2: Summarize record that removes T2 and a spilled tool result among other blocks
+    let spilled_uuid = uuid::Uuid::now_v7().to_string();
+    let mut spilled_output = ToolOutput::new(serde_json::Value::String("preview".into()));
+    spilled_output.truncation = causa::kernel::Truncation::Middle;
+    spilled_output.artifact = Some(causa::kernel::ArtifactRef::new(
+        format!("artifact:{spilled_uuid}"),
+        5_000,
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let spilled_block = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            BlockId::new(uuid::Uuid::now_v7()),
+            ToolResultStatus::Succeeded,
+            spilled_output,
+        )),
+        BlockMeta::default(),
+    );
     context
         .edit()
-        .append(vec![r2_extra.clone()])
+        .append(vec![spilled_block.clone()])
         .commit()
         .unwrap();
 
@@ -2925,7 +2944,7 @@ async fn test_be07_recall_next_layer_pointers() {
         estimate_before: 500,
         estimate_after: 100,
         replacements: vec![super::history::PlannedReplacement {
-            range: 1..3, // removes T2 and r2_extra
+            range: 1..3, // removes T2 and spilled_block
             with: vec![r2_brief.clone()],
         }],
     };
@@ -2968,7 +2987,7 @@ async fn test_be07_recall_next_layer_pointers() {
     assert!(content_m.contains(&format!("{m_id}/{}", b1.id().0)));
     assert!(content_m.contains(&format!("original: recall id={r1_id}")));
 
-    // 2. Listing R2 marks T2 with original: recall id=E
+    // 2. Listing R2 marks T2 with original: recall id=E and spilled_block with artifact: recall id=artifact:<id>
     let call_r2 = recall_call(serde_json::json!({ "id": r2_id }));
     let res_r2 = tool.execute(&call_r2, &control, None).await;
     let content_r2 = match &res_r2.output.content {
@@ -2977,8 +2996,9 @@ async fn test_be07_recall_next_layer_pointers() {
     };
     assert!(content_r2.contains(&format!("{r2_id}/{}", t2.id().0)));
     assert!(content_r2.contains(&format!("original: recall id={e_id}")));
+    assert!(content_r2.contains(&format!("artifact: recall id=artifact:{spilled_uuid}")));
 
-    // 3. Listing R1 shows plain originals carrying NO original line (negative case)
+    // 3. Listing R1 shows plain originals carrying NO original or artifact line (negative case)
     let call_r1 = recall_call(serde_json::json!({ "id": r1_id }));
     let res_r1 = tool.execute(&call_r1, &control, None).await;
     let content_r1 = match &res_r1.output.content {
@@ -2988,8 +3008,9 @@ async fn test_be07_recall_next_layer_pointers() {
     assert!(content_r1.contains(&format!("{r1_id}/{}", orig1.id().0)));
     assert!(content_r1.contains(&format!("{r1_id}/{}", orig2.id().0)));
     assert!(!content_r1.contains("original: recall id="));
+    assert!(!content_r1.contains("artifact: recall id="));
 
-    // 4. Reading B1 directly also carries original: recall id=R1
+    // 4. Reading B1 directly also carries original: recall id=R1, and reading spilled_block carries artifact pointer
     let call_read_b1 = recall_call(serde_json::json!({ "id": format!("{m_id}/{}", b1.id().0) }));
     let res_read_b1 = tool.execute(&call_read_b1, &control, None).await;
     let content_read_b1 = match &res_read_b1.output.content {
@@ -2997,6 +3018,15 @@ async fn test_be07_recall_next_layer_pointers() {
         _ => unreachable!(),
     };
     assert!(content_read_b1.contains(&format!("original: recall id={r1_id}")));
+
+    let call_read_spilled =
+        recall_call(serde_json::json!({ "id": format!("{r2_id}/{}", spilled_block.id().0) }));
+    let res_read_spilled = tool.execute(&call_read_spilled, &control, None).await;
+    let content_read_spilled = match &res_read_spilled.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        _ => unreachable!(),
+    };
+    assert!(content_read_spilled.contains(&format!("artifact: recall id=artifact:{spilled_uuid}")));
 }
 
 #[tokio::test]
@@ -3341,21 +3371,83 @@ async fn test_be07_recall_stops_in_flight_on_cancel_deadline_and_drop() {
 }
 
 #[tokio::test]
-async fn test_be08_shortened_result_note_contains_recall_id_and_recall_reads_original() {
+async fn test_be08_spilled_preview_and_record_pointer_contain_recall_id_and_recall_reads_original()
+{
     let dir = tempfile::tempdir().unwrap();
     let (store, _runtime, tool) = setup_recall_test(dir.path());
+    let artifacts = Arc::new(super::artifacts::HistoryArtifacts::new(store.clone()));
 
-    let original_text = "original full output of a lengthy command or file read";
+    let original_text: String = (1..=120)
+        .map(|i| format!("line-{i:03}: original full output of a lengthy command or file read"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let big_output = format!("{original_text}\n{}", "x".repeat(16_000));
+    let call_id = BlockId::new(uuid::Uuid::now_v7());
+    let result_id = BlockId::new(uuid::Uuid::now_v7());
+    let call_ctx = causa::kernel::ToolCallContext::new(
+        call_id,
+        causa::kernel::ToolCallPayload::new("run_command", serde_json::json!({})),
+    );
+    let mut batch = causa::kernel::ToolBatch::new(vec![call_ctx]).unwrap();
+    batch
+        .resolve_at(
+            0,
+            result_id,
+            causa::kernel::ToolResultPayload::new(
+                call_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::Value::String(big_output.clone())),
+            ),
+        )
+        .unwrap();
+
+    use causa::kernel::ToolBatchProcessor;
+
+    let processor = super::spill::OutputSpillProcessor::new(artifacts);
+    let turn_id = causa::kernel::TurnId::new("t1");
+    let control = recall_control();
+    let ids = [call_id];
+    let ctx =
+        causa::kernel::ProcessorContext::new(&turn_id, causa::kernel::RoundId(1), &ids, &control);
+    processor.process(&mut batch, &ctx).await.unwrap();
+
+    let (_, spilled_payload) = batch.results()[0].result().unwrap();
+    let spilled_preview = match &spilled_payload.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        other => panic!("expected spilled preview string, got: {other:?}"),
+    };
+    let art_ref = spilled_payload
+        .output
+        .artifact
+        .as_ref()
+        .expect("spilled output must attach ArtifactRef");
+    assert!(spilled_preview.contains(&format!("recall id={}", art_ref.id)));
+
+    // Follow the id exactly as the model sees it in the spilled preview.
+    let noted_id = spilled_preview
+        .split("recall id=")
+        .nth(1)
+        .and_then(|rest| rest.split([')', '\n', ' ']).next())
+        .expect("preview names a recall id");
+    assert_eq!(noted_id, art_ref.id);
+    let call = recall_call(serde_json::json!({ "id": noted_id }));
+    let res = tool.execute(&call, &recall_control(), None).await;
+    assert_eq!(res.status, ToolResultStatus::Succeeded);
+    let output_text = match &res.output.content {
+        serde_json::Value::String(s) => s.as_str(),
+        other => panic!("expected string output, got: {other:?}"),
+    };
+    assert!(output_text.contains("line-001: original full output"));
+
+    // Also verify `<record_id>/<block_id>` recall from a committed rewrite record.
     let b0 = ContextBlock::text(
         BlockId::new(uuid::Uuid::now_v7()),
         Role::User,
-        original_text,
+        "compacted original block body",
     );
     let mut context = Context::new();
     context.edit().append(vec![b0.clone()]).commit().unwrap();
-
     let record_id = super::history::new_record_id();
-    let block_id = b0.id();
     let rewrite = super::history::Rewrite {
         record_id: record_id.clone(),
         trigger: super::HistoryTrigger::Auto,
@@ -3372,41 +3464,13 @@ async fn test_be08_shortened_result_note_contains_recall_id_and_recall_reads_ori
     };
     store.commit_rewrite(&mut context, rewrite).unwrap();
 
-    let note = super::shortened_result_note(&record_id, block_id.0);
-    let recall_id = format!("{record_id}/{}", block_id.0);
-    assert!(
-        note.0.contains(&recall_id),
-        "note must contain recall id: {}",
-        note.0
-    );
-
-    let mut output = ToolOutput::new(serde_json::json!("shortened preview"));
-    output.artifact = Some(causa::kernel::ArtifactRef::new(
-        recall_id.clone(),
-        original_text.len(),
-        causa::kernel::ArtifactKind::FullOutput,
-        true,
-    ));
-    let mut result_payload = ToolResultPayload::new(
-        BlockId::new(uuid::Uuid::now_v7()),
-        ToolResultStatus::Succeeded,
-        output,
-    );
-    result_payload.notes.push(note);
-
-    // Follow the id exactly as the model sees it in the note.
-    let noted_id = result_payload.notes[0]
-        .0
-        .rsplit_once("recall id=")
-        .map(|(_, id)| id.trim())
-        .expect("note names a recall id");
-    assert_eq!(noted_id, recall_id);
-    let call = recall_call(serde_json::json!({ "id": noted_id }));
+    let record_recall_id = format!("{record_id}/{}", b0.id().0);
+    let call = recall_call(serde_json::json!({ "id": record_recall_id }));
     let res = tool.execute(&call, &recall_control(), None).await;
     assert_eq!(res.status, ToolResultStatus::Succeeded);
     let output_text = match &res.output.content {
         serde_json::Value::String(s) => s.as_str(),
         other => panic!("expected string output, got: {other:?}"),
     };
-    assert!(output_text.contains(original_text));
+    assert!(output_text.contains("compacted original block body"));
 }

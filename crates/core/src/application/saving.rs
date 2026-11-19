@@ -229,9 +229,11 @@ pub(super) async fn io<T: Send + 'static>(
     .map_err(Into::into)
 }
 
-/// Deep check of the record's history artifact references before it is
-/// written: each must name a record in the record's own index whose file
-/// still exists and holds that original block. Runs on the blocking pool.
+/// Deep check of the record's history and spilled artifact references before
+/// it is written: history references must name a record in the record's own
+/// index whose file still exists and holds that original block; spilled artifact
+/// references (`artifact:<id>`) must exist and be readable in this session's
+/// `.artifacts/` directory. Runs on the blocking pool.
 fn check_artifact_references(
     record: &SavedSessionRecord,
     history: Option<&crate::compact::history::HistoryStore>,
@@ -257,6 +259,25 @@ fn check_artifact_references(
                 format!("history artifact reference {}: {reason}", artifact.id),
             ))
         };
+        if artifact
+            .id
+            .starts_with(crate::compact::history::ARTIFACT_ID_PREFIX)
+        {
+            let artifact_id = crate::compact::history::parse_spilled_artifact_id(&artifact.id)
+                .map_err(|reason| invalid(reason.into()))?;
+            let history = history
+                .ok_or_else(|| invalid("this session keeps no artifact directory".into()))?;
+            history
+                .verify_spilled_artifact(artifact_id)
+                .map_err(|error| match error {
+                    crate::store::StoreError::Io(source) => refused(std::io::Error::new(
+                        source.kind(),
+                        format!("artifact reference {}: {source}", artifact.id),
+                    )),
+                    other => invalid(other.to_string()),
+                })?;
+            continue;
+        }
         let (record_id, block_id) = crate::compact::history::parse_artifact_id(&artifact.id)
             .map_err(|reason| invalid(reason.into()))?;
         if !record

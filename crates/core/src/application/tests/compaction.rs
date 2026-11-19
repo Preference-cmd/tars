@@ -2056,3 +2056,668 @@ async fn test_be28_a_fixed_prefix_over_half_the_line_is_reported_once_and_refuse
         .await
         .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be16_save_and_repair_accept_own_artifact_and_refuse_missing_unreadable_and_foreign() {
+    use causa::kernel::{ArtifactHint, ArtifactKind, ArtifactStore};
+
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("Summary.".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+
+    let s1 = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(None),
+            Context::new(),
+        ))
+        .await
+        .unwrap();
+
+    let payload = b"spilled full output for save & repair test";
+    let art_ref = s1
+        .artifacts()
+        .unwrap()
+        .persist(
+            payload,
+            ArtifactHint::new(
+                "read_file",
+                causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+                ArtifactKind::FullOutput,
+            ),
+        )
+        .await
+        .unwrap();
+
+    let call_id = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
+    let call_block = ContextBlock::new(
+        call_id,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "read_file",
+            serde_json::json!({}),
+        )),
+        Default::default(),
+    );
+    let mut output = causa::kernel::ToolOutput::new(serde_json::Value::String("preview".into()));
+    output.truncation = causa::kernel::Truncation::Middle;
+    output.artifact = Some(art_ref.clone());
+    let result_block = ContextBlock::new(
+        causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            output,
+        )),
+        Default::default(),
+    );
+
+    let v1 = s1.read_materials().unwrap().version;
+    s1.edit(v1, vec![call_block.clone(), result_block.clone()])
+        .unwrap();
+    s1.wait_saved().await.unwrap();
+
+    // Own existing readable artifact is accepted by repair inspection and admission.
+    assert!(s1.inspect_repair(None).unwrap().diagnosis.is_ready());
+    let r1 = s1
+        .submit(SubmitRequest {
+            request_key: "own-artifact-ok".into(),
+            blocks: vec![text_block(10)],
+        })
+        .unwrap();
+    finished(&s1, &r1.work).await;
+    s1.wait_saved().await.unwrap();
+
+    // Foreign session referencing s1's artifact:<id> is refused by repair and save.
+    let s2 = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(None),
+            Context::new(),
+        ))
+        .await
+        .unwrap();
+    let v2 = s2.read_materials().unwrap().version;
+    s2.edit(v2, vec![call_block, result_block]).unwrap();
+    let s2_save_err = s2.wait_saved().await.unwrap_err();
+    assert!(
+        matches!(s2_save_err, ApplicationError::SaveBlocked(_)),
+        "foreign spilled artifact must block save: {s2_save_err}"
+    );
+    assert!(
+        !s2.inspect_repair(None).unwrap().diagnosis.is_ready(),
+        "foreign spilled artifact must be reported by repair inspection"
+    );
+    host.close(&s2.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+
+    // Missing artifact file on s1: repair flags UnsupportedReference, submit refuses, save blocks.
+    let s1_id = s1.target().conversation_id().as_str().to_owned();
+    let art_uuid = art_ref.id.strip_prefix("artifact:").unwrap();
+    let art_path = store
+        .path()
+        .join("sessions")
+        .join(format!("{s1_id}.artifacts"))
+        .join(art_uuid);
+    std::fs::remove_file(&art_path).unwrap();
+
+    let diag = s1.inspect_repair(None).unwrap().diagnosis;
+    assert!(!diag.is_ready());
+    assert!(
+        diag.issues
+            .iter()
+            .any(|i| i.kind == crate::application::RepairIssueKind::UnsupportedReference)
+    );
+    assert!(s1.submit(request("blocked-by-missing-artifact")).is_err());
+
+    let mut blocks = s1.read_materials().unwrap().context.blocks().to_vec();
+    blocks.push(text_block(10));
+    let v_missing = s1.read_materials().unwrap().version;
+    s1.edit(v_missing, blocks).unwrap();
+    let missing_err = s1.wait_saved().await.unwrap_err();
+    assert!(matches!(missing_err, ApplicationError::SaveBlocked(_)));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(&art_path, b"locked").unwrap();
+        let mut perms = std::fs::metadata(&art_path).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&art_path, perms).unwrap();
+
+        if std::fs::File::open(&art_path).is_err() {
+            assert!(!s1.inspect_repair(None).unwrap().diagnosis.is_ready());
+            let retry_err = s1.retry_save().await.unwrap_err();
+            assert!(matches!(retry_err, ApplicationError::SaveBlocked(_)));
+        }
+        let mut restore = std::fs::metadata(&art_path).unwrap().permissions();
+        restore.set_mode(0o600);
+        std::fs::set_permissions(&art_path, restore).unwrap();
+    }
+
+    host.close(&s1.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be16_reopen_under_write_lock_cleans_orphan_artifacts_and_keeps_context_and_history_refs()
+ {
+    use causa::kernel::{ArtifactHint, ArtifactKind, ArtifactStore};
+
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("Goal: summary.".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+
+    let session = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(None),
+            Context::new(),
+        ))
+        .await
+        .unwrap();
+    let artifacts = session.artifacts().unwrap();
+
+    // 1. Artifact that will be summarized into a history record
+    let art_hist = artifacts
+        .persist(
+            b"history-referenced payload",
+            ArtifactHint::new(
+                "read_file",
+                causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+                ArtifactKind::FullOutput,
+            ),
+        )
+        .await
+        .unwrap();
+    let call_hist = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
+    let mut out_hist = causa::kernel::ToolOutput::new(serde_json::Value::String("p-hist".into()));
+    out_hist.truncation = causa::kernel::Truncation::Middle;
+    out_hist.artifact = Some(art_hist.clone());
+    let v = session.read_materials().unwrap().version;
+    session
+        .edit(
+            v,
+            vec![
+                text_block(1_200),
+                ContextBlock::new(
+                    call_hist,
+                    causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+                        "read_file",
+                        serde_json::json!({}),
+                    )),
+                    Default::default(),
+                ),
+                ContextBlock::new(
+                    causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+                    causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+                        call_hist,
+                        causa::kernel::ToolResultStatus::Succeeded,
+                        out_hist,
+                    )),
+                    Default::default(),
+                ),
+            ],
+        )
+        .unwrap();
+    session.wait_saved().await.unwrap();
+
+    session.compact().await.unwrap();
+    session.wait_saved().await.unwrap();
+    assert!(!session.history().is_empty());
+
+    // 2. Artifact that remains in current Context
+    let art_ctx = artifacts
+        .persist(
+            b"context-referenced payload",
+            ArtifactHint::new(
+                "read_file",
+                causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+                ArtifactKind::FullOutput,
+            ),
+        )
+        .await
+        .unwrap();
+    let call_ctx = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
+    let mut out_ctx = causa::kernel::ToolOutput::new(serde_json::Value::String("p-ctx".into()));
+    out_ctx.truncation = causa::kernel::Truncation::Middle;
+    out_ctx.artifact = Some(art_ctx.clone());
+    let mut blocks = session.read_materials().unwrap().context.blocks().to_vec();
+    blocks.push(ContextBlock::new(
+        call_ctx,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "read_file",
+            serde_json::json!({}),
+        )),
+        Default::default(),
+    ));
+    blocks.push(ContextBlock::new(
+        causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_ctx,
+            causa::kernel::ToolResultStatus::Succeeded,
+            out_ctx,
+        )),
+        Default::default(),
+    ));
+    let v2 = session.read_materials().unwrap().version;
+    session.edit(v2, blocks).unwrap();
+    session.wait_saved().await.unwrap();
+
+    // 3. Orphan artifact persisted on disk but never referenced by Context or HistoryRecord
+    let art_orphan = artifacts
+        .persist(
+            b"orphan payload",
+            ArtifactHint::new(
+                "read_file",
+                causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+                ArtifactKind::FullOutput,
+            ),
+        )
+        .await
+        .unwrap();
+
+    let id = session.target().conversation_id().clone();
+    let art_dir = store
+        .path()
+        .join("sessions")
+        .join(format!("{}.artifacts", id.as_str()));
+    let path_hist = art_dir.join(art_hist.id.strip_prefix("artifact:").unwrap());
+    let path_ctx = art_dir.join(art_ctx.id.strip_prefix("artifact:").unwrap());
+    let path_orphan = art_dir.join(art_orphan.id.strip_prefix("artifact:").unwrap());
+    assert!(path_hist.is_file());
+    assert!(path_ctx.is_file());
+    assert!(path_orphan.is_file());
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // Reopen under write lock: orphan removed, Context + History references kept, 0 artifact reads.
+    let reopened = host.open(id).await.unwrap();
+    assert_eq!(
+        reopened.artifact_reads(),
+        0,
+        "reopening a session must not read .artifacts/ files"
+    );
+    assert!(path_hist.is_file(), "history-referenced artifact must stay");
+    assert!(path_ctx.is_file(), "context-referenced artifact must stay");
+    assert!(!path_orphan.exists(), "orphan artifact must be removed");
+    host.close(&reopened.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be16_persistent_list_directory_spills_at_entry_while_transient_does_not_and_internal_cap_stays()
+ {
+    struct ScriptedWorkspaceGateway {
+        calls: Vec<(&'static str, serde_json::Value)>,
+        step: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelGateway for ScriptedWorkspaceGateway {
+        async fn invoke(
+            &self,
+            _request: &causa::kernel::ModelRequest,
+            _control: &causa::kernel::CallControl,
+        ) -> Result<causa::kernel::ModelOutput, causa::kernel::ModelInvokeError> {
+            let idx = self.step.fetch_add(1, Ordering::SeqCst);
+            let output = if let Some((name, args)) = self.calls.get(idx) {
+                causa::kernel::ModelOutput::new(
+                    causa::kernel::ModelResponse {
+                        items: vec![causa::kernel::ModelItem::tool_call(
+                            causa::kernel::ToolCallDraft::new(*name, args.clone()),
+                        )],
+                    },
+                    causa::kernel::ModelStopReason::ToolUse,
+                )
+            } else {
+                causa::kernel::ModelOutput::new(
+                    causa::kernel::ModelResponse {
+                        items: vec![causa::kernel::ModelItem::text("done listing and reading")],
+                    },
+                    causa::kernel::ModelStopReason::EndTurn,
+                )
+            };
+            Ok(output)
+        }
+    }
+
+    let workspace = tempfile::tempdir().unwrap();
+    let ws_root = workspace.path().canonicalize().unwrap();
+    let big_dir = ws_root.join("many");
+    std::fs::create_dir(&big_dir).unwrap();
+    let pad = "x".repeat(90);
+    for i in 1..=150 {
+        std::fs::write(big_dir.join(format!("entry-{i:03}-{pad}.txt")), b"").unwrap();
+    }
+    let huge_content = "h".repeat(80_000);
+    std::fs::write(ws_root.join("huge.txt"), &huge_content).unwrap();
+
+    // 1. Persistent session: list_directory spills to .artifacts/, huge.txt still hits read_file's internal 64 KiB cap
+    let store = tempfile::tempdir().unwrap();
+    let persistent_host = SessionHost::new(Some(store.path().into()));
+    persistent_host.set_test_gateway(Some(Arc::new(ScriptedWorkspaceGateway {
+        calls: vec![
+            ("list_directory", serde_json::json!({ "path": "many" })),
+            ("read_file", serde_json::json!({ "path": "huge.txt" })),
+        ],
+        step: AtomicUsize::new(0),
+    })));
+    let mut def = compacting_definition(None);
+    def.workspace_root = Some(ws_root.clone());
+    def.tools = vec![
+        crate::definition::WorkspaceTool::ListDirectory,
+        crate::definition::WorkspaceTool::ReadFile,
+    ];
+    def.max_model_rounds = 4;
+    def.max_tool_calls = 4;
+
+    let session = persistent_host
+        .create(PreparedCreate::persistent(def.clone(), Context::new()))
+        .await
+        .unwrap();
+    let r = session
+        .submit(SubmitRequest {
+            request_key: "list-and-read".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&session, &r.work).await;
+    session.wait_saved().await.unwrap();
+
+    assert!(
+        session.history().is_empty(),
+        "entry spilling produces no elide rewrite records"
+    );
+    let blocks = session.read_materials().unwrap().context;
+    let tool_results: Vec<_> = blocks
+        .blocks()
+        .iter()
+        .filter_map(|b| match b.content() {
+            causa::kernel::BlockContent::ToolResult(res) => Some(res),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 2);
+
+    // First result (list_directory) was spilled by after processor
+    let spilled = &tool_results[0].output;
+    assert_eq!(spilled.truncation, causa::kernel::Truncation::Middle);
+    assert!(spilled.meta.as_ref().unwrap().original_tokens.unwrap() > 4_000);
+    let art = spilled.artifact.as_ref().expect("list_directory spilled");
+    assert!(art.id.starts_with("artifact:"));
+    let preview = spilled.content.as_str().unwrap();
+    assert!(preview.contains(&format!("recall id={}", art.id)));
+    let full = session.read_spilled_artifact(&art.id).unwrap();
+    let full_count = (1..=150)
+        .filter(|i| full.contains(&format!("entry-{i:03}-")))
+        .count();
+    let preview_count = (1..=150)
+        .filter(|i| preview.contains(&format!("entry-{i:03}-")))
+        .count();
+    assert_eq!(full_count, 150);
+    assert!(
+        preview_count < 60,
+        "preview only keeps head/tail: {preview_count}"
+    );
+
+    // Second result (huge.txt) hit read_file's internal output_bytes cap (not relaxed!)
+    let capped_obj = tool_results[1].output.content.as_object();
+    assert_eq!(
+        capped_obj
+            .and_then(|o| o.get("limit_reason"))
+            .and_then(|v| v.as_str()),
+        Some("output_bytes"),
+        "built-in read_file internal cap must not be relaxed: {:?}",
+        tool_results[1].output.content
+    );
+
+    persistent_host
+        .close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // 2. Transient run: no artifact store / spill processor, list_directory stays intact
+    let transient_host = SessionHost::new(None);
+    transient_host.set_test_gateway(Some(Arc::new(ScriptedWorkspaceGateway {
+        calls: vec![("list_directory", serde_json::json!({ "path": "many" }))],
+        step: AtomicUsize::new(0),
+    })));
+    let transient = transient_host
+        .create(PreparedCreate::transient(def, Context::new()))
+        .await
+        .unwrap();
+    let rt = transient
+        .submit(SubmitRequest {
+            request_key: "list-transient".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&transient, &rt.work).await;
+
+    let t_blocks = transient.read_materials().unwrap().context;
+    let t_res = t_blocks
+        .blocks()
+        .iter()
+        .find_map(|b| match b.content() {
+            causa::kernel::BlockContent::ToolResult(res) => Some(res),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(t_res.output.truncation, causa::kernel::Truncation::None);
+    assert!(t_res.output.artifact.is_none());
+    let t_json = t_res.output.content.to_string();
+    assert_eq!(
+        (1..=150)
+            .filter(|i| t_json.contains(&format!("entry-{i:03}-")))
+            .count(),
+        150,
+        "transient session must keep full output in Context"
+    );
+    transient_host
+        .close(&transient.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be17_spill_recall_and_subsequent_summary_uses_preview_not_original() {
+    use super::support::is_summary_request;
+
+    struct SpillRecallGateway {
+        phase: AtomicUsize,
+        summary_requests: Arc<Mutex<Vec<String>>>,
+        recall_outputs: Arc<Mutex<Vec<String>>>,
+        art_id: Mutex<Option<String>>,
+        record_id: Mutex<Option<String>>,
+        omitted_marker: Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelGateway for SpillRecallGateway {
+        async fn invoke(
+            &self,
+            request: &causa::kernel::ModelRequest,
+            _control: &causa::kernel::CallControl,
+        ) -> Result<causa::kernel::ModelOutput, causa::kernel::ModelInvokeError> {
+            if is_summary_request(request) {
+                let rendered = serde_json::to_string(&request.frame.blocks).unwrap();
+                self.summary_requests.lock().unwrap().push(rendered);
+                let mut out = causa::kernel::ModelOutput::new(
+                    causa::kernel::ModelResponse {
+                        items: vec![causa::kernel::ModelItem::text("Summary of spilled read.")],
+                    },
+                    causa::kernel::ModelStopReason::EndTurn,
+                );
+                out.usage = Some(causa::kernel::ModelUsage::new(300, 30));
+                return Ok(out);
+            }
+            let phase = self.phase.fetch_add(1, Ordering::SeqCst);
+            let item = match phase {
+                // Work 1, round 0: call list_directory on many -> spills at entry
+                0 => causa::kernel::ModelItem::tool_call(causa::kernel::ToolCallDraft::new(
+                    "list_directory",
+                    serde_json::json!({ "path": "many" }),
+                )),
+                // Work 1, round 1: observe preview, finish turn
+                1 => {
+                    let frame_json = serde_json::to_string(&request.frame.blocks).unwrap();
+                    assert!(frame_json.contains("output spilled"));
+                    causa::kernel::ModelItem::text("spilled preview observed")
+                }
+                // Work 2 (after manual compact), round 0: call recall on the history record id
+                2 => {
+                    let rec_id = self.record_id.lock().unwrap().clone().unwrap();
+                    causa::kernel::ModelItem::tool_call(causa::kernel::ToolCallDraft::new(
+                        "recall",
+                        serde_json::json!({ "id": rec_id }),
+                    ))
+                }
+                // Work 2, round 1: verify recall list showed artifact:<id>, now call recall on artifact:<id>
+                3 => {
+                    let frame_json = serde_json::to_string(&request.frame.blocks).unwrap();
+                    let art_id = self.art_id.lock().unwrap().clone().unwrap();
+                    assert!(
+                        frame_json.contains(&format!("artifact: recall id={art_id}")),
+                        "recall listing of summarized spilled block must expose artifact id: {frame_json}"
+                    );
+                    causa::kernel::ModelItem::tool_call(causa::kernel::ToolCallDraft::new(
+                        "recall",
+                        serde_json::json!({ "id": art_id }),
+                    ))
+                }
+                // Work 2, round 2: recall on artifact:<id> returned full original including omitted entry
+                4 => {
+                    let frame_json = serde_json::to_string(&request.frame.blocks).unwrap();
+                    self.recall_outputs.lock().unwrap().push(frame_json);
+                    causa::kernel::ModelItem::text("verified full original via recall")
+                }
+                _ => causa::kernel::ModelItem::text("done"),
+            };
+            let stop = if matches!(phase, 0 | 2 | 3) {
+                causa::kernel::ModelStopReason::ToolUse
+            } else {
+                causa::kernel::ModelStopReason::EndTurn
+            };
+            let mut out = causa::kernel::ModelOutput::new(
+                causa::kernel::ModelResponse { items: vec![item] },
+                stop,
+            );
+            out.usage = Some(causa::kernel::ModelUsage::new(400, 30));
+            Ok(out)
+        }
+    }
+
+    let workspace = tempfile::tempdir().unwrap();
+    let ws_root = workspace.path().canonicalize().unwrap();
+    let big_dir = ws_root.join("many");
+    std::fs::create_dir(&big_dir).unwrap();
+    let pad = "m".repeat(90);
+    for i in 1..=95 {
+        std::fs::write(big_dir.join(format!("entry-{i:03}-{pad}.txt")), b"").unwrap();
+    }
+
+    let summary_requests = Arc::new(Mutex::new(Vec::new()));
+    let recall_outputs = Arc::new(Mutex::new(Vec::new()));
+    let gateway = Arc::new(SpillRecallGateway {
+        phase: AtomicUsize::new(0),
+        summary_requests: summary_requests.clone(),
+        recall_outputs: recall_outputs.clone(),
+        art_id: Mutex::new(None),
+        record_id: Mutex::new(None),
+        omitted_marker: Mutex::new(None),
+    });
+
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    host.set_test_gateway(Some(gateway.clone() as Arc<dyn ModelGateway>));
+
+    let mut def = compacting_definition(Some(40_000));
+    def.workspace_root = Some(ws_root);
+    def.tools = vec![crate::definition::WorkspaceTool::ListDirectory];
+    def.max_model_rounds = 6;
+    def.max_tool_calls = 6;
+
+    let session = host
+        .create(PreparedCreate::persistent(def, Context::new()))
+        .await
+        .unwrap();
+
+    // Work 1: list_directory -> spilled at entry
+    let r1 = session
+        .submit(SubmitRequest {
+            request_key: "work-list".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&session, &r1.work).await;
+    session.wait_saved().await.unwrap();
+
+    let (art_id, preview_text) = session
+        .read_materials()
+        .unwrap()
+        .context
+        .blocks()
+        .iter()
+        .find_map(|b| match b.content() {
+            causa::kernel::BlockContent::ToolResult(res) => res.output.artifact.as_ref().map(|a| {
+                (
+                    a.id.clone(),
+                    res.output.content.as_str().unwrap().to_owned(),
+                )
+            }),
+            _ => None,
+        })
+        .expect("spilled artifact present");
+    let full_text = session.read_spilled_artifact(&art_id).unwrap();
+    // Pick an entry name present in the first 12,000 chars of full_text (page 1 of recall)
+    // that was omitted from preview_text.
+    let first_page: String = full_text.chars().take(11_000).collect();
+    let omitted = (1..=95)
+        .map(|i| format!("entry-{i:03}-"))
+        .find(|tag| first_page.contains(tag.as_str()) && !preview_text.contains(tag.as_str()))
+        .expect("at least one entry omitted from preview on page 1");
+    *gateway.art_id.lock().unwrap() = Some(art_id.clone());
+    *gateway.omitted_marker.lock().unwrap() = Some(omitted.clone());
+
+    // Compact: brief request must receive ONLY the preview, never re-pull the full original
+    let outcome = session.compact().await.unwrap();
+    session.wait_saved().await.unwrap();
+    *gateway.record_id.lock().unwrap() = Some(outcome.record.record_id.clone());
+
+    {
+        let summaries = summary_requests.lock().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0].contains("output spilled"));
+        assert!(summaries[0].contains(&format!("recall id={art_id}")));
+        assert!(
+            !summaries[0].contains(&omitted),
+            "summary brief request must use preview and never re-pull full artifact"
+        );
+    }
+
+    // Work 2: recall lists record (seeing artifact pointer) -> reads artifact:<id> -> gets omitted entry
+    let r2 = session
+        .submit(SubmitRequest {
+            request_key: "work-recall".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&session, &r2.work).await;
+    session.wait_saved().await.unwrap();
+
+    {
+        let recall_seen = recall_outputs.lock().unwrap();
+        assert_eq!(recall_seen.len(), 1);
+        assert!(recall_seen[0].contains(&omitted));
+    }
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}

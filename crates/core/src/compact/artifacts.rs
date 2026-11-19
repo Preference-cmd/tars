@@ -1,24 +1,25 @@
-//! Artifact store backed by a session's rewrite records.
+//! Artifact store backed by a session's rewrite records and `.artifacts/` directory.
 //!
-//! Exposes original blocks from committed history rewrite records as readable
-//! artifacts. History artifacts are read-only and cannot be created via persist.
+//! Exposes both original blocks from committed history rewrite records
+//! (`<record id>/<block id>`) and spilled oversized tool outputs
+//! (`artifact:<artifact id>`) persisted atomically in `<store>/sessions/<id>.artifacts/`.
 
-use super::history::{HistoryStore, parse_artifact_id};
+use super::history::{
+    ARTIFACT_ID_PREFIX, HistoryStore, parse_artifact_id, parse_spilled_artifact_id,
+};
 use async_trait::async_trait;
 use causa::kernel::{ArtifactHint, ArtifactRef, ArtifactStore, StoreError};
 use std::ops::Range;
 use std::sync::Arc;
 
-/// An artifact store that exposes original blocks from rewrite records.
+/// An artifact store bound to one session's history records and spilled artifacts.
 #[derive(Clone)]
-#[allow(dead_code)]
 pub(crate) struct HistoryArtifacts {
     history: Arc<HistoryStore>,
 }
 
-#[allow(dead_code)]
 impl HistoryArtifacts {
-    /// Bind an artifact store to a session's rewrite record store.
+    /// Bind an artifact store to a session's history and artifact directories.
     pub(crate) fn new(history: Arc<HistoryStore>) -> Self {
         Self { history }
     }
@@ -26,13 +27,39 @@ impl HistoryArtifacts {
 
 #[async_trait]
 impl ArtifactStore for HistoryArtifacts {
-    async fn persist(&self, _data: &[u8], _hint: ArtifactHint) -> Result<ArtifactRef, StoreError> {
-        Err(StoreError::Persist(
-            "history artifacts are written only by context rewrites".into(),
+    async fn persist(&self, data: &[u8], hint: ArtifactHint) -> Result<ArtifactRef, StoreError> {
+        let size_bytes = data.len();
+        let bytes = data.to_vec();
+        let history = self.history.clone();
+        let artifact_id =
+            tokio::task::spawn_blocking(move || history.persist_spilled_artifact(&bytes))
+                .await
+                .map_err(|e| StoreError::Persist(format!("storage task failed: {e}")))?
+                .map_err(|e| StoreError::Persist(e.to_string()))?;
+        Ok(ArtifactRef::new(
+            format!("{ARTIFACT_ID_PREFIX}{artifact_id}"),
+            size_bytes,
+            hint.kind,
+            true,
         ))
     }
 
     async fn read(&self, id: &str, range: Option<Range<u64>>) -> Result<Vec<u8>, StoreError> {
+        if id.starts_with(ARTIFACT_ID_PREFIX) {
+            let artifact_id = parse_spilled_artifact_id(id)
+                .map_err(|reason| {
+                    StoreError::Read(format!("malformed artifact id {id}: {reason}"))
+                })?
+                .to_owned();
+            let history = self.history.clone();
+            return tokio::task::spawn_blocking(move || {
+                history.read_spilled_artifact(&artifact_id, range)
+            })
+            .await
+            .map_err(|e| StoreError::Read(format!("storage task failed: {e}")))?
+            .map_err(|e| StoreError::Read(e.to_string()));
+        }
+
         let (record_id, block_id) = parse_artifact_id(id).map_err(|reason| {
             StoreError::Read(format!("malformed history artifact id {id}: {reason}"))
         })?;
