@@ -134,9 +134,13 @@ prompt_cache = false
 }
 
 async fn run_session_turn(session: &ManagedSession, text: &str) {
+    run_session_turn_with_key(session, "turn-1", text).await;
+}
+
+async fn run_session_turn_with_key(session: &ManagedSession, key: &str, text: &str) {
     let work = session
         .submit(SubmitRequest {
-            request_key: "turn-1".into(),
+            request_key: key.into(),
             blocks: vec![text_input(text)],
         })
         .unwrap()
@@ -222,5 +226,185 @@ async fn test_be20_wire_request_bodies_across_all_three_protocols() {
                 }
             }
         }
+    }
+}
+
+/// Extracts the rendered system prefix, tools declaration, and conversation items
+/// (with Anthropic `cache_control` markers stripped) from a raw wire body.
+fn extract_wire_head(
+    provider: Provider,
+    raw: &[u8],
+) -> (serde_json::Value, serde_json::Value, Vec<serde_json::Value>) {
+    let mut body: serde_json::Value = serde_json::from_slice(raw).unwrap();
+    if provider == Provider::Anthropic {
+        without_cache_control(&mut body);
+    }
+    let tools = body
+        .get("tools")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    match provider {
+        Provider::OpenAiChat => {
+            let messages = body["messages"].as_array().unwrap().clone();
+            let leading_sys_len = messages
+                .iter()
+                .take_while(|msg| msg["role"] == "system")
+                .count();
+            let system = serde_json::Value::Array(messages[..leading_sys_len].to_vec());
+            let items = messages[leading_sys_len..].to_vec();
+            (system, tools, items)
+        }
+        Provider::OpenAiResponses => {
+            let system = body
+                .get("instructions")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let items = body["input"].as_array().unwrap().clone();
+            (system, tools, items)
+        }
+        Provider::Anthropic => {
+            let system = body
+                .get("system")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let items = body["messages"].as_array().unwrap().clone();
+            (system, tools, items)
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_be20_frame_head_is_byte_identical_between_merges() {
+    for (name, provider) in [
+        ("openai-chat", Provider::OpenAiChat),
+        ("openai-responses", Provider::OpenAiResponses),
+        ("anthropic", Provider::Anthropic),
+    ] {
+        let fixture = Fixture::new(
+            name,
+            vec![
+                Reply::Answer,                             // turn 1
+                Reply::Summary("Brief S1: first phase."),  // compact 1 -> S1
+                Reply::Answer,                             // turn 2 (head = prefix + S1)
+                Reply::Answer,                             // turn 3 (head = prefix + S1)
+                Reply::Summary("Brief S2: second phase."), // compact 2 -> S1, S2 (no merge)
+                Reply::Answer,                             // turn 4 (head = prefix + S1 + S2)
+            ],
+            None,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let host = SessionHost::new(Some(dir.path().to_path_buf()));
+        let mut definition = test_definition(provider, Some(fixture.endpoint.clone()), true);
+        // Large window so two small briefs stay well under the chain budget and never merge.
+        definition.context_window = Some(100_000);
+        let initial = Context::from_blocks(vec![
+            causa::kernel::ContextBlock::new(
+                causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+                causa::kernel::BlockContent::text(causa::kernel::Role::System, "System rule one."),
+                causa::kernel::BlockMeta::default(),
+            ),
+            causa::kernel::ContextBlock::new(
+                causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+                causa::kernel::BlockContent::text(causa::kernel::Role::System, "System rule two."),
+                causa::kernel::BlockMeta::default(),
+            ),
+        ])
+        .unwrap();
+        let session = host
+            .create(PreparedCreate::persistent(definition, initial))
+            .await
+            .unwrap();
+
+        run_session_turn_with_key(&session, "t1", &"First turn payload. ".repeat(40)).await;
+        let first = session.compact().await.expect("first manual compact");
+        assert!(
+            first.merged.is_none(),
+            "{name}: first compact must not merge"
+        );
+        session.wait_saved().await.unwrap();
+
+        run_session_turn_with_key(&session, "t2", &"Second turn payload. ".repeat(40)).await;
+        run_session_turn_with_key(&session, "t3", &"Third turn payload. ".repeat(40)).await;
+
+        let second = session.compact().await.expect("second manual compact");
+        assert!(
+            second.merged.is_none(),
+            "{name}: second compact must not merge"
+        );
+        session.wait_saved().await.unwrap();
+
+        run_session_turn_with_key(&session, "t4", "Fourth turn short question.").await;
+
+        let history = session.history();
+        assert_eq!(history.len(), 2, "{name}: two summarize records, no merge");
+        assert!(
+            history
+                .iter()
+                .all(|entry| entry.kind == tars_core::compact::RewriteKind::Summarize),
+            "{name}: expected only summarize records between merges"
+        );
+
+        let bodies = fixture.raw_requests.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 6, "{name}: 4 turns + 2 briefs");
+
+        // Compare turn 2 (#2), turn 3 (#3), and turn 4 (#5) between merges.
+        let (sys2, tools2, items2) = extract_wire_head(provider, &bodies[2]);
+        let (sys3, tools3, items3) = extract_wire_head(provider, &bodies[3]);
+        let (sys4, tools4, items4) = extract_wire_head(provider, &bodies[5]);
+
+        assert_eq!(
+            serde_json::to_vec(&sys2).unwrap(),
+            serde_json::to_vec(&sys3).unwrap(),
+            "{name}: system prefix must be byte-identical between turn 2 and turn 3"
+        );
+        assert_eq!(
+            serde_json::to_vec(&sys2).unwrap(),
+            serde_json::to_vec(&sys4).unwrap(),
+            "{name}: system prefix must be byte-identical after second summary"
+        );
+        assert_eq!(
+            serde_json::to_vec(&tools2).unwrap(),
+            serde_json::to_vec(&tools3).unwrap(),
+            "{name}: tools must be byte-identical between turn 2 and turn 3"
+        );
+        assert_eq!(
+            serde_json::to_vec(&tools2).unwrap(),
+            serde_json::to_vec(&tools4).unwrap(),
+            "{name}: tools must be byte-identical after second summary"
+        );
+
+        // S1 is the first conversation block after the fixed prefix and must stay byte-identical
+        // across turn 2, turn 3, and turn 4 (no merge happened). Anthropic coalesces adjacent user
+        // blocks into one user message's `content` array, so S1 is `items[0]["content"][0]` there.
+        let s1_slice = |items: &[serde_json::Value]| -> Vec<u8> {
+            let value = match provider {
+                Provider::Anthropic => &items[0]["content"][0],
+                Provider::OpenAiChat | Provider::OpenAiResponses => &items[0],
+            };
+            serde_json::to_vec(value).unwrap()
+        };
+        let s1_t2 = s1_slice(&items2);
+        let s1_t3 = s1_slice(&items3);
+        let s1_t4 = s1_slice(&items4);
+        assert!(
+            String::from_utf8_lossy(&s1_t2).contains("Brief S1: first phase."),
+            "{name}: first item after prefix should be S1"
+        );
+        assert_eq!(
+            s1_t2, s1_t3,
+            "{name}: S1 in frame head must be byte-identical between turn 2 and turn 3"
+        );
+        assert_eq!(
+            s1_t2, s1_t4,
+            "{name}: S1 in frame head must remain byte-identical after appending S2"
+        );
+
+        // Turn 4 must also contain S2 somewhere after S1 (Anthropic may merge adjacent user turns
+        // into one message with multiple content blocks, so check the serialized items4).
+        let items4_text = serde_json::to_string(&items4).unwrap();
+        assert!(
+            items4_text.contains("Brief S2: second phase."),
+            "{name}: turn 4 should include S2 after S1"
+        );
     }
 }
