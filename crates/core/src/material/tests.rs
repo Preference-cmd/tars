@@ -460,4 +460,45 @@ fn test_be16_detach_history_references_drops_spilled_artifacts_and_preserves_pre
     save(&exported_path, &detached).unwrap();
     let loaded = load(&exported_path).unwrap();
     assert_eq!(loaded.blocks(), detached.blocks());
+
+    // Structured object preview (e.g. spilled read_file) also detaches cleanly while
+    // preserving object metadata and the in-place preview string.
+    let structured_id = format!("artifact:{}", uuid::Uuid::now_v7());
+    let structured_preview = serde_json::json!({
+        "path": "src/main.rs",
+        "start_line": 1,
+        "end_line": 200,
+        "text": format!("head\n[... output spilled; recall id={structured_id} ...]\ntail"),
+        "truncated": false,
+    });
+    let mut structured_out = ToolOutput::new(structured_preview.clone());
+    structured_out.truncation = causa::kernel::Truncation::Middle;
+    structured_out.artifact = Some(ArtifactRef::new(
+        structured_id,
+        24_000,
+        ArtifactKind::FullOutput,
+        true,
+    ));
+    let structured_ctx = Context::from_blocks(vec![ContextBlock::new(
+        new_block_id(),
+        BlockContent::ToolResult(ToolResultPayload::new(
+            new_block_id(),
+            ToolResultStatus::Succeeded,
+            structured_out,
+        )),
+        BlockMeta::default(),
+    )])
+    .unwrap();
+    let structured_detached = detach_history_references(&structured_ctx, &[]);
+    let BlockContent::ToolResult(structured_res) = structured_detached.blocks()[0].content() else {
+        panic!("expected ToolResult");
+    };
+    assert!(structured_res.output.artifact.is_none());
+    assert_eq!(
+        structured_res.output.truncation,
+        causa::kernel::Truncation::Middle
+    );
+    assert_eq!(structured_res.output.content, structured_preview);
+    assert_eq!(structured_res.notes.len(), 1);
+    assert_eq!(structured_res.notes[0].0, DETACHED_HISTORY_NOTE);
 }

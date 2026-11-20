@@ -249,6 +249,15 @@ fn bounded_text(
     ))
 }
 
+/// Exact byte length of `ch` inside a serialized `serde_json` string literal.
+pub(crate) fn json_escaped_len(ch: char) -> usize {
+    match ch {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\x08' | '\x0c' => 2,
+        c if (c as u32) < 0x20 => 6,
+        c => c.len_utf8(),
+    }
+}
+
 #[cfg(unix)]
 fn read(
     workspace: &Workspace,
@@ -266,7 +275,12 @@ fn read(
     let start = p.start_line.unwrap_or(1);
     let max_lines = p.max_lines.unwrap_or(200);
     let mut output = json!({"path":p.path,"start_line":start,"end_line":null,"text":"","scanned_bytes":scanned,"truncated":scan_limited,"limit_reason":if scan_limited { Some("file_scan_bytes") } else { None }});
+    let path_escaped_bytes: usize = p.path.chars().map(json_escaped_len).sum();
+    let content_budget = limits
+        .max_output_bytes
+        .saturating_sub(1024 + path_escaped_bytes);
     let mut content = String::new();
+    let mut content_escaped_bytes = 0usize;
     let mut lines = 0;
     for (index, line) in text.split_inclusive('\n').enumerate() {
         control.check()?;
@@ -279,19 +293,16 @@ fn read(
             break;
         }
         // A full long line is never copied into the output candidate. Scalar appends
-        // are charged conservatively for maximum JSON escaping before allocation.
-        let remaining = limits
-            .max_output_bytes
-            .saturating_sub(1024 + p.path.len() * 6 + content.len() * 6);
+        // are charged the exact serde_json string-escaping byte length before pushing.
         let mut shortened = false;
-        let mut taken = 0;
         for character in line.chars() {
-            if taken + character.len_utf8() > remaining / 6 {
+            let escaped_len = json_escaped_len(character);
+            if content_escaped_bytes + escaped_len > content_budget {
                 shortened = true;
                 break;
             }
             content.push(character);
-            taken += character.len_utf8();
+            content_escaped_bytes += escaped_len;
         }
         lines += 1;
         output["end_line"] = json!(index + 1);

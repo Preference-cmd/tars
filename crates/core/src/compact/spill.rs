@@ -33,6 +33,9 @@ pub(crate) const SPILL_PREVIEW_MAX_TOKENS: u64 = 2_000;
 /// Serialized JSON byte cap matching [`SPILL_PREVIEW_MAX_TOKENS`] at 3 bytes/token.
 const MAX_PREVIEW_JSON_BYTES: usize = (SPILL_PREVIEW_MAX_TOKENS as usize) * 3;
 
+/// Maximum serialized JSON byte size of sibling metadata fields for in-place object spilling.
+const MAX_DOMINANT_SIBLINGS_JSON_BYTES: usize = 1024;
+
 /// Post-execution processor that spills oversized tool outputs to an [`ArtifactStore`].
 pub(crate) struct OutputSpillProcessor {
     store: Arc<dyn ArtifactStore>,
@@ -64,6 +67,40 @@ impl ToolBatchProcessor for OutputSpillProcessor {
             if output.artifact.is_some() {
                 continue;
             }
+
+            if let Value::Object(map) = &output.content
+                && let Some(dominant) = find_dominant_text_field(map)
+            {
+                let whole_bytes =
+                    serde_json::to_vec(&output.content).map_or(usize::MAX, |bytes| bytes.len());
+                let original_tokens = estimate::estimate_bytes(whole_bytes as u64);
+                if original_tokens <= SPILL_THRESHOLD_TOKENS {
+                    continue;
+                }
+                let hint = ArtifactHint::new(tool_name, call_block_id, ArtifactKind::FullOutput);
+                let Ok(artifact_ref) = self.store.persist(dominant.text.as_bytes(), hint).await
+                else {
+                    // Degrade gracefully: keep the original output without failing the tool call.
+                    continue;
+                };
+                let max_value_json_bytes =
+                    MAX_PREVIEW_JSON_BYTES.saturating_sub(dominant.shell_overhead);
+                let preview = build_spill_preview_within(
+                    dominant.text,
+                    original_tokens,
+                    &artifact_ref.id,
+                    max_value_json_bytes,
+                );
+                let mut updated = map.clone();
+                updated.insert(dominant.key.to_owned(), Value::String(preview));
+                output.content = Value::Object(updated);
+                output.truncation = Truncation::Middle;
+                let meta = output.meta.get_or_insert_with(Default::default);
+                meta.original_tokens = Some(usize::try_from(original_tokens).unwrap_or(usize::MAX));
+                output.artifact = Some(artifact_ref);
+                continue;
+            }
+
             let Some(text) = extract_text(&output.content) else {
                 continue;
             };
@@ -87,6 +124,48 @@ impl ToolBatchProcessor for OutputSpillProcessor {
         }
         Ok(())
     }
+}
+
+struct DominantTextField<'a> {
+    key: &'a str,
+    text: &'a str,
+    shell_overhead: usize,
+}
+
+/// Identify a single oversized `Value::String` field inside a structured object
+/// whose remaining sibling fields are small metadata (`<= 1024` JSON bytes).
+fn find_dominant_text_field(map: &serde_json::Map<String, Value>) -> Option<DominantTextField<'_>> {
+    let (key, text) = map
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.as_str(), s)))
+        .max_by_key(|(k, s)| (s.len(), *k))?;
+
+    if estimate::estimate_bytes(text.len() as u64) <= SPILL_THRESHOLD_TOKENS {
+        return None;
+    }
+
+    let mut siblings = serde_json::Map::with_capacity(map.len().saturating_sub(1));
+    for (k, v) in map {
+        if k != key {
+            siblings.insert(k.clone(), v.clone());
+        }
+    }
+    let siblings_bytes = serde_json::to_vec(&siblings).ok()?.len();
+    if siblings_bytes > MAX_DOMINANT_SIBLINGS_JSON_BYTES {
+        return None;
+    }
+
+    siblings.insert(key.to_owned(), Value::String(String::new()));
+    let shell_overhead = serde_json::to_vec(&siblings).ok()?.len().saturating_sub(2);
+    if shell_overhead + 256 > MAX_PREVIEW_JSON_BYTES {
+        return None;
+    }
+
+    Some(DominantTextField {
+        key,
+        text,
+        shell_overhead,
+    })
 }
 
 fn extract_text(content: &Value) -> Option<String> {
@@ -158,6 +237,18 @@ fn json_string_len(text: &str) -> usize {
 
 /// Build `head (<=40 lines) + notice + tail (<=40 lines)` bounded within [`SPILL_PREVIEW_MAX_TOKENS`].
 pub(crate) fn build_spill_preview(text: &str, original_tokens: u64, artifact_id: &str) -> String {
+    build_spill_preview_within(text, original_tokens, artifact_id, MAX_PREVIEW_JSON_BYTES)
+}
+
+/// Build `head (<=40 lines) + notice + tail (<=40 lines)` whose serialized JSON
+/// string fits within `max_json_bytes` (and [`SPILL_PREVIEW_MAX_TOKENS`]).
+fn build_spill_preview_within(
+    text: &str,
+    original_tokens: u64,
+    artifact_id: &str,
+    max_json_bytes: usize,
+) -> String {
+    let effective_max_json_bytes = max_json_bytes.min(MAX_PREVIEW_JSON_BYTES);
     let notice = format!(
         "\n[... output spilled: {} bytes (~{} tokens); full output: recall id={} ...]\n",
         text.len(),
@@ -165,7 +256,7 @@ pub(crate) fn build_spill_preview(text: &str, original_tokens: u64, artifact_id:
         artifact_id,
     );
     let notice_json = json_string_len(&notice).saturating_sub(2);
-    let available = MAX_PREVIEW_JSON_BYTES
+    let available = effective_max_json_bytes
         .saturating_sub(2)
         .saturating_sub(notice_json);
     let head_budget = available / 2;
@@ -178,7 +269,7 @@ pub(crate) fn build_spill_preview(text: &str, original_tokens: u64, artifact_id:
         let candidate = format!("{}{}{}", &text[..head_end], notice, &text[tail_start..]);
         let json_len = json_string_len(&candidate);
         let raw_tokens = estimate::estimate_bytes(candidate.len() as u64);
-        if json_len <= MAX_PREVIEW_JSON_BYTES && raw_tokens <= SPILL_PREVIEW_MAX_TOKENS {
+        if json_len <= effective_max_json_bytes && raw_tokens <= SPILL_PREVIEW_MAX_TOKENS {
             return candidate;
         }
         if head_end == 0 && tail_start >= text.len() {
@@ -187,8 +278,8 @@ pub(crate) fn build_spill_preview(text: &str, original_tokens: u64, artifact_id:
         // Trim proportionally when JSON escaping (quotes, newlines, controls)
         // expanded the serialized byte size past the budget.
         let excess = json_len
-            .saturating_sub(MAX_PREVIEW_JSON_BYTES)
-            .max(candidate.len().saturating_sub(MAX_PREVIEW_JSON_BYTES))
+            .saturating_sub(effective_max_json_bytes)
+            .max(candidate.len().saturating_sub(effective_max_json_bytes))
             .max(1);
         let trim_each = (excess / 2).max(16);
         if head_end > 0 {

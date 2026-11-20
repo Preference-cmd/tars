@@ -204,6 +204,111 @@ async fn budgets_include_json_escaping_for_reads_and_listings() {
     assert!(serde_json::to_vec(&read).unwrap().len() <= 2048);
 }
 
+#[test]
+fn json_escaped_len_matches_serde_json() {
+    for code in 0_u32..=0x7f {
+        let ch = char::from_u32(code).unwrap();
+        let serialized = serde_json::to_vec(&ch.to_string()).unwrap();
+        assert_eq!(
+            super::operations::json_escaped_len(ch),
+            serialized.len() - 2,
+            "mismatch for ASCII/control code {code:#x}"
+        );
+    }
+    for ch in ['é', '中', '🦀'] {
+        let serialized = serde_json::to_vec(&ch.to_string()).unwrap();
+        assert_eq!(
+            super::operations::json_escaped_len(ch),
+            serialized.len() - 2,
+            "mismatch for UTF-8 char {ch:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn read_file_30kib_ascii_and_cjk_utf8_fit_default_64kib_budget() {
+    let (dir, shared) = tools(WorkspaceToolLimits::default());
+    assert_eq!(WorkspaceToolLimits::default().max_output_bytes, 65_536);
+
+    // 30 KiB ASCII across 600 lines (well past the old ~10.7 KiB 6x-worst-case cutoff)
+    let ascii: String = (1..=600)
+        .map(|i| format!("line-{i:03}: {}\n", "a".repeat(41)))
+        .collect();
+    assert!(ascii.len() >= 30 * 1024);
+    std::fs::write(dir.path().join("ascii.txt"), &ascii).unwrap();
+    let res_ascii = invoke(
+        &shared,
+        WorkspaceTool::ReadFile,
+        json!({"path": "ascii.txt", "max_lines": 2000}),
+    )
+    .await;
+    assert_eq!(res_ascii.status, ToolResultStatus::Succeeded);
+    assert_eq!(res_ascii.output.content["truncated"], false);
+    assert_eq!(res_ascii.output.content["limit_reason"], json!(null));
+    assert_eq!(res_ascii.output.content["end_line"], 600);
+    assert_eq!(res_ascii.output.content["text"], ascii);
+    assert!(serde_json::to_vec(&res_ascii).unwrap().len() <= 65_536);
+
+    // 30 KiB Chinese UTF-8 across 600 lines (well past the old ~3.5 KiB 18-byte-per-CJK cutoff)
+    let cjk: String = (1..=600)
+        .map(|i| format!("第{i:03}行：{}\n", "中文测试内容".repeat(3)))
+        .collect();
+    assert!(cjk.len() >= 30 * 1024);
+    std::fs::write(dir.path().join("cjk.txt"), &cjk).unwrap();
+    let res_cjk = invoke(
+        &shared,
+        WorkspaceTool::ReadFile,
+        json!({"path": "cjk.txt", "max_lines": 2000}),
+    )
+    .await;
+    assert_eq!(res_cjk.status, ToolResultStatus::Succeeded);
+    assert_eq!(res_cjk.output.content["truncated"], false);
+    assert_eq!(res_cjk.output.content["limit_reason"], json!(null));
+    assert_eq!(res_cjk.output.content["end_line"], 600);
+    assert_eq!(res_cjk.output.content["text"], cjk);
+    assert!(serde_json::to_vec(&res_cjk).unwrap().len() <= 65_536);
+}
+
+#[tokio::test]
+async fn read_file_extreme_json_escaping_counterexamples_respect_budget() {
+    let limits = WorkspaceToolLimits {
+        max_output_bytes: 2048,
+        ..Default::default()
+    };
+    let (dir, shared) = tools(limits);
+
+    std::fs::write(dir.path().join("quotes.txt"), "\"".repeat(10_000)).unwrap();
+    let quotes_res = invoke(
+        &shared,
+        WorkspaceTool::ReadFile,
+        json!({"path": "quotes.txt"}),
+    )
+    .await;
+    assert_eq!(quotes_res.status, ToolResultStatus::Succeeded);
+    assert!(serde_json::to_vec(&quotes_res).unwrap().len() <= 2048);
+    assert_eq!(quotes_res.output.content["truncated"], true);
+    assert_eq!(quotes_res.output.content["limit_reason"], "output_bytes");
+    assert!(
+        !quotes_res.output.content["text"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
+
+    std::fs::write(dir.path().join("ctrl.txt"), "\x01".repeat(10_000)).unwrap();
+    let ctrl_res = invoke(
+        &shared,
+        WorkspaceTool::ReadFile,
+        json!({"path": "ctrl.txt"}),
+    )
+    .await;
+    assert_eq!(ctrl_res.status, ToolResultStatus::Succeeded);
+    assert!(serde_json::to_vec(&ctrl_res).unwrap().len() <= 2048);
+    assert_eq!(ctrl_res.output.content["truncated"], true);
+    assert_eq!(ctrl_res.output.content["limit_reason"], "output_bytes");
+    assert!(!ctrl_res.output.content["text"].as_str().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn waiting_cancellation_and_deadline_never_start_operations() {
     let (_dir, shared) = tools(WorkspaceToolLimits {

@@ -215,7 +215,7 @@ async fn test_be16_after_processor_spills_multiline_and_structured_outputs_and_p
         multiline
     );
 
-    // Check second result (structured JSON with CJK)
+    // Check second result (structured JSON with dominant CJK text field -> in-place spill)
     let (_, res2) = batch.results()[1].result().unwrap();
     assert_eq!(res2.output.truncation, Truncation::Middle);
     let art2 = res2
@@ -223,12 +223,22 @@ async fn test_be16_after_processor_spills_multiline_and_structured_outputs_and_p
         .artifact
         .as_ref()
         .expect("spilled json artifact");
-    let preview2 = res2.output.content.as_str().expect("string preview");
+    let obj2 = res2.output.content.as_object().expect("preserved object");
+    assert_eq!(
+        obj2.get("path").and_then(|v| v.as_str()),
+        Some("src/main.rs")
+    );
+    let preview2 = obj2
+        .get("text")
+        .and_then(|v| v.as_str())
+        .expect("in-place string preview");
     assert!(preview2.contains(&format!("recall id={}", art2.id)));
-    assert!(estimate::estimate_bytes(preview2.len() as u64) <= SPILL_PREVIEW_MAX_TOKENS);
+    let serialized2 = serde_json::to_vec(&res2.output.content).unwrap();
+    assert!(serialized2.len() <= (SPILL_PREVIEW_MAX_TOKENS as usize) * 3);
+    assert!(estimate::estimate_bytes(serialized2.len() as u64) <= SPILL_PREVIEW_MAX_TOKENS);
     assert_eq!(
         String::from_utf8(artifacts.read(&art2.id, None).await.unwrap()).unwrap(),
-        serde_json::to_string_pretty(&big_obj).unwrap()
+        "中文内容 ".repeat(2_000)
     );
 }
 
@@ -437,4 +447,298 @@ async fn test_be17_recall_reads_spilled_artifact_with_cjk_paging_output_cap_and_
         )
         .await;
     assert_eq!(bad_res.status, ToolResultStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_tb03_spill_structured_dominant_field_and_fallbacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let conv_id = "0190a000-0000-7000-8000-000000000019";
+    let store = Arc::new(HistoryStore::new(dir.path(), conv_id, Vec::new()));
+    let artifacts = Arc::new(HistoryArtifacts::new(store));
+    let processor = OutputSpillProcessor::new(artifacts.clone());
+
+    // 1. run_command-shaped object: preserves exit_code + wall_time_ms, spills `output` in place.
+    let cmd_output: String = (1..=150)
+        .map(|i| format!("cmd-line-{i:03}: {}", "v".repeat(100)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cmd_json = serde_json::json!({
+        "exit_code": 2,
+        "wall_time_ms": 487,
+        "output": cmd_output,
+    });
+
+    // 2. search_text-shaped object: large `matches` array (no dominant top-level string field)
+    //    -> falls back to whole pretty JSON spill.
+    let matches: Vec<serde_json::Value> = (1..=200)
+        .map(|i| {
+            serde_json::json!({
+                "path": format!("src/mod_{i}.rs"),
+                "line": i,
+                "text": format!("match line {i}: {}", "s".repeat(60)),
+            })
+        })
+        .collect();
+    let search_json = serde_json::json!({
+        "path": ".",
+        "query": "needle",
+        "matches": matches,
+        "complete": true,
+    });
+
+    // 3. Multi-huge-field object (`stdout` and `stderr` both large -> siblings > 1024 bytes)
+    //    -> falls back to whole pretty JSON spill.
+    let multi_json = serde_json::json!({
+        "exit_code": 1,
+        "stdout": "o\n".repeat(7_000),
+        "stderr": "e\n".repeat(7_000),
+    });
+
+    // 4. Dominant string field with heavy JSON escaping (`"` and `\x01` and UTF-8)
+    let escaped_text: String = (1..=160)
+        .map(|i| format!("row-{i:03}: \"{}\x01中\"\n", "\"".repeat(80)))
+        .collect();
+    let escaped_json = serde_json::json!({
+        "path": "escaped.txt",
+        "start_line": 1,
+        "end_line": 160,
+        "text": escaped_text,
+    });
+
+    let (mut batch, ids) = batch_for(vec![
+        (
+            "run_command",
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(cmd_json.clone()),
+            Vec::new(),
+            Vec::new(),
+        ),
+        (
+            "search_text",
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(search_json.clone()),
+            Vec::new(),
+            Vec::new(),
+        ),
+        (
+            "custom_multi",
+            ToolResultStatus::Failed,
+            ToolOutput::new(multi_json.clone()),
+            Vec::new(),
+            Vec::new(),
+        ),
+        (
+            "read_file",
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(escaped_json),
+            Vec::new(),
+            Vec::new(),
+        ),
+    ]);
+
+    let turn_id = TurnId::new("t-tb03");
+    let control = CallControl::new(CancellationToken::new(), None);
+    let ctx = ProcessorContext::new(&turn_id, RoundId(1), &ids, &control);
+    processor.process(&mut batch, &ctx).await.unwrap();
+
+    // 1. run_command in-place spill
+    let (_, r_cmd) = batch.results()[0].result().unwrap();
+    let cmd_obj = r_cmd.output.content.as_object().expect("command object");
+    assert_eq!(cmd_obj.get("exit_code").and_then(|v| v.as_i64()), Some(2));
+    assert_eq!(
+        cmd_obj.get("wall_time_ms").and_then(|v| v.as_u64()),
+        Some(487)
+    );
+    let cmd_preview = cmd_obj.get("output").and_then(|v| v.as_str()).unwrap();
+    let cmd_art = r_cmd.output.artifact.as_ref().unwrap();
+    assert!(cmd_preview.contains("cmd-line-001:"));
+    assert!(cmd_preview.contains("cmd-line-150:"));
+    assert!(!cmd_preview.contains("cmd-line-075:"));
+    assert!(cmd_preview.contains(&format!("recall id={}", cmd_art.id)));
+    let (cmd_head, cmd_tail) = cmd_preview.split_once("[... output spilled:").unwrap();
+    assert!(cmd_head.trim_end_matches('\n').lines().count() <= SPILL_PREVIEW_HEAD_LINES);
+    let cmd_tail_body = cmd_tail.split_once("...]\n").unwrap().1;
+    assert!(cmd_tail_body.lines().count() <= SPILL_PREVIEW_TAIL_LINES);
+    let cmd_serialized = serde_json::to_vec(&r_cmd.output.content).unwrap();
+    assert!(estimate::estimate_bytes(cmd_serialized.len() as u64) <= SPILL_PREVIEW_MAX_TOKENS);
+    assert_eq!(
+        String::from_utf8(artifacts.read(&cmd_art.id, None).await.unwrap()).unwrap(),
+        cmd_output
+    );
+
+    // 2. search_text whole-object fallback
+    let (_, r_search) = batch.results()[1].result().unwrap();
+    let search_art = r_search.output.artifact.as_ref().unwrap();
+    let search_preview = r_search
+        .output
+        .content
+        .as_str()
+        .expect("whole-object fallback string preview");
+    assert!(search_preview.contains(&format!("recall id={}", search_art.id)));
+    assert_eq!(
+        String::from_utf8(artifacts.read(&search_art.id, None).await.unwrap()).unwrap(),
+        serde_json::to_string_pretty(&search_json).unwrap()
+    );
+
+    // 3. Multi-huge-field whole-object fallback
+    let (_, r_multi) = batch.results()[2].result().unwrap();
+    let multi_art = r_multi.output.artifact.as_ref().unwrap();
+    assert!(r_multi.output.content.is_string());
+    assert_eq!(
+        String::from_utf8(artifacts.read(&multi_art.id, None).await.unwrap()).unwrap(),
+        serde_json::to_string_pretty(&multi_json).unwrap()
+    );
+
+    // 4. Heavy escaping stays within total MAX_PREVIEW_JSON_BYTES / 2,000 tokens
+    let (_, r_esc) = batch.results()[3].result().unwrap();
+    let esc_obj = r_esc.output.content.as_object().expect("escaped object");
+    assert_eq!(
+        esc_obj.get("path").and_then(|v| v.as_str()),
+        Some("escaped.txt")
+    );
+    let esc_serialized = serde_json::to_vec(&r_esc.output.content).unwrap();
+    assert!(esc_serialized.len() <= (SPILL_PREVIEW_MAX_TOKENS as usize) * 3);
+    assert!(estimate::estimate_bytes(esc_serialized.len() as u64) <= SPILL_PREVIEW_MAX_TOKENS);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_tb03_e2e_read_file_spill_and_recall_artifact() {
+    use crate::definition::{WorkspaceTool, WorkspaceToolLimits};
+    use crate::session::{ToolReporter, WorkRef};
+    use crate::tools::{ToolResources, WorkspaceTools};
+    use crate::workspace::Workspace;
+
+    let work_dir = tempfile::tempdir().unwrap();
+    let store_dir = tempfile::tempdir().unwrap();
+    let file_body: String = (1..=200)
+        .map(|i| format!("line-{i:03}: {}\n", "alpha-beta-gamma-".repeat(5)))
+        .collect();
+    assert!(file_body.len() > 16_000);
+    std::fs::write(work_dir.path().join("big.txt"), &file_body).unwrap();
+
+    let workspace = Workspace::open(&work_dir.path().canonicalize().unwrap()).unwrap();
+    let shared = WorkspaceTools::new(
+        workspace,
+        WorkspaceToolLimits::default(),
+        ToolResources::new(16),
+    );
+
+    let call = ToolCallContext::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        ToolCallPayload::new(
+            "read_file",
+            serde_json::json!({ "path": "big.txt", "max_lines": 2000 }),
+        ),
+    );
+    let turn_id = TurnId::new("t-e2e");
+    let reporter = ToolReporter::new(
+        WorkRef {
+            conversation_id: "0190a000-0000-7000-8000-000000000020".into(),
+            turn_id: turn_id.clone(),
+        },
+        tokio::sync::broadcast::channel(32).0,
+    );
+    let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
+    reporter.batch_ready(
+        &causa::kernel::InvocationId {
+            turn_id: turn_id.clone(),
+            round_id: RoundId(1),
+        },
+        &batch,
+    );
+    let read_tool = shared
+        .bind_for_test(&[WorkspaceTool::ReadFile], reporter.clone())
+        .pop()
+        .unwrap();
+    let read_payload = read_tool.execute(&call, &recall_control(), None).await;
+    reporter.drain().await;
+    assert_eq!(read_payload.status, ToolResultStatus::Succeeded);
+    assert_eq!(read_payload.output.content["truncated"], false);
+    assert_eq!(read_payload.output.content["end_line"], 200);
+
+    let result_id = BlockId::new(uuid::Uuid::now_v7());
+    batch.resolve_at(0, result_id, read_payload).unwrap();
+
+    let (store, _runtime, recall_tool) = setup_recall_test(store_dir.path());
+    let artifacts = Arc::new(HistoryArtifacts::new(store.clone()));
+    let processor = OutputSpillProcessor::new(artifacts);
+    let control = recall_control();
+    let ids = [call.call_block_id];
+    let ctx = ProcessorContext::new(&turn_id, RoundId(1), &ids, &control);
+    processor.process(&mut batch, &ctx).await.unwrap();
+
+    let (_, spilled) = batch.results()[0].result().unwrap();
+    assert_eq!(spilled.output.truncation, Truncation::Middle);
+    let art_ref = spilled
+        .output
+        .artifact
+        .as_ref()
+        .expect("read_file output must be spilled to .artifacts");
+    let uuid_part = art_ref.id.strip_prefix("artifact:").unwrap();
+    assert!(
+        store_dir
+            .path()
+            .join("conversation-recall.artifacts")
+            .join(uuid_part)
+            .is_file()
+    );
+
+    let obj = spilled
+        .output
+        .content
+        .as_object()
+        .expect("spilled read_file preserves object");
+    assert_eq!(obj.get("path").and_then(|v| v.as_str()), Some("big.txt"));
+    assert_eq!(obj.get("start_line").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(obj.get("end_line").and_then(|v| v.as_u64()), Some(200));
+    assert_eq!(obj.get("truncated").and_then(|v| v.as_bool()), Some(false));
+    let preview = obj
+        .get("text")
+        .and_then(|v| v.as_str())
+        .expect("preview text");
+    assert!(preview.contains("line-001:"));
+    assert!(preview.contains("line-200:"));
+    assert!(!preview.contains("line-100:"));
+    let (head_part, tail_part) = preview.split_once("[... output spilled:").unwrap();
+    assert!(head_part.trim_end_matches('\n').lines().count() <= SPILL_PREVIEW_HEAD_LINES);
+    let tail_after = tail_part.split_once("...]\n").unwrap().1;
+    assert!(tail_after.lines().count() <= SPILL_PREVIEW_TAIL_LINES);
+    let serialized = serde_json::to_vec(&spilled.output.content).unwrap();
+    assert!(estimate::estimate_bytes(serialized.len() as u64) <= SPILL_PREVIEW_MAX_TOKENS);
+
+    // Model reads back the full unescaped multiline text via recall id=artifact:<id>
+    let mut reconstructed = String::new();
+    let mut offset = 0usize;
+    loop {
+        let recall_res = recall_tool
+            .execute(
+                &recall_call(serde_json::json!({
+                    "id": art_ref.id,
+                    "offset": offset,
+                    "limit": 12_000,
+                })),
+                &recall_control(),
+                None,
+            )
+            .await;
+        assert_eq!(recall_res.status, ToolResultStatus::Succeeded);
+        let page = recall_res.output.content.as_str().unwrap();
+        let (_header, rest) = page.split_once('\n').unwrap();
+        if let Some((body, next_line)) = rest.rsplit_once("\nmore: recall id=") {
+            reconstructed.push_str(body);
+            let next_offset: usize = next_line
+                .split("offset=")
+                .nth(1)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            offset = next_offset;
+        } else {
+            reconstructed.push_str(rest);
+            break;
+        }
+    }
+    assert_eq!(reconstructed, file_body);
 }
