@@ -8,7 +8,7 @@ Configuration file selection order:
 2. The `TARS_CONFIG` environment variable.
 3. Unix/macOS: the absolute path `$XDG_CONFIG_HOME/tars/config.toml`, or `~/.config/tars/config.toml` when that variable is unset; Windows: `%APPDATA%/TARS/config.toml`.
 
-The current project's configuration file is never searched for automatically. A missing default path means an empty configuration; a missing file for an explicit path or `TARS_CONFIG`, or invalid configuration, refuses to start. `--no-config` ignores file and environment selection and is mutually exclusive with `--config`. Reading, parsing, validating the configuration file and resolving presets fail with exit code 1; argument errors such as unknown arguments or missing argument values return 2. Help and the offline demo do not read the configuration.
+The current project's configuration file is never searched for automatically. A missing default path means an empty configuration; a missing file for an explicit path or `TARS_CONFIG`, or invalid configuration, refuses to start. `--no-config` ignores file and environment selection and is mutually exclusive with `--config`. Reading, parsing, validating the configuration file and resolving presets fail with exit code 1; argument errors such as unknown arguments or missing argument values return 2. Help does not read the configuration.
 
 See the root [config.example.toml](../config.example.toml):
 

@@ -2337,13 +2337,11 @@ dependencies = [
 name = "tars-cli"
 version = "0.0.0"
 dependencies = [
- "async-trait",
  "causa",
  "serde_json",
  "tars-core",
  "tempfile",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]

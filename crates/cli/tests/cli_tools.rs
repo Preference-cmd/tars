@@ -165,7 +165,6 @@ fn commands_that_are_not_tools_install_never_touch_the_data_directory() {
         vec!["tools"],
         vec!["tools", "--help"],
         vec!["tools", "status", "--json"],
-        vec!["demo"],
     ] {
         let output = cli(home.path()).args(&arguments).output().unwrap();
         assert!(

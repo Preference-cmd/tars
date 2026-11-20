@@ -58,4 +58,4 @@ jobs:
           "$binary" --version
           "$binary" run --help
           "$binary" session --help
-          "$binary" demo
+          "$binary" session list --no-config --store "$RUNNER_TEMP/tars-store"

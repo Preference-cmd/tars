@@ -154,6 +154,10 @@ fn stdin_save_reload_preserves_materials_and_creates_fresh_work() {
     let bytes = std::fs::read_to_string(&path).unwrap();
     assert!(!bytes.contains("fixture-secret"));
     assert!(!bytes.contains("request_key"));
+    let wire: Value = serde_json::from_str(&bytes).unwrap();
+    let object = wire.as_object().unwrap();
+    assert_eq!(object.len(), 1);
+    assert!(object.contains_key("blocks"));
     let (endpoint, requests) = server(200, chat(), Duration::ZERO);
     let second = command("openai-chat", &endpoint)
         .args(["--input", "continue", "--json", "--load"])
@@ -217,17 +221,44 @@ fn save_failure_keeps_execution_result_and_reports_nonzero_exit() {
     let dir = tempfile::tempdir().unwrap();
     let (endpoint, requests) = server(200, chat(), Duration::ZERO);
     let output = command("openai-chat", &endpoint)
+        .env("TMPDIR", dir.path())
         .args(["--input", "hello", "--json", "--save"])
         .arg(dir.path().join("absent/material.json"))
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
-    let report = report(&output);
-    assert_eq!(report["status"], "completed");
-    assert_eq!(report["text"], "fixture answer");
-    assert_eq!(report["saved"], false);
-    assert_eq!(report["error"], "material save failed");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("TARS: material save failed"));
+    let first_report = report(&output);
+    assert_eq!(first_report["status"], "completed");
+    assert_eq!(first_report["text"], "fixture answer");
+    assert_eq!(first_report["saved"], false);
+    assert_eq!(first_report["error"], "material save failed");
     requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+    // Also cover a failure after creating the staging temp file in an existing parent.
+    let existing = dir.path().join("existing");
+    std::fs::create_dir(&existing).unwrap();
+    let (endpoint, requests) = server(200, chat(), Duration::ZERO);
+    let output = command("openai-chat", &endpoint)
+        .env("TMPDIR", dir.path())
+        .args(["--input", "hello", "--json", "--save"])
+        .arg(&existing)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("TARS: material save failed"));
+    let second_report = report(&output);
+    assert_eq!(second_report["status"], "completed");
+    assert_eq!(second_report["text"], "fixture answer");
+    assert_eq!(second_report["saved"], false);
+    assert_eq!(second_report["error"], "material save failed");
+    requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    let entries: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(entries, vec![std::ffi::OsString::from("existing")]);
 }
 
 #[test]

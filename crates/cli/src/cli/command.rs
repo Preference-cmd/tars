@@ -1,18 +1,15 @@
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 const HELP: &str = "TARS — agent application
 
 Usage: tars [--help | --version]
-       tars demo [--save <file>]
        tars run --provider <protocol> --model <id> (--input <text> | --stdin) [options]
        tars session <create | run | list | show | compact | history | repair | export-materials> [options]
        tars tools <status | install> [options]
 
 Commands:
-  demo           Run the offline single-session demonstration
   run            Execute one work with a real model and explicitly selected workspace tools
   session        Save and reopen sessions; see tars session --help
   tools          Check or install the external search tool; see tars tools --help
@@ -54,7 +51,6 @@ Options:
   -h, --help     Show this help
   -V, --version  Show the version
 
-The demo uses a scripted model and a local tool; it makes no network calls.
 Run/session/tools read --config, then TARS_CONFIG, then the global config path.
 Explicit options override configured fields. Saved sessions keep their definition.
 Material export and --load import contain only the current Context, never the
@@ -135,10 +131,6 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                 error.exit_code()
             }
         },
-        [one] if one == "demo" => demo(None),
-        [one, option, path] if one == "demo" && option == "--save" && !path.is_empty() => {
-            demo(Some(path.into()))
-        }
         _ => {
             let _ = writeln!(
                 io::stderr().lock(),
@@ -146,20 +138,6 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             );
             ExitCode::from(2)
         }
-    }
-}
-
-fn demo(path: Option<PathBuf>) -> ExitCode {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => return failure(error),
-    };
-    match runtime.block_on(crate::demo::run(path)) {
-        Ok(report) => output(&report),
-        Err(error) => failure(error),
     }
 }
 

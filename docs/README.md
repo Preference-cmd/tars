@@ -46,7 +46,6 @@ TARS exists to validate and improve Causa; the application is the vehicle for va
 | `crates/core/src/store/` | Private JSON backend, file lock while active, commit and confirmation |
 | `crates/core/src/material/` | Explicit Context file import/export and reference validation |
 | `crates/cli/src/cli/` | Command arguments, signals, presentation, recovery files and exit codes |
-| `crates/cli/src/demo/` | A low-level Session demo with a scripted model and local tools |
 | `crates/tui/src/` | Single-column conversation, command/session selection, input adaptation, streaming preview and actual material presentation |
 | `crates/core/tests/`, `crates/cli/tests/` | Core contract consumers, real CLI and local HTTP tests |
 
@@ -115,7 +114,6 @@ cargo build --workspace --locked --release
 ./target/release/tars session --help
 ./target/release/tars tools status
 ./target/release/tars-tui --help
-./target/release/tars demo
 cargo deny check   # security advisories, licenses, sources; policy in deny.toml
 ```
 

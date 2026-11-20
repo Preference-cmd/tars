@@ -16,7 +16,7 @@ Boundaries:
 
 ## Current status
 
-A single-session work loop is implemented, along with an offline CLI demo: atomic submission, same-key replay, per-work assembly, cancellation and result observation, and material editing with save/import. The demo uses a scripted model and real local tools, runs through Session and the Causa runner, and needs no credentials or network.
+A single-session work loop is implemented: atomic submission, same-key replay, per-work assembly, cancellation and result observation, and material editing with save/import.
 
 `tars run` supports single text execution against a real provider, JSON output, cancellation/deadline and explicit material saving. `tars session create/run/list` automatically save the frozen definition and the latest materials through the shared SessionHost, and can reopen the same session. `tars-tui` provides a native terminal prototype with temporary streaming text preview; both ends share the TOML configuration and can explicitly choose the workspace and workspace tools. The standalone MCP configuration file `mcp.json` (with `${VAR}` expansion and literal-secret checks), preset/CLI/TUI selection, definition snapshots and runtime tools are wired (tools only; no resources/prompts/sampling). MCP calls run, ask (in the terminal or the TUI confirmation panel) or are rejected according to the `approval` setting in `mcp.json` and the current permission mode; verification against real third-party MCP servers is still pending. The built-in `run_command` runs in the macOS Seatbelt sandbox (no network by default, writable workspace, read-only `.git` hooks and config, unreadable/unwritable credential locations); a single command can request to run outside the sandbox with a reason and is asked or allowed according to the permission mode. The built-in `search_text` runs the external `rg` in a read-only sandbox, so it follows the workspace's ignore rules and supports regular expressions, case-insensitive matching, globs and context lines; `rg` is not bundled and is installed only after `tars tools install rg` asks for consent. The TUI `/status` and CLI `session create` display the sandbox backend and capabilities; both `run_command` and `search_text` are unavailable on Linux/Windows until those platforms have a sandbox backend (sessions containing them still open, and calls are rejected with the reason). GUI, parent/child agents and install channels are not implemented. CLI and TUI can write files: `ask` confirms in the terminal/confirmation panel and refuses in non-terminal contexts; `accept-edits` and `full-access` do not ask for file writes, while sandbox-outside requests for commands still ask under `accept-edits`. `tars-tui` has the write confirmation panel, command confirmation panel, `/mode` command and `Shift-Tab` mode switching wired. The current development version is `0.0.0`, with no public release yet.
 
@@ -27,15 +27,11 @@ Rust 1.96.0 is used (pinned by `rust-toolchain.toml`):
 ```sh
 cargo build --locked
 cargo run --locked -- --help
-cargo run --locked -- demo
-cargo run --locked -- demo --save materials.json
 cargo build --locked --release
-./target/release/tars demo
+./target/release/tars --help
 ```
 
-On Windows use `target\release\tars.exe`. No arguments prints help; argument errors exit with code 2, execution or file errors with 1. While the demo runs, Ctrl-C requests cancellation of the current work and waits for it to settle.
-
-`demo` runs T1, summary editing, exact replay and T2, then saves materials and creates a new Session to continue execution. Temporary files are used by default and cleaned up afterwards; `--save` writes the materials to the given file, atomically replacing the original, and the parent directory must already exist. The file contains only Context; import preserves BlockIds but does not restore old work, request keys or external side effects. The application must save whatever history it needs; materials that are deleted without being saved cannot be recovered.
+On Windows use `target\release\tars.exe`. No arguments prints help; argument errors exit with code 2, execution or file errors with 1.
 
 ## Single model execution
 
