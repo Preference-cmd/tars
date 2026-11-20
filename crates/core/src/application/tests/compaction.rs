@@ -2518,6 +2518,7 @@ async fn test_be16_persistent_list_directory_spills_at_entry_while_transient_doe
         })
         .unwrap();
     finished(&transient, &rt.work).await;
+    transient.wait_saved().await.unwrap();
 
     let t_blocks = transient.read_materials().unwrap().context;
     let t_res = t_blocks
