@@ -8,7 +8,9 @@ all-features = true
 [advisories]
 # Every advisory fails the check, unmaintained and unsound included; an
 # accepted one goes in `ignore` with the reason beside it.
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "chrono is pulled in transitively by rmcp and schemars with no safe upgrade available yet" },
+]
 
 [licenses]
 # Measured against the dependency graph: each entry is needed by at least
