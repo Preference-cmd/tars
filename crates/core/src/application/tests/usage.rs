@@ -136,9 +136,10 @@ async fn us04_compaction_calls_and_conversation_counts_remain_separate() {
     let store = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(store.path().into()));
 
-    let gateway = CompactionGateway::new(SummaryBehavior::Text(
-        "Goal: test compaction usage separation.".into(),
-    ));
+    let gateway = CompactionGateway::new(SummaryBehavior::Text(format!(
+        "Goal: test compaction usage separation. {}",
+        "context ".repeat(75)
+    )));
     host.set_test_gateway(Some(gateway.clone()));
 
     let session = host

@@ -212,7 +212,7 @@ async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_afte
     // Byte-based estimates, so the sizes below decide each trigger.
     gateway.main_without_usage.store(true, Ordering::SeqCst);
     host.set_test_gateway(as_gateway(&gateway));
-    // A 3,800-token trigger line, so the chain budget, (line − prefix) / 8,
+    // A 3,800-token trigger line, so the chain budget, min(4_000, (line − prefix) / 2),
     // holds two briefs and no merge follows. The first work compacts the
     // seeded conversation and keeps its own 2,200-token input; the second
     // work's 1,000-token input brings that input back over the line.
@@ -353,13 +353,14 @@ async fn test_be13_an_automatic_summary_that_overfills_the_chain_is_followed_by_
     use crate::compact::{CompactionProgress, RewriteKind};
     let store = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(store.path().into()));
-    let gateway = scripted(SummaryBehavior::Text(
-        "Goal: continue the fixture work. Next steps: finish.".into(),
-    ));
+    let gateway = scripted(SummaryBehavior::Text(format!(
+        "Goal: continue the fixture work. Next steps: finish. {}",
+        "detail ".repeat(80)
+    )));
     gateway.main_without_usage.store(true, Ordering::SeqCst);
     host.set_test_gateway(as_gateway(&gateway));
-    // A 1,200-token line gives the chain about 95 tokens, less than one
-    // brief, so the second summary makes a chain of two that is merged.
+    // A 1,200-token line gives the chain about 380 tokens (capped at available / 2),
+    // so two ~260-token briefs exceed the budget and the second summary triggers a merge.
     let mut definition = compacting_definition(Some(3_000));
     definition.compact_threshold = 40;
     let session = host

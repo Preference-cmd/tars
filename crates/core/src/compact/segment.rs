@@ -35,9 +35,18 @@ pub(crate) const RETAINED_TAIL_SHARE: u64 = 4;
 /// below the line to be worth a model call.
 pub(crate) const PREFIX_LIMIT_SHARE: u64 = 2;
 
-/// The chain gets at most this fraction (1/8) of the trigger line minus the
-/// fixed prefix before its briefs are merged into one.
+/// The chain gets this fraction (1/8) of the trigger line minus the fixed
+/// prefix before its briefs are merged into one, unless the floor applies.
 pub(crate) const CHAIN_SHARE: u64 = 8;
+
+/// Minimum token budget of the brief chain on small windows so typical briefs
+/// do not immediately merge, capped by [`CHAIN_MAX_SHARE`].
+pub(crate) const CHAIN_BUDGET_FLOOR: u64 = 4_000;
+
+/// The brief chain budget never exceeds this fraction (1/2) of the trigger
+/// line minus the fixed prefix, keeping room for the retained tail and new
+/// conversation on tiny windows.
+pub(crate) const CHAIN_MAX_SHARE: u64 = 2;
 
 /// The chain is merged once it holds more briefs than this.
 pub(crate) const MAX_CHAIN_BRIEFS: usize = 8;
@@ -175,15 +184,18 @@ pub(crate) fn retained_tail_budget(
     Ok(RETAINED_TAIL_CAP.min(line.saturating_sub(fixed_prefix) / RETAINED_TAIL_SHARE))
 }
 
-/// Token budget of the brief chain: `(line − prefix) / 8`, or none when the
-/// window is unknown and only the number of briefs counts.
+/// Token budget of the brief chain: `max((line − prefix) / 8, min(4_000, (line − prefix) / 2))`,
+/// or none when the window is unknown and only the number of briefs counts.
 pub(crate) fn chain_budget(
     window: Option<u64>,
     threshold_percent: u8,
     fixed_prefix: u64,
 ) -> Option<u64> {
     window.map(|window| {
-        trigger_line(window, threshold_percent).saturating_sub(fixed_prefix) / CHAIN_SHARE
+        let available = trigger_line(window, threshold_percent).saturating_sub(fixed_prefix);
+        let share = available / CHAIN_SHARE;
+        let floor = CHAIN_BUDGET_FLOOR.min(available / CHAIN_MAX_SHARE);
+        share.max(floor)
     })
 }
 

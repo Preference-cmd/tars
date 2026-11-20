@@ -78,13 +78,13 @@ struct Run {
     records: Vec<HistoryRecord>,
 }
 
-/// A brief as an earlier compaction would have left it.
+/// A brief as an earlier compaction would have left it (~1,400 tokens).
 fn seeded_brief(index: usize) -> ContextBlock {
     ContextBlock::new(
         causa::runtime::new_block_id(),
         BlockContent::text(
             Role::User,
-            format!("Seeded brief {index}. {}", "earlier work ".repeat(80)),
+            format!("Seeded brief {index}. {}", "earlier work ".repeat(310)),
         ),
         BlockMeta::from_source(SUMMARY_SOURCE),
     )
@@ -95,8 +95,8 @@ async fn run(name: &str, provider: Provider, with_system: bool) -> Run {
 }
 
 /// One work that compacts in round 2. With `chain`, two briefs of about
-/// 350 tokens each are seeded after the system blocks; with the new brief
-/// the chain is over its budget, (6,000 − prefix) / 8, and is merged.
+/// 1,400 tokens each are seeded after the system blocks; with the new brief
+/// the chain is over its budget, (6,000 − prefix) / 2, and is merged.
 async fn run_with(name: &str, provider: Provider, with_system: bool, chain: bool) -> Run {
     let root = tempfile::tempdir().unwrap();
     // One long line, about 1,000 tokens per read.
@@ -133,7 +133,7 @@ async fn run_with(name: &str, provider: Provider, with_system: bool, chain: bool
     let earlier = vec![
         block(
             Role::User,
-            "earlier question ".repeat(if chain { 490 } else { 620 }),
+            "earlier question ".repeat(if chain { 120 } else { 620 }),
         ),
         block(Role::Assistant, "earlier answer".into()),
     ];

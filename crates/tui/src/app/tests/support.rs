@@ -104,14 +104,21 @@ pub(super) struct Server {
 }
 impl Server {
     pub async fn new() -> Self {
-        Self::with_options(None).await
+        Self::with_options(None, None).await
+    }
+
+    pub async fn with_summary(summary: impl Into<String>) -> Self {
+        Self::with_options(None, Some(summary.into())).await
     }
 
     pub async fn with_streaming_rounds(rounds: Vec<Vec<String>>) -> Self {
-        Self::with_options(Some(rounds)).await
+        Self::with_options(Some(rounds), None).await
     }
 
-    async fn with_options(streaming_rounds: Option<Vec<Vec<String>>>) -> Self {
+    async fn with_options(
+        streaming_rounds: Option<Vec<Vec<String>>>,
+        summary_text: Option<String>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -120,6 +127,9 @@ impl Server {
         let barrier = release.clone();
         let streaming_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let rounds_arc = streaming_rounds.map(Arc::new);
+        let summary_arc = Arc::new(
+            summary_text.unwrap_or_else(|| "fixture summary: continue the task".to_owned()),
+        );
         let task = tokio::spawn(async move {
             // Owned children are aborted when the listener task is aborted.
             let mut children = tokio::task::JoinSet::new();
@@ -138,6 +148,7 @@ impl Server {
                 let barrier = barrier.clone();
                 let streaming_counter = streaming_counter.clone();
                 let rounds_arc = rounds_arc.clone();
+                let summary_arc = summary_arc.clone();
                 children.spawn(async move {
                     let mut data = Vec::new();
                     let (header_end, content_len) = loop {
@@ -189,7 +200,7 @@ impl Server {
                                 "index": 0,
                                 "message": {
                                     "role": "assistant",
-                                    "content": "fixture summary: continue the task",
+                                    "content": summary_arc.as_str(),
                                 },
                                 "finish_reason": "stop",
                             }],

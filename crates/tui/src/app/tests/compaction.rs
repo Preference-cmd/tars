@@ -739,18 +739,22 @@ async fn compaction_summarizing_and_merging_displays_all_blocks_once_with_no_rea
 
     let dir = tempfile::tempdir().unwrap();
     let mut app = app(dir.path());
-    let server = Server::new().await;
+    let server = Server::with_summary(format!(
+        "fixture summary: continue the task. {}",
+        "detail ".repeat(85)
+    ))
+    .await;
 
-    // Window 3,000 and threshold 40% gives line 1,200 and chain budget 95 tokens.
-    // Fixed prefix is recall (~440 tokens) < line / 2 (600 tokens).
-    // Two summaries will cause a merge because two briefs (~200 tokens) exceed 95 tokens.
+    // Window 3,000 and threshold 40% gives line 1,200 and chain budget ~380 tokens
+    // (capped at (line - prefix) / 2). Fixed prefix is recall (~440 tokens) < 600.
+    // Two summaries (~260 tokens each) exceed 380 tokens and trigger a merge.
     let mut definition = history_definition(Some(3_000));
     definition.endpoint = Some(server.endpoint.clone());
     definition.auto_compact = false;
     definition.compact_threshold = 40;
 
-    let m1 = format!("MARKER_ONE: {}", "first ".repeat(100));
-    let m2 = format!("MARKER_TWO: {}", "reply1 ".repeat(100));
+    let m1 = format!("MARKER_ONE: {}", "first ".repeat(250));
+    let m2 = format!("MARKER_TWO: {}", "reply1 ".repeat(250));
 
     let context = Context::from_blocks(vec![
         ContextBlock::new(
@@ -784,7 +788,7 @@ async fn compaction_summarizing_and_merging_displays_all_blocks_once_with_no_rea
     .await;
 
     // Paste additional material and run work.
-    let m3 = format!("MARKER_THREE: {}", "second ".repeat(50));
+    let m3 = format!("MARKER_THREE: {}", "second ".repeat(200));
     app.event(Event::Paste(m3));
     app.event(ctrl('s'));
     until(&mut app, |_| server.requests.lock().unwrap().len() >= 2).await;
