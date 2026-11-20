@@ -26,6 +26,7 @@ pub(super) struct Shared {
     pub candidate: Arc<dyn Fn() -> TurnId + Send + Sync>,
     pub progress: broadcast::Sender<Arc<WorkProgress>>,
     pub compaction: Option<Arc<crate::compact::CompactionRuntime>>,
+    pub protected_inputs: Option<Arc<crate::compact::ProtectedInputs>>,
     pub usage: Arc<crate::usage::UsageHub>,
 }
 pub(super) struct State {
@@ -97,6 +98,9 @@ impl Shared {
         let mut state = self.lock();
         if matches!(result, WorkResult::Faulted(_)) {
             state.faulted = true;
+        }
+        if let Some(inputs) = &self.protected_inputs {
+            inputs.clear();
         }
         if let Some(runtime) = &self.compaction {
             runtime.clear_current_work_inputs();

@@ -26,6 +26,7 @@ mod merge;
 mod partial;
 mod spill;
 mod thinking;
+mod trim;
 
 fn definition(context_window: Option<u64>, max_tokens: Option<u32>) -> SessionDefinition {
     SessionDefinition {

@@ -14,6 +14,7 @@ use super::history::{
     HistoryRecordEntry, HistoryStore, PlannedReplacement, Rewrite, RewriteError, RewriteKind,
 };
 use super::summary::{self, SUMMARY_MAX_TOKENS};
+use super::trim::{ProtectedInputs, TrimResult, trim_frame};
 use super::{CompactionAbandon, HistoryTrigger};
 use super::{sealed, segment};
 use crate::definition::SessionDefinition;
@@ -46,7 +47,7 @@ pub(crate) struct CompactionRuntime {
     history: Option<Arc<HistoryStore>>,
     usage: Arc<UsageTracker>,
     force: AtomicBool,
-    current_work_inputs: Mutex<HashSet<BlockId>>,
+    current_work_inputs: ProtectedInputs,
     prefix_too_large_reported: AtomicBool,
     rejected_brief_bytes: Mutex<Option<u64>>,
     gateway: Arc<dyn ModelGateway>,
@@ -88,7 +89,7 @@ impl CompactionRuntime {
             history: Some(history),
             usage,
             force: AtomicBool::new(false),
-            current_work_inputs: Mutex::new(HashSet::new()),
+            current_work_inputs: ProtectedInputs::default(),
             prefix_too_large_reported: AtomicBool::new(false),
             rejected_brief_bytes: Mutex::new(None),
             gateway,
@@ -166,26 +167,33 @@ impl CompactionRuntime {
     /// They keep their ids and stay in place whenever a summary in this work
     /// covers them, so the request being answered is never paraphrased away.
     pub(crate) fn set_current_work_inputs(&self, blocks: &[ContextBlock]) {
-        *self
-            .current_work_inputs
-            .lock()
-            .expect("work inputs have no callbacks") =
-            blocks.iter().map(ContextBlock::id).collect();
+        self.current_work_inputs.set(blocks);
     }
 
     /// Stop protecting the finished work's input blocks.
     pub(crate) fn clear_current_work_inputs(&self) {
-        self.current_work_inputs
-            .lock()
-            .expect("work inputs have no callbacks")
-            .clear();
+        self.current_work_inputs.clear();
     }
 
     fn current_work_inputs(&self) -> HashSet<BlockId> {
-        self.current_work_inputs
-            .lock()
-            .expect("work inputs have no callbacks")
-            .clone()
+        self.current_work_inputs.snapshot()
+    }
+
+    /// Temporarily trim a copy of the frame when `estimate_before + max_tokens > window`.
+    pub(crate) fn trim_frame_if_needed(
+        &self,
+        context: &Context,
+        estimate_before: u64,
+    ) -> Option<TrimResult> {
+        let window = self.window?;
+        let protected = self.current_work_inputs();
+        trim_frame(
+            context.blocks(),
+            window,
+            self.max_tokens,
+            estimate_before,
+            &protected,
+        )
     }
 
     /// Whether automatic compaction already reported a too-large fixed prefix.

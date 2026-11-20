@@ -2,6 +2,7 @@
 use super::state::{App, Entry, Key};
 use crate::preview::Preview;
 use std::sync::Arc;
+use tars_core::compact::{CompactionAbandon, CompactionProgress};
 use tars_core::session::{ProgressUpdate, WorkProgress};
 use tokio::sync::broadcast::{self, error::TryRecvError};
 
@@ -44,7 +45,8 @@ impl Entry {
             }
             return;
         }
-        if matches!(&event.update, ProgressUpdate::Compaction(_)) {
+        if let ProgressUpdate::Compaction(progress) = &event.update {
+            self.apply_compaction_progress(progress);
             return;
         }
         if let Some(current) = &self.preview.invocation
@@ -63,6 +65,50 @@ impl Entry {
             ProgressUpdate::Tool(_) => unreachable!("handled independently of model preview"),
             ProgressUpdate::Compaction(_) => {
                 unreachable!("handled independently of model preview")
+            }
+        }
+    }
+
+    fn apply_compaction_progress(&mut self, progress: &CompactionProgress) {
+        match progress {
+            CompactionProgress::Started { trigger, .. } => {
+                self.notice = format!("Compacting context ({})…", trigger.name());
+            }
+            CompactionProgress::Finished {
+                trigger,
+                estimate_before,
+                estimate_after,
+                ..
+            } => {
+                self.notice = format!(
+                    "Compacted ({}): {} -> {} tokens",
+                    trigger.name(),
+                    super::history::estimate_label(*estimate_before),
+                    super::history::estimate_label(*estimate_after),
+                );
+            }
+            CompactionProgress::Abandoned {
+                reason: CompactionAbandon::PrefixTooLarge,
+                ..
+            } => {
+                self.notice = "Fixed prefix too large; compaction skipped".into();
+            }
+            CompactionProgress::Abandoned { trigger, reason } => {
+                self.notice = format!(
+                    "Compaction abandoned ({}, {})",
+                    trigger.name(),
+                    reason.name(),
+                );
+            }
+            CompactionProgress::Trimmed {
+                before_tokens,
+                after_tokens,
+            } => {
+                self.notice = format!(
+                    "Request frame temporarily trimmed: {} -> {} tokens",
+                    super::history::estimate_label(*before_tokens),
+                    super::history::estimate_label(*after_tokens),
+                );
             }
         }
     }

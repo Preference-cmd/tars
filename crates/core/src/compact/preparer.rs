@@ -1,20 +1,24 @@
 //! The per-work Causa `ContextPreparer`.
 //!
 //! Installed once per work at assembly; every logical model invocation asks it
-//! for the frame. It decides whether this round compacts, and on success
-//! replaces the Context before returning the frame; a summary that leaves the
-//! brief chain over its budget is followed by a merge. Compaction is best
-//! effort: any abandonment returns the frame of the Context as it stands, so
-//! the round still goes out.
+//! for the frame. For persistent sessions, it decides whether this round
+//! compacts, and on success replaces the Context before returning the frame; a
+//! summary that leaves the brief chain over its budget is followed by a merge.
+//! Whenever the full frame still exceeds the configured window (counting
+//! `max_tokens`), whether because compaction was skipped, abandoned, off, or
+//! insufficient, or because the session is transient, the preparer falls back
+//! to temporary frame trimming on a copy of the frame without touching the
+//! Context or history.
 
 use super::CompactionProgress;
-use super::estimate;
+use super::estimate::{self, UsageTracker};
 use super::runtime::CompactionRuntime;
+use super::trim::{ProtectedInputs, trim_frame};
 use crate::session::ToolReporter;
 use causa::kernel::{CallControl, Context, ContextFrame, ContextPreparer, PrepareError, RoundInfo};
 use std::sync::Arc;
 
-/// One work's compaction decision point.
+/// One work's compaction decision point for persistent sessions.
 pub(crate) struct CompactionPreparer {
     runtime: Arc<CompactionRuntime>,
     reporter: ToolReporter,
@@ -30,6 +34,26 @@ impl CompactionPreparer {
         self.reporter
             .compaction(round.invocation_id.clone(), progress);
     }
+
+    fn finish_frame(&self, context: &Context, round: &RoundInfo<'_>) -> ContextFrame {
+        let bytes = estimate::context_bytes(context);
+        let estimate_tokens = self.runtime.usage().estimate(bytes);
+        if let Some(outcome) = self.runtime.trim_frame_if_needed(context, estimate_tokens)
+            && outcome.trimmed
+        {
+            self.runtime.usage().clear_pending_prepare();
+            self.report(
+                round,
+                CompactionProgress::Trimmed {
+                    before_tokens: estimate_tokens,
+                    after_tokens: outcome.after_tokens,
+                },
+            );
+            return outcome.frame;
+        }
+        self.runtime.note_prepare(bytes);
+        context.frame()
+    }
 }
 
 #[async_trait::async_trait]
@@ -43,66 +67,124 @@ impl ContextPreparer for CompactionPreparer {
         let bytes = estimate::context_bytes(context);
         let estimate_tokens = self.runtime.usage().estimate(bytes);
         // The fixed prefix never shrinks: once it was reported as too large,
-        // later rounds go out unchanged without another attempt.
+        // later rounds skip rewriting without another attempt, and fall back
+        // to temporary frame trimming when the frame exceeds the window.
         let trigger = (!self.runtime.prefix_too_large_reported())
             .then(|| self.runtime.trigger_for(estimate_tokens))
             .flatten();
-        let Some(trigger) = trigger else {
-            self.runtime.note_prepare(bytes);
-            return Ok(context.frame());
-        };
-        // An automatic summary rejected as `no_shrink` is not repeated while
-        // a brief of its size still could not shrink the Context; such rounds
-        // go out unchanged without a report, like those after a too-large
-        // prefix.
-        if trigger == super::HistoryTrigger::Auto && self.runtime.summary_cannot_shrink(context) {
-            self.runtime.note_prepare(bytes);
-            return Ok(context.frame());
-        }
-        self.report(
-            round,
-            CompactionProgress::Started {
-                trigger,
-                estimate_before: estimate_tokens,
-            },
-        );
-        let plan = self
-            .runtime
-            .plan(context, round.model, round.generation, trigger, control)
-            .await;
-        let rewrite = match plan {
-            Ok(rewrite) => rewrite,
-            Err(reason) => {
-                if reason == super::CompactionAbandon::PrefixTooLarge {
-                    self.runtime.note_prefix_too_large_reported();
+        if let Some(trigger) = trigger
+            // An automatic summary rejected as `no_shrink` is not repeated
+            // while a brief of its size still could not shrink the Context;
+            // such rounds fall through to temporary trimming when needed.
+            && !(trigger == super::HistoryTrigger::Auto
+                && self.runtime.summary_cannot_shrink(context))
+        {
+            self.report(
+                round,
+                CompactionProgress::Started {
+                    trigger,
+                    estimate_before: estimate_tokens,
+                },
+            );
+            match self
+                .runtime
+                .plan(context, round.model, round.generation, trigger, control)
+                .await
+            {
+                Ok(rewrite) => {
+                    let (estimate_before, estimate_after) =
+                        (rewrite.estimate_before, rewrite.estimate_after);
+                    match self.runtime.commit_rewrite(context, rewrite) {
+                        Ok(entry) => {
+                            self.report(
+                                round,
+                                CompactionProgress::Finished {
+                                    trigger,
+                                    estimate_before,
+                                    estimate_after,
+                                    record: entry.record_id,
+                                },
+                            );
+                            if self.runtime.needs_merge(context) {
+                                self.merge(context, round, control, trigger).await;
+                            }
+                        }
+                        Err(reason) => {
+                            self.report(round, CompactionProgress::Abandoned { trigger, reason });
+                        }
+                    }
                 }
-                self.report(round, CompactionProgress::Abandoned { trigger, reason });
-                self.runtime.note_prepare(bytes);
-                return Ok(context.frame());
+                Err(reason) => {
+                    if reason == super::CompactionAbandon::PrefixTooLarge {
+                        self.runtime.note_prefix_too_large_reported();
+                    }
+                    self.report(round, CompactionProgress::Abandoned { trigger, reason });
+                }
             }
-        };
-        let (estimate_before, estimate_after) = (rewrite.estimate_before, rewrite.estimate_after);
-        let entry = match self.runtime.commit_rewrite(context, rewrite) {
-            Ok(entry) => entry,
-            Err(reason) => {
-                self.runtime.note_prepare(bytes);
-                self.report(round, CompactionProgress::Abandoned { trigger, reason });
-                return Ok(context.frame());
-            }
-        };
-        self.report(
-            round,
-            CompactionProgress::Finished {
-                trigger,
-                estimate_before,
-                estimate_after,
-                record: entry.record_id,
-            },
-        );
-        if self.runtime.needs_merge(context) {
-            self.merge(context, round, control, trigger).await;
         }
-        self.runtime.note_prepare(estimate::context_bytes(context));
+        Ok(self.finish_frame(context, round))
+    }
+}
+
+/// One work's frame-trimming preparer for transient runs with a known window.
+pub(crate) struct TransientTrimPreparer {
+    window: u64,
+    max_tokens: Option<u32>,
+    usage: Arc<UsageTracker>,
+    protected: Arc<ProtectedInputs>,
+    reporter: ToolReporter,
+}
+
+impl TransientTrimPreparer {
+    /// Build a preparer that temporarily trims over-window frames without
+    /// modifying Context or touching disk.
+    pub(crate) fn new(
+        window: u64,
+        max_tokens: Option<u32>,
+        usage: Arc<UsageTracker>,
+        protected: Arc<ProtectedInputs>,
+        reporter: ToolReporter,
+    ) -> Self {
+        Self {
+            window,
+            max_tokens,
+            usage,
+            protected,
+            reporter,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ContextPreparer for TransientTrimPreparer {
+    async fn prepare(
+        &self,
+        context: &mut Context,
+        round: &RoundInfo<'_>,
+        _control: &CallControl,
+    ) -> Result<ContextFrame, PrepareError> {
+        let bytes = estimate::context_bytes(context);
+        let estimate_tokens = self.usage.estimate(bytes);
+        let protected = self.protected.snapshot();
+        if let Some(outcome) = trim_frame(
+            context.blocks(),
+            self.window,
+            self.max_tokens,
+            estimate_tokens,
+            &protected,
+        ) && outcome.trimmed
+        {
+            self.usage.clear_pending_prepare();
+            self.reporter.compaction(
+                round.invocation_id.clone(),
+                CompactionProgress::Trimmed {
+                    before_tokens: estimate_tokens,
+                    after_tokens: outcome.after_tokens,
+                },
+            );
+            return Ok(outcome.frame);
+        }
+        self.usage.note_prepare_bytes(bytes);
         Ok(context.frame())
     }
 }

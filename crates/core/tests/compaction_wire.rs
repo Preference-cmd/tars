@@ -464,6 +464,143 @@ async fn test_be13_a_chain_over_its_budget_is_merged_and_the_next_round_renders(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be27_transient_trimming_drops_middle_system_note_and_keeps_fixed_prefix_on_wire() {
+    for (name, provider) in PROTOCOLS {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("marker.txt"), "marker-ok\n").unwrap();
+        let fixture = Fixture::new(name, vec![Reply::Read("marker.txt"), Reply::Answer], None);
+        let sys0 = block(Role::System, "You are the compaction wire fixture.".into());
+        let sys1 = block(Role::System, "Project rules: answer in one line.".into());
+        let earlier_user = block(Role::User, "earlier question ".repeat(600));
+        let earlier_assistant = block(Role::Assistant, "earlier answer".into());
+        let middle_note = block(
+            Role::System,
+            "repair note: earlier unpaired call removed".into(),
+        );
+        let blocks = vec![
+            sys0.clone(),
+            sys1.clone(),
+            earlier_user.clone(),
+            earlier_assistant,
+            middle_note.clone(),
+        ];
+
+        let mut def = definition(provider, &fixture.endpoint, root.path());
+        def.context_window = Some(2_000);
+        def.max_tokens = Some(500);
+        let host = SessionHost::new(None);
+        let session = host
+            .create(PreparedCreate::transient(
+                def,
+                Context::from_blocks(blocks).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let request = text_input(REQUEST);
+        let request_id = request.id();
+        let work = session
+            .submit(SubmitRequest {
+                request_key: "be27-transient-wire".into(),
+                blocks: vec![request],
+            })
+            .unwrap()
+            .work;
+        let observation = session.wait(&work, Duration::from_secs(20)).await.unwrap();
+        assert!(
+            matches!(observation.state, WorkState::Finished(_)),
+            "{name}: {:?}",
+            observation.state
+        );
+
+        let bodies: Vec<Value> = fixture
+            .raw_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|raw| serde_json::from_slice(raw).unwrap())
+            .collect();
+        assert_eq!(bodies.len(), 2, "{name}: zero brief calls in transient");
+
+        for body in &bodies {
+            let prompt = system_prompt(provider, body);
+            let prompt_text = prompt.to_string();
+            assert!(
+                prompt_text.contains("You are the compaction wire fixture.")
+                    && prompt_text.contains("Project rules: answer in one line."),
+                "{name}: fixed prefix preserved: {prompt}"
+            );
+            assert!(
+                !prompt_text.contains("repair note"),
+                "{name}: middle system note must not enter leading system prompt: {prompt}"
+            );
+            let serialized = body.to_string();
+            assert!(
+                !serialized.contains("repair note"),
+                "{name}: middle system note dropped with earlier conversation"
+            );
+            assert!(
+                !serialized.contains("earlier question"),
+                "{name}: earlier conversation dropped"
+            );
+            assert!(serialized.contains(REQUEST), "{name}: U protected");
+            assert!(serialized.contains("read_file"), "{name}: bound tools stay");
+            assert!(
+                !serialized.contains("\"recall\""),
+                "{name}: no recall in transient"
+            );
+        }
+
+        // Compare rendered system prompt against a clean untrimmed frame containing only [sys0, sys1, U].
+        let baseline_fixture = Fixture::new(name, vec![Reply::Answer], None);
+        let mut baseline_def = definition(provider, &baseline_fixture.endpoint, root.path());
+        baseline_def.context_window = None;
+        baseline_def.max_tokens = Some(500);
+        let baseline_session = host
+            .create(PreparedCreate::transient(
+                baseline_def,
+                Context::from_blocks(vec![sys0, sys1]).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let baseline_work = baseline_session
+            .submit(SubmitRequest {
+                request_key: "be27-baseline".into(),
+                blocks: vec![text_input(REQUEST)],
+            })
+            .unwrap()
+            .work;
+        let baseline_obs = baseline_session
+            .wait(&baseline_work, Duration::from_secs(20))
+            .await
+            .unwrap();
+        assert!(matches!(baseline_obs.state, WorkState::Finished(_)));
+        let baseline_body: Value =
+            serde_json::from_slice(&baseline_fixture.raw_requests.lock().unwrap()[0]).unwrap();
+        assert_eq!(
+            system_prompt(provider, &bodies[0]),
+            system_prompt(provider, &baseline_body),
+            "{name}: leading system prompt must match Context fixed prefix byte-for-byte"
+        );
+
+        // Session Context itself stays completely untouched.
+        let final_blocks = session.read_materials().unwrap().context;
+        assert!(
+            final_blocks
+                .blocks()
+                .iter()
+                .any(|b| b.id() == earlier_user.id())
+        );
+        assert!(
+            final_blocks
+                .blocks()
+                .iter()
+                .any(|b| b.id() == middle_note.id())
+        );
+        assert!(final_blocks.blocks().iter().any(|b| b.id() == request_id));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_be25_the_system_prompt_and_tools_render_the_same_after_a_merge() {
     for (name, provider) in PROTOCOLS {
         let run = run_with(name, provider, true, true).await;

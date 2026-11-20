@@ -160,6 +160,9 @@ impl SessionHandle {
         if let Some(runtime) = &self.shared.compaction {
             runtime.set_current_work_inputs(&original_blocks);
         }
+        if let Some(inputs) = &self.shared.protected_inputs {
+            inputs.set(&original_blocks);
+        }
         state
             .keys
             .insert(request.request_key.clone(), work.turn_id.clone());

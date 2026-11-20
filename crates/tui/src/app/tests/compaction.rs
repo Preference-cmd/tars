@@ -1130,3 +1130,61 @@ async fn manual_scroll_clears_pending_scroll_anchor() {
     assert!(app.entries[0].scroll_anchor.is_none());
     assert!(app.entries[0].scroll.unwrap() > 20);
 }
+
+#[test]
+fn compaction_progress_trimmed_updates_entry_notice_and_survives_finish() {
+    use tars_core::compact::CompactionProgress;
+    use tars_core::session::{ProgressUpdate, WorkProgress, WorkRef};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    let turn_id = causa::kernel::TurnId::new("work-trim");
+    let work = WorkRef {
+        conversation_id: "session-trim".into(),
+        turn_id: turn_id.clone(),
+    };
+    let mut entry = crate::app::Entry::new("session-trim".into(), "fixture".into());
+    entry.work = Some(work.clone());
+    let key = entry.key.clone();
+    let (tx, rx) = tokio::sync::broadcast::channel(16);
+    entry.bind_progress(rx);
+    app.entries.push(entry);
+
+    tx.send(std::sync::Arc::new(WorkProgress {
+        work: work.clone(),
+        invocation_id: causa::kernel::InvocationId {
+            turn_id,
+            round_id: causa::kernel::RoundId(0),
+        },
+        update: ProgressUpdate::Compaction(CompactionProgress::Trimmed {
+            before_tokens: 12_000,
+            after_tokens: 4_000,
+        }),
+    }))
+    .unwrap();
+    app.poll_progress();
+    assert_eq!(
+        app.entries[0].notice,
+        "Request frame temporarily trimmed: ~12k -> ~4k tokens"
+    );
+
+    let result = std::sync::Arc::new(tars_core::session::WorkResult::Run(
+        causa::runtime::TurnResult::Completed {
+            final_output: causa::kernel::ModelOutput::new(
+                causa::kernel::ModelResponse {
+                    items: vec![causa::kernel::ModelItem::text("ok")],
+                },
+                causa::kernel::ModelStopReason::EndTurn,
+            ),
+        },
+    ));
+    app.complete(crate::app::jobs::Message::Finished(
+        key,
+        work,
+        Ok((result, std::sync::Arc::default())),
+    ));
+    assert_eq!(
+        app.entries[0].notice,
+        "Request frame temporarily trimmed: ~12k -> ~4k tokens"
+    );
+}

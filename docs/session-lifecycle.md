@@ -67,7 +67,7 @@ An owner/worker fault isolates new work, waits for confirmable task stops and ke
 
 On save failure the CLI keeps the original execution status/text and additionally outputs save_error; according to the user's choice it exports a random, non-overwriting recovery Context and then exits 1. recovery_error, close_error and close_outcome are reported separately; a recovery file contains the actually returned materials, not the original work table or uncommitted content. After Ctrl-C cancels the work it still waits for the return and save; a second Ctrl-C during the save wait stops waiting, exports the actual Context and exits with an error.
 
-`tars run` creates a transient host and still supports the original `--load/--save`: an import gets a new ConversationId, only an explicit `--save` exports Context, and the report and exit codes are unchanged. The low-level offline demo is a separate fixture used to observe the single-session contract.
+`tars run` creates a transient host and still supports the original `--load/--save`: an import gets a new ConversationId, only an explicit `--save` exports Context, and the report and exit codes are unchanged. When `context_window` is known, a transient run installs only a temporary frame-trimming preparer that drops older intervals on a copy of over-window request frames without modifying Context or creating `.history/` or `.artifacts/` directories (and without declaring `recall` or spilling tool outputs); when `context_window` is unknown, no trimming preparer is installed. The low-level offline demo is a separate fixture used to observe the single-session contract.
 
 ## 7. Usage statistics
 
@@ -81,6 +81,6 @@ A count that no call reported is `null` in JSON and "not reported" in text, neve
 
 ## Transient streaming observation
 
-`SessionHandle::subscribe_progress` and `ManagedSession::subscribe_progress` return this instance's broadcast receiver. Callers that need to observe new work subscribe before submit; each WorkProgress carries the WorkRef, InvocationId and ModelStarted, body Text or ModelOutputReady. Current limits, Lagged and truncation semantics are in [Current implementation](README.md#streaming-observation). The original `TurnRunOptions::observer` is composed with the call and never silently replaced.
+`SessionHandle::subscribe_progress` and `ManagedSession::subscribe_progress` return this instance's broadcast receiver. Callers that need to observe new work subscribe before submit; each WorkProgress carries the WorkRef, InvocationId and ModelStarted, body Text, ModelOutputReady, Tool, or Compaction (including temporary frame trimming) updates. Current limits, Lagged and truncation semantics are in [Current implementation](README.md#streaming-observation). The original `TurnRunOptions::observer` is composed with the call and never silently replaced.
 
 These events are losable transient observations with no work-history or reopen-recovery meaning, and they are not material-editing instructions. Reliable WorkResult is still kept by the original work table; the synchronous observer does not wait for UI consumption. Only the Context returned by Causa enters the original save flow; text fragments before cancellation/EOF/error are never padded into complete model output. Model output being complete, work being terminal, and materials being saved remain distinct facts.

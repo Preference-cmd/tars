@@ -190,6 +190,7 @@ impl Session {
                 candidate: Arc::new(|| TurnId::new(uuid::Uuid::now_v7().to_string())),
                 progress: tokio::sync::broadcast::channel(super::progress::PROGRESS_CAPACITY).0,
                 compaction: None,
+                protected_inputs: None,
                 usage: Arc::new(crate::usage::UsageHub::new()),
             }),
         }
@@ -224,6 +225,17 @@ impl Session {
         Arc::get_mut(&mut self.shared)
             .expect("attach compaction before cloning handles")
             .compaction = Some(compaction);
+        self
+    }
+
+    /// Attach the session-wide active work input tracker before any handle is cloned.
+    pub(crate) fn with_protected_inputs(
+        mut self,
+        inputs: Arc<crate::compact::ProtectedInputs>,
+    ) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .expect("attach protected inputs before cloning handles")
+            .protected_inputs = Some(inputs);
         self
     }
 

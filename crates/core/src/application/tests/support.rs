@@ -349,6 +349,7 @@ pub(super) struct CompactionGateway {
     pub(super) summary_calls: Arc<AtomicUsize>,
     pub(super) main_calls: Arc<AtomicUsize>,
     pub(super) summary_inputs: Mutex<Vec<Vec<ContextBlock>>>,
+    pub(super) main_inputs: Mutex<Vec<Vec<ContextBlock>>>,
     pub(super) summary_behavior: Mutex<SummaryBehavior>,
     pub(super) main_overflow: std::sync::atomic::AtomicBool,
     /// Ordinary rounds report no usage, as some providers do.
@@ -363,6 +364,7 @@ impl CompactionGateway {
             summary_calls: Arc::new(AtomicUsize::new(0)),
             main_calls: Arc::new(AtomicUsize::new(0)),
             summary_inputs: Mutex::new(Vec::new()),
+            main_inputs: Mutex::new(Vec::new()),
             summary_behavior: Mutex::new(behavior),
             main_overflow: std::sync::atomic::AtomicBool::new(false),
             main_without_usage: std::sync::atomic::AtomicBool::new(false),
@@ -434,6 +436,10 @@ impl causa::kernel::ModelGateway for CompactionGateway {
             }
         } else {
             self.main_calls.fetch_add(1, Ordering::SeqCst);
+            self.main_inputs
+                .lock()
+                .unwrap()
+                .push(request.frame.blocks.clone());
             let overflow = self
                 .main_overflow
                 .swap(false, std::sync::atomic::Ordering::SeqCst);

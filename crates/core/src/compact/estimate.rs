@@ -102,6 +102,15 @@ impl UsageTracker {
     pub(crate) fn reset(&self) {
         *self.state.lock().expect("usage tracker has no callbacks") = UsageState::default();
     }
+
+    /// Clear only the pending preparation size so a trimmed round's upstream
+    /// usage is not paired with the untrimmed Context's byte size.
+    pub(crate) fn clear_pending_prepare(&self) {
+        self.state
+            .lock()
+            .expect("usage tracker has no callbacks")
+            .pending_prepare_bytes = None;
+    }
 }
 
 /// Gateway wrapper recording each successful response's prompt usage.

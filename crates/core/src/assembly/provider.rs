@@ -1,6 +1,6 @@
-use crate::compact::CompactionRuntime;
 use crate::compact::estimate::{UsageTracker, UsageTrackingGateway};
-use crate::compact::preparer::CompactionPreparer;
+use crate::compact::preparer::{CompactionPreparer, TransientTrimPreparer};
+use crate::compact::{CompactionRuntime, ProtectedInputs};
 use crate::definition::{CredentialRef, DefinitionError, RenderOptions, SessionDefinition};
 use crate::external_tools::ExternalTools;
 use crate::session::{ConversationId, Session};
@@ -310,9 +310,14 @@ pub(crate) fn assemble(
         auto_compact,
         compact_threshold,
         summary_gateway,
-        usage,
+        usage.clone(),
     );
+    let transient_trim = (compaction.is_none())
+        .then_some(definition.context_window)
+        .flatten()
+        .map(|window| (window, Arc::new(ProtectedInputs::default())));
     let options = definition.run_options();
+    let max_tokens = definition.max_tokens;
     let selected = definition.tools.clone();
     let has_persistent_compaction = compaction.is_some();
     let call_timeout_secs = definition.tool_limits.call_timeout_secs;
@@ -365,12 +370,16 @@ pub(crate) fn assemble(
         .map(|tools| tools.outside_sandbox_grants());
 
     let compaction_for_work = compaction.clone();
+    let transient_trim_for_work = transient_trim.clone();
+    let usage_for_trim = usage;
     let session = Session::new_with_tools(
         conversation_id,
         context,
         move |work, _control, reporter| {
             let gateway = gateway.clone();
             let compact_for_work = compaction_for_work.clone();
+            let transient_trim_for_work = transient_trim_for_work.clone();
+            let usage_for_trim = usage_for_trim.clone();
             let reporter_for_compaction = reporter.clone();
             let options = options
                 .clone()
@@ -466,6 +475,14 @@ pub(crate) fn assemble(
                         runtime,
                         reporter_for_compaction,
                     )));
+                } else if let Some((window, protected)) = transient_trim_for_work {
+                    options = options.with_preparer(Arc::new(TransientTrimPreparer::new(
+                        window,
+                        max_tokens,
+                        usage_for_trim,
+                        protected,
+                        reporter_for_compaction,
+                    )));
                 }
                 Ok((
                     Arc::new(TurnRunner::new(gateway, Arc::new(executor))),
@@ -487,7 +504,10 @@ pub(crate) fn assemble(
     };
     let session = match compaction {
         Some(runtime) => session.with_compaction(runtime),
-        None => session,
+        None => match transient_trim {
+            Some((_, protected)) => session.with_protected_inputs(protected),
+            None => session,
+        },
     };
     let session = session.with_usage(usage_hub);
 

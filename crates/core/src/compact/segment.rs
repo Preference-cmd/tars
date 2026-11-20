@@ -70,7 +70,7 @@ fn is_system_text(block: &ContextBlock) -> bool {
     )
 }
 
-fn is_user_message(block: &ContextBlock) -> bool {
+pub(crate) fn is_user_message(block: &ContextBlock) -> bool {
     matches!(
         block.content(),
         BlockContent::Message {

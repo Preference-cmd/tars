@@ -1496,3 +1496,73 @@ fn test_be16_cli_export_materials_drops_spilled_artifact_and_imports() {
         material.blocks().len()
     );
 }
+
+#[test]
+fn test_be19_cli_transient_run_with_window_trims_over_window_request_and_reports_stderr() {
+    let folder = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(1);
+    fixture.stream("transient answer");
+
+    let earlier_marker = "transient-earlier-marker ";
+    let material_path = folder.path().join("material.json");
+    let material_context = causa::kernel::Context::from_blocks(vec![
+        causa::kernel::ContextBlock::text(
+            causa::runtime::new_block_id(),
+            causa::kernel::Role::System,
+            "transient system rules",
+        ),
+        causa::kernel::ContextBlock::text(
+            causa::runtime::new_block_id(),
+            causa::kernel::Role::User,
+            earlier_marker.repeat(400),
+        ),
+        causa::kernel::ContextBlock::text(
+            causa::runtime::new_block_id(),
+            causa::kernel::Role::Assistant,
+            "earlier transient reply",
+        ),
+    ])
+    .unwrap();
+    tars_core::material::save(&material_path, &material_context).unwrap();
+
+    let output = cli()
+        .args([
+            "run",
+            "--no-config",
+            "--provider",
+            "openai-chat",
+            "--model",
+            "fixture-model",
+            "--api-key-env",
+            "TARS_TEST_KEY",
+            "--endpoint",
+            &fixture.endpoint,
+            "--context-window",
+            "1200",
+            "--max-tokens",
+            "200",
+            "--load",
+        ])
+        .arg(&material_path)
+        .args(["--input", "current transient question", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let value = report(&output);
+    assert_eq!(value["status"], "completed");
+    assert_eq!(value["text"], "transient answer");
+
+    let sent = fixture.request().to_string();
+    assert!(
+        !sent.contains(earlier_marker),
+        "earlier interval trimmed: {sent}"
+    );
+    assert!(sent.contains("transient system rules"));
+    assert!(sent.contains("current transient question"));
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TARS: request frame temporarily trimmed"),
+        "expected trim notice on stderr, got: {stderr}"
+    );
+}

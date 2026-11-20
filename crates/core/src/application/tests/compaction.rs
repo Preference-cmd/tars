@@ -2029,7 +2029,7 @@ async fn test_be28_a_fixed_prefix_over_half_the_line_is_reported_once_and_refuse
     }
     assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 0);
     assert_eq!(gateway.main_calls.load(Ordering::SeqCst), 2);
-    let (mut started, mut too_large) = (0, 0);
+    let (mut started, mut too_large, mut trimmed) = (0, 0, 0);
     while let Ok(event) = progress.try_recv() {
         if let crate::session::ProgressUpdate::Compaction(update) = &event.update {
             match update {
@@ -2038,11 +2038,30 @@ async fn test_be28_a_fixed_prefix_over_half_the_line_is_reported_once_and_refuse
                     reason: CompactionAbandon::PrefixTooLarge,
                     ..
                 } => too_large += 1,
+                CompactionProgress::Trimmed {
+                    before_tokens,
+                    after_tokens,
+                } => {
+                    assert!(*before_tokens > FIXTURE_WINDOW);
+                    assert!(*after_tokens <= FIXTURE_WINDOW);
+                    trimmed += 1;
+                }
                 other => panic!("unexpected compaction progress {other:?}"),
             }
         }
     }
     assert_eq!((started, too_large), (1, 1), "reported once per session");
+    assert_eq!(trimmed, 2, "both over-window rounds fall back to trimming");
+    {
+        let main_inputs = gateway.main_inputs.lock().unwrap();
+        assert_eq!(main_inputs.len(), 2);
+        for frame_blocks in main_inputs.iter() {
+            assert!(
+                crate::compact::segment::blocks_estimate(frame_blocks) <= FIXTURE_WINDOW,
+                "trimmed frame fits window"
+            );
+        }
+    }
     for _ in 0..2 {
         let refused = session.compact().await.unwrap_err();
         assert!(
@@ -2718,6 +2737,449 @@ async fn test_be17_spill_recall_and_subsequent_summary_uses_preview_not_original
     }
 
     host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be18_abandoned_compaction_and_auto_off_trim_frame_when_over_window() {
+    use crate::compact::CompactionProgress;
+
+    // 1. Brief request fails, and frame exceeds window (estimate + max_tokens > window):
+    //    frame is trimmed at cut points, U and head stay, Context and .history/ stay untouched.
+    {
+        let store = tempfile::tempdir().unwrap();
+        let host = SessionHost::new(Some(store.path().into()));
+        let gateway = scripted(SummaryBehavior::Fail);
+        host.set_test_gateway(as_gateway(&gateway));
+        let mut def = compacting_definition(Some(1_600));
+        def.max_tokens = Some(200);
+        let session = host
+            .create(PreparedCreate::persistent(def, earlier_conversation()))
+            .await
+            .unwrap();
+        let mut progress = session.subscribe_progress();
+        let request = short_request();
+        let request_id = request[0].id();
+        let receipt = session
+            .submit(SubmitRequest {
+                request_key: "be18-fail".into(),
+                blocks: request,
+            })
+            .unwrap();
+        finished(&session, &receipt.work).await;
+        session.wait_saved().await.unwrap();
+
+        let id = session.target().conversation_id().as_str().to_owned();
+        assert!(session.history().is_empty());
+        assert_eq!(
+            std::fs::read_dir(history_dir(store.path(), &id))
+                .map(|entries| entries.count())
+                .unwrap_or(0),
+            0
+        );
+        // Context still has all 4 earlier + request + ToolChange(recall) + answer = 7 blocks.
+        assert_eq!(session.read_materials().unwrap().context.blocks().len(), 7);
+
+        {
+            let sent = gateway.main_inputs.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert!(sent[0].len() < 6, "oldest intervals were dropped");
+            assert!(sent[0].iter().any(|b| b.id() == request_id), "U is kept");
+            assert!(
+                crate::compact::segment::blocks_estimate(&sent[0]) + 200 <= 1_600,
+                "trimmed frame + max_tokens fits window"
+            );
+        }
+
+        let mut trimmed_events = 0;
+        while let Ok(event) = progress.try_recv() {
+            if let crate::session::ProgressUpdate::Compaction(CompactionProgress::Trimmed {
+                before_tokens,
+                after_tokens,
+            }) = &event.update
+            {
+                assert!(*before_tokens + 200 > 1_600);
+                assert!(*after_tokens + 200 <= 1_600);
+                trimmed_events += 1;
+            }
+        }
+        assert_eq!(trimmed_events, 1);
+
+        host.close(&session.target(), ClosePolicy::Save)
+            .await
+            .unwrap();
+    }
+
+    // 2. Record write failure (`UnwritableHistory`) when frame > window -> trims frame without touching Context.
+    {
+        let store = tempfile::tempdir().unwrap();
+        let host = SessionHost::new(Some(store.path().into()));
+        let gateway = scripted(SummaryBehavior::Text("brief that cannot be saved".into()));
+        host.set_test_gateway(as_gateway(&gateway));
+        let mut def = compacting_definition(Some(1_600));
+        def.max_tokens = Some(200);
+        let session = host
+            .create(PreparedCreate::persistent(def, earlier_conversation()))
+            .await
+            .unwrap();
+        let id = session.target().conversation_id().as_str().to_owned();
+        std::fs::write(history_dir(store.path(), &id), b"not a directory").unwrap();
+        let mut progress = session.subscribe_progress();
+        let receipt = session
+            .submit(SubmitRequest {
+                request_key: "be18-unwritable".into(),
+                blocks: short_request(),
+            })
+            .unwrap();
+        finished(&session, &receipt.work).await;
+        session.wait_saved().await.unwrap();
+
+        assert!(session.history().is_empty());
+        assert_eq!(session.read_materials().unwrap().context.blocks().len(), 7);
+        {
+            let sent = gateway.main_inputs.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert!(crate::compact::segment::blocks_estimate(&sent[0]) + 200 <= 1_600);
+        }
+        let mut trimmed_events = 0;
+        while let Ok(event) = progress.try_recv() {
+            if matches!(
+                &event.update,
+                crate::session::ProgressUpdate::Compaction(CompactionProgress::Trimmed { .. })
+            ) {
+                trimmed_events += 1;
+            }
+        }
+        assert_eq!(trimmed_events, 1);
+
+        std::fs::remove_file(history_dir(store.path(), &id)).unwrap();
+        host.close(&session.target(), ClosePolicy::Save)
+            .await
+            .unwrap();
+    }
+
+    // 3. `auto_compact = off` with known window -> no summary call, trims when frame > window.
+    {
+        let store = tempfile::tempdir().unwrap();
+        let host = SessionHost::new(Some(store.path().into()));
+        let gateway = scripted(SummaryBehavior::Text("unused".into()));
+        host.set_test_gateway(as_gateway(&gateway));
+        let mut def = compacting_definition(Some(1_600));
+        def.auto_compact = false;
+        def.max_tokens = Some(200);
+        let session = host
+            .create(PreparedCreate::persistent(def, earlier_conversation()))
+            .await
+            .unwrap();
+        let mut progress = session.subscribe_progress();
+        let receipt = session
+            .submit(SubmitRequest {
+                request_key: "be18-auto-off".into(),
+                blocks: short_request(),
+            })
+            .unwrap();
+        finished(&session, &receipt.work).await;
+        session.wait_saved().await.unwrap();
+
+        assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 0);
+        assert!(session.history().is_empty());
+        assert_eq!(session.read_materials().unwrap().context.blocks().len(), 7);
+        {
+            let sent = gateway.main_inputs.lock().unwrap();
+            assert!(crate::compact::segment::blocks_estimate(&sent[0]) + 200 <= 1_600);
+        }
+        let mut trimmed_events = 0;
+        while let Ok(event) = progress.try_recv() {
+            if matches!(
+                &event.update,
+                crate::session::ProgressUpdate::Compaction(CompactionProgress::Trimmed { .. })
+            ) {
+                trimmed_events += 1;
+            }
+        }
+        assert_eq!(trimmed_events, 1);
+        host.close(&session.target(), ClosePolicy::Save)
+            .await
+            .unwrap();
+    }
+
+    // 4. Rewrite succeeds, but rewritten frame (head + retained tail + U + max_tokens) still exceeds
+    //    window -> trims the retained tail on a copy without modifying the rewritten Context.
+    {
+        let store = tempfile::tempdir().unwrap();
+        let host = SessionHost::new(Some(store.path().into()));
+        let gateway = scripted(SummaryBehavior::Text("brief ".repeat(900)));
+        host.set_test_gateway(as_gateway(&gateway));
+        let mut def = compacting_definition(Some(10_000));
+        def.max_tokens = Some(7_500);
+        let tail_user = text_block(1_000);
+        let tail_answer = ContextBlock::text(
+            BlockId::new(uuid::Uuid::now_v7()),
+            causa::kernel::Role::Assistant,
+            "tail answer ".repeat(80),
+        );
+        let context = Context::from_blocks(vec![
+            text_block(6_000),
+            text_block(6_000),
+            text_block(6_000),
+            text_block(6_000),
+            tail_user.clone(),
+            tail_answer.clone(),
+        ])
+        .unwrap();
+        let session = host
+            .create(PreparedCreate::persistent(def, context))
+            .await
+            .unwrap();
+        let mut progress = session.subscribe_progress();
+        let request = short_request();
+        let request_id = request[0].id();
+        let receipt = session
+            .submit(SubmitRequest {
+                request_key: "be18-still-over".into(),
+                blocks: request,
+            })
+            .unwrap();
+        finished(&session, &receipt.work).await;
+        session.wait_saved().await.unwrap();
+
+        assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(session.history().len(), 1);
+        // Context keeps the brief + retained tail + U + answer.
+        let saved_blocks = session.read_materials().unwrap().context;
+        assert!(
+            saved_blocks
+                .blocks()
+                .iter()
+                .any(|b| b.id() == tail_user.id())
+        );
+        assert!(
+            saved_blocks
+                .blocks()
+                .iter()
+                .any(|b| b.id() == tail_answer.id())
+        );
+
+        {
+            let sent = gateway.main_inputs.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert!(
+                !sent[0].iter().any(|b| b.id() == tail_user.id()),
+                "retained tail interval dropped from frame so frame + max_tokens fits window"
+            );
+            assert!(sent[0].iter().any(|b| b.id() == request_id), "U is kept");
+            assert!(
+                crate::compact::segment::blocks_estimate(&sent[0]) + 7_500 <= 10_000,
+                "trimmed frame + max_tokens fits window"
+            );
+        }
+
+        let mut finished_count = 0;
+        let mut trimmed_count = 0;
+        while let Ok(event) = progress.try_recv() {
+            if let crate::session::ProgressUpdate::Compaction(update) = &event.update {
+                match update {
+                    CompactionProgress::Finished { .. } => finished_count += 1,
+                    CompactionProgress::Trimmed { .. } => trimmed_count += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!((finished_count, trimmed_count), (1, 1));
+        host.close(&session.target(), ClosePolicy::Save)
+            .await
+            .unwrap();
+    }
+
+    // 5. Anti-example: when frame fits window (`estimate + max_tokens <= window`), never trim.
+    {
+        let store = tempfile::tempdir().unwrap();
+        let host = SessionHost::new(Some(store.path().into()));
+        let gateway = scripted(SummaryBehavior::Text("unused".into()));
+        host.set_test_gateway(as_gateway(&gateway));
+        let mut def = compacting_definition(Some(10_000));
+        def.auto_compact = false;
+        def.max_tokens = Some(500);
+        let session = host
+            .create(PreparedCreate::persistent(def, earlier_conversation()))
+            .await
+            .unwrap();
+        let mut progress = session.subscribe_progress();
+        let receipt = session
+            .submit(SubmitRequest {
+                request_key: "be18-fits".into(),
+                blocks: short_request(),
+            })
+            .unwrap();
+        finished(&session, &receipt.work).await;
+        session.wait_saved().await.unwrap();
+        {
+            let sent = gateway.main_inputs.lock().unwrap();
+            // All 4 earlier + short_request + recall ToolChange = 6 blocks sent verbatim.
+            assert_eq!(sent[0].len(), 6);
+        }
+        while let Ok(event) = progress.try_recv() {
+            assert!(!matches!(
+                &event.update,
+                crate::session::ProgressUpdate::Compaction(CompactionProgress::Trimmed { .. })
+            ));
+        }
+        host.close(&session.target(), ClosePolicy::Save)
+            .await
+            .unwrap();
+    }
+
+    // 6. Empty/whitespace brief (`EmptySummary`) and `NoShrink` brief when frame > window ->
+    //    both abandon without touching Context or history and fall back to trimming.
+    for (key, behavior, expected_reason) in [
+        (
+            "be18-empty",
+            SummaryBehavior::Text("   ".into()),
+            crate::compact::CompactionAbandon::EmptySummary,
+        ),
+        (
+            "be18-noshrink",
+            SummaryBehavior::Text("oversized brief ".repeat(400)),
+            crate::compact::CompactionAbandon::NoShrink,
+        ),
+    ] {
+        let store = tempfile::tempdir().unwrap();
+        let host = SessionHost::new(Some(store.path().into()));
+        let gateway = scripted(behavior);
+        host.set_test_gateway(as_gateway(&gateway));
+        let mut def = compacting_definition(Some(1_600));
+        def.max_tokens = Some(200);
+        let session = host
+            .create(PreparedCreate::persistent(def, earlier_conversation()))
+            .await
+            .unwrap();
+        let mut progress = session.subscribe_progress();
+        let request = short_request();
+        let request_id = request[0].id();
+        let receipt = session
+            .submit(SubmitRequest {
+                request_key: key.into(),
+                blocks: request,
+            })
+            .unwrap();
+        finished(&session, &receipt.work).await;
+        session.wait_saved().await.unwrap();
+
+        assert!(session.history().is_empty(), "{key}");
+        assert_eq!(session.read_materials().unwrap().context.blocks().len(), 7);
+        {
+            let sent = gateway.main_inputs.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert!(sent[0].iter().any(|b| b.id() == request_id));
+            assert!(crate::compact::segment::blocks_estimate(&sent[0]) + 200 <= 1_600);
+        }
+        let (mut abandoned, mut trimmed) = (0, 0);
+        while let Ok(event) = progress.try_recv() {
+            if let crate::session::ProgressUpdate::Compaction(update) = &event.update {
+                match update {
+                    CompactionProgress::Abandoned { reason, .. } if *reason == expected_reason => {
+                        abandoned += 1;
+                    }
+                    CompactionProgress::Trimmed { .. } => trimmed += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!((abandoned, trimmed), (1, 1), "{key}");
+        host.close(&session.target(), ClosePolicy::Save)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_be19_transient_with_known_window_trims_without_history_or_artifacts() {
+    use crate::compact::CompactionProgress;
+
+    // Known window: trims at cut points, keeps U, keeps Context untouched, creates neither .history/ nor .artifacts/.
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("unused".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+    let mut def = compacting_definition(Some(1_000));
+    def.max_tokens = Some(100);
+    let session = host
+        .create(PreparedCreate::transient(def, earlier_conversation()))
+        .await
+        .unwrap();
+    let id = session.target().conversation_id().as_str().to_owned();
+    let mut progress = session.subscribe_progress();
+    let request = short_request();
+    let request_id = request[0].id();
+    let receipt = session
+        .submit(SubmitRequest {
+            request_key: "be19-known".into(),
+            blocks: request,
+        })
+        .unwrap();
+    finished(&session, &receipt.work).await;
+    until(|| session.status().active_work.is_none()).await;
+
+    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 0);
+    assert!(!history_dir(store.path(), &id).exists());
+    assert!(
+        !store
+            .path()
+            .join("sessions")
+            .join(format!("{id}.artifacts"))
+            .exists()
+    );
+    assert!(session.artifacts().is_none());
+    assert!(session.compaction_settings().is_none());
+    // Full Context still holds all 4 earlier blocks + request + answer = 6 blocks.
+    assert_eq!(session.read_materials().unwrap().context.blocks().len(), 6);
+
+    {
+        let sent = gateway.main_inputs.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].len() < 5);
+        assert!(
+            sent[0].iter().any(|b| b.id() == request_id),
+            "U is protected"
+        );
+        assert!(crate::compact::segment::blocks_estimate(&sent[0]) + 100 <= 1_000);
+    }
+
+    let mut trimmed = 0;
+    while let Ok(event) = progress.try_recv() {
+        if matches!(
+            &event.update,
+            crate::session::ProgressUpdate::Compaction(CompactionProgress::Trimmed { .. })
+        ) {
+            trimmed += 1;
+        }
+    }
+    assert_eq!(trimmed, 1);
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+
+    // Unknown window: no trimming preparer, full frame sent unchanged.
+    let gateway_unknown = scripted(SummaryBehavior::Text("unused".into()));
+    host.set_test_gateway(as_gateway(&gateway_unknown));
+    let session_unknown = host
+        .create(PreparedCreate::transient(
+            compacting_definition(None),
+            earlier_conversation(),
+        ))
+        .await
+        .unwrap();
+    let receipt = session_unknown
+        .submit(SubmitRequest {
+            request_key: "be19-unknown".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&session_unknown, &receipt.work).await;
+    until(|| session_unknown.status().active_work.is_none()).await;
+    assert_eq!(gateway_unknown.main_inputs.lock().unwrap()[0].len(), 5);
+    host.close(&session_unknown.target(), ClosePolicy::DiscardLocal)
         .await
         .unwrap();
 }

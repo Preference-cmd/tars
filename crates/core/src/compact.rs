@@ -42,6 +42,7 @@ pub(crate) mod sealed;
 pub(crate) mod segment;
 pub(crate) mod spill;
 pub(crate) mod summary;
+pub(crate) mod trim;
 
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +60,7 @@ pub(crate) use runtime::CompactionRuntime;
 pub use segment::fixed_prefix_end;
 pub(crate) use spill::OutputSpillProcessor;
 pub use summary::SUMMARY_SOURCE;
+pub(crate) use trim::ProtectedInputs;
 
 /// Why a compaction attempt was abandoned before editing the Context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +133,15 @@ pub enum CompactionProgress {
         trigger: HistoryTrigger,
         /// Why it stopped.
         reason: CompactionAbandon,
+    },
+    /// This round's request frame was temporarily trimmed on a copy because
+    /// the full frame exceeded the context window; the Context and history
+    /// remain unchanged.
+    Trimmed {
+        /// Estimated request size before trimming.
+        before_tokens: u64,
+        /// Estimated request size after trimming.
+        after_tokens: u64,
     },
 }
 

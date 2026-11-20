@@ -133,6 +133,7 @@ pub(super) async fn work(
     } else {
         None
     };
+    let mut progress = session.subscribe_progress();
     let receipt = session
         .submit(SubmitRequest {
             request_key: new_block_id().0.to_string(),
@@ -141,6 +142,7 @@ pub(super) async fn work(
         .map_err(|error| error.to_string())?;
     let mut signal_failed = false;
     let mut stopping = false;
+    let mut progress_open = true;
     let result = loop {
         let observation = tokio::select! {
             biased;
@@ -159,11 +161,33 @@ pub(super) async fn work(
                 stopping = true;
                 continue;
             }
+            event = progress.recv(), if progress_open => {
+                match event {
+                    Ok(event) if event.work == receipt.work => {
+                        report_compaction_progress(&event.update);
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        progress_open = false;
+                    }
+                }
+                continue;
+            }
         };
         if let WorkState::Finished(result) = observation.state {
             break result;
         }
     };
+    loop {
+        match progress.try_recv() {
+            Ok(event) if event.work == receipt.work => report_compaction_progress(&event.update),
+            Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+            Err(
+                tokio::sync::broadcast::error::TryRecvError::Empty
+                | tokio::sync::broadcast::error::TryRecvError::Closed,
+            ) => break,
+        }
+    }
     if let Some(approver) = approver {
         approver.finish();
     }
@@ -178,6 +202,37 @@ pub(super) async fn work(
         signal_failed: signal_failed || wait_signal_failed,
         usage,
     })
+}
+
+fn report_compaction_progress(update: &tars_core::session::ProgressUpdate) {
+    use tars_core::compact::{CompactionAbandon, CompactionProgress};
+    use tars_core::session::ProgressUpdate;
+    let ProgressUpdate::Compaction(progress) = update else {
+        return;
+    };
+    match progress {
+        CompactionProgress::Trimmed {
+            before_tokens,
+            after_tokens,
+        } => {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "TARS: request frame temporarily trimmed (~{before_tokens} -> ~{after_tokens} tokens)"
+            );
+        }
+        CompactionProgress::Abandoned {
+            reason: CompactionAbandon::PrefixTooLarge,
+            ..
+        } => {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "TARS: fixed prefix too large; compaction skipped"
+            );
+        }
+        CompactionProgress::Started { .. }
+        | CompactionProgress::Finished { .. }
+        | CompactionProgress::Abandoned { .. } => {}
+    }
 }
 
 /// Wait for the save barrier, but let a second Ctrl-C abandon an unresponsive
