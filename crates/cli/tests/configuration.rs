@@ -304,8 +304,10 @@ fn legacy_record_has_an_offline_non_overwriting_material_export_path() {
         .output()
         .unwrap();
     assert!(result.status.success(), "{result:?}");
+    let exported_context = tars_core::material::load(&exported).unwrap();
+    assert!(tars_core::prelude::has_prelude(exported_context.blocks()));
     assert_eq!(
-        tars_core::material::load(&exported).unwrap().blocks(),
+        &exported_context.blocks()[exported_context.blocks().len() - context.blocks().len()..],
         context.blocks()
     );
     assert_eq!(std::fs::read(&record).unwrap(), original);
@@ -382,8 +384,10 @@ fn v2_record_is_refused_with_the_export_path_and_left_unchanged() {
         .output()
         .unwrap();
     assert!(result.status.success(), "{result:?}");
+    let exported_context = tars_core::material::load(&exported).unwrap();
+    assert!(tars_core::prelude::has_prelude(exported_context.blocks()));
     assert_eq!(
-        tars_core::material::load(&exported).unwrap().blocks(),
+        &exported_context.blocks()[exported_context.blocks().len() - context.blocks().len()..],
         context.blocks()
     );
     assert_eq!(std::fs::read(&record).unwrap(), original);

@@ -222,10 +222,10 @@ fn history_blocks(output: &Output) -> Vec<tars_core::compact::ExpandedBlock> {
         .collect()
 }
 
-/// Flags for sessions that compact: a 4,000-token window with a 2,000-token
-/// trigger line, well above twice the `recall` declaration (about 440
-/// tokens) that every persistent session carries.
-const COMPACTING: [&str; 4] = ["--context-window", "4000", "--auto-compact", "50"];
+/// Flags for sessions that compact: a 6,000-token window with a 3,000-token
+/// trigger line, well above twice the initial prelude (~780 tokens) plus
+/// `recall` declaration (~440 tokens) that every persistent session carries.
+const COMPACTING: [&str; 4] = ["--context-window", "6000", "--auto-compact", "50"];
 
 /// Run one work that stays under the trigger line and answer it.
 ///
@@ -448,13 +448,15 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_record() {
     assert_eq!(history[0]["removed_block_count"], 3);
     let summary_block = history[0]["inserted_block_ids"][1].clone();
     let blocks = saved["context"]["blocks"].as_array().unwrap();
-    assert_eq!(blocks.len(), 4);
-    assert_eq!(blocks[0]["content"]["shape"], "tool_change");
-    assert_eq!(blocks[1]["meta"]["source"], "tars:compaction");
-    assert_eq!(blocks[1]["id"], summary_block);
-    assert_eq!(blocks[2]["content"]["value"]["role"], "user");
-    assert_eq!(history[0]["inserted_block_ids"][2], blocks[2]["id"]);
-    assert_eq!(blocks[3]["content"]["value"]["role"], "assistant");
+    assert_eq!(blocks.len(), 6);
+    assert_eq!(blocks[0]["meta"]["source"], "tars:prelude:base");
+    assert_eq!(blocks[1]["meta"]["source"], "tars:prelude:env");
+    assert_eq!(blocks[2]["content"]["shape"], "tool_change");
+    assert_eq!(blocks[3]["meta"]["source"], "tars:compaction");
+    assert_eq!(blocks[3]["id"], summary_block);
+    assert_eq!(blocks[4]["content"]["value"]["role"], "user");
+    assert_eq!(history[0]["inserted_block_ids"][2], blocks[4]["id"]);
+    assert_eq!(blocks[5]["content"]["value"]["role"], "assistant");
 
     let history_output = cli()
         .args([
@@ -470,27 +472,29 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_record() {
         .unwrap();
     assert!(history_output.status.success(), "{history_output:?}");
     let blocks = history_blocks(&history_output);
-    // Seeded request, declaration and answer summarized; the current request
-    // and its answer as they are.
-    assert_eq!(blocks.len(), 5);
+    // Initial prelude (2 original), then seeded request, declaration and answer
+    // summarized; the current request and its answer as they are.
+    assert_eq!(blocks.len(), 7);
     let record_id = history[0]["id"]
         .as_str()
         .or_else(|| history[0]["record_id"].as_str())
         .unwrap();
-    assert_eq!(
-        blocks[0].status,
-        tars_core::compact::BlockStatus::Summarized(record_id.to_owned())
-    );
-    assert_eq!(
-        blocks[1].status,
-        tars_core::compact::BlockStatus::Summarized(record_id.to_owned())
-    );
+    assert_eq!(blocks[0].status, tars_core::compact::BlockStatus::Original);
+    assert_eq!(blocks[1].status, tars_core::compact::BlockStatus::Original);
     assert_eq!(
         blocks[2].status,
         tars_core::compact::BlockStatus::Summarized(record_id.to_owned())
     );
-    assert_eq!(blocks[3].status, tars_core::compact::BlockStatus::Original);
-    assert_eq!(blocks[4].status, tars_core::compact::BlockStatus::Original);
+    assert_eq!(
+        blocks[3].status,
+        tars_core::compact::BlockStatus::Summarized(record_id.to_owned())
+    );
+    assert_eq!(
+        blocks[4].status,
+        tars_core::compact::BlockStatus::Summarized(record_id.to_owned())
+    );
+    assert_eq!(blocks[5].status, tars_core::compact::BlockStatus::Original);
+    assert_eq!(blocks[6].status, tars_core::compact::BlockStatus::Original);
 
     let last = cli()
         .args([
@@ -540,8 +544,8 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_record() {
     assert!(show.status.success(), "{show:?}");
     let shown = report(&show);
     assert_eq!(shown["history_records"], 1);
-    assert_eq!(shown["block_count"], 4);
-    assert_eq!(shown["context_window"], 4000);
+    assert_eq!(shown["block_count"], 6);
+    assert_eq!(shown["context_window"], 6000);
     assert_eq!(shown["auto_compact"], true);
     assert_eq!(shown["compact_threshold"], 50);
     assert!(shown["context_estimate_tokens"].as_u64().unwrap() > 0);
@@ -584,8 +588,8 @@ fn export_and_import_carry_only_the_current_context_after_compaction() {
         .unwrap();
     assert!(export.status.success(), "{export:?}");
     let material = tars_core::material::load(&exported).unwrap();
-    // Declaration, brief, the kept request and its answer.
-    assert_eq!(material.blocks().len(), 4);
+    // Prelude (2), declaration, brief, the kept request and its answer.
+    assert_eq!(material.blocks().len(), 6);
     let serialized = serde_json::to_string(&material).unwrap();
     assert!(serialized.contains("Goal: finish the export fixture"));
     assert!(!serialized.contains(&"x".repeat(20)));
@@ -601,7 +605,7 @@ fn export_and_import_carry_only_the_current_context_after_compaction() {
             .as_array()
             .unwrap()
             .len(),
-        4
+        6
     );
     assert!(
         imported_record
@@ -648,8 +652,8 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
     let first_summary = first["summary_block_id"].as_str().unwrap().to_owned();
     assert_eq!(first["merge_record_id"], json!(null));
     let saved = record(&store, &id);
-    assert_eq!(saved["context"]["blocks"].as_array().unwrap().len(), 2);
-    assert_eq!(saved["context"]["blocks"][1]["id"], json!(first_summary));
+    assert_eq!(saved["context"]["blocks"].as_array().unwrap().len(), 4);
+    assert_eq!(saved["context"]["blocks"][3]["id"], json!(first_summary));
     assert_eq!(saved["history"][0]["trigger"], "manual");
 
     // Material added after one compaction keeps the next replacement smaller.
@@ -683,9 +687,9 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
     let second_record = history[1]["record_id"].as_str().unwrap().to_owned();
     assert!(text.contains(&second_record), "{text}");
     let blocks = saved["context"]["blocks"].as_array().unwrap();
-    assert_eq!(blocks.len(), 3, "declaration and the two briefs");
-    assert_eq!(blocks[1]["id"], json!(first_summary));
-    let second_summary = blocks[2]["id"].as_str().unwrap();
+    assert_eq!(blocks.len(), 5, "prelude, declaration and the two briefs");
+    assert_eq!(blocks[3]["id"], json!(first_summary));
+    let second_summary = blocks[4]["id"].as_str().unwrap();
     assert!(
         text.contains(&format!("summary block {second_summary}")),
         "the newest brief is reported: {text}"
@@ -706,25 +710,27 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
         .unwrap();
     assert!(full.status.success(), "{full:?}");
     let blocks = history_blocks(&full);
-    assert_eq!(blocks.len(), 5);
-    assert_eq!(
-        blocks[0].status,
-        tars_core::compact::BlockStatus::Summarized(first_record.clone())
-    );
-    assert_eq!(
-        blocks[1].status,
-        tars_core::compact::BlockStatus::Summarized(first_record.clone())
-    );
+    assert_eq!(blocks.len(), 7);
+    assert_eq!(blocks[0].status, tars_core::compact::BlockStatus::Original);
+    assert_eq!(blocks[1].status, tars_core::compact::BlockStatus::Original);
     assert_eq!(
         blocks[2].status,
         tars_core::compact::BlockStatus::Summarized(first_record.clone())
     );
     assert_eq!(
         blocks[3].status,
-        tars_core::compact::BlockStatus::Summarized(second_record.clone())
+        tars_core::compact::BlockStatus::Summarized(first_record.clone())
     );
     assert_eq!(
         blocks[4].status,
+        tars_core::compact::BlockStatus::Summarized(first_record.clone())
+    );
+    assert_eq!(
+        blocks[5].status,
+        tars_core::compact::BlockStatus::Summarized(second_record.clone())
+    );
+    assert_eq!(
+        blocks[6].status,
         tars_core::compact::BlockStatus::Summarized(second_record.clone())
     );
 
@@ -775,7 +781,7 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
     assert_eq!(shown["auto_compact"], false);
     assert_eq!(shown["compact_threshold"], 70);
     assert!(shown["context_window"].is_null());
-    assert_eq!(shown["block_count"], 3);
+    assert_eq!(shown["block_count"], 5);
 
     // An unreadable record is reported in both output modes and fails the
     // command, while the readable record is still expanded.
@@ -953,7 +959,7 @@ fn show_reports_retained_work_capacity() {
         shown["work_capacity"]["used"].as_u64().unwrap() <= 2,
         "{shown}"
     );
-    assert_eq!(shown["block_count"], 11);
+    assert_eq!(shown["block_count"], 13);
     assert_eq!(shown["history_records"], 0);
 
     let human = cli()
@@ -1020,7 +1026,7 @@ fn test_be05_cli_history_prints_expanded_conversation_and_deleting_record_exits_
         .lines()
         .filter(|l| !l.trim().is_empty())
         .collect();
-    assert_eq!(lines.len(), 5);
+    assert_eq!(lines.len(), 7);
     for line in &lines {
         let block_json: Value = serde_json::from_str(line).expect("valid JSON line");
         assert!(block_json.get("status").is_some());
@@ -1061,13 +1067,17 @@ fn test_be05_cli_history_prints_expanded_conversation_and_deleting_record_exits_
     // The inserted blocks of the missing record stand in for its originals:
     // the declaration, the brief and the request it put back. Without the
     // record nothing tells the put-back block from a new one.
-    assert_eq!(broken_lines.len(), 4, "{broken_lines:?}");
-    for line in &broken_lines[..3] {
+    assert_eq!(broken_lines.len(), 6, "{broken_lines:?}");
+    for line in &broken_lines[..2] {
+        let block: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(block["status"], "original");
+    }
+    for line in &broken_lines[2..5] {
         let block: Value = serde_json::from_str(line).unwrap();
         assert_eq!(block["status"], "unreadable");
         assert_eq!(block["record_id"], rec_id);
     }
-    let last: Value = serde_json::from_str(broken_lines[3]).unwrap();
+    let last: Value = serde_json::from_str(broken_lines[5]).unwrap();
     assert_eq!(last["status"], "original");
 }
 
@@ -1508,11 +1518,6 @@ fn test_be19_cli_transient_run_with_window_trims_over_window_request_and_reports
     let material_context = causa::kernel::Context::from_blocks(vec![
         causa::kernel::ContextBlock::text(
             causa::runtime::new_block_id(),
-            causa::kernel::Role::System,
-            "transient system rules",
-        ),
-        causa::kernel::ContextBlock::text(
-            causa::runtime::new_block_id(),
             causa::kernel::Role::User,
             earlier_marker.repeat(400),
         ),
@@ -1538,7 +1543,7 @@ fn test_be19_cli_transient_run_with_window_trims_over_window_request_and_reports
             "--endpoint",
             &fixture.endpoint,
             "--context-window",
-            "1200",
+            "1600",
             "--max-tokens",
             "200",
             "--load",
@@ -1557,7 +1562,7 @@ fn test_be19_cli_transient_run_with_window_trims_over_window_request_and_reports
         !sent.contains(earlier_marker),
         "earlier interval trimmed: {sent}"
     );
-    assert!(sent.contains("transient system rules"));
+    assert!(sent.contains("You are running inside the TARS agent host."));
     assert!(sent.contains("current transient question"));
 
     let stderr = String::from_utf8_lossy(&output.stderr);

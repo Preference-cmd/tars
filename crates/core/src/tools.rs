@@ -20,7 +20,7 @@ pub(crate) use execute::PreparedWrite;
 #[cfg_attr(not(unix), allow(unused_imports))]
 pub(crate) use execute::TestGate;
 pub use execute::WorkspaceTools;
-pub(crate) use execute::result;
+pub(crate) use execute::{result, workspace_tool_definition};
 #[cfg(test)]
 pub use resources::ToolMetrics;
 pub use resources::ToolResources;

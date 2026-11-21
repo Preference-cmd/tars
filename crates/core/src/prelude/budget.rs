@@ -68,7 +68,7 @@ pub(super) fn apply_budget(
     static_bytes: usize,
     total_budget_bytes: usize,
 ) -> RenderedSections {
-    let mut rendered = RenderedSections {
+    let rendered = RenderedSections {
         user_instructions: draft
             .user_instructions
             .as_deref()
@@ -92,10 +92,65 @@ pub(super) fn apply_budget(
             .map(|body| wrap_text_section("dynamic_context", body)),
     };
 
+    apply_budget_to_rendered(
+        rendered,
+        draft.user_instructions.as_deref(),
+        draft.workspace_instructions.as_deref(),
+        draft.dynamic_custom.as_deref(),
+        draft.env.as_deref(),
+        |max_bytes| shrink_skills(&draft.skills, max_bytes),
+        static_bytes,
+        total_budget_bytes,
+    )
+}
+
+pub(super) struct FoldedRawSections<'a> {
+    pub(super) user_instructions: Option<&'a str>,
+    pub(super) workspace_instructions: Option<&'a str>,
+    pub(super) dynamic_custom: Option<&'a str>,
+    pub(super) env: Option<&'a str>,
+    pub(super) skills_xml: Option<&'a str>,
+}
+
+pub(super) fn apply_budget_folded(
+    rendered: RenderedSections,
+    raw: &FoldedRawSections<'_>,
+    static_bytes: usize,
+    total_budget_bytes: usize,
+) -> RenderedSections {
+    apply_budget_to_rendered(
+        rendered,
+        raw.user_instructions,
+        raw.workspace_instructions,
+        raw.dynamic_custom,
+        raw.env,
+        |max_bytes| {
+            let xml = raw.skills_xml?;
+            if xml.len() <= max_bytes {
+                return Some(xml.to_owned());
+            }
+            shrink_skills_xml(xml, max_bytes)
+        },
+        static_bytes,
+        total_budget_bytes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_budget_to_rendered(
+    mut rendered: RenderedSections,
+    raw_user: Option<&str>,
+    raw_ws: Option<&str>,
+    raw_dyn: Option<&str>,
+    raw_env: Option<&str>,
+    shrink_skills_fn: impl Fn(usize) -> Option<String>,
+    static_bytes: usize,
+    total_budget_bytes: usize,
+) -> RenderedSections {
     // 1. Apply per-section soft caps first.
     if let Some(ref text) = rendered.dynamic_custom
         && text.len() > DYNAMIC_CUSTOM_SOFT_CAP_BYTES
-        && let Some(raw) = draft.dynamic_custom.as_deref()
+        && let Some(raw) = raw_dyn
     {
         rendered.dynamic_custom =
             shrink_wrapped_text_section("dynamic_context", raw, DYNAMIC_CUSTOM_SOFT_CAP_BYTES);
@@ -103,7 +158,7 @@ pub(super) fn apply_budget(
 
     if let Some(ref text) = rendered.env
         && text.len() > ENV_SOFT_CAP_BYTES
-        && let Some(raw) = draft.env.as_deref()
+        && let Some(raw) = raw_env
     {
         rendered.env = shrink_wrapped_text_section("env", raw, ENV_SOFT_CAP_BYTES);
     }
@@ -117,7 +172,7 @@ pub(super) fn apply_budget(
             .map_or(0, String::len);
     if instr_total > INSTRUCTIONS_SOFT_CAP_BYTES {
         let user_len = rendered.user_instructions.as_ref().map_or(0, String::len);
-        if let Some(raw_ws) = draft.workspace_instructions.as_deref()
+        if let Some(raw_ws) = raw_ws
             && rendered.workspace_instructions.is_some()
         {
             let ws_target = INSTRUCTIONS_SOFT_CAP_BYTES.saturating_sub(user_len);
@@ -130,7 +185,7 @@ pub(super) fn apply_budget(
                 .as_ref()
                 .map_or(0, String::len);
         if after_ws > INSTRUCTIONS_SOFT_CAP_BYTES
-            && let Some(raw_user) = draft.user_instructions.as_deref()
+            && let Some(raw_user) = raw_user
         {
             let ws_len = rendered
                 .workspace_instructions
@@ -145,7 +200,7 @@ pub(super) fn apply_budget(
     if let Some(ref text) = rendered.skills
         && text.len() > SKILLS_SOFT_CAP_BYTES
     {
-        rendered.skills = shrink_skills(&draft.skills, SKILLS_SOFT_CAP_BYTES);
+        rendered.skills = shrink_skills_fn(SKILLS_SOFT_CAP_BYTES);
     }
 
     // 2. Enforce unified total budget in deterministic degradation order:
@@ -155,7 +210,7 @@ pub(super) fn apply_budget(
     let dynamic_budget = total_budget_bytes.saturating_sub(static_bytes);
 
     if rendered.total_bytes() > dynamic_budget
-        && let Some(raw) = draft.dynamic_custom.as_deref()
+        && let Some(raw) = raw_dyn
         && rendered.dynamic_custom.is_some()
     {
         let others =
@@ -165,7 +220,7 @@ pub(super) fn apply_budget(
     }
 
     if rendered.total_bytes() > dynamic_budget
-        && let Some(raw) = draft.workspace_instructions.as_deref()
+        && let Some(raw) = raw_ws
         && rendered.workspace_instructions.is_some()
     {
         let others = rendered.total_bytes()
@@ -179,7 +234,7 @@ pub(super) fn apply_budget(
     }
 
     if rendered.total_bytes() > dynamic_budget
-        && let Some(raw) = draft.user_instructions.as_deref()
+        && let Some(raw) = raw_user
         && rendered.user_instructions.is_some()
     {
         let others =
@@ -191,10 +246,91 @@ pub(super) fn apply_budget(
     if rendered.total_bytes() > dynamic_budget && rendered.skills.is_some() {
         let others = rendered.total_bytes() - rendered.skills.as_ref().map_or(0, String::len);
         let target = dynamic_budget.saturating_sub(others);
-        rendered.skills = shrink_skills(&draft.skills, target);
+        rendered.skills = shrink_skills_fn(target);
     }
 
     rendered
+}
+
+fn shrink_skills_xml(xml: &str, max_bytes: usize) -> Option<String> {
+    if xml.len() <= max_bytes {
+        return Some(xml.to_owned());
+    }
+    let names = extract_skill_names_from_xml(xml);
+    if names.is_empty() {
+        return None;
+    }
+    let prior_omitted = extract_prior_omitted_count(xml);
+    if let Some(names_only) = render_skill_names_only(&names, prior_omitted)
+        && names_only.len() <= max_bytes
+    {
+        return Some(names_only);
+    }
+    for keep in (1..names.len()).rev() {
+        let omitted = prior_omitted.saturating_add(names.len() - keep);
+        if let Some(candidate) = render_skill_names_only(&names[..keep], omitted)
+            && candidate.len() <= max_bytes
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn extract_skill_names_from_xml(xml: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find("<name>") {
+        let after_open = &rest[start + "<name>".len()..];
+        let Some(end) = after_open.find("</name>") else {
+            break;
+        };
+        names.push(xml_unescape(&after_open[..end]));
+        rest = &after_open[end + "</name>".len()..];
+    }
+    names
+}
+
+fn extract_prior_omitted_count(xml: &str) -> usize {
+    let Some(first_line) = xml.lines().next() else {
+        return 0;
+    };
+    let Some(after_semi) = first_line.split("; ").nth(1) else {
+        return 0;
+    };
+    after_semi
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn xml_unescape(input: &str) -> String {
+    input
+        .replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&")
+}
+
+fn render_skill_names_only(names: &[String], omitted_count: usize) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let note = if omitted_count == 0 {
+        "descriptions omitted due to budget".to_owned()
+    } else {
+        format!("descriptions omitted; {omitted_count} more skills omitted due to budget")
+    };
+    let mut out = format!("<available_skills note=\"{note}\">\n");
+    for name in names {
+        out.push_str("  <skill><name>");
+        push_xml_escaped(&mut out, name);
+        out.push_str("</name></skill>\n");
+    }
+    out.push_str("</available_skills>");
+    Some(out)
 }
 
 pub(super) fn wrap_text_section(tag: &str, body: &str) -> String {

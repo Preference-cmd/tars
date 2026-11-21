@@ -102,16 +102,45 @@ pub(crate) fn is_brief(block: &ContextBlock) -> bool {
     block.meta().source.as_deref() == Some(SUMMARY_SOURCE)
 }
 
+/// Whether a block is a dynamic prelude prefix block (`tars:prelude:<sec>`).
+pub(crate) fn is_prelude_dynamic_prefix(block: &ContextBlock) -> bool {
+    is_user_message(block)
+        && block
+            .meta()
+            .source
+            .as_deref()
+            .and_then(crate::prelude::dynamic_section_from_prefix_source)
+            .is_some()
+}
+
 /// End of the leading system run: one past its last system text block.
 ///
 /// Tool declarations inside the run do not end it, as in Causa's rendering,
 /// where a `ToolChange` is not a segment. A Context that does not start with
-/// a system block has no fixed-prefix blocks.
-pub fn fixed_prefix_end(blocks: &[ContextBlock]) -> usize {
+/// a system block has zero leading system blocks.
+pub(crate) fn leading_system_end(blocks: &[ContextBlock]) -> usize {
     let mut end = 0;
     for (index, block) in blocks.iter().enumerate() {
         if is_system_text(block) {
             end = index + 1;
+        } else if !is_tool_change(block) {
+            break;
+        }
+    }
+    end
+}
+
+/// End of the fixed prefix: the leading system run followed by any contiguous
+/// initial `tars:prelude:*` dynamic `Role::User` blocks (skipping `ToolChange`).
+///
+/// Incremental `tars:prelude:update:*` blocks in the conversation are not part
+/// of the fixed prefix.
+pub fn fixed_prefix_end(blocks: &[ContextBlock]) -> usize {
+    let sys_end = leading_system_end(blocks);
+    let mut end = sys_end;
+    for (offset, block) in blocks[sys_end..].iter().enumerate() {
+        if is_prelude_dynamic_prefix(block) {
+            end = sys_end + offset + 1;
         } else if !is_tool_change(block) {
             break;
         }
@@ -131,8 +160,8 @@ pub(crate) fn head_end(blocks: &[ContextBlock]) -> usize {
     end
 }
 
-/// Estimate of the fixed prefix: the leading system blocks plus one tool
-/// declaration of the whole current tool state.
+/// Estimate of the fixed prefix: the leading system blocks, initial dynamic
+/// prelude blocks, plus one tool declaration of the whole current tool state.
 ///
 /// The declaration is counted whole because Anthropic sends the folded tool
 /// state with every request, wherever the `ToolChange` blocks sit.
@@ -140,7 +169,7 @@ pub(crate) fn fixed_prefix_estimate(blocks: &[ContextBlock]) -> u64 {
     let end = fixed_prefix_end(blocks);
     let mut bytes: u64 = blocks[..end]
         .iter()
-        .filter(|block| is_system_text(block))
+        .filter(|block| is_system_text(block) || is_prelude_dynamic_prefix(block))
         .fold(0, |total, block| total.saturating_add(block_bytes(block)));
     let tools = current_tools(blocks);
     if !tools.is_empty() {

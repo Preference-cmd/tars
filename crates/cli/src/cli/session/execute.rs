@@ -133,9 +133,9 @@ async fn create(
     recovery_dir: PathBuf,
     json_output: bool,
 ) -> ExitCode {
-    let context = match load {
+    let imported_context = match load {
         Some(path) => match tars_core::material::load(path) {
-            Ok(context) => context,
+            Ok(context) => Some(context),
             Err(error) => {
                 return early_failure(
                     json_output,
@@ -143,9 +143,13 @@ async fn create(
                 );
             }
         },
-        None => Context::new(),
+        None => None,
     };
-    let prepared = PreparedCreate::persistent(definition, context.clone());
+    let prepared = match PreparedCreate::prepare_persistent(definition, imported_context) {
+        Ok(prepared) => prepared,
+        Err(error) => return early_failure(json_output, &error.to_string()),
+    };
+    let recovery_context = prepared.context().clone();
     let id = prepared.conversation_id().clone();
     // Creating saves the definition and closes; it starts no MCP server.
     let host = managed_execution::definition_host(store).with_external_tools(external_tools);
@@ -156,7 +160,7 @@ async fn create(
             if let Some(status) = status
                 && status.lifecycle == Lifecycle::InitializationBlocked
             {
-                let recovered = export_initial_recovery(&context, &recovery_dir);
+                let recovered = export_initial_recovery(&recovery_context, &recovery_dir);
                 let close = host.close(&status.target, ClosePolicy::DiscardLocal).await;
                 let saved_revision = close
                     .as_ref()

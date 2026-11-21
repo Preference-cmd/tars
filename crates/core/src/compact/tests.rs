@@ -24,6 +24,7 @@ use std::time::Duration;
 mod brief_reply;
 mod merge;
 mod partial;
+mod prelude_fold;
 mod spill;
 mod thinking;
 mod trim;

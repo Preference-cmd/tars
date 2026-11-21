@@ -699,11 +699,15 @@ impl HistoryStore {
         }
         let mut replacements = Vec::with_capacity(rewrite.replacements.len());
         let mut previous_end = 0;
-        for planned in &rewrite.replacements {
+        for (index, planned) in rewrite.replacements.iter().enumerate() {
             let range = planned.range.clone();
-            if range.start >= range.end || range.start < previous_end || range.end > blocks.len() {
+            if range.start > range.end
+                || range.start < previous_end
+                || (index > 0 && range.start == range.end && range.start == previous_end)
+                || range.end > blocks.len()
+            {
                 return Err(RewriteError::Rejected(format!(
-                    "range {}..{} is empty, out of order or past the end of {} blocks",
+                    "range {}..{} is inverted, out of order or past the end of {} blocks",
                     range.start,
                     range.end,
                     blocks.len()

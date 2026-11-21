@@ -75,6 +75,7 @@ pub(crate) fn trim_frame(
     if !exceeds_window(estimate_before, window, max_tokens) {
         return None;
     }
+    let leading_sys_end = segment::leading_system_end(blocks);
     let fixed_end = segment::fixed_prefix_end(blocks);
     let head_end = segment::head_end(blocks);
     if head_end >= blocks.len() {
@@ -91,8 +92,13 @@ pub(crate) fn trim_frame(
             continue;
         }
         let candidate = build_candidate(blocks, head_end, restart, protected_ids);
-        if !candidate_valid(&candidate.blocks, fixed_end, head_end, head_has_user)
-            || !has_conversation_message(&candidate.blocks, fixed_end)
+        if !candidate_valid(
+            &candidate.blocks,
+            leading_sys_end,
+            fixed_end,
+            head_end,
+            head_has_user,
+        ) || !has_conversation_message(&candidate.blocks, fixed_end)
         {
             continue;
         }
@@ -113,8 +119,13 @@ pub(crate) fn trim_frame(
     // declaration, and protected blocks) when it still carries conversation
     // content; otherwise fall back to the smallest valid interval candidate.
     let minimal = build_candidate(blocks, head_end, blocks.len(), protected_ids);
-    if candidate_valid(&minimal.blocks, fixed_end, head_end, head_has_user)
-        && has_conversation_message(&minimal.blocks, fixed_end)
+    if candidate_valid(
+        &minimal.blocks,
+        leading_sys_end,
+        fixed_end,
+        head_end,
+        head_has_user,
+    ) && has_conversation_message(&minimal.blocks, fixed_end)
     {
         let after_tokens = scaled_estimate(&minimal.blocks, estimate_before, full_blocks_tokens);
         return Some(TrimResult {
@@ -141,6 +152,40 @@ struct Candidate {
     changed: bool,
 }
 
+fn protected_with_latest_prelude_updates(
+    blocks: &[ContextBlock],
+    head_end: usize,
+    restart: usize,
+    protected_ids: &HashSet<BlockId>,
+) -> HashSet<BlockId> {
+    let mut later_sections = HashSet::new();
+    for block in &blocks[restart..] {
+        if let Some(sec) = block
+            .meta()
+            .source
+            .as_deref()
+            .and_then(crate::prelude::dynamic_section_from_update_source)
+        {
+            later_sections.insert(sec);
+        }
+    }
+    let mut effective = protected_ids.clone();
+    let mut seen_dropped = HashSet::new();
+    for block in blocks[head_end..restart].iter().rev() {
+        if let Some(sec) = block
+            .meta()
+            .source
+            .as_deref()
+            .and_then(crate::prelude::dynamic_section_from_update_source)
+            && !later_sections.contains(&sec)
+            && seen_dropped.insert(sec)
+        {
+            effective.insert(block.id());
+        }
+    }
+    effective
+}
+
 fn build_candidate(
     blocks: &[ContextBlock],
     head_end: usize,
@@ -154,7 +199,9 @@ fn build_candidate(
     if let Some(change) = delta {
         out.push(change);
     }
-    let protected = segment::protected_positions(blocks, head_end, restart, protected_ids);
+    let effective_protected =
+        protected_with_latest_prelude_updates(blocks, head_end, restart, protected_ids);
+    let protected = segment::protected_positions(blocks, head_end, restart, &effective_protected);
     let first_change = if has_delta {
         head_end
     } else {
@@ -192,10 +239,14 @@ fn push_kept_block(out: &mut Vec<ContextBlock>, block: &ContextBlock, strip_seal
 /// system prompt (BE27) or start a headerless conversation with a non-user block.
 fn candidate_valid(
     candidate: &[ContextBlock],
+    leading_sys_end: usize,
     fixed_end: usize,
     head_end: usize,
     head_has_user: bool,
 ) -> bool {
+    if segment::leading_system_end(candidate) != leading_sys_end {
+        return false;
+    }
     if segment::fixed_prefix_end(candidate) != fixed_end {
         return false;
     }

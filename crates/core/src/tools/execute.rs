@@ -488,90 +488,104 @@ fn search_not_started(call: &ToolCallContext, control: &CallControl) -> ToolResu
     )
 }
 
+pub(crate) fn workspace_tool_definition(
+    kind: WorkspaceTool,
+    limits: &WorkspaceToolLimits,
+    write_limits: &WriteToolLimits,
+    command_settings: CommandSettings,
+) -> ToolDefinition {
+    use serde_json::json;
+    let (name, description, fields) = match kind {
+        WorkspaceTool::ListDirectory => (
+            "list_directory",
+            "List a single workspace-relative directory without following links.",
+            json!({"path":{"type":"string","maxLength":4096},"limit":{"type":"integer","minimum":1,"maximum":limits.max_directory_entries}}),
+        ),
+        WorkspaceTool::ReadFile => (
+            "read_file",
+            "Read UTF-8 lines from a regular workspace-relative file; line numbers start at one.",
+            json!({"path":{"type":"string","maxLength":4096},"start_line":{"type":"integer","minimum":1},"max_lines":{"type":"integer","minimum":1,"maximum":2000}}),
+        ),
+        WorkspaceTool::SearchText => (
+            "search_text",
+            "Search a sandboxed workspace tree with ripgrep, honoring .gitignore \
+             (including nested and negated rules) and skipping .git. The query is a \
+             single-line literal of at most 1024 UTF-8 bytes unless regex is true; \
+             regex mode uses ripgrep's linear-time engine. Read-only; no network.",
+            json!({
+                "path": {"type":"string","maxLength":4096,"description":"Workspace-relative directory or regular file; '.' is the workspace root."},
+                "query": {"type":"string","minLength":1,"maxLength":1024},
+                "max_matches": {"type":"integer","minimum":1,"maximum":limits.max_search_matches},
+                "regex": {"type":"boolean","description":"Treat the query as a regular expression instead of a literal."},
+                "ignore_case": {"type":"boolean","description":"Match case-insensitively; the default is case-sensitive."},
+                "glob": {"type":"string","minLength":1,"maxLength":256,"description":"One inclusive glob filter passed to ripgrep, for example *.rs."},
+                "context_lines": {"type":"integer","minimum":0,"maximum":3,"description":"Context lines included before and after each match."},
+                "include_ignored": {"type":"boolean","description":"Also search ignored files; .git, .hg, .svn and .jj stay excluded."}
+            }),
+        ),
+        WorkspaceTool::WriteFile => (
+            "write_file",
+            "Write full UTF-8 content to a workspace-relative file, creating missing directories or overwriting atomically.",
+            json!({"path":{"type":"string","maxLength":4096},"content":{"type":"string"}}),
+        ),
+        WorkspaceTool::EditFile => (
+            "edit_file",
+            "Replace exact text segments in a workspace-relative file; all edits apply simultaneously against the original content.",
+            json!({
+                "path": {"type":"string","maxLength":4096},
+                "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": write_limits.max_edit_segments,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "old_text": {"type": "string"},
+                            "new_text": {"type": "string"}
+                        },
+                        "required": ["old_text", "new_text"],
+                        "additionalProperties": false
+                    }
+                }
+            }),
+        ),
+        WorkspaceTool::RunCommand => (
+            "run_command",
+            "Run one shell command in a sandboxed workspace; network is disabled unless the \
+             session enables it. Set outside_sandbox with a justification only when the \
+             sandbox blocked a command you need and it requires writes, credentials or \
+             network outside the workspace.",
+            json!({
+                "command": {"type":"string","minLength":1,"maxLength":16384},
+                "workdir": {"type":"string","maxLength":4096},
+                "timeout_secs": {"type":"integer","minimum":1,"maximum":command_settings.max_timeout_secs},
+                "outside_sandbox": {"type":"boolean","description":"Run this one command outside the sandbox; requires justification."},
+                "justification": {"type":"string","maxLength":1024,"description":"Why outside execution is needed; at most 1 KiB (UTF-8 bytes)."}
+            }),
+        ),
+    };
+    let required = match kind {
+        WorkspaceTool::SearchText => json!(["path", "query"]),
+        WorkspaceTool::WriteFile => json!(["path", "content"]),
+        WorkspaceTool::EditFile => json!(["path", "edits"]),
+        WorkspaceTool::RunCommand => json!(["command"]),
+        _ => json!(["path"]),
+    };
+    ToolDefinition::new(
+        name,
+        description,
+        json!({"type":"object","properties":fields,"required":required,"additionalProperties":false}),
+    )
+}
+
 #[async_trait::async_trait]
 impl Tool for WorkspaceToolImpl {
     fn definition(&self) -> ToolDefinition {
-        use serde_json::json;
-        let (name, description, fields) = match self.kind {
-            WorkspaceTool::ListDirectory => (
-                "list_directory",
-                "List a single workspace-relative directory without following links.",
-                json!({"path":{"type":"string","maxLength":4096},"limit":{"type":"integer","minimum":1,"maximum":self.shared.limits.max_directory_entries}}),
-            ),
-            WorkspaceTool::ReadFile => (
-                "read_file",
-                "Read UTF-8 lines from a regular workspace-relative file; line numbers start at one.",
-                json!({"path":{"type":"string","maxLength":4096},"start_line":{"type":"integer","minimum":1},"max_lines":{"type":"integer","minimum":1,"maximum":2000}}),
-            ),
-            WorkspaceTool::SearchText => (
-                "search_text",
-                "Search a sandboxed workspace tree with ripgrep, honoring .gitignore \
-                 (including nested and negated rules) and skipping .git. The query is a \
-                 single-line literal of at most 1024 UTF-8 bytes unless regex is true; \
-                 regex mode uses ripgrep's linear-time engine. Read-only; no network.",
-                json!({
-                    "path": {"type":"string","maxLength":4096,"description":"Workspace-relative directory or regular file; '.' is the workspace root."},
-                    "query": {"type":"string","minLength":1,"maxLength":1024},
-                    "max_matches": {"type":"integer","minimum":1,"maximum":self.shared.limits.max_search_matches},
-                    "regex": {"type":"boolean","description":"Treat the query as a regular expression instead of a literal."},
-                    "ignore_case": {"type":"boolean","description":"Match case-insensitively; the default is case-sensitive."},
-                    "glob": {"type":"string","minLength":1,"maxLength":256,"description":"One inclusive glob filter passed to ripgrep, for example *.rs."},
-                    "context_lines": {"type":"integer","minimum":0,"maximum":3,"description":"Context lines included before and after each match."},
-                    "include_ignored": {"type":"boolean","description":"Also search ignored files; .git, .hg, .svn and .jj stay excluded."}
-                }),
-            ),
-            WorkspaceTool::WriteFile => (
-                "write_file",
-                "Write full UTF-8 content to a workspace-relative file, creating missing directories or overwriting atomically.",
-                json!({"path":{"type":"string","maxLength":4096},"content":{"type":"string"}}),
-            ),
-            WorkspaceTool::EditFile => (
-                "edit_file",
-                "Replace exact text segments in a workspace-relative file; all edits apply simultaneously against the original content.",
-                json!({
-                    "path": {"type":"string","maxLength":4096},
-                    "edits": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": self.shared.write_limits.max_edit_segments,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "old_text": {"type": "string"},
-                                "new_text": {"type": "string"}
-                            },
-                            "required": ["old_text", "new_text"],
-                            "additionalProperties": false
-                        }
-                    }
-                }),
-            ),
-            WorkspaceTool::RunCommand => (
-                "run_command",
-                "Run one shell command in a sandboxed workspace; network is disabled unless the \
-                 session enables it. Set outside_sandbox with a justification only when the \
-                 sandbox blocked a command you need and it requires writes, credentials or \
-                 network outside the workspace.",
-                json!({
-                    "command": {"type":"string","minLength":1,"maxLength":16384},
-                    "workdir": {"type":"string","maxLength":4096},
-                    "timeout_secs": {"type":"integer","minimum":1,"maximum":self.shared.command_settings().max_timeout_secs},
-                    "outside_sandbox": {"type":"boolean","description":"Run this one command outside the sandbox; requires justification."},
-                    "justification": {"type":"string","maxLength":1024,"description":"Why outside execution is needed; at most 1 KiB (UTF-8 bytes)."}
-                }),
-            ),
-        };
-        let required = match self.kind {
-            WorkspaceTool::SearchText => json!(["path", "query"]),
-            WorkspaceTool::WriteFile => json!(["path", "content"]),
-            WorkspaceTool::EditFile => json!(["path", "edits"]),
-            WorkspaceTool::RunCommand => json!(["command"]),
-            _ => json!(["path"]),
-        };
-        ToolDefinition::new(
-            name,
-            description,
-            json!({"type":"object","properties":fields,"required":required,"additionalProperties":false}),
+        workspace_tool_definition(
+            self.kind,
+            &self.shared.limits,
+            &self.shared.write_limits,
+            self.shared.command_settings(),
         )
     }
 

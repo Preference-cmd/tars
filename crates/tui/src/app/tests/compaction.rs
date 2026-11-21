@@ -128,6 +128,7 @@ async fn status_bar_reports_the_window_and_auto_off_and_status_lists_work_capaci
 async fn compact_job_keeps_the_replaced_conversation_and_summary_panel() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app(dir.path());
+    app.viewport_height = 60;
     let server = Server::new().await;
     create(&mut app, &server.endpoint).await;
     app.event(Event::Paste("recorded before compaction ".repeat(200)));
@@ -233,6 +234,7 @@ async fn compact_job_keeps_the_replaced_conversation_and_summary_panel() {
     until(&mut app, |app| app.entries[0].session.is_none()).await;
     let mut reopened = crate::app::tests::support::app(dir.path());
     open_in_view(&mut reopened, &id).await;
+    reopened.viewport_height = 60;
     until(&mut reopened, |app| {
         app.entries[0].record_reads == 1
             && !app.entries[0].history.loading()

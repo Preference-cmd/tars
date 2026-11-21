@@ -337,3 +337,166 @@ fn test_be18_minimal_frame_emitted_when_nothing_fits() {
     let est_single = segment::blocks_estimate(&single_turn);
     assert!(trim_frame(&single_turn, 10, None, est_single, &HashSet::new()).is_none());
 }
+
+fn prelude_block(role: Role, source: &str, text: &str) -> ContextBlock {
+    ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::text(role, text),
+        BlockMeta::from_source(source),
+    )
+}
+
+#[test]
+fn test_si04_trim_frame_protects_latest_prelude_updates_and_preserves_be27() {
+    use crate::prelude::{
+        BASE_HOST_CONTRACT, DynamicSection, PRELUDE_BASE_SOURCE, PRELUDE_ENV_SOURCE,
+        PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE,
+    };
+
+    let base = prelude_block(Role::System, PRELUDE_BASE_SOURCE, BASE_HOST_CONTRACT);
+    let ws_v1 = prelude_block(
+        Role::User,
+        PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE,
+        "<workspace_instructions>\nRule v1\n</workspace_instructions>",
+    );
+    let env_v1 = prelude_block(
+        Role::User,
+        PRELUDE_ENV_SOURCE,
+        "<env>\npermission_mode: ask\n</env>",
+    );
+
+    let u0 = big_block(700);
+    let env_v2 = prelude_block(
+        Role::User,
+        DynamicSection::Env.update_source(),
+        "<env updated=\"true\">\npermission_mode: accept-edits\n</env>",
+    );
+    let ws_removed = prelude_block(
+        Role::User,
+        DynamicSection::WorkspaceInstructions.update_source(),
+        "<workspace_instructions removed=\"true\" />",
+    );
+    let a0 = assistant("a0");
+    let u1 = big_block(700);
+    let env_v3 = prelude_block(
+        Role::User,
+        DynamicSection::Env.update_source(),
+        "<env updated=\"true\">\npermission_mode: read-only\n</env>",
+    );
+    let a1 = assistant("a1");
+    let middle_sys = system("middle system repair note");
+    let u_cur = user("current question");
+
+    // Case 1: `head_end..restart` drops [u0, env_v2, ws_removed, a0, u1, env_v3, a1, middle_sys]
+    // and keeps `u_cur`. Both `env_v3` (latest for Env) and `ws_removed` (latest for WorkspaceInstructions)
+    // must be protected, while `env_v2` is dropped. Also `middle_sys` is never promoted to leading system.
+    let blocks = vec![
+        base.clone(),
+        ws_v1.clone(),
+        env_v1.clone(),
+        u0.clone(),
+        env_v2.clone(),
+        ws_removed.clone(),
+        a0.clone(),
+        u1.clone(),
+        env_v3.clone(),
+        a1.clone(),
+        middle_sys.clone(),
+        u_cur.clone(),
+    ];
+    assert_eq!(segment::leading_system_end(&blocks), 1);
+    assert_eq!(segment::fixed_prefix_end(&blocks), 3);
+
+    let est = segment::blocks_estimate(&blocks);
+    let protected: HashSet<BlockId> = [u_cur.id()].into_iter().collect();
+    let keep_budget = segment::blocks_estimate(&[
+        base.clone(),
+        ws_v1.clone(),
+        env_v1.clone(),
+        ws_removed.clone(),
+        env_v3.clone(),
+        u_cur.clone(),
+    ]);
+    let trimmed = trim_frame(&blocks, keep_budget + 50, None, est, &protected).unwrap();
+    assert!(trimmed.trimmed);
+    assert_eq!(
+        ids(&trimmed.frame.blocks),
+        vec![
+            base.id(),
+            ws_v1.id(),
+            env_v1.id(),
+            ws_removed.id(),
+            env_v3.id(),
+            u_cur.id()
+        ],
+        "only latest update per section in dropped interval is protected; middle system stays dropped"
+    );
+    assert!(
+        !trimmed
+            .frame
+            .blocks
+            .iter()
+            .any(|b| b.id() == middle_sys.id())
+    );
+    assert!(!trimmed.frame.blocks.iter().any(|b| b.id() == env_v2.id()));
+
+    // Case 2: When `restart..` already contains a newer update (`env_v4`) for Env,
+    // the older `env_v2` / `env_v3` in `head_end..restart` is NOT protected.
+    let env_v4 = prelude_block(
+        Role::User,
+        DynamicSection::Env.update_source(),
+        "<env updated=\"true\">\npermission_mode: full-access\n</env>",
+    );
+    let blocks2 = vec![
+        base.clone(),
+        ws_v1.clone(),
+        env_v1.clone(),
+        u0,
+        env_v2.clone(),
+        ws_removed.clone(),
+        a0,
+        env_v4.clone(),
+        u_cur.clone(),
+    ];
+    let est2 = segment::blocks_estimate(&blocks2);
+    let keep_budget2 = segment::blocks_estimate(&[
+        base.clone(),
+        ws_v1.clone(),
+        env_v1.clone(),
+        ws_removed.clone(),
+        env_v4.clone(),
+        u_cur.clone(),
+    ]);
+    let trimmed2 = trim_frame(&blocks2, keep_budget2 + 50, None, est2, &protected).unwrap();
+    assert_eq!(
+        ids(&trimmed2.frame.blocks),
+        vec![
+            base.id(),
+            ws_v1.id(),
+            env_v1.id(),
+            ws_removed.id(),
+            env_v4.id(),
+            u_cur.id()
+        ],
+        "env_v2 is not protected when env_v4 is already in kept tail"
+    );
+}
+
+#[test]
+fn test_si04_be27_rejects_middle_system_after_prelude_or_without_dynamic_prefix() {
+    use crate::prelude::{BASE_HOST_CONTRACT, PRELUDE_BASE_SOURCE};
+
+    let base = prelude_block(Role::System, PRELUDE_BASE_SOURCE, BASE_HOST_CONTRACT);
+    let u0 = big_block(600);
+    let a0 = assistant("a0");
+    let middle_sys = system("middle repair note");
+    let u_cur = user("current");
+
+    let blocks = vec![base.clone(), u0, a0, middle_sys.clone(), u_cur.clone()];
+    let est = segment::blocks_estimate(&blocks);
+    let protected: HashSet<BlockId> = [u_cur.id()].into_iter().collect();
+    let min_keep = segment::blocks_estimate(&[base.clone(), u_cur.clone()]);
+    let trimmed = trim_frame(&blocks, min_keep + 10, None, est, &protected).unwrap();
+    assert_eq!(ids(&trimmed.frame.blocks), vec![base.id(), u_cur.id()]);
+    assert_eq!(segment::leading_system_end(&trimmed.frame.blocks), 1);
+}

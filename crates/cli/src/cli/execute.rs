@@ -1,7 +1,7 @@
 use super::command::{failure, output};
 use super::managed_execution;
 use super::options::RunOptions;
-use causa::kernel::{Context, ControlError};
+use causa::kernel::ControlError;
 use causa::runtime::{TurnInterruption, TurnResult};
 use std::io::{self, Write};
 use std::process::ExitCode;
@@ -26,9 +26,9 @@ pub(super) fn run(options: RunOptions) -> ExitCode {
 }
 
 async fn execute(options: RunOptions) -> (ExitCode, bool) {
-    let context = match &options.load {
+    let imported_context = match &options.load {
         Some(path) => match tars_core::material::load(path) {
-            Ok(context) => context,
+            Ok(context) => Some(context),
             Err(error) => {
                 return (
                     early_failure(options.json, &format!("material load failed: {error}")),
@@ -36,18 +36,19 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
                 );
             }
         },
-        None => Context::new(),
+        None => None,
     };
     let used_stdin_input = options.input.is_none();
     let input = match managed_execution::input_text(options.input) {
         Ok(input) => input,
         Err(error) => return (early_failure(options.json, error), false),
     };
+    let prepared = match PreparedCreate::prepare_transient(options.definition, imported_context) {
+        Ok(prepared) => prepared,
+        Err(error) => return (early_failure(options.json, &error.to_string()), false),
+    };
     let host = SessionHost::new(None).with_external_tools(options.external_tools);
-    let session = match host
-        .create(PreparedCreate::transient(options.definition, context))
-        .await
-    {
+    let session = match host.create(prepared).await {
         Ok(session) => session,
         Err(error) => return (early_failure(options.json, &error.to_string()), false),
     };

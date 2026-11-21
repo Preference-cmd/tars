@@ -75,7 +75,15 @@ impl SessionHandle {
     /// New work needs a current Tokio runtime with time enabled. Every refusal
     /// returns the original request. After admission, failures appear only in the
     /// work result. Assembly and execution are never called under the lock.
-    pub fn submit(&self, mut request: SubmitRequest) -> Result<WorkReceipt, SubmitRejection> {
+    pub fn submit(&self, request: SubmitRequest) -> Result<WorkReceipt, SubmitRejection> {
+        self.submit_with_prelude_updates(request, Vec::new())
+    }
+
+    pub(crate) fn submit_with_prelude_updates(
+        &self,
+        mut request: SubmitRequest,
+        prelude_updates: Vec<causa::kernel::ContextBlock>,
+    ) -> Result<WorkReceipt, SubmitRejection> {
         let mut state = self.shared.lock();
         if let Some(turn_id) = state.keys.get(&request.request_key) {
             let entry = state
@@ -140,9 +148,12 @@ impl SessionHandle {
         };
         let control = CallControl::new(CancellationToken::new(), deadline);
         let original_blocks = request.blocks.clone();
+        let mut to_append = prelude_updates;
+        to_append.extend(request.blocks);
         let context = state.context.as_mut().expect("idle context checked");
-        if let Err(failure) = context.edit().append(request.blocks).commit() {
-            request.blocks = failure.appended;
+        if let Err(failure) = context.edit().append(to_append).commit() {
+            let _ = failure.appended;
+            request.blocks = original_blocks;
             return Err(reject(SessionError::ContextEdit(failure.reason), request));
         }
         let record = Arc::new(Record {

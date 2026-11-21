@@ -3,7 +3,6 @@ use super::{
     state::{App, Entry},
 };
 use crate::{input, transcript::Rows};
-use causa::kernel::Context;
 use causa::runtime::new_block_id;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tars_core::application::{ClosePolicy, ManagedSession, PreparedCreate, SaveStatus};
@@ -55,7 +54,13 @@ impl App {
         };
         let model = definition.model.clone();
         let prompt_cache = definition.prompt_cache;
-        let prepared = PreparedCreate::persistent(definition, Context::new());
+        let prepared = match PreparedCreate::prepare_persistent(definition, None) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                form.error = error.to_string();
+                return;
+            }
+        };
         let mut entry = Entry::new(prepared.conversation_id().as_str().to_owned(), model);
         entry.prompt_cache = prompt_cache;
         entry.prepared = Some(prepared);

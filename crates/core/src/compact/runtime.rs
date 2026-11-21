@@ -230,8 +230,11 @@ impl CompactionRuntime {
         // in its place.
         let empty = summary::summary_block(summary::new_block_id(), "");
         let empty_bytes = segment::block_bytes(&empty);
-        let (removed, inserted) =
-            sealed::replaced_bytes(blocks, &summary_replacements(blocks, &interval, empty));
+        let (_, threshold) = self.settings();
+        let (removed, inserted) = sealed::replaced_bytes(
+            blocks,
+            &build_summary_replacements(blocks, &interval, empty, self.window, threshold),
+        );
         inserted
             .saturating_sub(empty_bytes)
             .saturating_add(rejected)
@@ -318,7 +321,9 @@ impl CompactionRuntime {
             &summary::summary_text(&text, &record_id),
         );
         let brief_bytes = segment::block_bytes(&brief);
-        let replacements = summary_replacements(blocks, &interval, brief);
+        let (_, threshold) = self.settings();
+        let replacements =
+            build_summary_replacements(blocks, &interval, brief, self.window, threshold);
         let rewrite = self.rewrite(
             context,
             record_id,
@@ -600,6 +605,129 @@ struct SummaryInterval {
     head_end: usize,
     k: usize,
     protected: Vec<usize>,
+}
+
+/// The replacements of a summary over `interval` with `brief` standing for it,
+/// plus an atomic fold of dynamic prelude updates in `head_end..k` back into
+/// the dynamic prefix when present.
+fn build_summary_replacements(
+    blocks: &[ContextBlock],
+    interval: &SummaryInterval,
+    brief: ContextBlock,
+    window: Option<u64>,
+    threshold: u8,
+) -> Vec<PlannedReplacement> {
+    let has_updates = blocks[interval.head_end..interval.k].iter().any(|block| {
+        block
+            .meta()
+            .source
+            .as_deref()
+            .is_some_and(crate::prelude::is_prelude_update_source)
+    });
+    if !has_updates {
+        return summary_replacements(blocks, interval, brief);
+    }
+
+    let fixed_end = segment::fixed_prefix_end(blocks);
+    let dynamic_start = blocks[..fixed_end]
+        .iter()
+        .position(segment::is_prelude_dynamic_prefix)
+        .unwrap_or(fixed_end);
+
+    let tools = causa::kernel::current_tools(blocks);
+    let folded_tool_declaration_estimate = if tools.is_empty() {
+        0
+    } else {
+        let decl = ContextBlock::new(
+            BlockId::new(uuid::Uuid::nil()),
+            BlockContent::ToolChange(causa::kernel::ToolChange::between(&[], &tools)),
+            causa::kernel::BlockMeta::default(),
+        );
+        estimate::estimate_bytes(segment::block_bytes(&decl))
+    };
+    let budget = crate::prelude::PreludeBudgetConfig {
+        context_window: window,
+        compact_threshold: threshold,
+        folded_tool_declaration_estimate,
+    };
+    let mut folded_dynamic = crate::prelude::fold_dynamic_prefix(blocks, interval.k, &budget);
+
+    let existing_dynamic: Vec<&ContextBlock> = blocks[dynamic_start..fixed_end]
+        .iter()
+        .filter(|b| segment::is_prelude_dynamic_prefix(b))
+        .collect();
+    let unchanged = existing_dynamic.len() == folded_dynamic.len()
+        && existing_dynamic
+            .iter()
+            .zip(&folded_dynamic)
+            .all(|(old, new)| {
+                old.meta().source == new.meta().source && old.content() == new.content()
+            });
+    if unchanged {
+        return summary_replacements(blocks, interval, brief);
+    }
+
+    for block in &blocks[dynamic_start..fixed_end] {
+        if let BlockContent::ToolChange(change) = block.content() {
+            folded_dynamic.push(ContextBlock::new(
+                summary::new_block_id(),
+                BlockContent::ToolChange(change.clone()),
+                block.meta().clone(),
+            ));
+        }
+    }
+
+    if dynamic_start < fixed_end {
+        let prefix_replacement = if !folded_dynamic.is_empty() {
+            Some(PlannedReplacement {
+                range: dynamic_start..fixed_end,
+                with: folded_dynamic,
+            })
+        } else if dynamic_start > 0 {
+            // Synthetic edge case where all dynamic sections were removed and no `env` existed:
+            // put the preceding static block back unchanged to remove `dynamic_start..fixed_end`.
+            Some(PlannedReplacement {
+                range: (dynamic_start - 1)..fixed_end,
+                with: vec![blocks[dynamic_start - 1].clone()],
+            })
+        } else {
+            None
+        };
+        let mut out = Vec::new();
+        if let Some(rep) = prefix_replacement {
+            out.push(rep);
+        }
+        out.extend(summary_replacements(blocks, interval, brief));
+        return out;
+    }
+
+    // `dynamic_start == fixed_end`: no prior dynamic prefix blocks existed.
+    if fixed_end < interval.head_end {
+        let mut out = vec![PlannedReplacement {
+            range: fixed_end..fixed_end,
+            with: folded_dynamic,
+        }];
+        out.extend(summary_replacements(blocks, interval, brief));
+        return out;
+    }
+
+    let mut new_blocks = folded_dynamic;
+    new_blocks.extend(segment::tool_delta(
+        &blocks[..interval.head_end],
+        &blocks[..interval.k],
+    ));
+    new_blocks.push(brief);
+    sealed::strip_after(
+        blocks,
+        interval.head_end,
+        segment::replacements(
+            blocks,
+            interval.head_end,
+            interval.k,
+            &interval.protected,
+            new_blocks,
+        ),
+    )
 }
 
 /// The replacements of a summary over `interval` with `brief` standing for it.

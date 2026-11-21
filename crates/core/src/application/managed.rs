@@ -188,6 +188,10 @@ impl ManagedSession {
     pub fn open_report(&self) -> OpenReport {
         self.entry.lock().open_report
     }
+    /// Non-fatal prelude diagnostics recorded during preparation or the most recent submit.
+    pub fn prelude_diagnostics(&self) -> Vec<crate::prelude::PreludeDiagnostic> {
+        self.entry.lock().prelude_diagnostics.clone()
+    }
     /// Replay a retained key first; otherwise synchronously admit under the save barrier.
     pub fn submit(&self, request: SubmitRequest) -> Result<WorkReceipt, ManagedSubmitRejection> {
         let mut state = self.entry.lock();
@@ -241,12 +245,52 @@ impl ManagedSession {
                 });
             }
         }
+        let persistent = state.persistent;
+        let definition = state
+            .definition
+            .as_ref()
+            .expect("published definition")
+            .clone();
+        let owner = state.owner.as_mut().expect("published owner");
+        let current_mode = owner
+            .permission_mode()
+            .map(|(m, _)| m)
+            .unwrap_or_else(|| definition.initial_permission_mode());
+        let prelude_evaluation = owner.with_context(|context| {
+            let blocks = context.blocks();
+            if !crate::prelude::has_prelude(blocks) {
+                return None;
+            }
+            let runtime_state = crate::prelude::PreludeRuntimeState::from_definition(
+                &definition,
+                current_mode,
+                persistent,
+            );
+            let budget = prelude_budget_config(&definition, persistent);
+            Some(crate::prelude::evaluate_dynamic_updates(
+                blocks,
+                &definition.prelude,
+                &runtime_state,
+                &budget,
+            ))
+        });
+        let (prelude_updates, update_diagnostics) = match prelude_evaluation {
+            Ok(Some(update)) => (update.blocks, update.diagnostics),
+            Ok(None) => (Vec::new(), Vec::new()),
+            Err(error) => {
+                return Err(ManagedSubmitRejection {
+                    reason: error.into(),
+                    request,
+                });
+            }
+        };
         let receipt = handle
-            .submit(request)
+            .submit_with_prelude_updates(request, prelude_updates)
             .map_err(|failure| ManagedSubmitRejection {
                 reason: failure.reason.into(),
                 request: failure.request,
             })?;
+        state.prelude_diagnostics = update_diagnostics;
         // The supervisor already exists. This synchronous registration holds the
         // application gate until it captures and confirms this work's materials.
         state.active = Some(receipt.work.clone());

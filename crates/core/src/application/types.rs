@@ -1,7 +1,11 @@
 use crate::definition::SessionDefinition;
+use crate::prelude::{
+    PreludeBudgetConfig, PreludeDiagnostic, PreludeError, PreludeRuntimeState,
+    build_initial_prelude, has_prelude,
+};
 use crate::session::{ConversationId, SessionError, SubmitRequest, WorkRef};
 use crate::store::StoreError;
-use causa::kernel::Context;
+use causa::kernel::{BlockContent, BlockId, BlockMeta, Context, ContextBlock, ToolChange};
 use std::sync::Arc;
 
 /// Opaque address of one instance on one host; a reopened conversation differs.
@@ -26,28 +30,127 @@ pub struct PreparedCreate {
     pub(super) definition: SessionDefinition,
     pub(super) context: Context,
     pub(super) persistent: bool,
+    pub(super) prelude_diagnostics: Vec<PreludeDiagnostic>,
 }
 impl PreparedCreate {
     /// Prepare a durable initial snapshot before any asynchronous operation.
     pub fn persistent(definition: SessionDefinition, context: Context) -> Self {
-        Self::new(definition, context, true)
+        Self::new(definition, context, true, Vec::new())
     }
     /// Prepare a temporary conversation with no implicit store writes.
     pub fn transient(definition: SessionDefinition, context: Context) -> Self {
-        Self::new(definition, context, false)
+        Self::new(definition, context, false, Vec::new())
     }
-    fn new(definition: SessionDefinition, context: Context, persistent: bool) -> Self {
+    /// Prepare a durable initial snapshot with unified prelude injection when
+    /// `imported_context` does not already begin with prelude blocks.
+    pub fn prepare_persistent(
+        definition: SessionDefinition,
+        imported_context: Option<Context>,
+    ) -> Result<Self, PreludeError> {
+        Self::prepare(definition, imported_context, true)
+    }
+    /// Prepare a temporary conversation with unified prelude injection when
+    /// `imported_context` does not already begin with prelude blocks.
+    pub fn prepare_transient(
+        definition: SessionDefinition,
+        imported_context: Option<Context>,
+    ) -> Result<Self, PreludeError> {
+        Self::prepare(definition, imported_context, false)
+    }
+    fn prepare(
+        definition: SessionDefinition,
+        imported_context: Option<Context>,
+        persistent: bool,
+    ) -> Result<Self, PreludeError> {
+        let base_context = imported_context.unwrap_or_default();
+        if has_prelude(base_context.blocks()) {
+            return Ok(Self::new(definition, base_context, persistent, Vec::new()));
+        }
+        let state = PreludeRuntimeState::from_definition(
+            &definition,
+            definition.initial_permission_mode(),
+            persistent,
+        );
+        let budget = prelude_budget_config(&definition, persistent);
+        let initial = build_initial_prelude(&definition.prelude, &state, &budget)?;
+        let mut blocks = initial.blocks;
+        blocks.extend(base_context.into_blocks());
+        let context =
+            Context::from_blocks(blocks).expect("fresh prelude blocks have unique block ids");
+        Ok(Self::new(
+            definition,
+            context,
+            persistent,
+            initial.diagnostics,
+        ))
+    }
+    fn new(
+        definition: SessionDefinition,
+        context: Context,
+        persistent: bool,
+        prelude_diagnostics: Vec<PreludeDiagnostic>,
+    ) -> Self {
         Self {
             conversation_id: uuid::Uuid::now_v7().to_string().into(),
             commit_id: uuid::Uuid::now_v7().to_string(),
             definition,
             context,
             persistent,
+            prelude_diagnostics,
         }
     }
     /// Read the identity allocated synchronously by preparation.
     pub fn conversation_id(&self) -> &ConversationId {
         &self.conversation_id
+    }
+    /// Read the prepared initial `Context`.
+    pub fn context(&self) -> &Context {
+        &self.context
+    }
+    /// Non-fatal prelude diagnostics collected during preparation.
+    pub fn prelude_diagnostics(&self) -> &[PreludeDiagnostic] {
+        &self.prelude_diagnostics
+    }
+}
+
+pub(crate) fn prelude_budget_config(
+    definition: &SessionDefinition,
+    persistent: bool,
+) -> PreludeBudgetConfig {
+    let command_settings = definition.effective_command_settings().unwrap_or_default();
+    let write_limits = definition.write_limits.unwrap_or_default();
+    let mut tools: Vec<causa::kernel::ToolDefinition> = definition
+        .tools
+        .iter()
+        .map(|&kind| {
+            crate::tools::workspace_tool_definition(
+                kind,
+                &definition.tool_limits,
+                &write_limits,
+                command_settings,
+            )
+        })
+        .collect();
+    if persistent {
+        tools.push(crate::compact::recall::recall_tool_definition());
+    }
+    let folded_tool_declaration_estimate = if tools.is_empty() {
+        0
+    } else {
+        let block = ContextBlock::new(
+            BlockId::new(uuid::Uuid::nil()),
+            BlockContent::ToolChange(ToolChange::between(&[], &tools)),
+            BlockMeta::default(),
+        );
+        let bytes = serde_json::to_vec(&block)
+            .map(|v| u64::try_from(v.len()).unwrap_or(u64::MAX))
+            .unwrap_or(u64::MAX);
+        crate::compact::estimate::estimate_bytes(bytes)
+    };
+    PreludeBudgetConfig {
+        context_window: definition.context_window,
+        compact_threshold: definition.compact_threshold,
+        folded_tool_declaration_estimate,
     }
 }
 

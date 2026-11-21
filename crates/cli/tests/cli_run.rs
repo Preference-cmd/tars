@@ -150,7 +150,8 @@ fn stdin_save_reload_preserves_materials_and_creates_fresh_work() {
     assert!(first.status.success(), "{first:?}");
     requests.recv_timeout(Duration::from_secs(5)).unwrap();
     let original = tars_core::material::load(&path).unwrap();
-    assert_eq!(original.blocks().len(), 2);
+    assert!(tars_core::prelude::has_prelude(original.blocks()));
+    assert_eq!(original.blocks().len(), 4);
     let bytes = std::fs::read_to_string(&path).unwrap();
     assert!(!bytes.contains("fixture-secret"));
     assert!(!bytes.contains("request_key"));
@@ -173,8 +174,8 @@ fn stdin_save_reload_preserves_materials_and_creates_fresh_work() {
         report(&second)["conversation_id"]
     );
     let restored = tars_core::material::load(&path).unwrap();
-    assert_eq!(&restored.blocks()[..2], original.blocks());
-    assert_eq!(restored.blocks().len(), 4);
+    assert_eq!(&restored.blocks()[..4], original.blocks());
+    assert_eq!(restored.blocks().len(), 6);
     let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(request.contains("original input") && request.contains("continue"));
 }
@@ -210,7 +211,7 @@ fn provider_failure_and_deadline_save_actual_input_with_distinct_exit_codes() {
         let report = report(&output);
         assert_eq!(report["status"], state);
         assert_eq!(report["saved"], true);
-        assert_eq!(tars_core::material::load(&path).unwrap().blocks().len(), 1);
+        assert_eq!(tars_core::material::load(&path).unwrap().blocks().len(), 3);
         assert!(!String::from_utf8_lossy(&output.stderr).contains("fixture-secret"));
         requests.recv_timeout(Duration::from_secs(5)).unwrap();
     }
@@ -311,7 +312,7 @@ fn ctrl_c_cancels_http_work_and_saves_returned_materials() {
     assert_eq!(output.status.code(), Some(130), "{output:?}");
     assert_eq!(report(&output)["status"], "cancelled");
     assert_eq!(report(&output)["saved"], true);
-    assert_eq!(tars_core::material::load(&path).unwrap().blocks().len(), 1);
+    assert_eq!(tars_core::material::load(&path).unwrap().blocks().len(), 3);
 }
 
 #[test]

@@ -395,9 +395,10 @@ impl ExpansionCursor {
                 Some(piece) => {
                     let start = end - piece.inserted.len();
                     let inserted = &run[start..end];
-                    // Originals that only lost sealed items still stand
-                    // where the replies that replaced them stand.
-                    let stripped = is_stripped(piece, inserted);
+                    // Originals that only lost sealed items or folded dynamic prelude
+                    // sections still stand where the blocks that replaced them stand
+                    // and do not emit a compaction divider.
+                    let stripped = is_stripped(piece, inserted) || is_prelude_fold(piece, inserted);
                     if !stripped && let Some(m) = mark_to_insert.take() {
                         newest_first.push(Item::Rewrite(m));
                     }
@@ -453,6 +454,23 @@ fn is_stripped(piece: &Piece<'_>, inserted: &[(ContextBlock, BlockStatus)]) -> b
             .iter()
             .filter(|block| !piece.inserted.contains(&block.id()))
             .all(super::sealed::has_sealed)
+}
+
+/// Whether a piece only folded dynamic prelude prefix blocks: every inserted
+/// block and every original block is an initial `tars:prelude:*` prefix block
+/// (or an interleaved `ToolChange`).
+fn is_prelude_fold(piece: &Piece<'_>, inserted: &[(ContextBlock, BlockStatus)]) -> bool {
+    let is_prefix_or_tool = |block: &ContextBlock| {
+        block
+            .meta()
+            .source
+            .as_deref()
+            .is_some_and(crate::prelude::is_prelude_prefix_source)
+            || matches!(block.content(), causa::kernel::BlockContent::ToolChange(_))
+    };
+    !inserted.is_empty()
+        && inserted.iter().all(|(block, _)| is_prefix_or_tool(block))
+        && piece.originals.iter().all(is_prefix_or_tool)
 }
 
 /// The newest record older than `below` that inserted `id`.

@@ -786,28 +786,32 @@ impl RecallTool {
     }
 }
 
+pub(crate) fn recall_tool_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        TOOL_NAME,
+        TOOL_DESCRIPTION,
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string", "description": "Record id, <record id>/<block id>, or artifact:<artifact id>." },
+                "query": { "type": "string", "description": "Text to search for, per line." },
+                "regex": { "type": "boolean", "description": "Query is a regex. Default false." },
+                "case_sensitive": { "type": "boolean", "description": "Default false." },
+                "offset": { "type": "integer", "minimum": 0, "description": "Blocks to skip in a listing, characters to skip in a read." },
+                "limit": { "type": "integer", "minimum": 1, "description": "Listing: blocks (max 200). Read: characters (max 12000). Search: hits (max 20)." },
+                "context": { "type": "integer", "minimum": 0, "maximum": 3, "description": "Neighbouring blocks to show around each search hit." },
+                "role": { "type": "string", "enum": ["user", "assistant", "system", "tool"] },
+                "kind": { "type": "string", "enum": ["message", "tool_call", "tool_result", "tool_change"] }
+            },
+            "additionalProperties": false
+        }),
+    )
+}
+
 #[async_trait]
 impl Tool for RecallTool {
     fn definition(&self) -> ToolDefinition {
-        ToolDefinition::new(
-            TOOL_NAME,
-            TOOL_DESCRIPTION,
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Record id, <record id>/<block id>, or artifact:<artifact id>." },
-                    "query": { "type": "string", "description": "Text to search for, per line." },
-                    "regex": { "type": "boolean", "description": "Query is a regex. Default false." },
-                    "case_sensitive": { "type": "boolean", "description": "Default false." },
-                    "offset": { "type": "integer", "minimum": 0, "description": "Blocks to skip in a listing, characters to skip in a read." },
-                    "limit": { "type": "integer", "minimum": 1, "description": "Listing: blocks (max 200). Read: characters (max 12000). Search: hits (max 20)." },
-                    "context": { "type": "integer", "minimum": 0, "maximum": 3, "description": "Neighbouring blocks to show around each search hit." },
-                    "role": { "type": "string", "enum": ["user", "assistant", "system", "tool"] },
-                    "kind": { "type": "string", "enum": ["message", "tool_call", "tool_result", "tool_change"] }
-                },
-                "additionalProperties": false
-            }),
-        )
+        recall_tool_definition()
     }
 
     fn hints(&self) -> ToolHints {

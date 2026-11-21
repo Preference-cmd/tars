@@ -1,5 +1,6 @@
 use super::budget::{
-    DynamicDraft, RenderedSections, apply_budget, effective_budget_bytes, push_xml_escaped,
+    DynamicDraft, FoldedRawSections, RenderedSections, apply_budget, apply_budget_folded,
+    effective_budget_bytes, push_xml_escaped,
 };
 use super::contract::{
     BASE_HOST_CONTRACT, DynamicSection, PRELUDE_BASE_SOURCE, PRELUDE_STATIC_CUSTOM_SOURCE,
@@ -247,6 +248,90 @@ pub fn evaluate_dynamic_updates(
     }
 }
 
+/// Folds the dynamic prelude prefix plus all `tars:prelude:update:*` blocks in
+/// `blocks[..k]` into canonical `tars:prelude:*` `Role::User` prefix blocks in
+/// [`DynamicSection::ALL`] order, re-applying the unified budget and window
+/// tightening against the leading static `Role::System` blocks and `budget`.
+pub(crate) fn fold_dynamic_prefix(
+    blocks: &[ContextBlock],
+    k: usize,
+    budget: &PreludeBudgetConfig,
+) -> Vec<ContextBlock> {
+    let effective = effective_section_contents(&blocks[..k]);
+    let mut static_blocks = Vec::new();
+    for block in blocks {
+        if matches!(
+            block.content(),
+            BlockContent::Message {
+                role: Role::System,
+                ..
+            }
+        ) {
+            static_blocks.push(block.clone());
+        } else if !matches!(block.content(), BlockContent::ToolChange(_)) {
+            break;
+        }
+    }
+    let static_bytes = blocks_text_bytes(&static_blocks);
+    let initial_budget = effective_budget_bytes(budget);
+
+    let raw_user = effective
+        .get(&DynamicSection::UserInstructions)
+        .and_then(|v| v.as_deref())
+        .and_then(|t| strip_outer_tag(DynamicSection::UserInstructions, t));
+    let raw_ws = effective
+        .get(&DynamicSection::WorkspaceInstructions)
+        .and_then(|v| v.as_deref())
+        .and_then(|t| strip_outer_tag(DynamicSection::WorkspaceInstructions, t));
+    let raw_dyn = effective
+        .get(&DynamicSection::DynamicCustom)
+        .and_then(|v| v.as_deref())
+        .and_then(|t| strip_outer_tag(DynamicSection::DynamicCustom, t));
+    let raw_env = effective
+        .get(&DynamicSection::Env)
+        .and_then(|v| v.as_deref())
+        .and_then(|t| strip_outer_tag(DynamicSection::Env, t));
+    let skills_xml = effective
+        .get(&DynamicSection::Skills)
+        .and_then(|v| v.as_deref());
+
+    let make_rendered = || RenderedSections {
+        user_instructions: effective
+            .get(&DynamicSection::UserInstructions)
+            .cloned()
+            .flatten(),
+        workspace_instructions: effective
+            .get(&DynamicSection::WorkspaceInstructions)
+            .cloned()
+            .flatten(),
+        skills: effective.get(&DynamicSection::Skills).cloned().flatten(),
+        env: effective.get(&DynamicSection::Env).cloned().flatten(),
+        dynamic_custom: effective
+            .get(&DynamicSection::DynamicCustom)
+            .cloned()
+            .flatten(),
+    };
+
+    let raw = FoldedRawSections {
+        user_instructions: raw_user.as_deref(),
+        workspace_instructions: raw_ws.as_deref(),
+        dynamic_custom: raw_dyn.as_deref(),
+        env: raw_env.as_deref(),
+        skills_xml,
+    };
+    let (rendered, _) = tighten_loop(&static_blocks, initial_budget, budget, |target_budget| {
+        apply_budget_folded(make_rendered(), &raw, static_bytes, target_budget)
+    });
+
+    let mut out = Vec::new();
+    for sec in DynamicSection::ALL {
+        if let Some(text) = rendered_section_text(&rendered, sec) {
+            out.push(make_block(Role::User, sec.prefix_source(), text));
+        }
+    }
+    out
+}
+
 fn section_index(sec: DynamicSection) -> usize {
     match sec {
         DynamicSection::UserInstructions => 0,
@@ -316,8 +401,22 @@ fn tighten_to_window(
     initial_budget: usize,
     budget_config: &PreludeBudgetConfig,
 ) -> (RenderedSections, usize) {
+    tighten_loop(
+        static_blocks,
+        initial_budget,
+        budget_config,
+        |target_budget| apply_budget(draft, static_bytes, target_budget),
+    )
+}
+
+fn tighten_loop(
+    static_blocks: &[ContextBlock],
+    initial_budget: usize,
+    budget_config: &PreludeBudgetConfig,
+    render_with_budget: impl Fn(usize) -> RenderedSections,
+) -> (RenderedSections, usize) {
     let mut current_budget = initial_budget;
-    let mut rendered = apply_budget(draft, static_bytes, current_budget);
+    let mut rendered = render_with_budget(current_budget);
 
     let Some(window) = budget_config.context_window else {
         return (rendered, current_budget);
@@ -357,7 +456,7 @@ fn tighten_to_window(
             break;
         }
         current_budget = next_budget;
-        rendered = apply_budget(draft, static_bytes, current_budget);
+        rendered = render_with_budget(current_budget);
     }
 
     (rendered, current_budget)

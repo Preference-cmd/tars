@@ -150,3 +150,13 @@ pub fn is_prelude_update_source(source: &str) -> bool {
 pub fn is_any_prelude_source(source: &str) -> bool {
     is_prelude_prefix_source(source) || is_prelude_update_source(source)
 }
+
+/// Returns `true` if `blocks` begins with an initial `tars:prelude:*` prefix block
+/// (skipping any leading `ToolChange` blocks).
+pub fn has_prelude(blocks: &[causa::kernel::ContextBlock]) -> bool {
+    blocks
+        .iter()
+        .find(|block| !matches!(block.content(), causa::kernel::BlockContent::ToolChange(_)))
+        .and_then(|block| block.meta().source.as_deref())
+        .is_some_and(is_prelude_prefix_source)
+}

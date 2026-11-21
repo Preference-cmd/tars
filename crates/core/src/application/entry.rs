@@ -42,6 +42,8 @@ pub(super) struct State {
     pub open_report: OpenReport,
     /// Title and last-activity time of the last stored record.
     pub saved: crate::store::RecordMetadata,
+    /// Non-fatal prelude diagnostics recorded during creation or last submit.
+    pub prelude_diagnostics: Vec<crate::prelude::PreludeDiagnostic>,
 }
 impl Entry {
     pub fn new(
@@ -55,6 +57,10 @@ impl Entry {
             generation: 0,
         };
         let saved = crate::store::RecordMetadata::unsaved(target.conversation_id.as_str());
+        let prelude_diagnostics = prepared
+            .as_ref()
+            .map(|p| p.prelude_diagnostics.clone())
+            .unwrap_or_default();
         Self {
             target,
             snapshot_clones,
@@ -89,6 +95,7 @@ impl Entry {
                 close_outcome: None,
                 open_report: OpenReport::default(),
                 saved,
+                prelude_diagnostics,
             }),
             changed: Notify::new(),
             wake: Notify::new(),
