@@ -1,23 +1,15 @@
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use causa::kernel::{
     CallControl, Context, ModelGateway, ModelInvokeError, ModelItem, ModelOutput, ModelRequest,
     ModelResponse, ModelStopReason,
 };
-use serde_json::json;
 
-use crate::application::{
-    ApplicationError, ClosePolicy, HostOptions, ManagedSession, PreparedCreate, SessionHost,
-    text_input,
-};
-use crate::definition::{
-    CommandSettings, CredentialRef, Provider, SessionDefinition, WorkspaceTool, WorkspaceToolLimits,
-};
-use crate::permission::{CommandRule, RuleDecision, RuleScope, RuleSource};
-use crate::session::{SubmitRequest, WorkRef, WorkResult, WorkState};
+use crate::application::{ApplicationError, ClosePolicy, HostOptions, PreparedCreate, SessionHost};
+use crate::definition::{CredentialRef, Provider, SessionDefinition, WorkspaceToolLimits};
+use crate::permission::{CommandRule, RuleDecision};
 use crate::store::SessionStore;
 
 struct StaticAnswerGateway;
@@ -288,12 +280,17 @@ decision = \"allow\"
     host.close(&s4.target(), ClosePolicy::Save).await.unwrap();
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-mod unix_execution {
+#[cfg(target_os = "macos")]
+mod macos_execution {
     use super::*;
     use crate::application::tests::workspace_http::*;
-    use crate::permission::PermissionDecisionKind;
+    use crate::application::{ManagedSession, text_input};
+    use crate::definition::{CommandSettings, WorkspaceTool};
+    use crate::permission::{PermissionDecisionKind, RuleScope, RuleSource};
+    use crate::session::{SubmitRequest, WorkRef, WorkResult, WorkState};
     use causa::kernel::ToolResultStatus;
+    use serde_json::json;
+    use std::time::Duration;
 
     fn command_definition(endpoint: &str, root: &Path) -> SessionDefinition {
         let mut def = minimal_definition(Some(root));

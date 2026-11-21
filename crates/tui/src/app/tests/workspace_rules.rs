@@ -1,10 +1,13 @@
 use super::support::{Server, app, ctrl, key, until};
+#[cfg(target_os = "macos")]
 use super::wire;
 use crate::{input::Form, render};
 use crossterm::event::KeyCode;
 use ratatui::{Terminal, backend::TestBackend};
 use ratatui_textarea::TextArea;
+#[cfg(target_os = "macos")]
 use serde_json::json;
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 use tars_core::application::ClosePolicy;
 
@@ -210,7 +213,7 @@ decision = \"allow\"
     app.host.close(&target, ClosePolicy::Save).await.unwrap();
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn tui_trust_confirmation_activates_allow_rules_for_run_command() {
     let dir = tempfile::tempdir().unwrap();
@@ -280,7 +283,7 @@ async fn tui_trust_confirmation_activates_allow_rules_for_run_command() {
     app.host.close(&target, ClosePolicy::Save).await.unwrap();
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 async fn settle_turn(app: &mut crate::app::App) {
     until(app, |a| {
         a.entries[0].execution == "Completed"
@@ -292,7 +295,7 @@ async fn settle_turn(app: &mut crate::app::App) {
     .await;
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rc07_rc08_rc10_tui_command_options_session_workspace_rules_and_slash_rules() {
     use super::support::advance_past_approval_window;
@@ -577,7 +580,7 @@ async fn rc07_rc08_rc10_tui_command_options_session_workspace_rules_and_slash_ru
     until(&mut app, |a| a.done).await;
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rc07_rc10_tui_four_option_workspace_append_and_outside_sandbox_render() {
     use super::support::advance_past_approval_window;

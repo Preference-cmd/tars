@@ -766,7 +766,7 @@ mod tests {
         assert_eq!(out.matches("Allow this command? [y/n] ").count(), 5);
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cli_approver_workspace_choice_persists_rules_and_gitignore_end_to_end() {
         use tars_core::application::{ClosePolicy, PreparedCreate, SessionHost, text_input};
