@@ -3,7 +3,8 @@
 use super::approval::ApprovalsHub;
 use super::precheck::resolve_call;
 use super::processor::{
-    PermissionDecision, PermissionDecisionKind, PermissionVerdict, ToolPermissionClass, decide,
+    PermissionDecision, PermissionDecisionKind, PermissionVerdict, mode_refused_message,
+    rule_denied_message,
 };
 use super::view::PermissionView;
 use crate::session::ToolReporter;
@@ -57,6 +58,7 @@ impl ToolBatchProcessor for ModeGateProcessor {
                         mode,
                         revision,
                         kind: PermissionDecisionKind::Unavailable,
+                        rule: None,
                     },
                 );
                 if let Some(out) = entry.output_mut() {
@@ -84,7 +86,9 @@ impl ToolBatchProcessor for ModeGateProcessor {
 
             let (mode, revision) = view.get();
 
-            let Some(category) = view.classify_call(&tool_name, &call.input.arguments) else {
+            let Some((category, evaluated)) =
+                view.evaluate_call(mode, &tool_name, &call.input.arguments)
+            else {
                 self.reporter.record_permission_decision(
                     &call,
                     &invocation_id,
@@ -92,6 +96,7 @@ impl ToolBatchProcessor for ModeGateProcessor {
                         mode,
                         revision,
                         kind: PermissionDecisionKind::Unavailable,
+                        rule: None,
                     },
                 );
                 resolve_call(
@@ -105,34 +110,25 @@ impl ToolBatchProcessor for ModeGateProcessor {
                 continue;
             };
 
-            let verdict = decide(mode, category);
-            match verdict {
+            match evaluated.verdict {
                 PermissionVerdict::Reject => {
+                    let kind = evaluated
+                        .fixed_kind
+                        .unwrap_or(PermissionDecisionKind::ModeRefused);
                     self.reporter.record_permission_decision(
                         &call,
                         &invocation_id,
                         PermissionDecision {
                             mode,
                             revision,
-                            kind: PermissionDecisionKind::ModeRefused,
+                            kind,
+                            rule: evaluated.rule.clone(),
                         },
                     );
-                    let msg = match category {
-                        ToolPermissionClass::BuiltinWrite => {
-                            format!(
-                                "the current permission mode '{mode}' does not allow this write"
-                            )
-                        }
-                        ToolPermissionClass::BuiltinCommand => format!(
-                            "the current permission mode '{mode}' does not allow this command"
-                        ),
-                        ToolPermissionClass::CommandOutsideSandbox => format!(
-                            "the current permission mode '{mode}' does not allow running a \
-                             command outside the sandbox"
-                        ),
-                        _ => format!(
-                            "the current permission mode '{mode}' does not allow this MCP tool call"
-                        ),
+                    let msg = if kind == PermissionDecisionKind::RuleDenied {
+                        rule_denied_message(evaluated.rule.as_ref())
+                    } else {
+                        mode_refused_message(mode, category)
                     };
                     resolve_call(
                         batch,
@@ -142,7 +138,7 @@ impl ToolBatchProcessor for ModeGateProcessor {
                     )?;
                 }
                 PermissionVerdict::Ask => {
-                    let has_route = self.hub.get_sender().map_or(false, |s| !s.is_closed());
+                    let has_route = self.hub.get_sender().is_some_and(|s| !s.is_closed());
                     if !has_route {
                         self.reporter.record_permission_decision(
                             &call,
@@ -151,6 +147,7 @@ impl ToolBatchProcessor for ModeGateProcessor {
                                 mode,
                                 revision,
                                 kind: PermissionDecisionKind::NoConfirmationRoute,
+                                rule: evaluated.rule,
                             },
                         );
                         resolve_call(

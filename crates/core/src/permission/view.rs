@@ -2,7 +2,8 @@
 
 use super::approval::{ApprovalReceiver, ApprovalsHub};
 use super::mode::PermissionMode;
-use super::processor::ToolPermissionClass;
+use super::processor::{ToolPermissionClass, decide};
+use super::rules::{CommandRuleSet, EvaluatedPermission, apply_command_rule};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -62,6 +63,7 @@ struct PermissionStateInner {
 pub struct PermissionView {
     state: Arc<RwLock<PermissionStateInner>>,
     mcp_table: Arc<McpPermissionTable>,
+    rules: Arc<RwLock<CommandRuleSet>>,
 }
 
 impl PermissionView {
@@ -79,6 +81,43 @@ impl PermissionView {
     /// Read the current revision number.
     pub fn revision(&self) -> u64 {
         self.get().1
+    }
+
+    /// Snapshot the currently active command rule layers.
+    pub fn command_rules(&self) -> CommandRuleSet {
+        self.rules.read().expect("command rules lock").clone()
+    }
+
+    /// Classify a tool call and evaluate it against both `mode` and active
+    /// command rules.
+    ///
+    /// Both `ModeGateProcessor` and `PermissionProcessor` call this single
+    /// method so mode gating and execution-time checks never diverge.
+    pub(crate) fn evaluate_call(
+        &self,
+        mode: PermissionMode,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Option<(ToolPermissionClass, EvaluatedPermission)> {
+        let category = self.classify_call(name, arguments)?;
+        let base = decide(mode, category);
+        let matched = match category {
+            ToolPermissionClass::BuiltinCommand | ToolPermissionClass::CommandOutsideSandbox => {
+                let outside_sandbox = category == ToolPermissionClass::CommandOutsideSandbox;
+                let command = arguments
+                    .as_object()
+                    .and_then(|obj| obj.get("command"))
+                    .and_then(|value| value.as_str());
+                command.and_then(|cmd| {
+                    self.rules
+                        .read()
+                        .expect("command rules lock")
+                        .evaluate(cmd, outside_sandbox)
+                })
+            }
+            _ => None,
+        };
+        Some((category, apply_command_rule(base, matched)))
     }
 
     /// Classify a tool call by name and arguments.
@@ -126,11 +165,12 @@ impl PermissionView {
     }
 }
 
-/// Instance-level hub managing permission mode state, revisions, and approvals.
+/// Instance-level hub managing permission mode state, revisions, rules, and approvals.
 pub(crate) struct PermissionHub {
     state: Arc<RwLock<PermissionStateInner>>,
     approvals: Arc<ApprovalsHub>,
     mcp_table: Arc<McpPermissionTable>,
+    rules: Arc<RwLock<CommandRuleSet>>,
 }
 
 impl PermissionHub {
@@ -143,6 +183,14 @@ impl PermissionHub {
         initial_mode: PermissionMode,
         mcp_table: Arc<McpPermissionTable>,
     ) -> Self {
+        Self::with_rules(initial_mode, mcp_table, CommandRuleSet::new())
+    }
+
+    pub(crate) fn with_rules(
+        initial_mode: PermissionMode,
+        mcp_table: Arc<McpPermissionTable>,
+        rules: CommandRuleSet,
+    ) -> Self {
         Self {
             state: Arc::new(RwLock::new(PermissionStateInner {
                 mode: initial_mode,
@@ -150,6 +198,7 @@ impl PermissionHub {
             })),
             approvals: Arc::new(ApprovalsHub::new()),
             mcp_table,
+            rules: Arc::new(RwLock::new(rules)),
         }
     }
 
@@ -157,7 +206,13 @@ impl PermissionHub {
         PermissionView {
             state: self.state.clone(),
             mcp_table: self.mcp_table.clone(),
+            rules: self.rules.clone(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_rules(&self, rules: CommandRuleSet) {
+        *self.rules.write().expect("command rules lock") = rules;
     }
 
     pub(crate) fn approvals(&self) -> Arc<ApprovalsHub> {

@@ -3585,3 +3585,522 @@ async fn command_cancel_repair_case(outside: bool) {
         .await
         .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes() {
+    use crate::permission::rules::{
+        CommandRule, CommandRuleSet, RuleDecision, RuleScope, RuleSource,
+    };
+    use crate::permission::{
+        ModeGateProcessor, OutsideSandboxGrants, PermissionHub, PermissionProcessor,
+    };
+    use causa::kernel::{
+        CallControl, InvocationId, ProcessorContext, ProcessorData, RoundId, ToolBatch,
+        ToolCallContext, ToolCallPayload, TurnId,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    let rules = CommandRuleSet::with_layers(
+        vec![CommandRule {
+            prefix: vec!["rm".into()],
+            decision: RuleDecision::Deny,
+            outside_sandbox: false,
+        }],
+        vec![
+            CommandRule {
+                prefix: vec!["cargo".into(), "test".into()],
+                decision: RuleDecision::Allow,
+                outside_sandbox: false,
+            },
+            CommandRule {
+                prefix: vec!["git".into(), "push".into()],
+                decision: RuleDecision::Allow,
+                outside_sandbox: true,
+            },
+            CommandRule {
+                prefix: vec!["curl".into()],
+                decision: RuleDecision::Ask,
+                outside_sandbox: false,
+            },
+        ],
+        vec![CommandRule {
+            prefix: vec!["pwd".into()],
+            decision: RuleDecision::Allow,
+            outside_sandbox: false,
+        }],
+    );
+
+    let make_call = |outside: bool, command: &str| {
+        let args = if outside {
+            json!({
+                "command": command,
+                "outside_sandbox": true,
+                "justification": "needed outside",
+            })
+        } else {
+            json!({ "command": command })
+        };
+        ToolCallContext::new(
+            causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+            ToolCallPayload::new("run_command", args),
+        )
+    };
+
+    for mode in [
+        PermissionMode::ReadOnly,
+        PermissionMode::Ask,
+        PermissionMode::AcceptEdits,
+        PermissionMode::FullAccess,
+    ] {
+        for (command, outside, expected_kind, expected_rule) in [
+            (
+                "rm -rf x",
+                false,
+                PermissionDecisionKind::RuleDenied,
+                Some(RuleSource {
+                    scope: RuleScope::User,
+                    prefix: vec!["rm".into()],
+                }),
+            ),
+            (
+                "rm -rf x",
+                true,
+                PermissionDecisionKind::RuleDenied,
+                Some(RuleSource {
+                    scope: RuleScope::User,
+                    prefix: vec!["rm".into()],
+                }),
+            ),
+            (
+                "cargo test -p x",
+                false,
+                match mode {
+                    PermissionMode::ReadOnly => PermissionDecisionKind::ModeRefused,
+                    PermissionMode::Ask => PermissionDecisionKind::RuleAllowed,
+                    PermissionMode::AcceptEdits | PermissionMode::FullAccess => {
+                        PermissionDecisionKind::DirectExecution
+                    }
+                },
+                match mode {
+                    PermissionMode::Ask => Some(RuleSource {
+                        scope: RuleScope::Workspace,
+                        prefix: vec!["cargo".into(), "test".into()],
+                    }),
+                    _ => None,
+                },
+            ),
+            (
+                "cargo test -p x",
+                true,
+                match mode {
+                    PermissionMode::ReadOnly => PermissionDecisionKind::ModeRefused,
+                    PermissionMode::Ask | PermissionMode::AcceptEdits => {
+                        PermissionDecisionKind::NoConfirmationRoute
+                    }
+                    PermissionMode::FullAccess => PermissionDecisionKind::DirectExecution,
+                },
+                None,
+            ),
+            (
+                "git push origin main",
+                true,
+                match mode {
+                    PermissionMode::ReadOnly => PermissionDecisionKind::ModeRefused,
+                    PermissionMode::Ask | PermissionMode::AcceptEdits => {
+                        PermissionDecisionKind::RuleAllowed
+                    }
+                    PermissionMode::FullAccess => PermissionDecisionKind::DirectExecution,
+                },
+                match mode {
+                    PermissionMode::Ask | PermissionMode::AcceptEdits => Some(RuleSource {
+                        scope: RuleScope::Workspace,
+                        prefix: vec!["git".into(), "push".into()],
+                    }),
+                    _ => None,
+                },
+            ),
+            (
+                "curl https://example.com",
+                false,
+                match mode {
+                    PermissionMode::ReadOnly => PermissionDecisionKind::ModeRefused,
+                    PermissionMode::Ask
+                    | PermissionMode::AcceptEdits
+                    | PermissionMode::FullAccess => PermissionDecisionKind::NoConfirmationRoute,
+                },
+                match mode {
+                    PermissionMode::ReadOnly => None,
+                    _ => Some(RuleSource {
+                        scope: RuleScope::Workspace,
+                        prefix: vec!["curl".into()],
+                    }),
+                },
+            ),
+        ] {
+            // Test without confirmation route: ModeGateProcessor and PermissionProcessor must match.
+            let perm_hub = PermissionHub::new(mode);
+            perm_hub.set_rules(rules.clone());
+            let view = perm_hub.view();
+            let data = ProcessorData::new(view.clone());
+            let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
+            let work = WorkRef {
+                conversation_id: "test".into(),
+                turn_id: turn_id.clone(),
+            };
+            let inv = InvocationId {
+                turn_id: turn_id.clone(),
+                round_id: RoundId(0),
+            };
+            let call = make_call(outside, command);
+            let decl = [call.call_block_id];
+            let control = CallControl::new(CancellationToken::new(), None);
+            let ctx = ProcessorContext::new(&turn_id, RoundId(0), &decl, &control).with_data(&data);
+
+            // Gate run
+            let gate_reporter = crate::session::ToolReporter::new(
+                work.clone(),
+                tokio::sync::broadcast::channel(16).0,
+            );
+            let mut gate_batch = ToolBatch::new(vec![call.clone()]).unwrap();
+            gate_reporter.batch_ready(&inv, &gate_batch);
+            let gate = ModeGateProcessor::new(gate_reporter.clone(), perm_hub.approvals());
+            gate.process(&mut gate_batch, &ctx).await.unwrap();
+
+            // Processor run
+            let proc_reporter = crate::session::ToolReporter::new(
+                work.clone(),
+                tokio::sync::broadcast::channel(16).0,
+            );
+            let mut proc_batch = ToolBatch::new(vec![call.clone()]).unwrap();
+            proc_reporter.batch_ready(&inv, &proc_batch);
+            let grants = OutsideSandboxGrants::new();
+            let processor = PermissionProcessor::new(
+                work,
+                proc_reporter.clone(),
+                perm_hub.approvals(),
+                crate::definition::CommandSettings::default(),
+                Arc::new(Mutex::new(std::collections::HashMap::new())),
+                grants.clone(),
+            );
+            processor.process(&mut proc_batch, &ctx).await.unwrap();
+
+            let proc_decision = proc_reporter.snapshot().calls[0]
+                .permission_decision
+                .clone()
+                .unwrap();
+            assert_eq!(
+                proc_decision.kind, expected_kind,
+                "mode={mode:?}, cmd={command:?}, outside={outside}"
+            );
+            assert_eq!(
+                proc_decision.rule, expected_rule,
+                "mode={mode:?}, cmd={command:?}, outside={outside}"
+            );
+
+            if matches!(
+                expected_kind,
+                PermissionDecisionKind::RuleDenied
+                    | PermissionDecisionKind::ModeRefused
+                    | PermissionDecisionKind::NoConfirmationRoute
+            ) {
+                let gate_decision = gate_reporter.snapshot().calls[0]
+                    .permission_decision
+                    .clone()
+                    .unwrap();
+                assert_eq!(gate_decision, proc_decision);
+                let (_, gate_res) = gate_batch.results()[0].result().unwrap();
+                let (_, proc_res) = proc_batch.results()[0].result().unwrap();
+                assert_eq!(gate_res.status, ToolResultStatus::Rejected);
+                assert_eq!(proc_res.status, ToolResultStatus::Rejected);
+                assert_eq!(gate_res.output.content, proc_res.output.content);
+                if expected_kind == PermissionDecisionKind::RuleDenied {
+                    let err = proc_res.output.content["error"].as_str().unwrap();
+                    assert!(err.contains("user permission rule"));
+                    assert!(!err.contains("cargo"));
+                    assert!(!err.contains("git"));
+                }
+                assert!(grants.take(call.call_block_id).is_none());
+            } else {
+                assert!(gate_batch.results().is_empty());
+                assert!(proc_batch.results().is_empty());
+                assert_eq!(grants.take(call.call_block_id).is_some(), outside);
+            }
+        }
+    }
+
+    // With confirmation route in FullAccess, `ask` rule asks and attaches RuleSource.
+    for approved in [true, false] {
+        let perm_hub = PermissionHub::new(PermissionMode::FullAccess);
+        perm_hub.set_rules(rules.clone());
+        let mut rx = perm_hub.connect_approvals();
+        let responder = tokio::spawn(async move {
+            let req = rx.recv().await.unwrap();
+            assert!(matches!(req.subject, ApprovalSubject::Command { .. }));
+            let _ = req.reply.send(if approved {
+                ApprovalDecision::Allow
+            } else {
+                ApprovalDecision::Deny {
+                    reason: Some("nope".into()),
+                }
+            });
+        });
+
+        let view = perm_hub.view();
+        let data = ProcessorData::new(view);
+        let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
+        let work = WorkRef {
+            conversation_id: "test".into(),
+            turn_id: turn_id.clone(),
+        };
+        let inv = InvocationId {
+            turn_id: turn_id.clone(),
+            round_id: RoundId(0),
+        };
+        let call = make_call(false, "curl https://example.com");
+        let decl = [call.call_block_id];
+        let control = CallControl::new(CancellationToken::new(), None);
+        let ctx = ProcessorContext::new(&turn_id, RoundId(0), &decl, &control).with_data(&data);
+
+        let gate_reporter =
+            crate::session::ToolReporter::new(work.clone(), tokio::sync::broadcast::channel(16).0);
+        let mut gate_batch = ToolBatch::new(vec![call.clone()]).unwrap();
+        gate_reporter.batch_ready(&inv, &gate_batch);
+        ModeGateProcessor::new(gate_reporter.clone(), perm_hub.approvals())
+            .process(&mut gate_batch, &ctx)
+            .await
+            .unwrap();
+        assert!(gate_batch.results().is_empty());
+
+        let proc_reporter =
+            crate::session::ToolReporter::new(work.clone(), tokio::sync::broadcast::channel(16).0);
+        let mut proc_batch = ToolBatch::new(vec![call.clone()]).unwrap();
+        proc_reporter.batch_ready(&inv, &proc_batch);
+        PermissionProcessor::new(
+            work,
+            proc_reporter.clone(),
+            perm_hub.approvals(),
+            crate::definition::CommandSettings::default(),
+            Arc::new(Mutex::new(std::collections::HashMap::new())),
+            OutsideSandboxGrants::new(),
+        )
+        .process(&mut proc_batch, &ctx)
+        .await
+        .unwrap();
+        responder.await.unwrap();
+
+        let decision = proc_reporter.snapshot().calls[0]
+            .permission_decision
+            .clone()
+            .unwrap();
+        assert_eq!(
+            decision.kind,
+            if approved {
+                PermissionDecisionKind::AskedAndAllowed
+            } else {
+                PermissionDecisionKind::AskedAndDenied
+            }
+        );
+        assert_eq!(
+            decision.rule,
+            Some(RuleSource {
+                scope: RuleScope::Workspace,
+                prefix: vec!["curl".into()],
+            })
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rc03_end_to_end_command_rules_execution_and_grants() {
+    use crate::permission::rules::{
+        CommandRule, CommandRuleSet, RuleDecision, RuleScope, RuleSource,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let outside_allowed = root
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("tars-rule-outside-ok-{}", uuid::Uuid::now_v7()));
+    let outside_blocked = root
+        .path()
+        .parent()
+        .unwrap()
+        .join(format!("tars-rule-outside-no-{}", uuid::Uuid::now_v7()));
+    let _ = std::fs::remove_file(&outside_allowed);
+    let _ = std::fs::remove_dir_all(&outside_blocked);
+
+    let rules = CommandRuleSet::with_layers(
+        vec![CommandRule {
+            prefix: vec!["mkdir".into(), "denied_dir".into()],
+            decision: RuleDecision::Deny,
+            outside_sandbox: false,
+        }],
+        vec![
+            CommandRule {
+                prefix: vec!["mkdir".into(), "asked_dir".into()],
+                decision: RuleDecision::Ask,
+                outside_sandbox: false,
+            },
+            CommandRule {
+                prefix: vec!["mkdir".into()],
+                decision: RuleDecision::Allow,
+                outside_sandbox: false,
+            },
+            CommandRule {
+                prefix: vec!["touch".into()],
+                decision: RuleDecision::Allow,
+                outside_sandbox: true,
+            },
+        ],
+        vec![],
+    );
+
+    let replies = vec![
+        // 1. ReadOnly + allow rule -> still ModeRefused
+        Reply::Calls(vec![call_command(json!({
+            "command": "mkdir readonly_dir"
+        }))]),
+        Reply::Answer,
+        // 2. FullAccess + deny rule -> RuleDenied
+        Reply::Calls(vec![call_command(json!({
+            "command": "mkdir denied_dir"
+        }))]),
+        Reply::Answer,
+        // 3. FullAccess + ask rule with no route -> NoConfirmationRoute, no process spawned
+        Reply::Calls(vec![call_command(json!({
+            "command": "mkdir asked_dir"
+        }))]),
+        Reply::Answer,
+        // 4. Ask + allow rule -> RuleAllowed without prompt
+        Reply::Calls(vec![call_command(json!({
+            "command": "mkdir allowed_dir"
+        }))]),
+        Reply::Answer,
+        // 5. AcceptEdits + outside_sandbox with allow(outside=false) vs allow(outside=true)
+        Reply::Calls(vec![
+            call_command_outside(
+                &format!("mkdir '{}'", outside_blocked.display()),
+                "rule lacks outside_sandbox",
+            ),
+            call_command_outside(
+                &format!("touch '{}'", outside_allowed.display()),
+                "rule grants outside_sandbox",
+            ),
+        ]),
+        Reply::Answer,
+    ];
+
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    session.set_command_rules(rules);
+
+    // 1. ReadOnly
+    session
+        .set_permission_mode(PermissionMode::ReadOnly)
+        .unwrap();
+    let obs1 = finish(&session, &submit(&session, "turn 1")).await;
+    assert_eq!(obs1.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    assert_eq!(
+        obs1.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::ModeRefused
+    );
+    assert!(!root.path().join("readonly_dir").exists());
+
+    // 2. FullAccess + deny
+    session
+        .set_permission_mode(PermissionMode::FullAccess)
+        .unwrap();
+    let obs2 = finish(&session, &submit(&session, "turn 2")).await;
+    assert_eq!(obs2.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    let d2 = obs2.tools.calls[0].permission_decision.as_ref().unwrap();
+    assert_eq!(d2.kind, PermissionDecisionKind::RuleDenied);
+    assert_eq!(
+        d2.rule,
+        Some(RuleSource {
+            scope: RuleScope::User,
+            prefix: vec!["mkdir".into(), "denied_dir".into()],
+        })
+    );
+    assert!(!root.path().join("denied_dir").exists());
+
+    // 3. FullAccess + ask without confirmation route
+    let obs3 = finish(&session, &submit(&session, "turn 3")).await;
+    assert_eq!(obs3.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    let d3 = obs3.tools.calls[0].permission_decision.as_ref().unwrap();
+    assert_eq!(d3.kind, PermissionDecisionKind::NoConfirmationRoute);
+    assert_eq!(
+        d3.rule,
+        Some(RuleSource {
+            scope: RuleScope::Workspace,
+            prefix: vec!["mkdir".into(), "asked_dir".into()],
+        })
+    );
+    assert!(!root.path().join("asked_dir").exists());
+
+    // 4. Ask + allow rule executes directly without route
+    session.set_permission_mode(PermissionMode::Ask).unwrap();
+    let obs4 = finish(&session, &submit(&session, "turn 4")).await;
+    assert_eq!(
+        obs4.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    let d4 = obs4.tools.calls[0].permission_decision.as_ref().unwrap();
+    assert_eq!(d4.kind, PermissionDecisionKind::RuleAllowed);
+    assert_eq!(
+        d4.rule,
+        Some(RuleSource {
+            scope: RuleScope::Workspace,
+            prefix: vec!["mkdir".into()],
+        })
+    );
+    assert!(root.path().join("allowed_dir").is_dir());
+
+    // 5. AcceptEdits + outside_sandbox
+    session
+        .set_permission_mode(PermissionMode::AcceptEdits)
+        .unwrap();
+    let obs5 = finish(&session, &submit(&session, "turn 5")).await;
+    assert_eq!(obs5.tools.calls.len(), 2);
+    assert_eq!(obs5.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    assert_eq!(
+        obs5.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::NoConfirmationRoute
+    );
+    assert!(!outside_blocked.exists());
+    assert_eq!(
+        obs5.tools.calls[1].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    let d5 = obs5.tools.calls[1].permission_decision.as_ref().unwrap();
+    assert_eq!(d5.kind, PermissionDecisionKind::RuleAllowed);
+    assert_eq!(
+        d5.rule,
+        Some(RuleSource {
+            scope: RuleScope::Workspace,
+            prefix: vec!["touch".into()],
+        })
+    );
+    assert!(outside_allowed.exists());
+    let _ = std::fs::remove_file(&outside_allowed);
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}

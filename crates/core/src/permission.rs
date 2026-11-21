@@ -7,6 +7,7 @@ mod grants;
 mod mode;
 mod precheck;
 mod processor;
+pub mod rules;
 mod view;
 
 pub use approval::{
@@ -16,6 +17,10 @@ pub use approval::{
 pub use escape::escape_untrusted_text;
 pub use mode::{ParsePermissionModeError, PermissionMode};
 pub use processor::{PermissionDecision, PermissionDecisionKind, ToolPermissionClass};
+pub use rules::{
+    CommandRule, CommandRuleSet, RuleDecision, RuleMatch, RuleScope, RuleSource, parse_command,
+    suggest_command_prefixes,
+};
 pub use view::PermissionView;
 
 pub(crate) use gate::ModeGateProcessor;

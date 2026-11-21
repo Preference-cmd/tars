@@ -6,6 +6,7 @@ use super::approval::{
 };
 use super::mode::PermissionMode;
 use super::precheck::resolve_call;
+use super::rules::{RuleScope, RuleSource};
 use super::view::PermissionView;
 use crate::definition::{CommandSettings, WorkspaceTool};
 use crate::session::ToolReporter;
@@ -88,6 +89,8 @@ pub struct PermissionDecision {
     pub revision: u64,
     /// Kind of permission decision rendered.
     pub kind: PermissionDecisionKind,
+    /// Command rule provenance when a rule governed or modified the decision.
+    pub rule: Option<RuleSource>,
 }
 
 /// Kind of permission decision rendered for a tool call.
@@ -95,12 +98,16 @@ pub struct PermissionDecision {
 pub enum PermissionDecisionKind {
     /// Direct execution without asking.
     DirectExecution,
+    /// Execution allowed without asking by a command rule.
+    RuleAllowed,
     /// Execution approved after asking.
     AskedAndAllowed,
     /// Call rejected after asking.
     AskedAndDenied,
     /// Call rejected directly by permission mode policy.
     ModeRefused,
+    /// Call rejected directly by a command rule.
+    RuleDenied,
     /// Write call rejected because no prepared write record was found.
     Unprepared,
     /// Outside-sandbox call rejected because its parameters could not be
@@ -110,6 +117,31 @@ pub enum PermissionDecisionKind {
     NoConfirmationRoute,
     /// Call rejected because the tool is unknown or unavailable.
     Unavailable,
+}
+
+pub(super) fn mode_refused_message(mode: PermissionMode, category: ToolPermissionClass) -> String {
+    match category {
+        ToolPermissionClass::BuiltinWrite => {
+            format!("the current permission mode '{mode}' does not allow this write")
+        }
+        ToolPermissionClass::BuiltinCommand => {
+            format!("the current permission mode '{mode}' does not allow this command")
+        }
+        ToolPermissionClass::CommandOutsideSandbox => format!(
+            "the current permission mode '{mode}' does not allow running a \
+             command outside the sandbox"
+        ),
+        _ => format!("the current permission mode '{mode}' does not allow this MCP tool call"),
+    }
+}
+
+pub(super) fn rule_denied_message(rule: Option<&RuleSource>) -> String {
+    match rule.map(|source| source.scope) {
+        Some(RuleScope::User) => "command rejected by user permission rule".to_owned(),
+        Some(RuleScope::Workspace) => "command rejected by workspace permission rule".to_owned(),
+        Some(RuleScope::Session) => "command rejected by session permission rule".to_owned(),
+        None => "command rejected by permission rule".to_owned(),
+    }
 }
 
 /// Processor evaluating tool calls against active permission mode and requesting approvals.
@@ -185,7 +217,9 @@ impl ToolBatchProcessor for PermissionProcessor {
 
             let (mode, revision) = view.get();
 
-            let Some(category) = view.classify_call(&tool_name, &call.input.arguments) else {
+            let Some((category, evaluated)) =
+                view.evaluate_call(mode, &tool_name, &call.input.arguments)
+            else {
                 self.reporter.record_permission_decision(
                     &call,
                     &invocation_id,
@@ -193,6 +227,7 @@ impl ToolBatchProcessor for PermissionProcessor {
                         mode,
                         revision,
                         kind: PermissionDecisionKind::Unavailable,
+                        rule: None,
                     },
                 );
                 resolve_call(
@@ -206,8 +241,8 @@ impl ToolBatchProcessor for PermissionProcessor {
                 continue;
             };
 
-            let verdict = decide(mode, category);
-            match verdict {
+            let rule_source = evaluated.rule.clone();
+            match evaluated.verdict {
                 PermissionVerdict::Execute => {
                     if category == ToolPermissionClass::CommandOutsideSandbox {
                         self.grants.grant(call_block_id);
@@ -218,36 +253,31 @@ impl ToolBatchProcessor for PermissionProcessor {
                         PermissionDecision {
                             mode,
                             revision,
-                            kind: PermissionDecisionKind::DirectExecution,
+                            kind: evaluated
+                                .fixed_kind
+                                .unwrap_or(PermissionDecisionKind::DirectExecution),
+                            rule: rule_source,
                         },
                     );
                 }
                 PermissionVerdict::Reject => {
+                    let kind = evaluated
+                        .fixed_kind
+                        .unwrap_or(PermissionDecisionKind::ModeRefused);
                     self.reporter.record_permission_decision(
                         &call,
                         &invocation_id,
                         PermissionDecision {
                             mode,
                             revision,
-                            kind: PermissionDecisionKind::ModeRefused,
+                            kind,
+                            rule: rule_source.clone(),
                         },
                     );
-                    let msg = match category {
-                        ToolPermissionClass::BuiltinWrite => {
-                            format!(
-                                "the current permission mode '{mode}' does not allow this write"
-                            )
-                        }
-                        ToolPermissionClass::BuiltinCommand => format!(
-                            "the current permission mode '{mode}' does not allow this command"
-                        ),
-                        ToolPermissionClass::CommandOutsideSandbox => format!(
-                            "the current permission mode '{mode}' does not allow running a \
-                             command outside the sandbox"
-                        ),
-                        _ => format!(
-                            "the current permission mode '{mode}' does not allow this MCP tool call"
-                        ),
+                    let msg = if kind == PermissionDecisionKind::RuleDenied {
+                        rule_denied_message(rule_source.as_ref())
+                    } else {
+                        mode_refused_message(mode, category)
                     };
                     resolve_call(
                         batch,
@@ -271,6 +301,7 @@ impl ToolBatchProcessor for PermissionProcessor {
                                         mode,
                                         revision,
                                         kind: PermissionDecisionKind::Unprepared,
+                                        rule: rule_source.clone(),
                                     },
                                 );
                                 resolve_call(
@@ -318,6 +349,7 @@ impl ToolBatchProcessor for PermissionProcessor {
                                         } else {
                                             PermissionDecisionKind::Unprepared
                                         },
+                                        rule: rule_source.clone(),
                                     },
                                 );
                                 resolve_call(
@@ -381,6 +413,7 @@ impl ToolBatchProcessor for PermissionProcessor {
                                 mode,
                                 revision,
                                 kind: PermissionDecisionKind::NoConfirmationRoute,
+                                rule: rule_source.clone(),
                             },
                         );
                         resolve_call(
@@ -417,6 +450,7 @@ impl ToolBatchProcessor for PermissionProcessor {
                                 mode,
                                 revision,
                                 kind: PermissionDecisionKind::NoConfirmationRoute,
+                                rule: rule_source.clone(),
                             },
                         );
                         resolve_call(
@@ -446,6 +480,7 @@ impl ToolBatchProcessor for PermissionProcessor {
                                     mode,
                                     revision,
                                     kind: PermissionDecisionKind::AskedAndAllowed,
+                                    rule: rule_source.clone(),
                                 },
                             );
                         }
@@ -457,6 +492,7 @@ impl ToolBatchProcessor for PermissionProcessor {
                                     mode,
                                     revision,
                                     kind: PermissionDecisionKind::AskedAndDenied,
+                                    rule: rule_source.clone(),
                                 },
                             );
                             let msg = if category == ToolPermissionClass::CommandOutsideSandbox {
@@ -499,6 +535,7 @@ impl ToolBatchProcessor for PermissionProcessor {
                                     mode,
                                     revision,
                                     kind: PermissionDecisionKind::NoConfirmationRoute,
+                                    rule: rule_source,
                                 },
                             );
                             resolve_call(

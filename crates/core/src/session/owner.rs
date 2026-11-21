@@ -121,6 +121,15 @@ impl Session {
         )
     }
 
+    /// Replace command approval rules on the instance's permission hub during test runs.
+    #[cfg(test)]
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn set_command_rules(&self, rules: crate::permission::CommandRuleSet) {
+        if let Some(permissions) = &self.permissions {
+            permissions.set_rules(rules);
+        }
+    }
+
     /// Append an extra before processor after the permission processor during test runs.
     #[cfg(test)]
     #[cfg_attr(not(unix), allow(dead_code))]
