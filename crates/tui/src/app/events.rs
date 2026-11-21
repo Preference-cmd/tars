@@ -310,12 +310,25 @@ impl App {
                 return;
             }
 
+            let (is_command, has_command_rules, can_save_workspace_rule) =
+                match entry.approval_queue.front().map(|req| &req.subject) {
+                    Some(tars_core::permission::ApprovalSubject::Command {
+                        suggested_prefixes,
+                        can_save_workspace_rule,
+                        ..
+                    }) => (
+                        true,
+                        !suggested_prefixes.is_empty(),
+                        !suggested_prefixes.is_empty() && *can_save_workspace_rule,
+                    ),
+                    _ => (false, false, false),
+                };
+
+            let no_ctrl_alt = !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
             match key.code {
-                KeyCode::Enter | KeyCode::Char('y' | 'Y')
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
+                KeyCode::Enter | KeyCode::Char('y' | 'Y') if no_ctrl_alt => {
                     if let Some(req) = entry.approval_queue.pop_front() {
                         req.respond(tars_core::permission::ApprovalDecision::Allow);
                         entry.approval_scroll = 0;
@@ -323,11 +336,31 @@ impl App {
                     self.update_approval_guard();
                     return;
                 }
-                KeyCode::Char('n' | 'N')
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
+                KeyCode::Char('1') if is_command && no_ctrl_alt => {
+                    if let Some(req) = entry.approval_queue.pop_front() {
+                        req.respond(tars_core::permission::ApprovalDecision::Allow);
+                        entry.approval_scroll = 0;
+                    }
+                    self.update_approval_guard();
+                    return;
+                }
+                KeyCode::Char('s' | 'S' | '2') if has_command_rules && no_ctrl_alt => {
+                    if let Some(req) = entry.approval_queue.pop_front() {
+                        req.respond(tars_core::permission::ApprovalDecision::AllowForSession);
+                        entry.approval_scroll = 0;
+                    }
+                    self.update_approval_guard();
+                    return;
+                }
+                KeyCode::Char('w' | 'W' | '3') if can_save_workspace_rule && no_ctrl_alt => {
+                    if let Some(req) = entry.approval_queue.pop_front() {
+                        req.respond(tars_core::permission::ApprovalDecision::AllowInWorkspace);
+                        entry.approval_scroll = 0;
+                    }
+                    self.update_approval_guard();
+                    return;
+                }
+                KeyCode::Char('n' | 'N') if no_ctrl_alt => {
                     entry.approval_reason = Some(String::new());
                 }
                 KeyCode::Esc | KeyCode::Char('c')

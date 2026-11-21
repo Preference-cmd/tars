@@ -121,11 +121,40 @@ impl Session {
         )
     }
 
-    /// Replace the active workspace-level command rules on the instance's permission hub.
-    pub(crate) fn set_workspace_rules(&self, rules: Vec<crate::permission::CommandRule>) {
+    /// Trust and replace the active workspace-level command rules on the instance's permission hub.
+    pub(crate) fn trust_workspace_rules(
+        &self,
+        rules: Vec<crate::permission::CommandRule>,
+        raw_text: String,
+    ) {
         if let Some(permissions) = &self.permissions {
-            permissions.set_workspace_rules(rules);
+            permissions.trust_workspace_rules(rules, raw_text);
         }
+    }
+
+    /// Remove one in-memory session rule by 0-based index.
+    pub(crate) fn remove_session_rule(
+        &self,
+        index: usize,
+    ) -> Result<bool, crate::application::ApplicationError> {
+        self.permissions
+            .as_ref()
+            .map(|permissions| Ok(permissions.remove_session_rule(index)))
+            .unwrap_or(Err(
+                crate::application::ApplicationError::PermissionUnavailable,
+            ))
+    }
+
+    /// Clear all in-memory session rules, returning the number removed.
+    pub(crate) fn clear_session_rules(
+        &self,
+    ) -> Result<usize, crate::application::ApplicationError> {
+        self.permissions
+            .as_ref()
+            .map(|permissions| Ok(permissions.clear_session_rules()))
+            .unwrap_or(Err(
+                crate::application::ApplicationError::PermissionUnavailable,
+            ))
     }
 
     /// Snapshot the active command rule layers on the instance's permission hub.

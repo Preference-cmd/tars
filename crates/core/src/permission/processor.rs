@@ -1,13 +1,13 @@
 //! Permission processor applying mode policies and managing confirmation flows.
 
 use super::approval::{
-    ApprovalDecision, ApprovalReply, ApprovalRequest, ApprovalSubject, ApprovalsHub, CommandTarget,
+    ApprovalDecision, ApprovalReply, ApprovalRequest, ApprovalSubject, CommandTarget,
     format_mcp_arguments,
 };
 use super::mode::PermissionMode;
 use super::precheck::resolve_call;
-use super::rules::{RuleScope, RuleSource};
-use super::view::PermissionView;
+use super::rules::{RuleScope, RuleSource, suggest_command_prefixes};
+use super::view::{PermissionHub, PermissionView};
 use crate::definition::{CommandSettings, WorkspaceTool};
 use crate::session::ToolReporter;
 use crate::session::WorkRef;
@@ -93,6 +93,24 @@ pub struct PermissionDecision {
     pub rule: Option<RuleSource>,
 }
 
+impl PermissionDecision {
+    /// Human-readable provenance summary when a command rule governed or
+    /// prompted this decision, suitable for tool progress and transcript lines.
+    pub fn rule_summary(&self) -> Option<String> {
+        let source = self.rule.as_ref()?;
+        match self.kind {
+            PermissionDecisionKind::RuleAllowed => Some(format!("allowed by {source}")),
+            PermissionDecisionKind::RuleDenied => Some(format!("denied by {source}")),
+            PermissionDecisionKind::AskedAndAllowed => Some(format!("asked by {source} (allowed)")),
+            PermissionDecisionKind::AskedAndDenied => Some(format!("asked by {source} (denied)")),
+            PermissionDecisionKind::NoConfirmationRoute => {
+                Some(format!("asked by {source} (no confirmation route)"))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Kind of permission decision rendered for a tool call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PermissionDecisionKind {
@@ -148,7 +166,7 @@ pub(super) fn rule_denied_message(rule: Option<&RuleSource>) -> String {
 pub(crate) struct PermissionProcessor {
     work: WorkRef,
     reporter: ToolReporter,
-    hub: Arc<ApprovalsHub>,
+    permissions: Arc<PermissionHub>,
     command_settings: CommandSettings,
     prepared: Arc<
         std::sync::Mutex<
@@ -162,7 +180,7 @@ impl PermissionProcessor {
     pub(crate) fn new(
         work: WorkRef,
         reporter: ToolReporter,
-        hub: Arc<ApprovalsHub>,
+        permissions: Arc<PermissionHub>,
         command_settings: CommandSettings,
         prepared: Arc<
             std::sync::Mutex<
@@ -174,7 +192,7 @@ impl PermissionProcessor {
         Self {
             work,
             reporter,
-            hub,
+            permissions,
             command_settings,
             prepared,
             grants,
@@ -371,6 +389,10 @@ impl ToolBatchProcessor for PermissionProcessor {
                                     network: self.command_settings.network,
                                 }
                             };
+                            let suggested_prefixes =
+                                suggest_command_prefixes(&params.command).unwrap_or_default();
+                            let can_save_workspace_rule = !suggested_prefixes.is_empty()
+                                && self.permissions.can_save_workspace_rule();
                             (
                                 ApprovalSubject::Command {
                                     command: params.command,
@@ -379,6 +401,8 @@ impl ToolBatchProcessor for PermissionProcessor {
                                         .timeout_secs
                                         .unwrap_or(self.command_settings.default_timeout_secs),
                                     target,
+                                    suggested_prefixes,
+                                    can_save_workspace_rule,
                                 },
                                 false,
                                 true,
@@ -404,7 +428,25 @@ impl ToolBatchProcessor for PermissionProcessor {
                         }
                     };
 
-                    let Some(sender) = self.hub.get_sender().filter(|sender| !sender.is_closed())
+                    let command_rule_info = match &subject {
+                        ApprovalSubject::Command {
+                            target,
+                            suggested_prefixes,
+                            can_save_workspace_rule,
+                            ..
+                        } => Some((
+                            suggested_prefixes.clone(),
+                            *can_save_workspace_rule,
+                            matches!(target, CommandTarget::Outside { .. }),
+                        )),
+                        _ => None,
+                    };
+
+                    let Some(sender) = self
+                        .permissions
+                        .approvals()
+                        .get_sender()
+                        .filter(|sender| !sender.is_closed())
                     else {
                         self.reporter.record_permission_decision(
                             &call,
@@ -470,6 +512,53 @@ impl ToolBatchProcessor for PermissionProcessor {
 
                     match reply_res {
                         Ok(ApprovalDecision::Allow) => {
+                            if category == ToolPermissionClass::CommandOutsideSandbox {
+                                self.grants.grant(call_block_id);
+                            }
+                            self.reporter.record_permission_decision(
+                                &call,
+                                &invocation_id,
+                                PermissionDecision {
+                                    mode,
+                                    revision,
+                                    kind: PermissionDecisionKind::AskedAndAllowed,
+                                    rule: rule_source.clone(),
+                                },
+                            );
+                        }
+                        Ok(ApprovalDecision::AllowForSession) => {
+                            if let Some((prefixes, _, outside)) = command_rule_info
+                                && !prefixes.is_empty()
+                            {
+                                self.permissions.add_session_rules(&prefixes, outside);
+                            }
+                            if category == ToolPermissionClass::CommandOutsideSandbox {
+                                self.grants.grant(call_block_id);
+                            }
+                            self.reporter.record_permission_decision(
+                                &call,
+                                &invocation_id,
+                                PermissionDecision {
+                                    mode,
+                                    revision,
+                                    kind: PermissionDecisionKind::AskedAndAllowed,
+                                    rule: rule_source.clone(),
+                                },
+                            );
+                        }
+                        Ok(ApprovalDecision::AllowInWorkspace) => {
+                            if let Some((prefixes, can_save, outside)) = command_rule_info
+                                && can_save
+                                && !prefixes.is_empty()
+                            {
+                                let permissions = self.permissions.clone();
+                                // Ignore errors (e.g., TOCTOU external modification) and fall
+                                // back to allowing this single call without trusting/overwriting.
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    permissions.append_workspace_rules(&prefixes, outside)
+                                })
+                                .await;
+                            }
                             if category == ToolPermissionClass::CommandOutsideSandbox {
                                 self.grants.grant(call_block_id);
                             }

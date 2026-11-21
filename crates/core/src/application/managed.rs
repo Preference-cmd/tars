@@ -216,6 +216,35 @@ impl ManagedSession {
             })
     }
 
+    /// Remove an in-memory session command rule by 0-based index.
+    ///
+    /// Returns `Ok(true)` if a rule at `index` existed and was removed, or
+    /// `Ok(false)` when `index` is out of bounds.
+    pub fn remove_session_rule(&self, index: usize) -> Result<bool, ApplicationError> {
+        let state = self.entry.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return Err(ApplicationError::Closed);
+        }
+        if state.lifecycle == Lifecycle::Closing {
+            return Err(ApplicationError::Closing);
+        }
+        let owner = state.owner.as_ref().ok_or(ApplicationError::InstanceGone)?;
+        owner.remove_session_rule(index)
+    }
+
+    /// Clear all in-memory session command rules, returning the number of rules cleared.
+    pub fn clear_session_rules(&self) -> Result<usize, ApplicationError> {
+        let state = self.entry.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return Err(ApplicationError::Closed);
+        }
+        if state.lifecycle == Lifecycle::Closing {
+            return Err(ApplicationError::Closing);
+        }
+        let owner = state.owner.as_ref().ok_or(ApplicationError::InstanceGone)?;
+        owner.clear_session_rules()
+    }
+
     /// Trust the workspace `.tars/permissions.toml` snapshot captured when this
     /// session opened, write it to the Store trust copy, and activate its
     /// `allow` rules in the live session.
@@ -268,7 +297,7 @@ impl ManagedSession {
             .iter()
             .filter(|rule| rule.decision == crate::permission::RuleDecision::Allow)
             .count();
-        owner.set_workspace_rules(snapshot.rules);
+        owner.trust_workspace_rules(snapshot.rules, snapshot.raw_text);
         state.open_report.workspace_rules.allow_rules.clear();
         state.open_report.workspace_rules.previous_trusted_text = None;
         state.open_report.workspace_rules.diff = None;

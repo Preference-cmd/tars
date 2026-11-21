@@ -530,4 +530,422 @@ decision = "allow"
             .await
             .unwrap();
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rc07_rc10_in_memory_session_rules_and_remove_clear_and_reopen_clear() {
+        use crate::permission::{ApprovalDecision, ApprovalSubject, CommandTarget};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("store");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let user_rules = temp.path().join("user-permissions.toml");
+        let outside_file = temp.path().join("outside-session-rule.txt");
+
+        let replies = vec![
+            // 1. Ask -> AllowForSession (`echo first`)
+            call_cmd("echo first"),
+            Reply::Answer,
+            // 2. Same prefix `echo first` runs via RuleAllowed without prompt!
+            call_cmd("echo first second"),
+            Reply::Answer,
+            // 3. Outside sandbox -> AllowForSession (`touch <outside_file>`)
+            Reply::Call(
+                "run_command".into(),
+                json!({
+                    "command": format!("touch '{}'", outside_file.display()),
+                    "outside_sandbox": true,
+                    "justification": "outside session rule test",
+                }),
+            ),
+            Reply::Answer,
+            // 4. Same prefix outside sandbox -> RuleAllowed without prompt!
+            Reply::Call(
+                "run_command".into(),
+                json!({
+                    "command": format!("touch '{}'", outside_file.display()),
+                    "outside_sandbox": true,
+                    "justification": "outside session rule reuse",
+                }),
+            ),
+            Reply::Answer,
+            // 5. After remove_session_rule(0) removes `echo first`, `echo first` asks again!
+            call_cmd("echo first after-remove"),
+            Reply::Answer,
+            // 6. After clear_session_rules(), `touch <outside_file>` outside asks again!
+            Reply::Call(
+                "run_command".into(),
+                json!({
+                    "command": format!("touch '{}'", outside_file.display()),
+                    "outside_sandbox": true,
+                    "justification": "after clear",
+                }),
+            ),
+            Reply::Answer,
+            // 7. Re-add session rule before close, then close & reopen: must ask again!
+            call_cmd("echo first before-reopen"),
+            Reply::Answer,
+            // 8. After reopen: session rule is gone -> asks again (we deny to verify prompt arrived).
+            call_cmd("echo first after-reopen"),
+            Reply::Answer,
+        ];
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let host =
+            SessionHost::new(Some(store.clone())).with_user_rules_path(Some(user_rules.clone()));
+        let session = host
+            .create(PreparedCreate::persistent(
+                command_definition(&fixture.endpoint, &workspace),
+                Context::default(),
+            ))
+            .await
+            .unwrap();
+        let id = session.target().conversation_id().clone();
+        let mut rx = session.connect_approvals();
+
+        let approver = tokio::spawn(async move {
+            // Prompt 1: `echo first` -> AllowForSession
+            let req1 = rx.recv().await.unwrap();
+            let ApprovalSubject::Command {
+                suggested_prefixes,
+                can_save_workspace_rule,
+                ..
+            } = &req1.subject
+            else {
+                panic!("expected Command subject");
+            };
+            assert_eq!(
+                suggested_prefixes,
+                &vec![vec!["echo".to_owned(), "first".to_owned()]]
+            );
+            assert!(*can_save_workspace_rule);
+            req1.reply.send(ApprovalDecision::AllowForSession).unwrap();
+
+            // Prompt 2: `touch` outside -> AllowForSession
+            let req2 = rx.recv().await.unwrap();
+            let ApprovalSubject::Command { target, .. } = &req2.subject else {
+                panic!("expected Command subject");
+            };
+            assert!(matches!(target, CommandTarget::Outside { .. }));
+            req2.reply.send(ApprovalDecision::AllowForSession).unwrap();
+
+            // Prompt 3: `echo first after-remove` -> Allow once
+            let req3 = rx.recv().await.unwrap();
+            req3.reply.send(ApprovalDecision::Allow).unwrap();
+
+            // Prompt 4: `touch` after clear -> Allow once
+            let req4 = rx.recv().await.unwrap();
+            req4.reply.send(ApprovalDecision::Allow).unwrap();
+
+            // Prompt 5: `echo first before-reopen` -> AllowForSession
+            let req5 = rx.recv().await.unwrap();
+            req5.reply.send(ApprovalDecision::AllowForSession).unwrap();
+        });
+
+        let obs1 = finish(&session, &submit(&session, "s1")).await;
+        assert_eq!(
+            obs1.tools.calls[0]
+                .permission_decision
+                .as_ref()
+                .unwrap()
+                .kind,
+            PermissionDecisionKind::AskedAndAllowed
+        );
+        assert_eq!(session.command_rules_snapshot().session_rules().len(), 1);
+
+        let obs2 = finish(&session, &submit(&session, "s2")).await;
+        let d2 = obs2.tools.calls[0].permission_decision.as_ref().unwrap();
+        assert_eq!(d2.kind, PermissionDecisionKind::RuleAllowed);
+        assert_eq!(
+            d2.rule,
+            Some(RuleSource {
+                scope: RuleScope::Session,
+                prefix: vec!["echo".into(), "first".into()],
+            })
+        );
+
+        let obs3 = finish(&session, &submit(&session, "s3")).await;
+        assert_eq!(
+            obs3.tools.calls[0].status,
+            Some(ToolResultStatus::Succeeded)
+        );
+        assert_eq!(session.command_rules_snapshot().session_rules().len(), 2);
+
+        let obs4 = finish(&session, &submit(&session, "s4")).await;
+        assert_eq!(
+            obs4.tools.calls[0].status,
+            Some(ToolResultStatus::Succeeded)
+        );
+        let d4 = obs4.tools.calls[0].permission_decision.as_ref().unwrap();
+        assert_eq!(d4.kind, PermissionDecisionKind::RuleAllowed);
+        assert_eq!(d4.rule.as_ref().map(|r| r.scope), Some(RuleScope::Session));
+
+        assert!(session.remove_session_rule(0).unwrap());
+        assert!(!session.remove_session_rule(99).unwrap());
+        assert_eq!(session.command_rules_snapshot().session_rules().len(), 1);
+
+        let obs5 = finish(&session, &submit(&session, "s5")).await;
+        assert_eq!(
+            obs5.tools.calls[0]
+                .permission_decision
+                .as_ref()
+                .unwrap()
+                .kind,
+            PermissionDecisionKind::AskedAndAllowed
+        );
+
+        assert_eq!(session.clear_session_rules().unwrap(), 1);
+        assert!(session.command_rules_snapshot().session_rules().is_empty());
+
+        let obs6 = finish(&session, &submit(&session, "s6")).await;
+        assert_eq!(
+            obs6.tools.calls[0]
+                .permission_decision
+                .as_ref()
+                .unwrap()
+                .kind,
+            PermissionDecisionKind::AskedAndAllowed
+        );
+
+        // Add one session rule before closing.
+        let _obs7 = finish(&session, &submit(&session, "s7")).await;
+        assert_eq!(session.command_rules_snapshot().session_rules().len(), 1);
+        approver.await.unwrap();
+
+        host.close(&session.target(), ClosePolicy::Save)
+            .await
+            .unwrap();
+
+        // Saved record must remain tars-session-v2.3 without session_rules, and user rules untouched.
+        let record_path = store.join("sessions").join(format!("{}.json", id.as_str()));
+        let record_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+        assert_eq!(record_json["format"], "tars-session-v2.3");
+        assert!(record_json.get("session_rules").is_none());
+        assert!(!user_rules.exists());
+        assert!(!workspace.join(".tars/permissions.toml").exists());
+
+        // Reopen: session rules must be cleared automatically.
+        let reopened = host.open(id).await.unwrap();
+        assert!(reopened.command_rules_snapshot().session_rules().is_empty());
+        let mut rx2 = reopened.connect_approvals();
+        let reopen_approver = tokio::spawn(async move {
+            let req = rx2.recv().await.unwrap();
+            req.reply
+                .send(ApprovalDecision::Deny {
+                    reason: Some("session rules cleared on reopen".into()),
+                })
+                .unwrap();
+        });
+        let obs8 = finish(&reopened, &submit(&reopened, "s8")).await;
+        reopen_approver.await.unwrap();
+        assert_eq!(obs8.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+        assert_eq!(
+            obs8.tools.calls[0]
+                .permission_decision
+                .as_ref()
+                .unwrap()
+                .kind,
+            PermissionDecisionKind::AskedAndDenied
+        );
+        let _ = std::fs::remove_file(&outside_file);
+        host.close(&reopened.target(), ClosePolicy::Save)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rc07_rc10_workspace_append_preserves_comments_creates_gitignore_and_guards_toctou() {
+        use crate::permission::{ApprovalDecision, ApprovalSubject};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("store");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let user_rules = temp.path().join("user-permissions.toml");
+
+        // Pre-seed `.tars` missing; first AllowInWorkspace creates `.tars/.gitignore` (`*\n`)
+        // and `.tars/permissions.toml` without touching `user_rules`.
+        let replies = vec![
+            // Turn 1: `echo one` -> AllowInWorkspace (creates .tars/.gitignore + .tars/permissions.toml)
+            call_cmd("echo one"),
+            Reply::Answer,
+            // Turn 2: `echo one two` -> RuleAllowed immediately without asking
+            call_cmd("echo one two"),
+            Reply::Answer,
+            // Turn 3 (after reopen): `echo one three` -> auto-trusted, RuleAllowed immediately
+            call_cmd("echo one three"),
+            Reply::Answer,
+            // Turn 4 (after appending to existing commented file): `pwd` -> AllowInWorkspace preserves comments
+            call_cmd("pwd"),
+            Reply::Answer,
+            // Turn 5 (after external tampering): `ls` -> AllowInWorkspace refuses to overwrite/trust tampered file!
+            call_cmd("ls"),
+            Reply::Answer,
+            // Turn 6: `ls` again still asks because tampered file was NOT trusted/saved!
+            call_cmd("ls"),
+            Reply::Answer,
+        ];
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let host =
+            SessionHost::new(Some(store.clone())).with_user_rules_path(Some(user_rules.clone()));
+        let s1 = host
+            .create(PreparedCreate::persistent(
+                command_definition(&fixture.endpoint, &workspace),
+                Context::default(),
+            ))
+            .await
+            .unwrap();
+        let id = s1.target().conversation_id().clone();
+        let mut rx1 = s1.connect_approvals();
+        let approver1 = tokio::spawn(async move {
+            let req = rx1.recv().await.unwrap();
+            let ApprovalSubject::Command {
+                suggested_prefixes,
+                can_save_workspace_rule,
+                ..
+            } = &req.subject
+            else {
+                panic!("expected Command");
+            };
+            assert_eq!(
+                suggested_prefixes,
+                &vec![vec!["echo".to_owned(), "one".to_owned()]]
+            );
+            assert!(*can_save_workspace_rule);
+            req.reply.send(ApprovalDecision::AllowInWorkspace).unwrap();
+        });
+
+        let obs1 = finish(&s1, &submit(&s1, "w1")).await;
+        approver1.await.unwrap();
+        assert_eq!(
+            obs1.tools.calls[0].status,
+            Some(ToolResultStatus::Succeeded)
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".tars/.gitignore")).unwrap(),
+            "*\n"
+        );
+        let created_toml =
+            std::fs::read_to_string(workspace.join(".tars/permissions.toml")).unwrap();
+        assert!(created_toml.starts_with("version = 1\n\n"));
+        assert!(created_toml.contains("prefix = [\"echo\", \"one\"]"));
+        assert!(!user_rules.exists());
+
+        let obs2 = finish(&s1, &submit(&s1, "w2")).await;
+        let d2 = obs2.tools.calls[0].permission_decision.as_ref().unwrap();
+        assert_eq!(d2.kind, PermissionDecisionKind::RuleAllowed);
+        assert_eq!(
+            d2.rule,
+            Some(RuleSource {
+                scope: RuleScope::Workspace,
+                prefix: vec!["echo".into(), "one".into()],
+            })
+        );
+        host.close(&s1.target(), ClosePolicy::Save).await.unwrap();
+
+        // Reopen: workspace rules must be automatically trusted!
+        let s2 = host.open(id.clone()).await.unwrap();
+        assert!(s2.workspace_rules_trusted());
+        let obs3 = finish(&s2, &submit(&s2, "w3")).await;
+        assert_eq!(
+            obs3.tools.calls[0]
+                .permission_decision
+                .as_ref()
+                .unwrap()
+                .kind,
+            PermissionDecisionKind::RuleAllowed
+        );
+        host.close(&s2.target(), ClosePolicy::Save).await.unwrap();
+
+        // Replace `.tars/permissions.toml` with custom comments & formatting and custom `.tars/.gitignore`,
+        // trust it via Store, then test verbatim preservation + TOCTOU tamper refusal.
+        let custom_gitignore = "# custom\n*.toml\n";
+        std::fs::write(workspace.join(".tars/.gitignore"), custom_gitignore).unwrap();
+        let commented_toml = "\
+# Leading comment preserved
+version = 1
+
+# Rule comment preserved
+[[command]]
+prefix = [\"echo\"]
+decision = \"allow\"
+";
+        std::fs::write(workspace.join(".tars/permissions.toml"), commented_toml).unwrap();
+        SessionStore::new(store.clone())
+            .write_workspace_rules_trust(&workspace, commented_toml)
+            .unwrap();
+
+        let s3 = host.open(id).await.unwrap();
+        assert!(s3.workspace_rules_trusted());
+        let mut rx3 = s3.connect_approvals();
+        let ws_clone = workspace.clone();
+        let approver3 = tokio::spawn(async move {
+            // Turn 4: `pwd` -> AllowInWorkspace appends verbatim after `commented_toml`
+            let req4 = rx3.recv().await.unwrap();
+            req4.reply.send(ApprovalDecision::AllowInWorkspace).unwrap();
+
+            // Wait for Turn 5 (`ls`): tamper with disk file BEFORE answering AllowInWorkspace
+            let req5 = rx3.recv().await.unwrap();
+            std::fs::write(
+                ws_clone.join(".tars/permissions.toml"),
+                "version = 1\n[[command]]\nprefix = [\"whoami\"]\ndecision = \"allow\"\n",
+            )
+            .unwrap();
+            req5.reply.send(ApprovalDecision::AllowInWorkspace).unwrap();
+
+            // Turn 6: `ls` must still prompt because TOCTOU refused to save/trust!
+            let req6 = rx3.recv().await.unwrap();
+            req6.reply.send(ApprovalDecision::Allow).unwrap();
+        });
+
+        let obs4 = finish(&s3, &submit(&s3, "w4")).await;
+        assert_eq!(
+            obs4.tools.calls[0].status,
+            Some(ToolResultStatus::Succeeded)
+        );
+        let after_append =
+            std::fs::read_to_string(workspace.join(".tars/permissions.toml")).unwrap();
+        assert!(
+            after_append.starts_with(commented_toml),
+            "existing comments and text must be preserved verbatim:\n{after_append}"
+        );
+        assert!(after_append.contains("prefix = [\"pwd\"]"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".tars/.gitignore")).unwrap(),
+            custom_gitignore
+        );
+
+        let obs5 = finish(&s3, &submit(&s3, "w5")).await;
+        assert_eq!(
+            obs5.tools.calls[0].status,
+            Some(ToolResultStatus::Succeeded)
+        );
+        // Tampered file was NOT overwritten!
+        let disk_after_toctou =
+            std::fs::read_to_string(workspace.join(".tars/permissions.toml")).unwrap();
+        assert!(disk_after_toctou.contains("whoami"));
+        assert!(!disk_after_toctou.contains("prefix = [\"ls\"]"));
+        assert!(
+            !s3.command_rules_snapshot()
+                .workspace_rules()
+                .iter()
+                .any(|r| r.prefix == vec!["ls"])
+        );
+
+        let obs6 = finish(&s3, &submit(&s3, "w6")).await;
+        assert_eq!(
+            obs6.tools.calls[0]
+                .permission_decision
+                .as_ref()
+                .unwrap()
+                .kind,
+            PermissionDecisionKind::AskedAndAllowed
+        );
+        approver3.await.unwrap();
+        assert!(!user_rules.exists());
+
+        host.close(&s3.target(), ClosePolicy::Save).await.unwrap();
+    }
 }

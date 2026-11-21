@@ -200,7 +200,15 @@ decision = "deny"
     assert!(run1.status.success());
     let run1_json: Value = serde_json::from_slice(&run1.stdout).expect("valid run1 json");
     assert_eq!(run1_json["text"], "pwd ok");
-    assert!(String::from_utf8_lossy(&run1.stderr).contains("ignored 1 allow rule"));
+    let run1_stderr = String::from_utf8_lossy(&run1.stderr);
+    assert!(
+        run1_stderr.contains("ignored 1 allow rule"),
+        "{run1_stderr}"
+    );
+    assert!(
+        run1_stderr.contains("allowed by user rule `pwd`"),
+        "{run1_stderr}"
+    );
 
     let run1b = wait_child_bounded(
         Command::new(env!("CARGO_BIN_EXE_tars"))
@@ -253,7 +261,12 @@ decision = "deny"
     assert!(run2.status.success());
     let run2_json: Value = serde_json::from_slice(&run2.stdout).unwrap();
     assert_eq!(run2_json["text"], "echo ok");
-    assert!(!String::from_utf8_lossy(&run2.stderr).contains("ignored"));
+    let run2_stderr = String::from_utf8_lossy(&run2.stderr);
+    assert!(!run2_stderr.contains("ignored"));
+    assert!(
+        run2_stderr.contains("allowed by workspace rule `echo`"),
+        "{run2_stderr}"
+    );
 
     // 4. Subsequent session run WITHOUT --trust-workspace-rules: trust persisted, no warning, `echo` succeeds.
     let run3 = wait_child_bounded(

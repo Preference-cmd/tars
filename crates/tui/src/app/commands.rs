@@ -33,6 +33,10 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("new", "Create a session with model settings"),
     ("sessions", "Find and open a saved or active session"),
     ("mode", "Show or change the permission mode"),
+    (
+        "rules",
+        "Show active command rules or manage in-memory session rules",
+    ),
     ("compact", "Replace the current context with a summary now"),
     (
         "auto_compact",
@@ -188,6 +192,11 @@ impl App {
                     }
                 }
             }
+            "rules" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("rules").unwrap_or("").trim();
+                self.rules_command(arg);
+            }
             "auto_compact" => {
                 let clean = query.trim_start_matches('/').trim();
                 let arg = clean.strip_prefix("auto_compact").unwrap_or("").trim();
@@ -200,6 +209,7 @@ impl App {
                 lines: ["Enter / Ctrl-S   Send input", "Ctrl-J / Alt-Enter   New line",
                     "Shift-Tab   Cycle mode (ask -> accept-edits -> read-only)",
                     "/mode [name]   Show or change the permission mode",
+                    "/rules [list | remove <N> | clear]   Show active rules or manage session rules",
                     "/auto_compact [on|off|PERCENT]   Compaction switch and threshold",
                     "/compact   Summarize and replace the current context now",
                     "/summary   Show the current context summary in full",
@@ -277,6 +287,141 @@ impl App {
             "quit" => self.request_quit(),
             _ => unreachable!("commands are a closed local set"),
         }
+    }
+
+    fn rules_command(&mut self, arg: &str) {
+        let Some(session) = self
+            .entries
+            .get(self.selected)
+            .and_then(|entry| entry.session.clone())
+        else {
+            self.notice = "Open a session first to inspect or manage command rules".into();
+            return;
+        };
+
+        if arg.is_empty() || arg.eq_ignore_ascii_case("list") {
+            let rules = session.command_rules_snapshot();
+            let report = session.open_report();
+            let ws_trusted = session.workspace_rules_trusted();
+
+            let mut lines = Vec::new();
+            let user_path_label = match &self.user_rules_path {
+                Some(path) => {
+                    tars_core::permission::escape_untrusted_text(&path.display().to_string())
+                }
+                None => "(disabled via --no-config)".into(),
+            };
+            lines.push(format!("User rules (read-only): {user_path_label}"));
+            if rules.user_rules().is_empty() {
+                lines.push("  (none)".into());
+            } else {
+                for rule in rules.user_rules() {
+                    lines.push(format!("  - {}", format_rule_entry(rule)));
+                }
+            }
+
+            lines.push(String::new());
+            let ws_path_label = match &report.workspace_rules.file_path {
+                Some(path) => {
+                    tars_core::permission::escape_untrusted_text(&path.display().to_string())
+                }
+                None => "(no workspace)".into(),
+            };
+            let trust_label = if ws_trusted {
+                "trusted"
+            } else {
+                "UNTRUSTED (allow rules ignored; deny/ask active)"
+            };
+            lines.push(format!("Workspace rules [{trust_label}]: {ws_path_label}"));
+            if rules.workspace_rules().is_empty() {
+                lines.push("  (none)".into());
+            } else {
+                for rule in rules.workspace_rules() {
+                    lines.push(format!("  - {}", format_rule_entry(rule)));
+                }
+            }
+            if !ws_trusted && !report.workspace_rules.allow_rules.is_empty() {
+                lines.push(format!(
+                    "  ({} untrusted allow rule(s) currently ignored)",
+                    report.workspace_rules.allow_rules.len()
+                ));
+            }
+
+            lines.push(String::new());
+            lines.push("Session rules (in-memory only; cleared on close/reopen):".into());
+            if rules.session_rules().is_empty() {
+                lines.push("  (none)".into());
+            } else {
+                for (idx, rule) in rules.session_rules().iter().enumerate() {
+                    lines.push(format!("  {}. {}", idx + 1, format_rule_entry(rule)));
+                }
+            }
+
+            lines.push(String::new());
+            lines.push(
+                "Precedence: deny > ask > allow across all layers (workspace/session cannot override user deny/ask)."
+                    .into(),
+            );
+            lines.push(
+                "/rules remove <N> removes an in-memory session rule · /rules clear clears all session rules."
+                    .into(),
+            );
+            lines.push(
+                "User and workspace rules are managed by editing their TOML files directly (TARS never rewrites global rules)."
+                    .into(),
+            );
+
+            self.panel = Some(Panel::Info {
+                title: "Command permission rules".into(),
+                lines,
+                scroll: 0,
+            });
+            return;
+        }
+
+        if arg.eq_ignore_ascii_case("clear") {
+            match session.clear_session_rules() {
+                Ok(0) => self.notice = "No in-memory session rules to clear".into(),
+                Ok(count) => {
+                    self.notice = format!("Cleared {count} in-memory session rule(s)");
+                }
+                Err(error) => {
+                    self.notice = format!("Failed to clear session rules: {error}");
+                }
+            }
+            self.dirty = true;
+            return;
+        }
+
+        let mut parts = arg.split_whitespace();
+        if let Some(sub) = parts.next()
+            && sub.eq_ignore_ascii_case("remove")
+        {
+            let index_arg = parts.next();
+            let extra = parts.next();
+            let one_based = index_arg.and_then(|raw| raw.parse::<usize>().ok());
+            match (one_based, extra) {
+                (Some(n), None) if n >= 1 => match session.remove_session_rule(n - 1) {
+                    Ok(true) => {
+                        self.notice = format!("Removed in-memory session rule #{n}");
+                    }
+                    Ok(false) => {
+                        self.notice = format!("No in-memory session rule #{n}");
+                    }
+                    Err(error) => {
+                        self.notice = format!("Failed to remove session rule: {error}");
+                    }
+                },
+                _ => {
+                    self.notice = "Usage: /rules remove <N> (1-based session rule index)".into();
+                }
+            }
+            self.dirty = true;
+            return;
+        }
+
+        self.notice = "Usage: /rules [list | remove <N> | clear]".into();
+        self.dirty = true;
     }
     /// `/auto_compact`: report the running settings, or change the switch or
     /// the trigger percentage. Only this session changes; shared TOML is never
@@ -590,6 +735,20 @@ impl App {
             _ => {}
         }
         self.panel = Some(panel);
+    }
+}
+
+fn format_rule_entry(rule: &tars_core::permission::CommandRule) -> String {
+    let decision = match rule.decision {
+        tars_core::permission::RuleDecision::Allow => "allow",
+        tars_core::permission::RuleDecision::Ask => "ask",
+        tars_core::permission::RuleDecision::Deny => "deny",
+    };
+    let prefix = tars_core::permission::escape_untrusted_text(&rule.prefix.join(" "));
+    if rule.outside_sandbox {
+        format!("{decision}: {prefix} [outside_sandbox]")
+    } else {
+        format!("{decision}: {prefix}")
     }
 }
 

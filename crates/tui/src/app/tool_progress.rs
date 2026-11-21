@@ -79,9 +79,15 @@ impl ToolView {
                 })
                 .map(|s| format!(" · {s:?}"))
                 .unwrap_or_default();
+            let provenance = call
+                .permission_decision
+                .as_ref()
+                .and_then(|decision| decision.rule_summary())
+                .map(|summary| format!(" · {summary}"))
+                .unwrap_or_default();
             lines.push(
                 crate::transcript::display(&format!(
-                    "Tool {} · {phase}{status} · {} · {}",
+                    "Tool {} · {phase}{status}{provenance} · {} · {}",
                     call.tool_name, call.call_block_id.0, call.arguments_summary
                 ))
                 .replace('\n', " "),

@@ -54,6 +54,8 @@ pub(crate) struct SessionResources {
     pub(crate) skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
     /// Initial layered command approval rules loaded for this session.
     pub(crate) command_rules: crate::permission::CommandRuleSet,
+    /// Optional workspace rules persistence backend for safe `.tars/permissions.toml` appending.
+    pub(crate) workspace_rules_backend: Option<crate::permission::WorkspaceRulesBackend>,
     /// Test-only command sandbox probe result injected into the real assembly
     /// path. Mirrors `CommandRuntime::bind_with_sandbox`: no production code
     /// can choose a backend or a probe result.
@@ -79,6 +81,7 @@ impl SessionResources {
             initial_usage: None,
             skill_registry: None,
             command_rules: crate::permission::CommandRuleSet::new(),
+            workspace_rules_backend: None,
             #[cfg(test)]
             gateway_override: None,
             #[cfg(test)]
@@ -115,6 +118,15 @@ impl SessionResources {
         command_rules: crate::permission::CommandRuleSet,
     ) -> Self {
         self.command_rules = command_rules;
+        self
+    }
+
+    /// Attach the workspace rules persistence backend when a workspace and Store are active.
+    pub(crate) fn with_workspace_rules_backend(
+        mut self,
+        backend: Option<crate::permission::WorkspaceRulesBackend>,
+    ) -> Self {
+        self.workspace_rules_backend = backend;
         self
     }
 
@@ -193,6 +205,7 @@ pub(crate) fn assemble(
         initial_usage,
         skill_registry,
         command_rules,
+        workspace_rules_backend,
         #[cfg(test)]
         gateway_override,
         #[cfg(test)]
@@ -379,10 +392,11 @@ pub(crate) fn assemble(
         .as_ref()
         .map(|m| m.permission_table())
         .unwrap_or_else(|| Arc::new(crate::permission::McpPermissionTable::new()));
-    let permissions = Arc::new(crate::permission::PermissionHub::with_rules(
+    let permissions = Arc::new(crate::permission::PermissionHub::with_rules_and_backend(
         current_mode,
         mcp_table,
         command_rules,
+        workspace_rules_backend,
     ));
     let view = permissions.view();
     let approvals = permissions.approvals();
@@ -487,7 +501,7 @@ pub(crate) fn assemble(
                 before.push(Arc::new(crate::permission::PermissionProcessor::new(
                     work,
                     reporter,
-                    approvals.clone(),
+                    permissions.clone(),
                     definition_command_settings,
                     prepared_writes,
                     outside_sandbox_grants

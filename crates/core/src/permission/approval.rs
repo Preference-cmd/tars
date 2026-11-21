@@ -11,8 +11,13 @@ use tokio::sync::{mpsc, oneshot};
 /// Decision returned by a reviewer answering an approval request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalDecision {
-    /// Allow the tool call to proceed to execution.
+    /// Allow the tool call to proceed to execution once.
     Allow,
+    /// Allow matching command prefixes for the remainder of the current in-memory session.
+    AllowForSession,
+    /// Persist matching command prefixes to `<workspace_root>/.tars/permissions.toml`
+    /// and allow matching commands in this workspace.
+    AllowInWorkspace,
     /// Deny the tool call, optionally providing a reason.
     Deny {
         /// Optional explanation for why the operation was declined.
@@ -83,6 +88,13 @@ pub enum ApprovalSubject {
         timeout_secs: u64,
         /// Where the command would run and what governs it.
         target: CommandTarget,
+        /// Candidate rule prefixes for session/workspace allow rules (empty if
+        /// unmatchable or a single-word interpreter/wrapper).
+        suggested_prefixes: Vec<Vec<String>>,
+        /// Whether saving to `<workspace_root>/.tars/permissions.toml` is available
+        /// (requires non-empty `suggested_prefixes`, a workspace root, a Store, and
+        /// currently trusted workspace rules).
+        can_save_workspace_rule: bool,
     },
     /// MCP tool call requiring confirmation.
     McpCall {
@@ -106,11 +118,14 @@ pub fn command_body(subject: &ApprovalSubject) -> Option<Vec<String>> {
         workdir,
         timeout_secs,
         target,
+        suggested_prefixes,
+        ..
     } = subject
     else {
         return None;
     };
     let mut lines = Vec::new();
+    let is_outside = matches!(target, CommandTarget::Outside { .. });
     match target {
         CommandTarget::Outside { justification } => {
             lines.push(
@@ -141,6 +156,31 @@ pub fn command_body(subject: &ApprovalSubject) -> Option<Vec<String>> {
                 "Workspace: writable; .git hooks and config read-only; credentials unreadable"
                     .to_owned(),
             );
+        }
+    }
+    if !suggested_prefixes.is_empty() {
+        let formatted: Vec<String> = suggested_prefixes
+            .iter()
+            .map(|prefix| escape_untrusted_text(&prefix.join(" ")))
+            .collect();
+        let label = if formatted.len() == 1 {
+            "Rule prefix"
+        } else {
+            "Rule prefixes"
+        };
+        let suffix = if is_outside {
+            " (includes outside_sandbox = true)"
+        } else {
+            ""
+        };
+        lines.push(format!("{label}: {}{suffix}", formatted.join("; ")));
+        if is_outside {
+            lines.push(
+                "Rule note: allows any trailing args; outside_sandbox = true bypasses sandbox."
+                    .to_owned(),
+            );
+        } else {
+            lines.push("Rule note: allows any trailing args.".to_owned());
         }
     }
     lines.push(String::new());
@@ -241,6 +281,8 @@ mod tests {
             target: CommandTarget::Sandboxed {
                 network: CommandNetwork::None,
             },
+            suggested_prefixes: Vec::new(),
+            can_save_workspace_rule: false,
         };
         let lines = command_body(&sandboxed).unwrap();
         assert_eq!(lines[0], "Working directory: src");
@@ -258,6 +300,8 @@ mod tests {
             target: CommandTarget::Outside {
                 justification: "line one\nline two\x1b".into(),
             },
+            suggested_prefixes: vec![vec!["printf".into(), "a".into()]],
+            can_save_workspace_rule: true,
         };
         let lines = command_body(&outside).unwrap();
         assert!(lines[0].starts_with("NOT in the sandbox"));
@@ -265,8 +309,13 @@ mod tests {
         assert_eq!(lines[2], "line two\\x1b");
         assert_eq!(lines[3], "Working directory: .");
         assert_eq!(lines[4], "Timeout: 120s");
-        assert_eq!(lines[5], "");
-        assert_eq!(lines[6], "$ printf a");
+        assert_eq!(
+            lines[5],
+            "Rule prefix: printf a (includes outside_sandbox = true)"
+        );
+        assert!(lines[6].contains("outside_sandbox = true bypasses sandbox"));
+        assert_eq!(lines[7], "");
+        assert_eq!(lines[8], "$ printf a");
 
         let mcp = ApprovalSubject::McpCall {
             server: "srv".into(),

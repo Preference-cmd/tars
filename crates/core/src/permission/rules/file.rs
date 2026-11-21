@@ -2,7 +2,7 @@
 
 use super::eval::{CommandRule, RuleDecision};
 use serde::Deserialize;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 /// Maximum size of a permissions rules file (256 KiB).
@@ -272,6 +272,163 @@ pub fn workspace_rules_diff(previous_trusted: &str, current_text: &str) -> Strin
         .context_radius(3)
         .header("a/.tars/permissions.toml", "b/.tars/permissions.toml")
         .to_string()
+}
+
+/// Failure when appending rules to `<workspace_root>/.tars/permissions.toml`.
+#[derive(Debug)]
+pub(crate) enum WorkspaceAppendError {
+    /// The file on disk changed since the session trusted it (TOCTOU protection).
+    ExternalModification,
+    /// Rules validation or file/store I/O failed.
+    Failed,
+}
+
+/// Outcome of safely appending rules to `<workspace_root>/.tars/permissions.toml`.
+#[derive(Debug)]
+pub(crate) struct WorkspaceAppendOutcome {
+    /// Updated raw UTF-8 text written to `.tars/permissions.toml` (and trusted in Store).
+    pub(crate) new_raw_text: String,
+    /// Rules that were newly added (identical existing rules are skipped).
+    pub(crate) added_rules: Vec<CommandRule>,
+}
+
+/// Safely append `new_rules` to `<workspace_root>/.tars/permissions.toml` with
+/// TOCTOU verification against `expected_trusted_text`, `.tars/.gitignore`
+/// creation (without overwriting an existing `.gitignore`), full TOML validation,
+/// atomic replacement, and Store trust synchronization.
+///
+/// Never touches `<user_tars_dir>/permissions.toml`.
+pub(crate) fn append_workspace_rules_file(
+    workspace_root: &Path,
+    store: &crate::store::SessionStore,
+    expected_trusted_text: Option<&str>,
+    new_rules: &[CommandRule],
+) -> Result<WorkspaceAppendOutcome, WorkspaceAppendError> {
+    if new_rules.is_empty() {
+        return Err(WorkspaceAppendError::Failed);
+    }
+    for rule in new_rules {
+        if rule.prefix.is_empty()
+            || rule
+                .prefix
+                .iter()
+                .any(|word| word.is_empty() || word.contains('\0'))
+            || (rule.outside_sandbox && rule.decision != RuleDecision::Allow)
+            || (rule.decision == RuleDecision::Allow
+                && rule.prefix.len() == 1
+                && is_forbidden_single_word_allow(&rule.prefix[0]))
+        {
+            return Err(WorkspaceAppendError::Failed);
+        }
+    }
+
+    let dot_tars = workspace_root.join(".tars");
+    let rules_path = dot_tars.join("permissions.toml");
+
+    let disk_text = match load_rules_file(&rules_path) {
+        Ok(Some(loaded)) => Some(loaded.raw_text),
+        Ok(None) => None,
+        Err(_) => return Err(WorkspaceAppendError::Failed),
+    };
+
+    if disk_text.as_deref() != expected_trusted_text {
+        return Err(WorkspaceAppendError::ExternalModification);
+    }
+
+    let existing_rules = match &disk_text {
+        Some(text) => {
+            parse_rules_toml(text, &rules_path).map_err(|_| WorkspaceAppendError::Failed)?
+        }
+        None => Vec::new(),
+    };
+
+    let mut rules_to_add = Vec::new();
+    for rule in new_rules {
+        if !existing_rules.contains(rule) && !rules_to_add.contains(rule) {
+            rules_to_add.push(rule.clone());
+        }
+    }
+
+    if rules_to_add.is_empty()
+        && let Some(existing) = disk_text
+    {
+        return Ok(WorkspaceAppendOutcome {
+            new_raw_text: existing,
+            added_rules: Vec::new(),
+        });
+    }
+
+    let new_text = match disk_text {
+        None => {
+            let mut text = String::from("version = 1\n");
+            for rule in &rules_to_add {
+                text.push('\n');
+                text.push_str(&format_command_rule_block(rule));
+            }
+            text
+        }
+        Some(mut text) => {
+            for rule in &rules_to_add {
+                if !text.is_empty() {
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    if !text.ends_with("\n\n") {
+                        text.push('\n');
+                    }
+                }
+                text.push_str(&format_command_rule_block(rule));
+            }
+            text
+        }
+    };
+
+    parse_rules_toml(&new_text, &rules_path).map_err(|_| WorkspaceAppendError::Failed)?;
+
+    std::fs::create_dir_all(&dot_tars).map_err(|_| WorkspaceAppendError::Failed)?;
+    ensure_dot_tars_gitignore(&dot_tars).map_err(|_| WorkspaceAppendError::Failed)?;
+
+    let mut pending = tempfile::Builder::new()
+        .prefix(".permissions.toml.pending-")
+        .tempfile_in(&dot_tars)
+        .map_err(|_| WorkspaceAppendError::Failed)?;
+    pending
+        .write_all(new_text.as_bytes())
+        .map_err(|_| WorkspaceAppendError::Failed)?;
+    pending
+        .as_file()
+        .sync_all()
+        .map_err(|_| WorkspaceAppendError::Failed)?;
+    pending
+        .persist(&rules_path)
+        .map_err(|_| WorkspaceAppendError::Failed)?;
+
+    store
+        .write_workspace_rules_trust(workspace_root, &new_text)
+        .map_err(|_| WorkspaceAppendError::Failed)?;
+
+    Ok(WorkspaceAppendOutcome {
+        new_raw_text: new_text,
+        added_rules: rules_to_add,
+    })
+}
+
+fn ensure_dot_tars_gitignore(dot_tars: &Path) -> io::Result<()> {
+    use std::io::Write;
+    let gitignore_path = dot_tars.join(".gitignore");
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&gitignore_path)
+    {
+        Ok(mut file) => {
+            file.write_all(b"*\n")?;
+            file.sync_all()?;
+            Ok(())
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn is_forbidden_single_word_allow(word: &str) -> bool {

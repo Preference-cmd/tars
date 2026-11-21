@@ -1363,13 +1363,13 @@ async fn unprepared_write_in_ask_mode_records_unprepared_decision() {
         &batch_initial,
     );
 
-    let hub = Arc::new(crate::permission::approval::ApprovalsHub::new());
+    let perm_hub = Arc::new(crate::permission::PermissionHub::new(PermissionMode::Ask));
     let prepared_empty = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
     let processor = crate::permission::PermissionProcessor::new(
         work,
         reporter.clone(),
-        hub,
+        perm_hub.clone(),
         crate::definition::CommandSettings::default(),
         prepared_empty,
         crate::permission::OutsideSandboxGrants::new(),
@@ -1378,7 +1378,7 @@ async fn unprepared_write_in_ask_mode_records_unprepared_decision() {
     let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
     let declaration_order = [call.call_block_id];
     let control = CallControl::new(CancellationToken::new(), None);
-    let view = crate::permission::PermissionHub::new(PermissionMode::Ask).view();
+    let view = perm_hub.view();
     let processor_data = causa::kernel::ProcessorData::new(view);
     let ctx = ProcessorContext::new(&turn_id, RoundId(0), &declaration_order, &control)
         .with_data(&processor_data);
@@ -1434,11 +1434,11 @@ async fn unprepared_outside_command_records_unprepared_outside_decision() {
         &batch_initial,
     );
 
-    let hub = Arc::new(crate::permission::approval::ApprovalsHub::new());
+    let perm_hub = Arc::new(crate::permission::PermissionHub::new(PermissionMode::Ask));
     let processor = crate::permission::PermissionProcessor::new(
         work,
         reporter.clone(),
-        hub,
+        perm_hub.clone(),
         crate::definition::CommandSettings::default(),
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         crate::permission::OutsideSandboxGrants::new(),
@@ -1447,7 +1447,7 @@ async fn unprepared_outside_command_records_unprepared_outside_decision() {
     let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
     let declaration_order = [call.call_block_id];
     let control = CallControl::new(CancellationToken::new(), None);
-    let view = crate::permission::PermissionHub::new(PermissionMode::Ask).view();
+    let view = perm_hub.view();
     let processor_data = causa::kernel::ProcessorData::new(view);
     let ctx = ProcessorContext::new(&turn_id, RoundId(0), &declaration_order, &control)
         .with_data(&processor_data);
@@ -3738,7 +3738,7 @@ async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes(
             ),
         ] {
             // Test without confirmation route: ModeGateProcessor and PermissionProcessor must match.
-            let perm_hub = PermissionHub::new(mode);
+            let perm_hub = Arc::new(PermissionHub::new(mode));
             perm_hub.set_rules(rules.clone());
             let view = perm_hub.view();
             let data = ProcessorData::new(view.clone());
@@ -3777,7 +3777,7 @@ async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes(
             let processor = PermissionProcessor::new(
                 work,
                 proc_reporter.clone(),
-                perm_hub.approvals(),
+                perm_hub.clone(),
                 crate::definition::CommandSettings::default(),
                 Arc::new(Mutex::new(std::collections::HashMap::new())),
                 grants.clone(),
@@ -3830,7 +3830,7 @@ async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes(
 
     // With confirmation route in FullAccess, `ask` rule asks and attaches RuleSource.
     for approved in [true, false] {
-        let perm_hub = PermissionHub::new(PermissionMode::FullAccess);
+        let perm_hub = Arc::new(PermissionHub::new(PermissionMode::FullAccess));
         perm_hub.set_rules(rules.clone());
         let mut rx = perm_hub.connect_approvals();
         let responder = tokio::spawn(async move {
@@ -3878,7 +3878,7 @@ async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes(
         PermissionProcessor::new(
             work,
             proc_reporter.clone(),
-            perm_hub.approvals(),
+            perm_hub.clone(),
             crate::definition::CommandSettings::default(),
             Arc::new(Mutex::new(std::collections::HashMap::new())),
             OutsideSandboxGrants::new(),

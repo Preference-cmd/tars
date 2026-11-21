@@ -14,4 +14,5 @@ pub use file::{
     RulesFileError, format_command_rule_block, load_rules_file, parse_rules_toml,
     workspace_rules_diff,
 };
+pub(crate) use file::{WorkspaceAppendError, append_workspace_rules_file};
 pub use parse::{parse_command, suggest_command_prefixes};

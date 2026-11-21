@@ -427,7 +427,7 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
         Constraint::Length(header_len + 1),
         Constraint::Min(1),
         Constraint::Length(reason_height),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .split(area);
 
@@ -475,8 +475,16 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
                 .skip(scroll)
                 .take(body_height)
                 .map(|line| {
-                    let style = if line.starts_with("NOT in the sandbox") {
+                    let style = if line.starts_with("NOT in the sandbox")
+                        || (line.starts_with("Rule ") && line.contains("outside_sandbox = true"))
+                    {
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    } else if line.starts_with("Rule prefix") {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else if line.starts_with("Rule note:") {
+                        Style::default().fg(MUTED)
                     } else {
                         Style::default()
                     };
@@ -516,14 +524,35 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
     let hint = if entry.approval_reason.is_some() {
         "Enter confirm deny · Esc cancel"
     } else {
-        "Enter / y allow · n deny · Esc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
+        match &req.subject {
+            tars_core::permission::ApprovalSubject::Command {
+                suggested_prefixes,
+                can_save_workspace_rule,
+                ..
+            } if !suggested_prefixes.is_empty() && *can_save_workspace_rule => {
+                "1/y/Enter allow once · 2/s allow for session · 3/w always in workspace · n deny\nEsc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
+            }
+            tars_core::permission::ApprovalSubject::Command {
+                suggested_prefixes, ..
+            } if !suggested_prefixes.is_empty() => {
+                "1/y/Enter allow once · 2/s allow for session · n deny\nEsc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
+            }
+            _ => {
+                "Enter / y allow · n deny · Esc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
+            }
+        }
     };
     let hint_style = if app.is_approval_guarded() {
         Style::default().fg(MUTED).add_modifier(Modifier::DIM)
     } else {
         Style::default().fg(MUTED).remove_modifier(Modifier::DIM)
     };
-    frame.render_widget(Paragraph::new(hint).style(hint_style), regions[3]);
+    frame.render_widget(
+        Paragraph::new(hint)
+            .wrap(Wrap { trim: false })
+            .style(hint_style),
+        regions[3],
+    );
 }
 
 fn diff_block() -> Block<'static> {

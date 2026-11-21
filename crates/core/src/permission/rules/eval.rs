@@ -53,6 +53,13 @@ pub struct RuleSource {
     pub prefix: Vec<String>,
 }
 
+impl std::fmt::Display for RuleSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let prefix = crate::permission::escape_untrusted_text(&self.prefix.join(" "));
+        write!(f, "{} rule `{prefix}`", self.scope)
+    }
+}
+
 /// A single validated command prefix rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandRule {

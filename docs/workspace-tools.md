@@ -68,7 +68,7 @@ The precheck before confirmation covers arguments, paths, read-before-write, edi
 
 - **Allow this time**: file versions are re-checked at execution and the write happens only if they match the precheck. A mismatch, a deleted target or an occupied new target results in Failed and the file is untouched.
 - **Reject**: an optional one-sentence reason can be attached. The model receives Rejected (`user declined this write`) plus the reason; this is an ordinary tool result, the round continues and the file is untouched.
-- "Always allow for this session" is not offered. Switch the permission mode when confirmation-free operation is needed; the dialog itself answers only this one call.
+- For `write_file`, `edit_file`, and MCP calls, "Always allow for this session" is not offered; switch the permission mode when confirmation-free writes are needed. For `run_command`, prefix-based command approval rules and confirmation options apply (see [Command approval rules](#command-approval-rules)).
 
 Waiting for confirmation does not count against a single tool's execution deadline (default 10 seconds) but is still bounded by the remaining work deadline; when the deadline arrives the round is cancelled, the call is recorded as not executed and the file is untouched. TUI `Esc` or CLI `Ctrl-C` also ends the wait.
 
@@ -82,6 +82,85 @@ The initial mode is chosen when creating a session through the preset `permissio
 - A switch affects only calls whose decision is made afterwards, including calls in the current batch that have not yet reached their turn to ask; a confirmation already displayed still waits for the user's answer.
 - The current mode is saved with the record and restored on reopen; when it is currently `full-access` and the initial mode was not, reopening yields `ask`.
 - Mode switches are not written into Context; the model learns that the current mode disallows something only from the body of a Rejected result.
+
+### Command approval rules
+
+`run_command` supports prefix-based permission rules across two persistent layers plus an in-memory session layer:
+
+1. **User rules (read-only, trusted by default)**: `<user_tars_dir>/permissions.toml` (`$TARS_HOME/permissions.toml` when `TARS_HOME` is an absolute path; otherwise `~/.tars/permissions.toml` on Unix/macOS or `%USERPROFILE%\.tars\permissions.toml` on Windows). Skipped when `--no-config` is passed. User rules live outside the command sandbox's write scope and are trusted automatically without a confirmation prompt. **TARS never creates or modifies the user rules file automatically.**
+2. **Workspace rules (workspace-private, Store-trusted)**: `<workspace_root>/.tars/permissions.toml` (only at the workspace root, never searched in parent directories). `.tars/` is a workspace-private gitignored directory; when TARS writes workspace rules for the first time, it ensures `.tars/.gitignore` (containing `*`) exists without overwriting an existing `.gitignore`.
+3. **Session rules (in-memory only)**: added from the confirmation panel (`Allow for this session`). Kept strictly in memory for the current open session, never written into `tars-session-v2.3` records, and automatically cleared when the session closes or reopens (including rules with `outside_sandbox = true`).
+
+#### Rule file format, limits, and validation
+
+```toml
+# .tars/permissions.toml or ~/.tars/permissions.toml
+version = 1
+
+[[command]]
+prefix = ["cargo", "test"]
+decision = "allow"            # allow | ask | deny
+
+[[command]]
+prefix = ["git", "push"]
+decision = "allow"
+outside_sandbox = true        # also allow outside_sandbox = true calls; valid only with allow
+
+[[command]]
+prefix = ["rm", "-rf"]
+decision = "deny"
+```
+
+- `version` must be `1`. Unknown fields, duplicate keys, wrong types, empty `prefix`, empty or NUL-containing prefix words, and `outside_sandbox = true` combined with `ask` or `deny` all fail validation.
+- Each rules file is bounded to **256 KiB** and **1000** `[[command]]` entries.
+- Single-word `decision = "allow"` rules targeting an interpreter or wrapper command are rejected (`deny` and `ask` are unrestricted). The forbidden single-word `allow` list is: `bash`, `sh`, `zsh`, `env`, `xargs`, `find`, `sudo`, `eval`, `exec`, `command`, `nohup`, `time`, `timeout`, `nice`, `python`, `python3`, `node`, `ruby`, `perl`.
+- Invalid user or workspace rule files fail session creation or opening immediately with the file path and 1-based line/column without echoing rule values; missing files simply contribute no rules.
+
+#### Conservative command parsing and cross-layer merging
+
+TARS parses `command` with a conservative built-in parser without invoking a shell:
+
+- **Recognized syntax**: unquoted words, single-quoted strings, double-quoted strings without `$`, backticks, or `\`, connectors (`&&`, `||`, `;`, `|`, newlines), and the fixed redirections `2>&1`, `>/dev/null`, and `2>/dev/null`.
+- **Unmatchable syntax** (falls back to the active permission mode without applying rules): `$`, backticks, any other redirection, background `&`, parentheses `(...)`, braces `{...}`, glob characters (`*`, `?`, `[`), leading `~`, heredocs, leading `VAR=val` assignments, comments `#`, or unclosed quotes.
+- A rule matches a simple command segment iff the segment's unquoted leading words match `rule.prefix` word-for-word literally (`git` does not match `/usr/bin/git`).
+- All three layers (`user`, active `workspace`, `session`) are merged by union across all segments with strict precedence **`deny > ask > allow`**:
+  1. If any segment matches `deny` in any layer, the whole command is `deny`.
+  2. Else if any segment matches `ask` in any layer, the whole command is `ask`.
+  3. Else if every segment matches `allow` (and for `outside_sandbox = true` requests, every segment's `allow` match has `outside_sandbox = true`), the whole command is `allow`.
+  4. Otherwise no rule decision applies. Workspace or session `allow` rules can never override a user-level `deny` or `ask`.
+
+#### Combination with permission modes
+
+The base verdict from the mode table above is adjusted by the merged rule outcome identically in both the pre-execution mode gate and the execution-time permission processor:
+
+| Merged rule result | Adjustment to mode verdict |
+| --- | --- |
+| `deny` | Always Rejected without prompting, in every mode including `full-access` (model sees only the rule scope, never other rules) |
+| `ask` | Turns `execute` into `ask` (prompts the user; Rejected when no confirmation channel is available) |
+| `allow` | Turns `ask` into `execute` directly (including `OutsideSandboxGrants` when `outside_sandbox = true`); `read-only` stays Rejected |
+| None | Unchanged |
+
+#### Protection, trust, and confirmation options
+
+- **Dual-layer read-only protection**: `<workspace_root>/.tars/` and any in-workspace session store directory are read-only to sandboxed `run_command` and rejected by `write_file` / `edit_file` in all permission modes (including `full-access`).
+- **Workspace trust check**: cloned repositories may still commit `.tars/permissions.toml`, so TARS checks the file byte-for-byte against a trusted snapshot stored per canonical workspace root in the Store (`.rules-trust/`).
+  - When a workspace rules file is new or modified, its `deny` and `ask` rules activate immediately, while its `allow` rules remain ignored until trusted.
+  - The TUI displays a trust prompt (with a 0.5s accidental-key guard, `[OUTSIDE SANDBOX]` warnings, and unified diff when previously trusted); the CLI prints the ignored `allow` rule count to stderr and accepts `--trust-workspace-rules` on `session create` and `session run`.
+  - Transient `tars run` has no Store, so untrusted workspace `allow` rules remain ignored (user rules and workspace `deny`/`ask` rules still apply).
+- **Four-option command confirmation (CLI & TUI)**:
+  - When the command is conservatively parseable (and when starting with an interpreter/wrapper from the forbidden single-word list, suggests the full command segment):
+    1. **Allow once** (`1` / `y` / `Enter`);
+    2. **Allow for this session** (`2` / `s` — adds in-memory session rules only);
+    3. **Always allow in this workspace** (`3` / `w` — shown only when a workspace root, Store, and trusted workspace state exist; verifies `.tars/permissions.toml` on disk still matches the session's trusted snapshot to prevent TOCTOU tampering, creates `.tars/.gitignore` `*` if missing, preserves all existing bytes and comments verbatim while appending `[[command]]` blocks, validates with the strict parser, writes atomically, and updates the Store trust copy);
+    4. **Deny** (`n` / `4` when 4 options / `3` when 3 options, with optional reason).
+  - When workspace rules are untrusted or no Store exists, option 3 (`w`) is omitted and ignored. When the command is unmatchable or a single-word interpreter, only **Allow once** and **Deny** are offered. Requests with `outside_sandbox = true` clearly warn that the saved rule will include `outside_sandbox = true`.
+- **Provenance display**: tool progress in the TUI and stderr notices in the CLI report the governing rule source (`allowed by ...`, `denied by ...`, `asked by ...`).
+
+#### Residual risks for command rules
+
+- Prefix rules do not constrain trailing arguments: for example, allowing `git` or `cargo test` permits flags such as `git -c ...` or project build scripts, and combining `allow` with `outside_sandbox = true` grants unconfined host execution (including access to `.tars/`, `~/.tars/`, and the Store) for matching prefixes.
+- Conservative parsing falls back to asking on unmatchable syntax such as `>` redirections (`cargo test > out.txt`).
+- Every machine and Store must independently trust a repository's `.tars/permissions.toml` before its `allow` rules activate; an external mid-session edit to `.tars/permissions.toml` causes in-session workspace-rule appending to refuse overwriting or blindly trusting the modified file.
 
 ## Search tool
 

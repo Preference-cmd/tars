@@ -666,3 +666,68 @@ fn format_command_rule_block_roundtrips_through_parser() {
     let parsed = parse_rules_toml(&text, Path::new("permissions.toml")).unwrap();
     assert_eq!(parsed, rules);
 }
+
+#[test]
+fn rc08_rule_source_display_and_permission_decision_rule_summary() {
+    use crate::permission::{PermissionDecision, PermissionMode};
+
+    let user_src = source(RuleScope::User, &["rm", "-rf"]);
+    let ws_src = source(RuleScope::Workspace, &["cargo", "test"]);
+    let session_src = source(RuleScope::Session, &["git", "push"]);
+
+    assert_eq!(user_src.to_string(), "user rule `rm -rf`");
+    assert_eq!(ws_src.to_string(), "workspace rule `cargo test`");
+    assert_eq!(session_src.to_string(), "session rule `git push`");
+
+    let allowed = PermissionDecision {
+        mode: PermissionMode::Ask,
+        revision: 0,
+        kind: PermissionDecisionKind::RuleAllowed,
+        rule: Some(ws_src.clone()),
+    };
+    assert_eq!(
+        allowed.rule_summary().as_deref(),
+        Some("allowed by workspace rule `cargo test`")
+    );
+
+    let denied = PermissionDecision {
+        mode: PermissionMode::FullAccess,
+        revision: 0,
+        kind: PermissionDecisionKind::RuleDenied,
+        rule: Some(user_src),
+    };
+    assert_eq!(
+        denied.rule_summary().as_deref(),
+        Some("denied by user rule `rm -rf`")
+    );
+
+    let asked_allow = PermissionDecision {
+        mode: PermissionMode::FullAccess,
+        revision: 0,
+        kind: PermissionDecisionKind::AskedAndAllowed,
+        rule: Some(session_src.clone()),
+    };
+    assert_eq!(
+        asked_allow.rule_summary().as_deref(),
+        Some("asked by session rule `git push` (allowed)")
+    );
+
+    let asked_deny = PermissionDecision {
+        mode: PermissionMode::FullAccess,
+        revision: 0,
+        kind: PermissionDecisionKind::AskedAndDenied,
+        rule: Some(session_src),
+    };
+    assert_eq!(
+        asked_deny.rule_summary().as_deref(),
+        Some("asked by session rule `git push` (denied)")
+    );
+
+    let direct = PermissionDecision {
+        mode: PermissionMode::Ask,
+        revision: 0,
+        kind: PermissionDecisionKind::DirectExecution,
+        rule: None,
+    };
+    assert_eq!(direct.rule_summary(), None);
+}

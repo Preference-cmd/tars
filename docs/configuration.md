@@ -10,6 +10,8 @@ Configuration file selection order:
 
 The current project's configuration file is never searched for automatically. A missing default path means an empty configuration; a missing file for an explicit path or `TARS_CONFIG`, or invalid configuration, refuses to start. `--no-config` ignores file and environment selection and is mutually exclusive with `--config`. Reading, parsing, validating the configuration file and resolving presets fail with exit code 1; argument errors such as unknown arguments or missing argument values return 2. Help does not read the configuration.
 
+User-level command permission rules live alongside `config.toml` at `<user_tars_dir>/permissions.toml` (`$TARS_HOME/permissions.toml` when `TARS_HOME` is an absolute path, otherwise `~/.tars/permissions.toml` on Unix/macOS or `%USERPROFILE%\.tars\permissions.toml` on Windows) and are also skipped by `--no-config`. Unlike `config.toml`, `permissions.toml` only defines `[[command]]` approval rules (`allow`, `ask`, `deny`); TARS treats the user-level file as read-only and never creates or modifies it automatically. Project-local `<workspace_root>/.tars/permissions.toml` holds workspace-private command rules (subject to Store trust verification) and is never treated as a model or session preset. See [Command approval rules](workspace-tools.md#command-approval-rules) for the schema, merging, and trust rules.
+
 See the root [config.example.toml](../config.example.toml):
 
 ```toml

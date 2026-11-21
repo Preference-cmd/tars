@@ -3,9 +3,13 @@
 use super::approval::{ApprovalReceiver, ApprovalsHub};
 use super::mode::PermissionMode;
 use super::processor::{ToolPermissionClass, decide};
-use super::rules::{CommandRule, CommandRuleSet, EvaluatedPermission, apply_command_rule};
+use super::rules::{
+    CommandRule, CommandRuleSet, EvaluatedPermission, RuleDecision, WorkspaceAppendError,
+    append_workspace_rules_file, apply_command_rule,
+};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Information about an allowed MCP tool recorded during catalog refresh.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,12 +169,27 @@ impl PermissionView {
     }
 }
 
+/// Backend state for safely appending rules to `<workspace_root>/.tars/permissions.toml`.
+#[derive(Clone)]
+pub(crate) struct WorkspaceRulesBackend {
+    /// Canonical workspace root path.
+    pub(crate) workspace_root: PathBuf,
+    /// Persistent Store used to synchronize workspace trust records.
+    pub(crate) store: crate::store::SessionStore,
+    /// Whether the workspace rules file is currently trusted by the user.
+    pub(crate) trusted: bool,
+    /// Exact raw UTF-8 text of `.tars/permissions.toml` last trusted by this session,
+    /// or `None` when the file did not exist when trusted/opened.
+    pub(crate) trusted_raw_text: Option<String>,
+}
+
 /// Instance-level hub managing permission mode state, revisions, rules, and approvals.
 pub(crate) struct PermissionHub {
     state: Arc<RwLock<PermissionStateInner>>,
     approvals: Arc<ApprovalsHub>,
     mcp_table: Arc<McpPermissionTable>,
     rules: Arc<RwLock<CommandRuleSet>>,
+    workspace_backend: Arc<Mutex<Option<WorkspaceRulesBackend>>>,
 }
 
 impl PermissionHub {
@@ -187,10 +206,20 @@ impl PermissionHub {
         Self::with_rules(initial_mode, mcp_table, CommandRuleSet::new())
     }
 
+    #[cfg(test)]
     pub(crate) fn with_rules(
         initial_mode: PermissionMode,
         mcp_table: Arc<McpPermissionTable>,
         rules: CommandRuleSet,
+    ) -> Self {
+        Self::with_rules_and_backend(initial_mode, mcp_table, rules, None)
+    }
+
+    pub(crate) fn with_rules_and_backend(
+        initial_mode: PermissionMode,
+        mcp_table: Arc<McpPermissionTable>,
+        rules: CommandRuleSet,
+        workspace_backend: Option<WorkspaceRulesBackend>,
     ) -> Self {
         Self {
             state: Arc::new(RwLock::new(PermissionStateInner {
@@ -200,6 +229,7 @@ impl PermissionHub {
             approvals: Arc::new(ApprovalsHub::new()),
             mcp_table,
             rules: Arc::new(RwLock::new(rules)),
+            workspace_backend: Arc::new(Mutex::new(workspace_backend)),
         }
     }
 
@@ -211,11 +241,90 @@ impl PermissionHub {
         }
     }
 
-    pub(crate) fn set_workspace_rules(&self, rules: Vec<CommandRule>) {
+    pub(crate) fn can_save_workspace_rule(&self) -> bool {
+        self.workspace_backend
+            .lock()
+            .expect("workspace rules backend lock")
+            .as_ref()
+            .is_some_and(|backend| backend.trusted)
+    }
+
+    pub(crate) fn trust_workspace_rules(&self, rules: Vec<CommandRule>, raw_text: String) {
+        let mut backend = self
+            .workspace_backend
+            .lock()
+            .expect("workspace rules backend lock");
+        if let Some(backend) = backend.as_mut() {
+            backend.trusted = true;
+            backend.trusted_raw_text = Some(raw_text);
+        }
         self.rules
             .write()
             .expect("command rules lock")
             .set_workspace_rules(rules);
+    }
+
+    pub(crate) fn add_session_rules(&self, prefixes: &[Vec<String>], outside_sandbox: bool) {
+        let mut guard = self.rules.write().expect("command rules lock");
+        for prefix in prefixes {
+            guard.add_session_rule(CommandRule {
+                prefix: prefix.clone(),
+                decision: RuleDecision::Allow,
+                outside_sandbox,
+            });
+        }
+    }
+
+    pub(crate) fn remove_session_rule(&self, index: usize) -> bool {
+        self.rules
+            .write()
+            .expect("command rules lock")
+            .remove_session_rule(index)
+            .is_some()
+    }
+
+    pub(crate) fn clear_session_rules(&self) -> usize {
+        let mut guard = self.rules.write().expect("command rules lock");
+        let count = guard.session_rules().len();
+        guard.clear_session_rules();
+        count
+    }
+
+    pub(crate) fn append_workspace_rules(
+        &self,
+        prefixes: &[Vec<String>],
+        outside_sandbox: bool,
+    ) -> Result<(), WorkspaceAppendError> {
+        let mut backend_guard = self
+            .workspace_backend
+            .lock()
+            .expect("workspace rules backend lock");
+        let Some(backend) = backend_guard.as_mut() else {
+            return Err(WorkspaceAppendError::Failed);
+        };
+        if !backend.trusted {
+            return Err(WorkspaceAppendError::Failed);
+        }
+        let candidate_rules: Vec<CommandRule> = prefixes
+            .iter()
+            .map(|prefix| CommandRule {
+                prefix: prefix.clone(),
+                decision: RuleDecision::Allow,
+                outside_sandbox,
+            })
+            .collect();
+        let outcome = append_workspace_rules_file(
+            &backend.workspace_root,
+            &backend.store,
+            backend.trusted_raw_text.as_deref(),
+            &candidate_rules,
+        )?;
+        backend.trusted_raw_text = Some(outcome.new_raw_text);
+        let mut rules_guard = self.rules.write().expect("command rules lock");
+        for rule in outcome.added_rules {
+            rules_guard.add_workspace_rule(rule);
+        }
+        Ok(())
     }
 
     pub(crate) fn command_rules(&self) -> CommandRuleSet {

@@ -120,6 +120,7 @@ pub(super) async fn initialize(
     open_report.workspace_rules = loaded_rules.report;
     let workspace_rules_snapshot = loaded_rules.snapshot;
     let command_rules = loaded_rules.rule_set;
+    let workspace_rules_backend = loaded_rules.backend;
     let pending = if persistent && let Some(prepared) = &prepared {
         entry.cloned_snapshot();
         let (title, updated_at_ms) = saved.next(&context, 0);
@@ -170,6 +171,7 @@ pub(super) async fn initialize(
             usage,
             prepared.as_ref().and_then(|p| p.skill_registry.clone()),
             command_rules,
+            workspace_rules_backend.clone(),
         )
         .await?
     };
@@ -189,6 +191,7 @@ pub(super) async fn initialize(
         usage,
         prepared.as_ref().and_then(|p| p.skill_registry.clone()),
         command_rules,
+        workspace_rules_backend,
     )
     .await?;
     let mut state = entry.lock();
@@ -230,6 +233,7 @@ struct LoadedCommandRules {
     rule_set: crate::permission::CommandRuleSet,
     report: WorkspaceRulesReport,
     snapshot: Option<super::entry::WorkspaceRulesSnapshot>,
+    backend: Option<crate::permission::WorkspaceRulesBackend>,
 }
 
 async fn load_command_rules(
@@ -259,6 +263,7 @@ async fn load_command_rules(
                 ..WorkspaceRulesReport::default()
             },
             snapshot: None,
+            backend: None,
         });
     };
 
@@ -292,7 +297,16 @@ async fn load_command_rules(
         Some((canonical_root, rules_path, Some(loaded), trusted_copy)) => {
             (canonical_root, rules_path, loaded, trusted_copy)
         }
-        Some((_, rules_path, None, _)) => {
+        Some((canonical_root, rules_path, None, _)) => {
+            let backend =
+                host.store
+                    .as_ref()
+                    .map(|store| crate::permission::WorkspaceRulesBackend {
+                        workspace_root: canonical_root,
+                        store: store.clone(),
+                        trusted: true,
+                        trusted_raw_text: None,
+                    });
             return Ok(LoadedCommandRules {
                 rule_set: crate::permission::CommandRuleSet::with_layers(
                     user_rules,
@@ -306,6 +320,7 @@ async fn load_command_rules(
                     ..WorkspaceRulesReport::default()
                 },
                 snapshot: None,
+                backend,
             });
         }
         None => {
@@ -328,6 +343,7 @@ async fn load_command_rules(
                     ..WorkspaceRulesReport::default()
                 },
                 snapshot: None,
+                backend: None,
             });
         }
     };
@@ -376,6 +392,16 @@ async fn load_command_rules(
         )
     };
 
+    let backend = host
+        .store
+        .as_ref()
+        .map(|store| crate::permission::WorkspaceRulesBackend {
+            workspace_root: canonical_root.clone(),
+            store: store.clone(),
+            trusted: is_trusted,
+            trusted_raw_text: is_trusted.then(|| loaded.raw_text.clone()),
+        });
+
     let snapshot = Some(super::entry::WorkspaceRulesSnapshot {
         workspace_root: canonical_root,
         raw_text: loaded.raw_text,
@@ -390,6 +416,7 @@ async fn load_command_rules(
         ),
         report,
         snapshot,
+        backend,
     })
 }
 
@@ -417,6 +444,7 @@ async fn assembled(
     usage: Option<crate::usage::SessionUsage>,
     initial_skills: Option<crate::skills::SkillRegistry>,
     command_rules: crate::permission::CommandRuleSet,
+    workspace_rules_backend: Option<crate::permission::WorkspaceRulesBackend>,
 ) -> Result<crate::session::Session, ApplicationError> {
     let registry = match initial_skills {
         Some(registry) => registry,
@@ -440,6 +468,7 @@ async fn assembled(
         .with_usage(usage)
         .with_skills(Arc::new(std::sync::RwLock::new(registry)))
         .with_command_rules(command_rules)
+        .with_workspace_rules_backend(workspace_rules_backend)
         .persistent(persistent);
     let base = match host.external_tools.clone() {
         Some(tools) => base.with_external_tools(tools),

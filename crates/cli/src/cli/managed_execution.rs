@@ -180,6 +180,7 @@ pub(super) async fn work(
     let mut signal_failed = false;
     let mut stopping = false;
     let mut progress_open = true;
+    let mut reported_rule_calls = std::collections::HashSet::new();
     let result = loop {
         let observation = tokio::select! {
             biased;
@@ -201,7 +202,7 @@ pub(super) async fn work(
             event = progress.recv(), if progress_open => {
                 match event {
                     Ok(event) if event.work == receipt.work => {
-                        report_compaction_progress(&event.update);
+                        report_progress_update(&event.update, &mut reported_rule_calls);
                     }
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -212,12 +213,17 @@ pub(super) async fn work(
             }
         };
         if let WorkState::Finished(result) = observation.state {
+            for call in &observation.tools.calls {
+                report_tool_rule_provenance(call, &mut reported_rule_calls);
+            }
             break result;
         }
     };
     loop {
         match progress.try_recv() {
-            Ok(event) if event.work == receipt.work => report_compaction_progress(&event.update),
+            Ok(event) if event.work == receipt.work => {
+                report_progress_update(&event.update, &mut reported_rule_calls);
+            }
             Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
             Err(
                 tokio::sync::broadcast::error::TryRecvError::Empty
@@ -241,12 +247,50 @@ pub(super) async fn work(
     })
 }
 
-fn report_compaction_progress(update: &tars_core::session::ProgressUpdate) {
-    use tars_core::compact::{CompactionAbandon, CompactionProgress};
-    use tars_core::session::ProgressUpdate;
-    let ProgressUpdate::Compaction(progress) = update else {
+fn report_progress_update(
+    update: &tars_core::session::ProgressUpdate,
+    reported_rule_calls: &mut std::collections::HashSet<(
+        causa::kernel::InvocationId,
+        causa::kernel::BlockId,
+    )>,
+) {
+    match update {
+        tars_core::session::ProgressUpdate::Compaction(progress) => {
+            report_compaction_progress(progress);
+        }
+        tars_core::session::ProgressUpdate::Tool(call) => {
+            report_tool_rule_provenance(call, reported_rule_calls);
+        }
+        _ => {}
+    }
+}
+
+fn report_tool_rule_provenance(
+    call: &tars_core::session::ToolProgress,
+    reported_rule_calls: &mut std::collections::HashSet<(
+        causa::kernel::InvocationId,
+        causa::kernel::BlockId,
+    )>,
+) {
+    let Some(summary) = call
+        .permission_decision
+        .as_ref()
+        .and_then(|decision| decision.rule_summary())
+    else {
         return;
     };
+    if reported_rule_calls.insert((call.invocation_id.clone(), call.call_block_id)) {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "TARS: {}: {}",
+            tars_core::permission::escape_untrusted_text(&call.tool_name),
+            summary
+        );
+    }
+}
+
+fn report_compaction_progress(progress: &tars_core::compact::CompactionProgress) {
+    use tars_core::compact::{CompactionAbandon, CompactionProgress};
     match progress {
         CompactionProgress::Trimmed {
             before_tokens,

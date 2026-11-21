@@ -379,6 +379,8 @@ pub(crate) struct App {
     pub(crate) external_tools: Option<tars_core::external_tools::ExternalTools>,
     /// Why search cannot work, when the startup check found a reason.
     pub(crate) search_reason: Option<String>,
+    /// User-level permissions file path (`~/.tars/permissions.toml`), or `None` when `--no-config`.
+    pub(crate) user_rules_path: Option<std::path::PathBuf>,
 }
 impl App {
     pub fn new(options: Options) -> Self {
@@ -386,8 +388,8 @@ impl App {
             .config
             .config_dir()
             .map(|dir| dir.join("permissions.toml"));
-        let host =
-            SessionHost::new(Some(options.store.clone())).with_user_rules_path(user_rules_path);
+        let host = SessionHost::new(Some(options.store.clone()))
+            .with_user_rules_path(user_rules_path.clone());
         let startup_backend: Arc<dyn super::startup::StartupBackend> =
             Arc::new(super::startup::ProcessBackend::new(options.config.clone()));
         let notice = if let Some(warning) = options.config.warnings().first() {
@@ -431,6 +433,7 @@ impl App {
             sandbox: None,
             external_tools: None,
             search_reason: None,
+            user_rules_path,
         }
     }
     pub(super) fn entry_mut(&mut self, key: &Key) -> Option<&mut Entry> {
