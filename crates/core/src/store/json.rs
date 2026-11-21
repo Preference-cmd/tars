@@ -81,6 +81,11 @@ impl SessionStore {
     pub(crate) fn directory(&self) -> &Path {
         &self.directory
     }
+    /// Reads and validates one saved record without locking or mutating any files.
+    pub(crate) fn read_saved(&self, id: &str) -> Result<Option<SavedSessionRecord>, StoreError> {
+        canonical_uuid(id)?;
+        read_record(&self.directory.join(format!("{id}.json")), id)
+    }
     #[cfg(test)]
     pub(crate) fn set_fault_hook(&self, hook: Option<FaultHook>) {
         *self.hook.lock().unwrap() = hook;

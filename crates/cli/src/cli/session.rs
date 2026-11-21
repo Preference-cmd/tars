@@ -47,6 +47,14 @@ Create options:
                       Initial permission mode saved in the definition. In ask mode, asks
                       when stdin and stderr are terminals and input is not from --stdin;
                       otherwise rejects without blocking.
+  --system            Inline static custom system prompt (conflicts with --system-file)
+  --system-file       UTF-8 static custom system prompt file, relative to cwd
+  --dynamic-context       Inline dynamic custom context (conflicts with --dynamic-context-file)
+  --dynamic-context-file  UTF-8 dynamic custom context file, relative to cwd
+  --skill-dir         Additional skill directory, relative to cwd (repeatable; ordered after
+                      configured dirs and before <workspace>/.tars/skills)
+  --no-skills         Disable skills discovery, <available_skills> injection, and load_skill
+                      (conflicts with --skill-dir)
   --load              Initial Context material file; creates a new conversation
   --recovery-dir      Material recovery directory on initial save failure
                       (default: configured recovery_dir, else current directory)

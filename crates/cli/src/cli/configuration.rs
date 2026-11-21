@@ -1,12 +1,22 @@
-use std::{collections::HashMap, ffi::OsString, process::ExitCode};
+use std::{collections::HashMap, ffi::OsString, path::PathBuf, process::ExitCode};
 use tars_core::{
-    config::{Config, ConfigSource, DefinitionOverrides, parse_mcp, parse_tools},
+    config::{
+        Config, ConfigSource, DefinitionOverrides, DynamicCustomOverride, PreludeOverrides,
+        StaticCustomOverride, parse_mcp, parse_tools,
+    },
     definition::{
         CommandNetwork, MAX_COMPACT_THRESHOLD, MIN_COMPACT_THRESHOLD, Provider, SessionDefinition,
     },
 };
 
 pub(super) type Values<'a> = HashMap<&'a str, &'a OsString>;
+
+/// Repeatable and boolean prelude/skills options parsed separately from single-value `Values`.
+#[derive(Default)]
+pub(super) struct PreludeCliOptions {
+    pub skill_dirs: Vec<PathBuf>,
+    pub no_skills: bool,
+}
 
 /// An invocation failure carrying the exit class promised by `--help`.
 #[derive(Debug)]
@@ -97,6 +107,7 @@ pub(super) fn load(values: &Values<'_>, disabled: bool) -> Result<Config, CliErr
 pub(super) fn definition(
     config: &Config,
     values: &Values<'_>,
+    prelude_cli: PreludeCliOptions,
 ) -> Result<SessionDefinition, CliError> {
     let provider = string(values, "--provider")?
         .map(|value| match value.as_str() {
@@ -147,6 +158,43 @@ pub(super) fn definition(
         Some(_) => {
             return Err(CliError::argument("--prompt-cache must be on or off"));
         }
+    };
+    let static_custom = match (string(values, "--system")?, values.get("--system-file")) {
+        (Some(_), Some(_)) => {
+            return Err(CliError::argument(
+                "--system and --system-file are mutually exclusive",
+            ));
+        }
+        (Some(text), None) => Some(StaticCustomOverride::Inline(text)),
+        (None, Some(path)) => Some(StaticCustomOverride::File(PathBuf::from(path))),
+        (None, None) => None,
+    };
+    let dynamic_custom = match (
+        string(values, "--dynamic-context")?,
+        values.get("--dynamic-context-file"),
+    ) {
+        (Some(_), Some(_)) => {
+            return Err(CliError::argument(
+                "--dynamic-context and --dynamic-context-file are mutually exclusive",
+            ));
+        }
+        (Some(text), None) => Some(DynamicCustomOverride::Inline(text)),
+        (None, Some(path)) => Some(DynamicCustomOverride::File(PathBuf::from(path))),
+        (None, None) => None,
+    };
+    if prelude_cli.no_skills && !prelude_cli.skill_dirs.is_empty() {
+        return Err(CliError::argument(
+            "--no-skills and --skill-dir are mutually exclusive",
+        ));
+    }
+    let has_skill_dirs = !prelude_cli.skill_dirs.is_empty();
+    let prelude = PreludeOverrides {
+        static_custom,
+        dynamic_custom,
+        skill_dirs: None,
+        extra_skill_dirs: prelude_cli.skill_dirs,
+        include_workspace_skills: None,
+        skills_enabled: prelude_cli.no_skills.then_some(false),
     };
     let overrides = DefinitionOverrides {
         provider,
@@ -221,26 +269,38 @@ pub(super) fn definition(
                     .map_err(|_| CliError::argument("--render-options must be a JSON object"))
             })
             .transpose()?,
-        prelude: Default::default(),
+        prelude,
     };
     config
         .definition(string(values, "--profile")?.as_deref(), overrides)
-        .map_err(|error| definition_error(error, values))
+        .map_err(|error| definition_error(error, values, has_skill_dirs))
 }
 
 /// Config-file failures are configuration errors; an invalid value from this
 /// command line stays an argument error. `Config::load` resolves every profile
 /// first, so a definition error here can only come from an explicit override.
-fn definition_error(error: tars_core::config::ConfigError, values: &Values<'_>) -> CliError {
+fn definition_error(
+    error: tars_core::config::ConfigError,
+    values: &Values<'_>,
+    has_skill_dirs: bool,
+) -> CliError {
     use tars_core::config::ConfigError;
     let explicit = match &error {
         ConfigError::UnknownMcpServer(_) | ConfigError::InvalidMcpServer(_) => {
             values.contains_key("--mcp")
         }
         ConfigError::InvalidTimeout => values.contains_key("--timeout-secs"),
-        ConfigError::Workspace { .. } | ConfigError::EmptyPath => {
+        ConfigError::Workspace { .. } => values.contains_key("--workspace"),
+        ConfigError::EmptyPath => {
             values.contains_key("--workspace")
+                || values.contains_key("--system-file")
+                || values.contains_key("--dynamic-context-file")
+                || has_skill_dirs
         }
+        ConfigError::PreludeFile { .. } => {
+            values.contains_key("--system-file") || values.contains_key("--dynamic-context-file")
+        }
+        ConfigError::SkillDirectory { .. } => has_skill_dirs,
         ConfigError::InvalidTools(_) => values.contains_key("--tools"),
         ConfigError::Definition(_) | ConfigError::ProviderRequired | ConfigError::ModelRequired => {
             true

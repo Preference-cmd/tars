@@ -250,6 +250,77 @@ impl SessionHost {
             })
             .collect())
     }
+    /// Inspect one saved session record read-only without resolving credentials,
+    /// locking, or mutating any Context, history, or artifact files.
+    pub async fn inspect(
+        &self,
+        id: &ConversationId,
+    ) -> Result<SavedSessionInspection, ApplicationError> {
+        let store = self
+            .inner
+            .store
+            .clone()
+            .ok_or(ApplicationError::StoreUnavailable)?;
+        let raw_id = id.as_str().to_owned();
+        let created_at_ms = crate::time::created_at_from_id(id.as_str());
+        let inspection = super::saving::io(&self.inner, move || {
+            let Some(record) = store.read_saved(&raw_id)? else {
+                return Ok(None);
+            };
+            let bytes = crate::compact::estimate::context_bytes(&record.context);
+            let estimate_tokens = crate::compact::estimate::estimate_bytes(bytes);
+            let context_usage = ContextUsage {
+                estimate_tokens,
+                context_window: record.definition.context_window,
+                auto_compact: record
+                    .auto_compact
+                    .unwrap_or(record.definition.auto_compact),
+                compact_threshold: record
+                    .compact_threshold
+                    .unwrap_or(record.definition.compact_threshold),
+            };
+            let work_capacity = WorkCapacity {
+                used: 0,
+                capacity: record.definition.retained_work_capacity,
+            };
+            let skills_count = if record.definition.prelude.skills_enabled {
+                crate::skills::SkillDiscovery::discover(
+                    &record.definition.prelude.skill_dirs,
+                    record.definition.workspace_root.as_deref(),
+                    record.definition.prelude.include_workspace_skills,
+                )
+                .registry
+                .len()
+            } else {
+                0
+            };
+            let dynamic_context_file_exists = match &record.definition.prelude.dynamic_custom {
+                Some(crate::prelude::DynamicCustomSlot::File(path)) => {
+                    Some(std::fs::metadata(path).is_ok_and(|meta| meta.is_file()))
+                }
+                _ => None,
+            };
+            let usage = record.session_usage();
+            Ok(Some(SavedSessionInspection {
+                conversation_id: record.conversation_id.into(),
+                definition: record.definition,
+                revision: record.revision,
+                block_count: record.context.blocks().len(),
+                context_usage,
+                work_capacity,
+                history_records: record.history.len(),
+                usage,
+                title: record.title,
+                created_at_ms,
+                updated_at_ms: record.updated_at_ms,
+                skills_count,
+                dynamic_context_file_exists,
+            }))
+        })
+        .await?
+        .ok_or(ApplicationError::NotFound)?;
+        Ok(inspection)
+    }
     /// Locate an opening or active instance without returning mutable access.
     pub fn lookup(&self, id: &ConversationId) -> Option<SessionStatus> {
         self.inner

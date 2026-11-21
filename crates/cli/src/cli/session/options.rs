@@ -1,4 +1,4 @@
-use crate::cli::configuration::{self, CliError};
+use crate::cli::configuration::{self, CliError, PreludeCliOptions};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -104,6 +104,8 @@ impl SessionCommand {
             return Err("unknown session command".into());
         }
         let mut values = HashMap::new();
+        let mut skill_dirs = Vec::new();
+        let mut no_skills = false;
         let mut stdin = false;
         let mut json = false;
         let mut no_config = false;
@@ -115,11 +117,21 @@ impl SessionCommand {
             match flag {
                 "--json" if !json => json = true,
                 "--no-config" if !no_config => no_config = true,
+                "--no-skills" if command == "create" && !no_skills => no_skills = true,
                 "--stdin" if command == "run" && !stdin => stdin = true,
                 "--apply" if command == "repair" && !apply => apply = true,
                 "--dry-run" if command == "repair" && !dry_run => dry_run = true,
                 "--store" | "--config" => {
                     insert(&mut values, flag, &mut args)?;
+                }
+                "--skill-dir" if command == "create" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::argument("option needs a value"))?;
+                    if value.is_empty() {
+                        return Err(CliError::argument("empty --skill-dir option"));
+                    }
+                    skill_dirs.push(PathBuf::from(value));
                 }
                 "--provider"
                 | "--model"
@@ -143,6 +155,10 @@ impl SessionCommand {
                 | "--context-window"
                 | "--auto-compact"
                 | "--prompt-cache"
+                | "--system"
+                | "--system-file"
+                | "--dynamic-context"
+                | "--dynamic-context-file"
                     if command == "create" =>
                 {
                     insert(&mut values, flag, &mut args)?;
@@ -216,7 +232,14 @@ impl SessionCommand {
                 })
             }
             "create" => {
-                let definition = configuration::definition(&config, &values)?;
+                let definition = configuration::definition(
+                    &config,
+                    &values,
+                    PreludeCliOptions {
+                        skill_dirs,
+                        no_skills,
+                    },
+                )?;
                 Ok(Self::Create {
                     store,
                     definition: Box::new(definition),
@@ -304,7 +327,7 @@ fn insert<'a>(
     let value = args
         .next()
         .ok_or_else(|| CliError::argument("option needs a value"))?;
-    if (value.is_empty() && !matches!(flag, "--tools" | "--mcp"))
+    if (value.is_empty() && !matches!(flag, "--tools" | "--mcp" | "--system" | "--dynamic-context"))
         || values.insert(flag, value).is_some()
     {
         return Err(CliError::argument("empty or duplicate option"));

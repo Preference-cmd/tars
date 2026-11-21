@@ -87,8 +87,8 @@ impl Transcript {
         let history_run = &blocks[fixed_end..fixed_end + history_run_len];
         let current_part = &blocks[fixed_end + history_run_len..];
 
-        // 1. Fixed prefix (leading system text blocks)
-        let mut head = Self::build(fixed_prefix, true);
+        // 1. Fixed prefix (leading system text blocks and initial dynamic prelude blocks)
+        let mut head = Self::build(fixed_prefix, true, true);
 
         // 2. The brief chain in history_run: one folded row per brief, and collect their bodies into summary
         for block in history_run {
@@ -115,7 +115,7 @@ impl Transcript {
         }
 
         // 3. Current part (blocks after history_run)
-        let tail = Self::build(current_part, true);
+        let tail = Self::build(current_part, true, true);
         head.text.push_str(&tail.text);
         head.tool_details.extend(tail.tool_details);
         head.tool_artifacts.extend(tail.tool_artifacts);
@@ -131,21 +131,84 @@ impl Transcript {
         head
     }
 
-    /// Archived conversation from history records keeps any summary expanded:
+    /// Archived conversation from history records keeps any summary and prelude expanded:
     /// it is not the material the model continues from.
     pub fn from_history_blocks(blocks: &[ContextBlock]) -> Self {
-        Self::build(blocks, false)
+        Self::build(blocks, false, false)
     }
 
-    fn build(blocks: &[ContextBlock], collapse_summary: bool) -> Self {
+    fn build(blocks: &[ContextBlock], collapse_summary: bool, collapse_prelude: bool) -> Self {
         let mut text = String::new();
         let mut tool_details = Vec::new();
         let mut tool_artifacts = Vec::new();
         let mut summary_text: Option<String> = None;
-        for block in blocks {
+        let mut index = 0;
+        while index < blocks.len() {
+            let block = &blocks[index];
             // The offered tool set is configuration the runner records, not
             // conversation; it has no transcript entry.
             if matches!(block.content(), BlockContent::ToolChange(_)) {
+                index += 1;
+                continue;
+            }
+            if collapse_prelude
+                && block
+                    .meta()
+                    .source
+                    .as_deref()
+                    .is_some_and(tars_core::prelude::is_prelude_prefix_source)
+            {
+                let mut count = 0usize;
+                while index < blocks.len() {
+                    let candidate = &blocks[index];
+                    if matches!(candidate.content(), BlockContent::ToolChange(_)) {
+                        index += 1;
+                        continue;
+                    }
+                    if candidate
+                        .meta()
+                        .source
+                        .as_deref()
+                        .is_some_and(tars_core::prelude::is_prelude_prefix_source)
+                    {
+                        count += 1;
+                        index += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let unit = if count == 1 { "block" } else { "blocks" };
+                text.push_str(&format!("● Session prelude · {count} {unit} · folded\n\n"));
+                continue;
+            }
+            if collapse_prelude
+                && let Some(source) = block.meta().source.as_deref()
+                && tars_core::prelude::is_prelude_update_source(source)
+            {
+                let section = source
+                    .strip_prefix(tars_core::prelude::PRELUDE_UPDATE_PREFIX)
+                    .unwrap_or(source);
+                text.push_str(&format!("● Prelude updated ({section}) · folded\n\n"));
+                index += 1;
+                continue;
+            }
+            if collapse_prelude
+                && block.meta().source.as_deref() == Some(tars_core::skills::SKILL_SOURCE)
+                && matches!(
+                    block.content(),
+                    BlockContent::Message {
+                        role: causa::kernel::Role::User,
+                        ..
+                    }
+                )
+            {
+                match tars_core::skills::skill_block_name(block) {
+                    Some(name) => {
+                        text.push_str(&format!("● Skill preserved ({name}) · folded\n\n"));
+                    }
+                    None => text.push_str("● Skill preserved · folded\n\n"),
+                }
+                index += 1;
                 continue;
             }
             let is_summary =
@@ -167,12 +230,32 @@ impl Transcript {
                     text.push_str(
                         "● Context summary · collapsed · /summary shows the full text\n\n",
                     );
+                    index += 1;
                     continue;
                 }
             }
             match block.meta().source.as_deref() {
                 Some("user") => text.push_str("❯ You\n"),
                 Some(_) if is_summary => text.push_str("● Context summary\n"),
+                Some(source) if tars_core::prelude::is_prelude_prefix_source(source) => {
+                    let section = source
+                        .strip_prefix(tars_core::prelude::PRELUDE_SOURCE_PREFIX)
+                        .unwrap_or(source);
+                    text.push_str(&format!("● Session prelude ({section}) · {source}\n"));
+                }
+                Some(source) if tars_core::prelude::is_prelude_update_source(source) => {
+                    let section = source
+                        .strip_prefix(tars_core::prelude::PRELUDE_UPDATE_PREFIX)
+                        .unwrap_or(source);
+                    text.push_str(&format!("● Prelude update ({section}) · {source}\n"));
+                }
+                Some(source) if source == tars_core::skills::SKILL_SOURCE => {
+                    if let Some(name) = tars_core::skills::skill_block_name(block) {
+                        text.push_str(&format!("● Skill ({name}) · {source}\n"));
+                    } else {
+                        text.push_str(&format!("● Skill · {source}\n"));
+                    }
+                }
                 Some(source) => {
                     text.push_str("● ");
                     text.push_str(source);
@@ -253,6 +336,7 @@ impl Transcript {
                 BlockContent::ToolChange(_) => {}
             }
             text.push_str("\n\n");
+            index += 1;
         }
         // Provider text is content, never a stream of terminal control commands.
         // The same escaping as confirmation panels keeps bidi controls and line
@@ -450,5 +534,209 @@ mod tests {
         assert_eq!(transcript2.history_range, 0..3);
         assert!(!transcript2.text.contains("stripped reply text"));
         assert!(transcript2.text.contains("tail user message"));
+    }
+
+    #[test]
+    fn from_materials_folds_prelude_prefix_updates_and_preserved_skills() {
+        use causa::kernel::{BlockMeta, ToolChange, ToolDefinition};
+        use tars_core::prelude::{
+            PRELUDE_BASE_SOURCE, PRELUDE_ENV_SOURCE, PRELUDE_STATIC_CUSTOM_SOURCE,
+            PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE,
+        };
+
+        let base = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::System, "BASE_CONTRACT_HIDDEN"),
+            BlockMeta::from_source(PRELUDE_BASE_SOURCE),
+        );
+        let static_custom = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::System, "STATIC_CUSTOM_HIDDEN"),
+            BlockMeta::from_source(PRELUDE_STATIC_CUSTOM_SOURCE),
+        );
+        let ws_inst = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(
+                Role::User,
+                "<workspace_instructions>\nAGENTS_SECRET_LINE\n</workspace_instructions>",
+            ),
+            BlockMeta::from_source(PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE),
+        );
+        let tool_change = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolChange(ToolChange::between(
+                &[],
+                &[ToolDefinition::new(
+                    "read_file",
+                    "read",
+                    serde_json::json!({}),
+                )],
+            )),
+            Default::default(),
+        );
+        let env = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, "<env>\nENV_BODY_HIDDEN\n</env>"),
+            BlockMeta::from_source(PRELUDE_ENV_SOURCE),
+        );
+        let user_msg = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, "hello model"),
+            BlockMeta::from_source("user"),
+        );
+        let env_update = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(
+                Role::User,
+                "<env updated=\"true\">\nENV_UPDATED_HIDDEN\n</env>",
+            ),
+            BlockMeta::from_source("tars:prelude:update:env"),
+        );
+        let preserved_skill = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(
+                Role::User,
+                "<skill_content name=\"my-skill\" sha256=\"deadbeef\">\nSKILL_BODY_HIDDEN\n</skill_content>",
+            ),
+            BlockMeta::from_source(tars_core::skills::SKILL_SOURCE),
+        );
+        let assistant_msg = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::Assistant, "visible assistant reply"),
+            BlockMeta::from_source("assistant"),
+        );
+
+        let context = Context::from_blocks(vec![
+            base,
+            static_custom,
+            ws_inst,
+            tool_change,
+            env,
+            user_msg,
+            env_update,
+            preserved_skill,
+            assistant_msg,
+        ])
+        .unwrap();
+
+        let transcript = Transcript::from_materials(&context, &[]);
+        assert!(
+            transcript
+                .text
+                .contains("● Session prelude · 4 blocks · folded"),
+            "{}",
+            transcript.text
+        );
+        assert!(
+            transcript.text.contains("● Prelude updated (env) · folded"),
+            "{}",
+            transcript.text
+        );
+        assert!(
+            transcript
+                .text
+                .contains("● Skill preserved (my-skill) · folded"),
+            "{}",
+            transcript.text
+        );
+        assert!(transcript.text.contains("❯ You\nhello model"));
+        assert!(transcript.text.contains("visible assistant reply"));
+
+        for hidden in [
+            "BASE_CONTRACT_HIDDEN",
+            "STATIC_CUSTOM_HIDDEN",
+            "AGENTS_SECRET_LINE",
+            "ENV_BODY_HIDDEN",
+            "ENV_UPDATED_HIDDEN",
+            "SKILL_BODY_HIDDEN",
+        ] {
+            assert!(
+                !transcript.text.contains(hidden),
+                "unexpectedly leaked {hidden}: {}",
+                transcript.text
+            );
+        }
+    }
+
+    #[test]
+    fn from_materials_keeps_non_prelude_system_blocks_verbatim() {
+        use causa::kernel::BlockMeta;
+
+        let plain_sys = ContextBlock::text(
+            causa::runtime::new_block_id(),
+            Role::System,
+            "CUSTOM_SYSTEM_PROMPT",
+        );
+        let labeled_sys = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::System, "LABELED_SYSTEM_PROMPT"),
+            BlockMeta::from_source("system"),
+        );
+        let user = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, "user prompt"),
+            BlockMeta::from_source("user"),
+        );
+
+        let context = Context::from_blocks(vec![plain_sys, labeled_sys, user]).unwrap();
+        let transcript = Transcript::from_materials(&context, &[]);
+        assert!(transcript.text.contains("CUSTOM_SYSTEM_PROMPT"));
+        assert!(transcript.text.contains("LABELED_SYSTEM_PROMPT"));
+        assert!(!transcript.text.contains("Session prelude"));
+    }
+
+    #[test]
+    fn from_history_blocks_keeps_prelude_updates_and_skills_expanded() {
+        use causa::kernel::BlockMeta;
+        use tars_core::prelude::PRELUDE_BASE_SOURCE;
+
+        let base = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::System, "HISTORY_BASE_BODY"),
+            BlockMeta::from_source(PRELUDE_BASE_SOURCE),
+        );
+        let update = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(
+                Role::User,
+                "<workspace_instructions updated=\"true\">\nHISTORY_UPDATE_BODY\n</workspace_instructions>",
+            ),
+            BlockMeta::from_source("tars:prelude:update:workspace-instructions"),
+        );
+        let skill = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(
+                Role::User,
+                "<skill_content name=\"hist-skill\" sha256=\"abc\">\nHISTORY_SKILL_BODY\n</skill_content>",
+            ),
+            BlockMeta::from_source(tars_core::skills::SKILL_SOURCE),
+        );
+
+        let transcript = Transcript::from_history_blocks(&[base, update, skill]);
+        assert!(
+            transcript
+                .text
+                .contains("● Session prelude (base) · tars:prelude:base"),
+            "{}",
+            transcript.text
+        );
+        assert!(transcript.text.contains("HISTORY_BASE_BODY"));
+        assert!(
+            transcript
+                .text
+                .contains("● Prelude update (workspace-instructions) · tars:prelude:update:workspace-instructions"),
+            "{}",
+            transcript.text
+        );
+        assert!(transcript.text.contains("HISTORY_UPDATE_BODY"));
+        assert!(
+            transcript
+                .text
+                .contains("● Skill (hist-skill) · tars:skill"),
+            "{}",
+            transcript.text
+        );
+        assert!(transcript.text.contains("HISTORY_SKILL_BODY"));
+        assert!(!transcript.text.contains("· folded"));
     }
 }

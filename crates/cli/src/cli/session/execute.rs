@@ -149,6 +149,7 @@ async fn create(
         Ok(prepared) => prepared,
         Err(error) => return early_failure(json_output, &error.to_string()),
     };
+    managed_execution::report_prelude_diagnostics(prepared.prelude_diagnostics());
     let recovery_context = prepared.context().clone();
     let id = prepared.conversation_id().clone();
     // Creating saves the definition and closes; it starts no MCP server.
@@ -278,6 +279,7 @@ async fn run_saved(
             return (early_failure(json_output, &error), false);
         }
     };
+    managed_execution::report_prelude_diagnostics(&session.prelude_diagnostics());
     let (status, text, execution_error, mut code) = classify(&report.result);
     let model_error = model_failure(&report.result);
     let abandoned = matches!(report.save, SaveWait::Abandoned);

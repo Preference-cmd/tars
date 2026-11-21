@@ -234,6 +234,11 @@ pub(crate) fn parse_standalone_skill_block(block: &ContextBlock) -> Option<(Stri
     parse_skill_content_header(&text)
 }
 
+/// Extracts the skill name if `block` is a standalone `Role::User` `tars:skill` block.
+pub fn skill_block_name(block: &ContextBlock) -> Option<String> {
+    parse_standalone_skill_block(block).map(|(name, _)| name)
+}
+
 /// Builds a standalone `Role::User` `tars:skill` block from promoted `<skill_content>` text.
 pub(crate) fn make_standalone_skill_block(promoted_text: String) -> ContextBlock {
     ContextBlock::new(

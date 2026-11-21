@@ -47,6 +47,8 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
         Ok(prepared) => prepared,
         Err(error) => return (early_failure(options.json, &error.to_string()), false),
     };
+    let initial_diagnostics = prepared.prelude_diagnostics().to_vec();
+    managed_execution::report_prelude_diagnostics(&initial_diagnostics);
     let host = SessionHost::new(None).with_external_tools(options.external_tools);
     let session = match host.create(prepared).await {
         Ok(session) => session,
@@ -64,6 +66,12 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
             return (early_failure(options.json, &error), false);
         }
     };
+    let extra_diagnostics: Vec<_> = session
+        .prelude_diagnostics()
+        .into_iter()
+        .filter(|diag| !initial_diagnostics.contains(diag))
+        .collect();
+    managed_execution::report_prelude_diagnostics(&extra_diagnostics);
     let (status, text, mut error, mut code) = classify(&report.result);
     let model_error = model_failure(&report.result);
     let save_wait_abandoned = matches!(report.save, managed_execution::SaveWait::Abandoned);

@@ -87,6 +87,23 @@ pub(super) fn report_mcp_status(session: &ManagedSession) {
     }
 }
 
+/// Writes non-fatal prelude and skill discovery warnings to `stderr` only,
+/// keeping `--json` output on `stdout` valid.
+pub(super) fn report_prelude_diagnostics(diagnostics: &[tars_core::prelude::PreludeDiagnostic]) {
+    if diagnostics.is_empty() {
+        return;
+    }
+    let mut stderr = io::stderr().lock();
+    for diag in diagnostics {
+        let _ = writeln!(
+            stderr,
+            "TARS: prelude warning ({}): {}",
+            diag.path.display(),
+            diag.message
+        );
+    }
+}
+
 /// Report the probed command sandbox in full when a session is created.
 pub(super) fn report_command_details(session: &ManagedSession) {
     if let Some(status) = session.command_status() {

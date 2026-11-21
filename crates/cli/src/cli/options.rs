@@ -1,4 +1,4 @@
-use super::configuration::{self, CliError};
+use super::configuration::{self, CliError, PreludeCliOptions};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -18,6 +18,8 @@ pub(super) struct RunOptions {
 impl RunOptions {
     pub fn parse(args: &[OsString]) -> Result<Self, CliError> {
         let mut values = HashMap::new();
+        let mut skill_dirs = Vec::new();
+        let mut no_skills = false;
         let mut stdin = false;
         let mut json = false;
         let mut no_config = false;
@@ -28,6 +30,14 @@ impl RunOptions {
                 "--stdin" if !stdin => stdin = true,
                 "--json" if !json => json = true,
                 "--no-config" if !no_config => no_config = true,
+                "--no-skills" if !no_skills => no_skills = true,
+                "--skill-dir" => {
+                    let value = args.next().ok_or("option needs a value")?;
+                    if value.is_empty() {
+                        return Err("empty --skill-dir option".into());
+                    }
+                    skill_dirs.push(PathBuf::from(value));
+                }
                 "--provider"
                 | "--model"
                 | "--api-key-env"
@@ -50,9 +60,14 @@ impl RunOptions {
                 | "--context-window"
                 | "--auto-compact"
                 | "--prompt-cache"
-                | "--permission-mode" => {
+                | "--permission-mode"
+                | "--system"
+                | "--system-file"
+                | "--dynamic-context"
+                | "--dynamic-context-file" => {
                     let value = args.next().ok_or("option needs a value")?;
-                    if (value.is_empty() && !matches!(flag, "--tools" | "--mcp"))
+                    if (value.is_empty()
+                        && !matches!(flag, "--tools" | "--mcp" | "--system" | "--dynamic-context"))
                         || values.insert(flag, value).is_some()
                     {
                         return Err("empty or duplicate option".into());
@@ -74,7 +89,14 @@ impl RunOptions {
         };
         let config = configuration::load(&values, no_config)?;
         let external_tools = ExternalTools::resolve(&config);
-        let mut definition = configuration::definition(&config, &values)?;
+        let mut definition = configuration::definition(
+            &config,
+            &values,
+            PreludeCliOptions {
+                skill_dirs,
+                no_skills,
+            },
+        )?;
         // This entry performs exactly one transient work; it does not retain an
         // interactive work history even when the preset has a larger capacity.
         definition.retained_work_capacity = 1;

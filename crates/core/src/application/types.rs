@@ -472,6 +472,37 @@ pub struct SavedSessionSummary {
     pub updated_at_ms: u64,
 }
 
+/// Read-only inspection of one saved session record without resolving credentials or locking.
+#[derive(Clone, Debug)]
+pub struct SavedSessionInspection {
+    /// Canonical conversation identity.
+    pub conversation_id: ConversationId,
+    /// Frozen execution definition.
+    pub definition: SessionDefinition,
+    /// Current validated persistent revision.
+    pub revision: u64,
+    /// Number of Context blocks in the current record.
+    pub block_count: usize,
+    /// Conservative request-size estimate and running compaction settings.
+    pub context_usage: ContextUsage,
+    /// Retained-work capacity (`used` is 0 for a saved record on disk).
+    pub work_capacity: WorkCapacity,
+    /// Number of rewrite records in the saved history index.
+    pub history_records: usize,
+    /// Cumulative model usage totals stored in the record.
+    pub usage: crate::usage::SessionUsage,
+    /// Session title derived from the first user message, if any.
+    pub title: Option<String>,
+    /// Creation timestamp in milliseconds since Unix epoch, if derived from UUIDv7 ID.
+    pub created_at_ms: Option<u64>,
+    /// Last update timestamp in milliseconds since Unix epoch.
+    pub updated_at_ms: u64,
+    /// Number of available skills discovered under the frozen skill directories (`0` when disabled).
+    pub skills_count: usize,
+    /// Whether `dynamic_custom` is a file path that currently exists as a regular file (`None` when not a file).
+    pub dynamic_context_file_exists: Option<bool>,
+}
+
 /// Confirmation of a pending commit when explicitly abandoning local materials.
 #[derive(Clone, Debug)]
 pub enum CommitDisposition {
