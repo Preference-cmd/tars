@@ -182,7 +182,9 @@ fn us09_session_show_json_and_text_and_omitted_cache() {
 
     // 1. Create session
     let create_out = Command::new(env!("CARGO_BIN_EXE_tars"))
-        .args(["session", "create", "--store"])
+        .env_remove("TARS_CONFIG")
+        .env_remove("TARS_HOME")
+        .args(["session", "create", "--no-config", "--store"])
         .arg(&store)
         .args([
             "--provider",
@@ -203,7 +205,9 @@ fn us09_session_show_json_and_text_and_omitted_cache() {
 
     // 2. Run session
     let run_out = Command::new(env!("CARGO_BIN_EXE_tars"))
-        .args(["session", "run", &id, "--store"])
+        .env_remove("TARS_CONFIG")
+        .env_remove("TARS_HOME")
+        .args(["session", "run", &id, "--no-config", "--store"])
         .arg(&store)
         .args(["--input", "run test", "--json"])
         .output()
@@ -221,7 +225,9 @@ fn us09_session_show_json_and_text_and_omitted_cache() {
 
     // 3. session show --json
     let show_out = Command::new(env!("CARGO_BIN_EXE_tars"))
-        .args(["session", "show", &id, "--store"])
+        .env_remove("TARS_CONFIG")
+        .env_remove("TARS_HOME")
+        .args(["session", "show", &id, "--no-config", "--store"])
         .arg(&store)
         .arg("--json")
         .output()
@@ -239,7 +245,9 @@ fn us09_session_show_json_and_text_and_omitted_cache() {
 
     // 4. session show text mode
     let text_out = Command::new(env!("CARGO_BIN_EXE_tars"))
-        .args(["session", "show", &id, "--store"])
+        .env_remove("TARS_CONFIG")
+        .env_remove("TARS_HOME")
+        .args(["session", "show", &id, "--no-config", "--store"])
         .arg(&store)
         .output()
         .unwrap();
@@ -271,7 +279,9 @@ fn us10_cli_session_show_text_contains_session_usage_lines() {
     let fixture = tools::Fixture::with_responses("openai-chat", responses);
 
     let create_out = Command::new(env!("CARGO_BIN_EXE_tars"))
-        .args(["session", "create", "--store"])
+        .env_remove("TARS_CONFIG")
+        .env_remove("TARS_HOME")
+        .args(["session", "create", "--no-config", "--store"])
         .arg(&store)
         .args([
             "--provider",
@@ -291,7 +301,9 @@ fn us10_cli_session_show_text_contains_session_usage_lines() {
     let id = rep["conversation_id"].as_str().unwrap().to_owned();
 
     let run_out = Command::new(env!("CARGO_BIN_EXE_tars"))
-        .args(["session", "run", &id, "--store"])
+        .env_remove("TARS_CONFIG")
+        .env_remove("TARS_HOME")
+        .args(["session", "run", &id, "--no-config", "--store"])
         .arg(&store)
         .args(["--input", "run input"])
         .output()
@@ -300,7 +312,9 @@ fn us10_cli_session_show_text_contains_session_usage_lines() {
 
     // Show in text mode
     let text_out = Command::new(env!("CARGO_BIN_EXE_tars"))
-        .args(["session", "show", &id, "--store"])
+        .env_remove("TARS_CONFIG")
+        .env_remove("TARS_HOME")
+        .args(["session", "show", &id, "--no-config", "--store"])
         .arg(&store)
         .output()
         .unwrap();

@@ -6,7 +6,7 @@ Configuration file selection order:
 
 1. `--config FILE`.
 2. The `TARS_CONFIG` environment variable.
-3. Unix/macOS: the absolute path `$XDG_CONFIG_HOME/tars/config.toml`, or `~/.config/tars/config.toml` when that variable is unset; Windows: `%APPDATA%/TARS/config.toml`.
+3. User TARS directory `config.toml`: `$TARS_HOME/config.toml` when `TARS_HOME` is set to an absolute path (relative or empty values are ignored); otherwise `~/.tars/config.toml` on Unix/macOS (when `HOME` is an absolute path) or `%USERPROFILE%\.tars\config.toml` on Windows (when `USERPROFILE` is an absolute path).
 
 The current project's configuration file is never searched for automatically. A missing default path means an empty configuration; a missing file for an explicit path or `TARS_CONFIG`, or invalid configuration, refuses to start. `--no-config` ignores file and environment selection and is mutually exclusive with `--config`. Reading, parsing, validating the configuration file and resolving presets fail with exit code 1; argument errors such as unknown arguments or missing argument values return 2. Help does not read the configuration.
 
@@ -84,9 +84,9 @@ Every new session (and transient `tars run`) builds a deterministic two-region p
    - `tars:prelude:base`: pure static host invariants compiled into TARS (no mutable session paths or modes, preserving cross-session `system[last]` prompt-cache hits).
    - `tars:prelude:static-custom`: optional custom system prompt appended after `base`, frozen at creation from `[prelude]` / `[profiles.<name>]` (`system_prompt` or `system_prompt_file`) or CLI (`--system` / `--system-file`).
 2. **Dynamic region (`Role::User`)**:
-   - `tars:prelude:user-instructions`: optional `<config_dir>/AGENTS.md` (silently skipped when absent).
+   - `tars:prelude:user-instructions`: optional `<config_dir>/AGENTS.md` (by default `~/.tars/AGENTS.md` or `$TARS_HOME/AGENTS.md`; silently skipped when absent).
    - `tars:prelude:workspace-instructions`: optional `<workspace_root>/AGENTS.md` (silently skipped when absent).
-   - `tars:prelude:skills`: `<available_skills>` catalog merged from configured/CLI skill directories and optional `<workspace_root>/.tars/skills` (omitted when 0 skills are discovered or skills are disabled).
+   - `tars:prelude:skills`: `<available_skills>` catalog merged from configured/CLI skill directories (by default `<config_dir>/skills`) and optional workspace-private (gitignored) `<workspace_root>/.tars/skills` (omitted when 0 skills are discovered or skills are disabled).
    - `tars:prelude:env`: deterministic platform, canonical `workspace_root`, active `permission_mode`, and enabled capability categories (`workspace_read`, `workspace_write`, `command`, `recall`, `skills`, `mcp`).
    - `tars:prelude:dynamic-custom`: optional dynamic custom context from `[prelude]` / `[profiles.<name>]` (`dynamic_context` or `dynamic_context_file`) or CLI (`--dynamic-context` / `--dynamic-context-file`).
 
@@ -193,7 +193,7 @@ The built-in `search_text` runs the external `rg` executable. `[external_tools] 
 
 | Value | Meaning | Check |
 | --- | --- | --- |
-| `managed` (default) | The pinned ripgrep 15.2.0 installed by TARS under `$XDG_DATA_HOME/tars/tools/ripgrep-15.2.0-<target>/rg`, falling back to `~/.local/share/tars/tools/...` | SHA-256 of the installed executable compiled into TARS; a mismatch means unavailable |
+| `managed` (default) | The pinned ripgrep 15.2.0 installed by TARS under `~/.tars/tools/ripgrep-15.2.0-<target>/rg` (or `$TARS_HOME/tools/...`, `%USERPROFILE%\.tars\tools\...` on Windows) | SHA-256 of the installed executable compiled into TARS; a mismatch means unavailable |
 | `system` | The first `rg` found in an absolute `PATH` entry when TARS starts; empty and relative entries are skipped so a repository's own `./rg` never runs | Version recorded (a packaging suffix such as `-1` is ignored); a major version below 14 is unavailable |
 | an absolute path | That executable | Must exist; its version is recorded |
 
@@ -207,7 +207,7 @@ MCP servers are defined in a separate `mcp.json`, kept apart from `config.toml`:
 
 File locations:
 
-- The default is `mcp.json` in the same directory as `config.toml`; when `TARS_CONFIG` points at another file, that file's directory is used.
+- The default is `mcp.json` in the same directory as `config.toml` (`~/.tars/mcp.json` or `$TARS_HOME/mcp.json` by default); when `TARS_CONFIG` points at another file, that file's directory is used.
 - `TARS_MCP_CONFIG` can name it separately; when set, that file must exist, and a relative path is based on the current directory.
 - Isolated invocations with `--no-config` read neither `mcp.json` nor `TARS_MCP_CONFIG`.
 - A missing default file means no servers; other read, parse or validation errors fail startup.

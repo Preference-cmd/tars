@@ -16,9 +16,9 @@ fn config_with(ripgrep: Option<&str>) -> Config {
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]
-fn tool_environment(data_home: &Path, path: &Path) -> ToolEnvironment {
+fn tool_environment(tars_home: &Path, path: &Path) -> ToolEnvironment {
     ToolEnvironment {
-        data_home: Some(data_home.to_owned()),
+        tars_home: Some(tars_home.to_owned()),
         home: None,
         path: Some(path.as_os_str().to_owned()),
         proxy: None,
@@ -53,47 +53,75 @@ fn tool_source_parses_the_three_configured_forms() {
 }
 
 #[test]
-fn managed_path_uses_an_absolute_xdg_data_home_or_the_home_fallback() {
-    // Build the expected paths natively: `/data` is not absolute on Windows,
+fn managed_path_uses_an_absolute_tars_home_or_the_home_fallback() {
+    // Build the expected paths natively: `/tars` is not absolute on Windows,
     // `$HOME`-style paths are not portable, and the executable name is
     // `rg.exe` there (RG_BINARY).
-    let xdg = std::env::temp_dir().join("tars-managed-xdg");
+    let tars_home = std::env::temp_dir().join("tars-managed-home-override");
     let home = std::env::temp_dir().join("tars-managed-home");
     let environment = ToolEnvironment {
-        data_home: Some(xdg.clone()),
+        tars_home: Some(tars_home.clone()),
         home: Some(home.clone()),
         path: None,
         proxy: None,
         no_proxy: None,
     };
+    let expected = tars_home
+        .join("tools")
+        .join(format!("ripgrep-{RIPGREP_VERSION}-aarch64-apple-darwin"))
+        .join(RG_BINARY);
     assert_eq!(
         managed_path(&environment, "aarch64-apple-darwin").unwrap(),
-        xdg.join("tars")
-            .join("tools")
-            .join(format!("ripgrep-{RIPGREP_VERSION}-aarch64-apple-darwin"))
-            .join(RG_BINARY)
+        expected
     );
 
-    let fallback = ToolEnvironment {
-        data_home: Some(PathBuf::from("relative-is-ignored")),
-        home: Some(home.clone()),
-        path: None,
-        proxy: None,
-        no_proxy: None,
-    };
-    assert_eq!(
-        managed_path(&fallback, "x86_64-apple-darwin").unwrap(),
-        home.join(".local")
-            .join("share")
-            .join("tars")
-            .join("tools")
-            .join(format!("ripgrep-{RIPGREP_VERSION}-x86_64-apple-darwin"))
-            .join(RG_BINARY)
-    );
+    for ignored in [PathBuf::from("relative-is-ignored"), PathBuf::new()] {
+        let fallback = ToolEnvironment {
+            tars_home: Some(ignored),
+            home: Some(home.clone()),
+            path: None,
+            proxy: None,
+            no_proxy: None,
+        };
+        assert_eq!(
+            managed_path(&fallback, "x86_64-apple-darwin").unwrap(),
+            home.join(".tars")
+                .join("tools")
+                .join(format!("ripgrep-{RIPGREP_VERSION}-x86_64-apple-darwin"))
+                .join(RG_BINARY)
+        );
+    }
 
     let nowhere = ToolEnvironment::default();
     assert!(managed_path(&nowhere, "aarch64-apple-darwin").is_none());
     assert!(managed_path(&nowhere, "x86_64-apple-darwin").is_none());
+
+    let empty_home = ToolEnvironment {
+        tars_home: Some(PathBuf::from("relative-is-ignored")),
+        home: Some(PathBuf::new()),
+        ..ToolEnvironment::default()
+    };
+    assert!(managed_path(&empty_home, "aarch64-apple-darwin").is_none());
+
+    let relative_home = ToolEnvironment {
+        tars_home: None,
+        home: Some(PathBuf::from(".")),
+        ..ToolEnvironment::default()
+    };
+    assert!(managed_path(&relative_home, "aarch64-apple-darwin").is_none());
+
+    let missing_dir_status = resolve_managed(
+        &nowhere,
+        Some(&ExpectedAsset {
+            target: "test-target".into(),
+            binary_sha256: "0".repeat(64),
+        }),
+    );
+    assert!(!missing_dir_status.is_ready());
+    assert_eq!(
+        missing_dir_status.unavailable_reason(),
+        Some("cannot locate the user TARS directory; set TARS_HOME or HOME")
+    );
 }
 
 #[test]
@@ -173,7 +201,7 @@ mod unix {
 
         let missing = resolve_managed(
             &ToolEnvironment {
-                data_home: Some(directory.path().join("empty")),
+                tars_home: Some(directory.path().join("empty")),
                 ..ToolEnvironment::default()
             },
             Some(&expected),

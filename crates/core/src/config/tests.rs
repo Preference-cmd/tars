@@ -1293,3 +1293,138 @@ fn prelude_and_skills_reject_same_level_conflicts_and_missing_or_wrong_type_expl
         );
     }
 }
+
+#[test]
+fn user_tars_dir_prefers_absolute_tars_home_and_falls_back_to_dot_tars() {
+    use super::file::resolve_user_tars_dir;
+    use std::path::{Path, PathBuf};
+
+    let tars_home = std::env::temp_dir().join("tars-home-override");
+    let home = std::env::temp_dir().join("tars-user-home");
+
+    assert_eq!(
+        resolve_user_tars_dir(Some(&tars_home), Some(&home)),
+        Some(tars_home.clone())
+    );
+    assert_eq!(
+        resolve_user_tars_dir(Some(Path::new("relative-tars-home")), Some(&home)),
+        Some(home.join(".tars"))
+    );
+    assert_eq!(
+        resolve_user_tars_dir(Some(Path::new("")), Some(&home)),
+        Some(home.join(".tars"))
+    );
+    assert_eq!(
+        resolve_user_tars_dir(None, Some(&home)),
+        Some(home.join(".tars"))
+    );
+    assert_eq!(resolve_user_tars_dir(None, Some(Path::new(""))), None);
+    assert_eq!(resolve_user_tars_dir(None, Some(Path::new("."))), None);
+    assert_eq!(
+        resolve_user_tars_dir(None, Some(Path::new("relative-home"))),
+        None
+    );
+    assert_eq!(
+        resolve_user_tars_dir(Some(&PathBuf::from("relative")), None),
+        None
+    );
+    assert_eq!(resolve_user_tars_dir(None, None), None);
+}
+
+#[test]
+fn discover_uses_tars_home_then_home_dot_tars_and_handles_missing_roots() {
+    const MODE: &str = "TARS_CONFIG_DISCOVER_TEST_MODE";
+    const EXPECTED: &str = "TARS_CONFIG_DISCOVER_TEST_EXPECTED";
+    if let Some(mode) = std::env::var_os(MODE) {
+        let config = Config::load(ConfigSource::Discover).unwrap();
+        match mode.to_str().unwrap() {
+            "tars_home" | "home_fallback" => {
+                let expected = std::path::PathBuf::from(std::env::var_os(EXPECTED).unwrap());
+                let expected_canon = expected.canonicalize().unwrap();
+                assert_eq!(
+                    config.source(),
+                    Some(expected.join("config.toml").as_path())
+                );
+                assert_eq!(config.config_dir(), Some(expected_canon.as_path()));
+                assert_eq!(
+                    config
+                        .definition(None, DefinitionOverrides::default())
+                        .unwrap()
+                        .model,
+                    "discovered-model"
+                );
+            }
+            "missing" => {
+                assert!(config.source().is_none());
+                assert!(config.config_dir().is_none());
+                assert!(config.preset(None).unwrap().is_none());
+            }
+            other => panic!("unexpected mode: {other}"),
+        }
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let tars_home = dir.path().join("custom-tars-home");
+    std::fs::create_dir(&tars_home).unwrap();
+    let toml_body = "version = 1\ndefault_profile = 'p'\n[profiles.p]\nprovider = 'openai-chat'\nmodel = 'discovered-model'\n";
+    std::fs::write(tars_home.join("config.toml"), toml_body).unwrap();
+
+    let user_home = dir.path().join("user-home");
+    let dot_tars = user_home.join(".tars");
+    std::fs::create_dir_all(&dot_tars).unwrap();
+    std::fs::write(dot_tars.join("config.toml"), toml_body).unwrap();
+
+    let run = |mode: &str,
+               tars_home_env: Option<&str>,
+               home_env: Option<&std::path::Path>,
+               expected: Option<&std::path::Path>| {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.arg("--exact")
+            .arg("config::tests::discover_uses_tars_home_then_home_dot_tars_and_handles_missing_roots")
+            .env(MODE, mode)
+            .env_remove("TARS_CONFIG")
+            .env_remove("TARS_HOME")
+            .env_remove("HOME")
+            .env_remove("USERPROFILE");
+        if let Some(value) = tars_home_env {
+            cmd.env("TARS_HOME", value);
+        }
+        if let Some(home) = home_env {
+            cmd.env("HOME", home).env("USERPROFILE", home);
+        }
+        if let Some(path) = expected {
+            cmd.env(EXPECTED, path);
+        }
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "mode={mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    run(
+        "tars_home",
+        Some(tars_home.to_str().unwrap()),
+        Some(&user_home),
+        Some(&tars_home),
+    );
+    run(
+        "home_fallback",
+        Some("relative-ignored"),
+        Some(&user_home),
+        Some(&dot_tars),
+    );
+    run("home_fallback", Some(""), Some(&user_home), Some(&dot_tars));
+    run("home_fallback", None, Some(&user_home), Some(&dot_tars));
+    run("missing", None, None, None);
+    run("missing", Some("relative-ignored"), None, None);
+    run("missing", None, Some(std::path::Path::new(".")), None);
+    run(
+        "missing",
+        Some(""),
+        Some(std::path::Path::new("relative-home")),
+        None,
+    );
+}

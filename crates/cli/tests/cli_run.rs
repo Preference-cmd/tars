@@ -59,8 +59,11 @@ fn server(status: u16, body: Value, delay: Duration) -> (String, mpsc::Receiver<
 fn command(provider: &str, endpoint: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tars"));
     command
+        .env_remove("TARS_CONFIG")
+        .env_remove("TARS_HOME")
         .args([
             "run",
+            "--no-config",
             "--provider",
             provider,
             "--model",
@@ -464,10 +467,22 @@ fn mcp_servers_that_fail_to_start_are_reported_on_stderr_but_not_in_json() {
     )
     .unwrap();
     let (endpoint, _requests) = server(200, chat(), Duration::ZERO);
-    let output = command("openai-chat", &endpoint)
+    let output = Command::new(env!("CARGO_BIN_EXE_tars"))
         .env_remove("TARS_CONFIG")
-        .env("XDG_CONFIG_HOME", directory.path())
-        .arg("--config")
+        .env("TARS_HOME", directory.path().join("tars-home"))
+        .env("TARS_TEST_KEY", "fixture-secret")
+        .args([
+            "run",
+            "--provider",
+            "openai-chat",
+            "--model",
+            "fixture-model",
+            "--api-key-env",
+            "TARS_TEST_KEY",
+            "--endpoint",
+            &endpoint,
+            "--config",
+        ])
         .arg(&config)
         .args(["--mcp", "absent", "--input", "user question", "--json"])
         .output()
@@ -492,7 +507,7 @@ fn mcp_servers_that_fail_to_start_are_reported_on_stderr_but_not_in_json() {
     // required server that cannot start does not block it.
     let created = Command::new(env!("CARGO_BIN_EXE_tars"))
         .env_remove("TARS_CONFIG")
-        .env("XDG_CONFIG_HOME", directory.path())
+        .env("TARS_HOME", directory.path().join("tars-home"))
         .env("TARS_TEST_KEY", "fixture-secret")
         .current_dir(directory.path())
         .args(["session", "create", "--config"])

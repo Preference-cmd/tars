@@ -488,6 +488,7 @@ async fn install_refuses_to_guess_a_data_directory() {
         matches!(error, InstallError::NoDataDirectory),
         "unexpected error: {error:?}"
     );
+    assert!(error.to_string().contains("TARS_HOME"));
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -495,7 +496,7 @@ async fn install_refuses_to_guess_a_data_directory() {
 async fn install_reports_a_missing_platform_archive() {
     let config = Config::load(ConfigSource::Disabled).unwrap();
     let environment = ToolEnvironment {
-        data_home: Some(std::env::temp_dir()),
+        tars_home: Some(std::env::temp_dir()),
         ..ToolEnvironment::default()
     };
     let error = install_managed_rg_with(&config, &environment)

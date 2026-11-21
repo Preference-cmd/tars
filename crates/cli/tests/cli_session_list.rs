@@ -13,16 +13,25 @@ fn report(output: &std::process::Output) -> Value {
     serde_json::from_str(stdout).unwrap()
 }
 
+fn tars_cmd() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tars"));
+    cmd.env_remove("TARS_CONFIG")
+        .env_remove("TARS_HOME")
+        .env("TARS_TEST_KEY", KEY);
+    cmd
+}
+
 fn create_session(
     store: &std::path::Path,
     model: &str,
     prompt_cache: Option<&str>,
     endpoint: Option<&str>,
 ) -> String {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tars"));
+    let mut cmd = tars_cmd();
     cmd.args([
         "session",
         "create",
+        "--no-config",
         "--store",
         store.to_str().unwrap(),
         "--json",
@@ -39,7 +48,7 @@ fn create_session(
     if let Some(endpoint) = endpoint {
         cmd.args(["--endpoint", endpoint]);
     }
-    let output = cmd.env("TARS_TEST_KEY", KEY).output().unwrap();
+    let output = cmd.output().unwrap();
     assert!(output.status.success(), "{output:?}");
     report(&output)["conversation_id"]
         .as_str()
@@ -62,14 +71,20 @@ fn test_be23_cli_session_list_ordering_and_fields() {
     std::thread::sleep(std::time::Duration::from_millis(15));
 
     // A turn on the oldest session gives it a title and the latest activity.
-    let output = Command::new(env!("CARGO_BIN_EXE_tars"))
-        .args(["session", "run", &id1, "--store", store.to_str().unwrap()])
+    let output = tars_cmd()
+        .args([
+            "session",
+            "run",
+            &id1,
+            "--no-config",
+            "--store",
+            store.to_str().unwrap(),
+        ])
         .args([
             "--input",
             "\n   Fix the   login bug  \nwith details",
             "--json",
         ])
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -80,15 +95,15 @@ fn test_be23_cli_session_list_ordering_and_fields() {
     fs::write(&bad_path, b"not valid json").unwrap();
 
     // 1. Test `session list --json`
-    let output = Command::new(env!("CARGO_BIN_EXE_tars"))
+    let output = tars_cmd()
         .args([
             "session",
             "list",
+            "--no-config",
             "--store",
             store.to_str().unwrap(),
             "--json",
         ])
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
@@ -121,9 +136,14 @@ fn test_be23_cli_session_list_ordering_and_fields() {
     assert!(u1 > created, "a turn moves the time past creation");
 
     // 2. Test `session list` plain text
-    let text_output = Command::new(env!("CARGO_BIN_EXE_tars"))
-        .args(["session", "list", "--store", store.to_str().unwrap()])
-        .env("TARS_TEST_KEY", KEY)
+    let text_output = tars_cmd()
+        .args([
+            "session",
+            "list",
+            "--no-config",
+            "--store",
+            store.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert_eq!(text_output.status.code(), Some(1));
@@ -144,9 +164,15 @@ fn test_be23_cli_session_list_ordering_and_fields() {
     assert!(lines[3].contains("invalid"));
 
     // 3. Test `session show`
-    let show_output = Command::new(env!("CARGO_BIN_EXE_tars"))
-        .args(["session", "show", &id1, "--store", store.to_str().unwrap()])
-        .env("TARS_TEST_KEY", KEY)
+    let show_output = tars_cmd()
+        .args([
+            "session",
+            "show",
+            &id1,
+            "--no-config",
+            "--store",
+            store.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(show_output.status.success(), "{show_output:?}");
@@ -166,16 +192,16 @@ fn test_be23_cli_session_list_ordering_and_fields() {
     assert!(show_text.contains("Prompt cache: on"));
 
     // Test `session show --json`
-    let show_json_output = Command::new(env!("CARGO_BIN_EXE_tars"))
+    let show_json_output = tars_cmd()
         .args([
             "session",
             "show",
             &id2,
+            "--no-config",
             "--store",
             store.to_str().unwrap(),
             "--json",
         ])
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert!(show_json_output.status.success(), "{show_json_output:?}");

@@ -110,8 +110,8 @@ pub enum InstallError {
     /// This build has no pinned archive for the host platform.
     #[error("no managed ripgrep release exists for this platform")]
     UnsupportedPlatform,
-    /// The user data directory cannot be determined.
-    #[error("cannot locate the user data directory; set XDG_DATA_HOME or HOME")]
+    /// The user TARS directory cannot be determined.
+    #[error("cannot locate the user TARS directory; set TARS_HOME or HOME")]
     NoDataDirectory,
     /// The download or local installation failed.
     #[error(transparent)]
@@ -156,7 +156,7 @@ impl DownloadSource {
 ///
 /// The caller must obtain explicit user consent first: this performs network
 /// access. The embedded manifest supplies the URL, SHA-256 and allowed hosts;
-/// the process environment supplies the data directory and proxy settings.
+/// the process environment supplies the user TARS directory and proxy settings.
 /// Every failure leaves nothing at the final path.
 pub async fn install_managed_rg(config: &Config) -> Result<ToolStatus, InstallError> {
     install_managed_rg_with(config, &ToolEnvironment::from_process()).await

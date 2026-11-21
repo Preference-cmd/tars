@@ -8,3 +8,6 @@
 /.agents/
 /scripts/
 /AGENTS.local.md
+
+# Workspace-local private TARS directory
+/.tars/

@@ -32,9 +32,10 @@ const MAX_MANAGED_BINARY_BYTES: u64 = 64 * 1024 * 1024;
 /// environment, so a check never depends on hidden global state.
 #[derive(Clone, Debug, Default)]
 pub struct ToolEnvironment {
-    /// `$XDG_DATA_HOME`, used only when it is an absolute path.
-    pub(crate) data_home: Option<PathBuf>,
-    /// `$HOME`, the fallback data directory root.
+    /// `$TARS_HOME`, used only when it is an absolute path.
+    pub(crate) tars_home: Option<PathBuf>,
+    /// `$HOME` (Unix/macOS) or `%USERPROFILE%` (Windows), the fallback root for
+    /// `<home>/.tars`.
     pub(crate) home: Option<PathBuf>,
     /// `$PATH` for the `system` source.
     pub(crate) path: Option<OsString>,
@@ -60,33 +61,27 @@ impl ToolEnvironment {
             .find_map(|name| std::env::var(name).ok())
             .filter(|value| !value.is_empty());
         Self {
-            data_home: variable("XDG_DATA_HOME").map(PathBuf::from),
-            home: variable("HOME").map(PathBuf::from),
+            tars_home: variable("TARS_HOME").map(PathBuf::from),
+            home: crate::config::process_home_dir(),
             path: variable("PATH"),
             proxy,
             no_proxy,
         }
     }
 
-    /// The XDG data root: `$XDG_DATA_HOME`, else `$HOME/.local/share`.
+    /// The user TARS directory: `$TARS_HOME`, else `<home>/.tars`.
     ///
-    /// A relative `XDG_DATA_HOME` is ignored, matching the XDG convention and
-    /// the configuration-directory rule.
-    pub(crate) fn data_root(&self) -> Option<PathBuf> {
-        match self.data_home.as_deref().filter(|path| path.is_absolute()) {
-            Some(root) => Some(root.to_owned()),
-            None => self
-                .home
-                .as_ref()
-                .map(|home| home.join(".local").join("share")),
-        }
+    /// Relative or empty `TARS_HOME` and `home` values are ignored so the
+    /// resolved path is always absolute.
+    pub(crate) fn tars_dir(&self) -> Option<PathBuf> {
+        crate::config::resolve_user_tars_dir(self.tars_home.as_deref(), self.home.as_deref())
     }
 }
 
 /// Where the configured `rg` executable comes from.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ToolSource {
-    /// The copy TARS installs under the user data directory, pinned by SHA-256.
+    /// The copy TARS installs under the user TARS directory, pinned by SHA-256.
     #[default]
     Managed,
     /// The first `rg` found on `PATH` when TARS starts.
@@ -224,10 +219,10 @@ impl ToolStatus {
     }
 }
 
-/// The managed ripgrep location for this build and data directory.
+/// The managed ripgrep location for this build and user TARS directory.
 ///
 /// Returns `None` when TARS has no managed ripgrep for the platform or the
-/// user data directory cannot be determined. The file is not checked for
+/// user TARS directory cannot be determined. The file is not checked for
 /// existence here.
 pub fn managed_rg_path(environment: &ToolEnvironment) -> Option<PathBuf> {
     let asset = ripgrep_asset()?;
@@ -235,10 +230,9 @@ pub fn managed_rg_path(environment: &ToolEnvironment) -> Option<PathBuf> {
 }
 
 fn managed_path(environment: &ToolEnvironment, target: &str) -> Option<PathBuf> {
-    let root = environment.data_root()?;
+    let root = environment.tars_dir()?;
     Some(
-        root.join("tars")
-            .join("tools")
+        root.join("tools")
             .join(format!("ripgrep-{RIPGREP_VERSION}-{target}"))
             .join(RG_BINARY),
     )
@@ -322,7 +316,7 @@ fn resolve_managed(environment: &ToolEnvironment, expected: Option<&ExpectedAsse
             source,
             None,
             None,
-            "cannot locate the user data directory; set XDG_DATA_HOME or HOME",
+            "cannot locate the user TARS directory; set TARS_HOME or HOME",
         );
     };
     match std::fs::metadata(&path) {

@@ -19,10 +19,9 @@ fn cli(home: &Path) -> Command {
     command
         .env_remove("TARS_CONFIG")
         .env_remove("TARS_MCP_CONFIG")
-        .env("XDG_CONFIG_HOME", home)
-        .env("XDG_DATA_HOME", home.join("data"))
+        .env("TARS_HOME", data_directory(home))
         .env("HOME", home)
-        .env("APPDATA", home)
+        .env("USERPROFILE", home)
         // If a command attempted a download it would fail through this
         // unreachable proxy, so a refusal cannot hide a silent network access.
         .env("HTTPS_PROXY", "http://127.0.0.1:9")
@@ -71,8 +70,13 @@ fn status_json_reports_source_path_state_and_the_sandbox_probe_without_downloadi
     assert!(!value["sandbox"]["detail"].as_str().unwrap().is_empty());
     if let Some(path) = tools[0]["path"].as_str() {
         // macOS builds know where the managed copy belongs even when missing.
-        assert!(path.starts_with(data_directory(home.path()).to_str().unwrap()));
-        assert!(path.ends_with("/rg"));
+        let expected_tools = data_directory(home.path()).join("tools");
+        assert!(path.starts_with(expected_tools.to_str().unwrap()), "{path}");
+        assert!(!path.contains("/tars/tools/"), "{path}");
+        assert!(
+            path.ends_with("/rg") || path.ends_with("\\rg.exe"),
+            "{path}"
+        );
     }
     assert!(
         !data_directory(home.path()).exists(),

@@ -12,8 +12,9 @@ fn cli(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tars"));
     command
         .env_remove("TARS_CONFIG")
-        .env("XDG_CONFIG_HOME", home)
-        .env("APPDATA", home)
+        .env("TARS_HOME", home.join("tars-home"))
+        .env("HOME", home)
+        .env("USERPROFILE", home)
         .env("TARS_CONFIG_TEST_KEY", "fixture-only");
     command
 }
@@ -88,7 +89,7 @@ fn explicit_config_and_overrides_share_paths_and_do_not_mutate_saved_definitions
 #[test]
 fn discovery_precedence_disabled_and_invalid_config_are_observable() {
     let dir = tempfile::tempdir().unwrap();
-    let global = dir.path().join(if cfg!(windows) { "TARS" } else { "tars" });
+    let global = dir.path().join("tars-home");
     std::fs::create_dir(&global).unwrap();
     std::fs::write(global.join("config.toml"), config()).unwrap();
     let default = json(
@@ -103,6 +104,28 @@ fn discovery_precedence_disabled_and_invalid_config_are_observable() {
             .join(format!(
                 "{}.json",
                 default["conversation_id"].as_str().unwrap()
+            ))
+            .exists()
+    );
+    let fallback_home = dir.path().join("fallback-home");
+    let dot_tars = fallback_home.join(".tars");
+    std::fs::create_dir_all(&dot_tars).unwrap();
+    std::fs::write(dot_tars.join("config.toml"), config()).unwrap();
+    let fallback = json(
+        cli(dir.path())
+            .env("TARS_HOME", "relative-ignored")
+            .env("HOME", &fallback_home)
+            .env("USERPROFILE", &fallback_home)
+            .args(["session", "create", "--json"])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        dot_tars
+            .join("configured-data/sessions")
+            .join(format!(
+                "{}.json",
+                fallback["conversation_id"].as_str().unwrap()
             ))
             .exists()
     );
@@ -1092,13 +1115,14 @@ fn wm11_cli_mcp_config_location_rules() {
         .unwrap();
     assert_eq!(out5.status.code(), Some(2), "case 5: {out5:?}");
 
-    // When no default config path exists (no XDG_CONFIG_HOME or HOME),
+    // When no default config path exists (no TARS_HOME, HOME, or USERPROFILE),
     // cwd mcp.json is NOT loaded (regression test).
     let dir6 = tempfile::tempdir().unwrap();
     std::fs::write(dir6.path().join("mcp.json"), custom_json).unwrap();
     let out6 = cli(dir.path())
-        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("TARS_HOME")
         .env_remove("HOME")
+        .env_remove("USERPROFILE")
         .env_remove("TARS_CONFIG")
         .env_remove("TARS_MCP_CONFIG")
         .current_dir(dir6.path())

@@ -71,8 +71,8 @@ fn config_file(dir: &Path, name: &str, rg: &str) -> Config {
     Config::load(ConfigSource::File(path)).unwrap()
 }
 
-/// A managed source with no data directory: deterministic on every platform
-/// and independent of the machine's real `$XDG_DATA_HOME` / `$HOME`.
+/// A managed source with no user TARS directory: deterministic on every platform
+/// and independent of the machine's real `$TARS_HOME` / `$HOME`.
 fn managed_unavailable(dir: &Path) -> ToolCheck {
     let config = config_file(dir, "managed.toml", "managed");
     let tools = ExternalTools::resolve_with(&config, &ToolEnvironment::default());

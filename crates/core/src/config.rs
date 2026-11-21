@@ -9,7 +9,8 @@ mod file;
 mod mcp;
 mod model;
 
-pub use file::{Config, ConfigError, ConfigSource};
+pub use file::{Config, ConfigError, ConfigSource, user_tars_dir};
+pub(crate) use file::{process_home_dir, resolve_user_tars_dir};
 pub use model::{
     DefinitionOverrides, DynamicCustomOverride, PreludeOverrides, StaticCustomOverride, parse_mcp,
     parse_tools,

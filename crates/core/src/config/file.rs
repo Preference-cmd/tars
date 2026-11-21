@@ -14,7 +14,7 @@ use std::{
 
 /// How an application invocation selects shared configuration.
 pub enum ConfigSource {
-    /// Use TARS_CONFIG, then the platform's global path; no project-local search.
+    /// Use TARS_CONFIG, then the user TARS directory's `config.toml`; no project-local search.
     Discover,
     /// Read this exact file; absence is an error.
     File(PathBuf),
@@ -431,16 +431,40 @@ impl Config {
     }
 }
 
+/// Resolve the user-level TARS directory from `TARS_HOME` or the home
+/// directory (`$HOME/.tars` on Unix/macOS, `%USERPROFILE%\.tars` on Windows).
+///
+/// `TARS_HOME` is used directly when set to an absolute path; relative or
+/// empty values are ignored and fall back to `<home>/.tars` when `HOME` (or
+/// `USERPROFILE` on Windows) is an absolute path.
+pub fn user_tars_dir() -> Option<PathBuf> {
+    let tars_home = std::env::var_os("TARS_HOME").map(PathBuf::from);
+    let home = process_home_dir();
+    resolve_user_tars_dir(tars_home.as_deref(), home.as_deref())
+}
+
+pub(crate) fn process_home_dir() -> Option<PathBuf> {
+    let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var_os(key)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+pub(crate) fn resolve_user_tars_dir(
+    tars_home: Option<&Path>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    tars_home
+        .filter(|path| path.is_absolute())
+        .map(Path::to_owned)
+        .or_else(|| {
+            home.filter(|path| path.is_absolute())
+                .map(|path| path.join(".tars"))
+        })
+}
+
 fn default_path() -> Option<PathBuf> {
-    if cfg!(windows) {
-        std::env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join("TARS/config.toml"))
-    } else {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .filter(|p| Path::new(p).is_absolute())
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .map(|root| root.join("tars/config.toml"))
-    }
+    user_tars_dir().map(|dir| dir.join("config.toml"))
 }
 
 /// Configuration errors omit TOML source snippets and credential values.

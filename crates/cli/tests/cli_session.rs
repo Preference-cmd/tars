@@ -25,8 +25,10 @@ fn global_profile_changes_do_not_replace_a_reopened_definition() {
         fixture.endpoint
     );
     fs::write(&config_path, &config).unwrap();
-    let output = command(dir.path(), "create")
-        .arg("--config")
+    let output = tars_bin()
+        .args(["session", "create", "--store"])
+        .arg(dir.path())
+        .args(["--json", "--config"])
         .arg(&config_path)
         .output()
         .unwrap();
@@ -41,8 +43,10 @@ fn global_profile_changes_do_not_replace_a_reopened_definition() {
     )
     .unwrap();
     let child = spawn(
-        run(dir.path(), &id, "use saved definition")
-            .arg("--config")
+        tars_bin()
+            .args(["session", "run", &id, "--store"])
+            .arg(dir.path())
+            .args(["--input", "use saved definition", "--json", "--config"])
             .arg(&config_path),
     );
     let request = fixture.request();
@@ -202,13 +206,25 @@ fn read_request(socket: &mut TcpStream) -> String {
     }
     String::from_utf8(bytes).unwrap()
 }
-fn command(store: &Path, operation: &str) -> Command {
+fn tars_bin() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tars"));
+    command
+        .env_remove("TARS_CONFIG")
+        .env_remove("TARS_HOME")
+        .env("TARS_TEST_KEY", KEY);
+    command
+}
+
+fn command(store: &Path, operation: &str) -> Command {
+    let mut command = tars_bin();
     command.args(["session", operation]);
     if operation != "run" {
-        command.arg("--store").arg(store).arg("--json");
+        command
+            .arg("--no-config")
+            .arg("--store")
+            .arg(store)
+            .arg("--json");
     }
-    command.env("TARS_TEST_KEY", KEY);
     command
 }
 fn create(store: &Path, endpoint: &str, timeout: &str) -> String {
@@ -244,6 +260,7 @@ fn run(store: &Path, id: &str, input: &str) -> Command {
     let mut command = command(store, "run");
     command
         .arg(id)
+        .arg("--no-config")
         .arg("--store")
         .arg(store)
         .args(["--input", input, "--json"]);
@@ -602,10 +619,11 @@ fn reopening_a_saved_full_access_mode_reports_the_downgrade() {
     assert!(repaired_report.get("permission_downgraded").is_none());
 
     // A definition created with full-access as its initial mode is not a downgrade.
-    let initial = Command::new(env!("CARGO_BIN_EXE_tars"))
+    let initial = tars_bin()
         .args([
             "session",
             "create",
+            "--no-config",
             "--store",
             store.to_str().unwrap(),
             "--json",
@@ -618,7 +636,6 @@ fn reopening_a_saved_full_access_mode_reports_the_downgrade() {
             "--permission-mode",
             "full-access",
         ])
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert!(initial.status.success(), "{initial:?}");
@@ -634,11 +651,10 @@ fn reopening_a_saved_full_access_mode_reports_the_downgrade() {
 }
 
 fn repair(store: &Path, id: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_tars"))
-        .args(["session", "repair", id, "--store"])
+    tars_bin()
+        .args(["session", "repair", id, "--no-config", "--store"])
         .arg(store)
         .args(["--dry-run", "--json"])
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap()
 }
@@ -686,10 +702,11 @@ fn second_sigint_abandons_a_blocked_save_and_exports_importable_recovery() {
     assert_eq!(materials.blocks().len(), 5);
 
     let imported_store = folder.path().join("imported");
-    let imported = Command::new(env!("CARGO_BIN_EXE_tars"))
+    let imported = tars_bin()
         .args([
             "session",
             "create",
+            "--no-config",
             "--store",
             imported_store.to_str().unwrap(),
             "--json",
@@ -702,7 +719,6 @@ fn second_sigint_abandons_a_blocked_save_and_exports_importable_recovery() {
             "--load",
         ])
         .arg(path)
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert!(imported.status.success(), "{imported:?}");
@@ -842,7 +858,7 @@ fn create_initial_save_failure_exports_recovery_to_the_selected_directory() {
         ),
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_tars"))
+    let output = tars_bin()
         .args([
             "session",
             "create",
@@ -856,7 +872,6 @@ fn create_initial_save_failure_exports_recovery_to_the_selected_directory() {
         .arg(&material)
         .arg("--recovery-dir")
         .arg(&recovery)
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "{output:?}");

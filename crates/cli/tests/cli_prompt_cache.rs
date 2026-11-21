@@ -9,16 +9,26 @@ fn report(output: &std::process::Output) -> Value {
     serde_json::from_str(stdout).unwrap()
 }
 
+fn tars_cmd() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tars"));
+    command
+        .env_remove("TARS_CONFIG")
+        .env_remove("TARS_HOME")
+        .env("TARS_TEST_KEY", KEY);
+    command
+}
+
 #[test]
 fn test_be20_cli_prompt_cache_flags_and_overrides() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store");
 
     // 1. Create with --prompt-cache off
-    let out_off = Command::new(env!("CARGO_BIN_EXE_tars"))
+    let out_off = tars_cmd()
         .args([
             "session",
             "create",
+            "--no-config",
             "--store",
             store.to_str().unwrap(),
             "--json",
@@ -31,7 +41,6 @@ fn test_be20_cli_prompt_cache_flags_and_overrides() {
             "--prompt-cache",
             "off",
         ])
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert!(out_off.status.success(), "{out_off:?}");
@@ -40,26 +49,27 @@ fn test_be20_cli_prompt_cache_flags_and_overrides() {
         .unwrap()
         .to_owned();
 
-    let show_off = Command::new(env!("CARGO_BIN_EXE_tars"))
+    let show_off = tars_cmd()
         .args([
             "session",
             "show",
             &id_off,
+            "--no-config",
             "--store",
             store.to_str().unwrap(),
             "--json",
         ])
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert!(show_off.status.success(), "{show_off:?}");
     assert_eq!(report(&show_off)["prompt_cache"], false);
 
     // 2. Create with --prompt-cache on
-    let out_on = Command::new(env!("CARGO_BIN_EXE_tars"))
+    let out_on = tars_cmd()
         .args([
             "session",
             "create",
+            "--no-config",
             "--store",
             store.to_str().unwrap(),
             "--json",
@@ -72,7 +82,6 @@ fn test_be20_cli_prompt_cache_flags_and_overrides() {
             "--prompt-cache",
             "on",
         ])
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert!(out_on.status.success(), "{out_on:?}");
@@ -81,16 +90,16 @@ fn test_be20_cli_prompt_cache_flags_and_overrides() {
         .unwrap()
         .to_owned();
 
-    let show_on = Command::new(env!("CARGO_BIN_EXE_tars"))
+    let show_on = tars_cmd()
         .args([
             "session",
             "show",
             &id_on,
+            "--no-config",
             "--store",
             store.to_str().unwrap(),
             "--json",
         ])
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert!(show_on.status.success(), "{show_on:?}");
@@ -112,7 +121,7 @@ prompt_cache = false
     );
     fs::write(&config_path, toml).unwrap();
 
-    let out_override = Command::new(env!("CARGO_BIN_EXE_tars"))
+    let out_override = tars_cmd()
         .args([
             "session",
             "create",
@@ -122,7 +131,6 @@ prompt_cache = false
             "--prompt-cache",
             "on",
         ])
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert!(out_override.status.success(), "{out_override:?}");
@@ -131,7 +139,7 @@ prompt_cache = false
         .unwrap()
         .to_owned();
 
-    let show_override = Command::new(env!("CARGO_BIN_EXE_tars"))
+    let show_override = tars_cmd()
         .args([
             "session",
             "show",
@@ -140,7 +148,6 @@ prompt_cache = false
             config_path.to_str().unwrap(),
             "--json",
         ])
-        .env("TARS_TEST_KEY", KEY)
         .output()
         .unwrap();
     assert!(show_override.status.success(), "{show_override:?}");

@@ -11,9 +11,9 @@
 //! `[external_tools] rg` selects where the executable comes from:
 //!
 //! - `managed` (the default) is the copy TARS installs under
-//!   `$XDG_DATA_HOME/tars/tools/ripgrep-15.2.0-<target>/rg`, falling back to
-//!   `~/.local/share/tars/...`. Its SHA-256 is checked before it is ever
-//!   executed.
+//!   `$TARS_HOME/tools/ripgrep-15.2.0-<target>/rg`, falling back to
+//!   `~/.tars/tools/...` (`%USERPROFILE%\.tars\tools\...` on Windows). Its
+//!   SHA-256 is checked before it is ever executed.
 //! - `system` is the first `rg` found on `PATH` when TARS starts; its version
 //!   is recorded and a version older than [`MIN_SYSTEM_MAJOR`] is unusable.
 //! - an absolute path names the executable directly; it must exist and its

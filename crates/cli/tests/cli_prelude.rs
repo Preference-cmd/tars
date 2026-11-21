@@ -16,8 +16,9 @@ fn cli(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tars"));
     command
         .env_remove("TARS_CONFIG")
-        .env("XDG_CONFIG_HOME", home)
-        .env("APPDATA", home)
+        .env("TARS_HOME", home.join("tars-home"))
+        .env("HOME", home)
+        .env("USERPROFILE", home)
         .env("TARS_PRELUDE_KEY", KEY);
     command
 }
