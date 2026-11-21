@@ -531,3 +531,87 @@ fn diff_block() -> Block<'static> {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(MUTED))
 }
+
+pub(super) fn workspace_rules_trust(
+    frame: &mut Frame<'_>,
+    app: &App,
+    entry: &crate::app::Entry,
+    area: Rect,
+) {
+    use crate::app::WorkspaceTrustLineKind;
+
+    frame.render_widget(Clear, area);
+    let Some(prompt) = entry.workspace_rules_trust.as_ref() else {
+        return;
+    };
+    let mut header_lines = vec![
+        Line::styled(
+            "Trust workspace command allow rules?",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!(
+                "File: {}",
+                tars_core::permission::escape_untrusted_text(
+                    &prompt.file_path.display().to_string()
+                )
+            ),
+            Style::default().fg(MUTED),
+        ),
+    ];
+    if prompt.has_outside_sandbox {
+        header_lines.push(Line::styled(
+            "WARNING: [OUTSIDE SANDBOX] rules allow execution outside the sandbox without prompting.",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    }
+    header_lines.push(Line::from(
+        "Pending allow rules (currently ignored; deny/ask rules are already active):",
+    ));
+
+    let header_len = header_lines.len() as u16;
+    let regions = Layout::vertical([
+        Constraint::Length(header_len + 1),
+        Constraint::Min(1),
+        Constraint::Length(2),
+    ])
+    .split(area);
+
+    frame.render_widget(Paragraph::new(header_lines), regions[0]);
+
+    let body_height = usize::from(regions[1].height.saturating_sub(2));
+    let scroll = prompt
+        .scroll
+        .min(prompt.body_lines.len().saturating_sub(body_height));
+    let visible: Vec<Line> = prompt
+        .body_lines
+        .iter()
+        .skip(scroll)
+        .take(body_height)
+        .map(|line| {
+            let style = match line.kind {
+                WorkspaceTrustLineKind::Plain => Style::default(),
+                WorkspaceTrustLineKind::Rule => Style::default().fg(Color::Cyan),
+                WorkspaceTrustLineKind::RuleOutsideSandbox => {
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                }
+                WorkspaceTrustLineKind::Heading => Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+                WorkspaceTrustLineKind::DiffAdd => Style::default().fg(Color::Green),
+                WorkspaceTrustLineKind::DiffRemove => Style::default().fg(Color::Red),
+                WorkspaceTrustLineKind::DiffHunk => Style::default().fg(Color::Cyan),
+            };
+            Line::styled(line.text.as_str(), style)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(visible).block(diff_block()), regions[1]);
+
+    let hint = "Enter / y trust · n / Esc decline · ↑↓ PgUp PgDn scroll";
+    let hint_style = if app.is_workspace_trust_guarded() {
+        Style::default().fg(MUTED).add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(MUTED).remove_modifier(Modifier::DIM)
+    };
+    frame.render_widget(Paragraph::new(hint).style(hint_style), regions[2]);
+}

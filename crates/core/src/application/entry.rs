@@ -1,15 +1,25 @@
 use super::types::*;
 use crate::definition::SessionDefinition;
 use crate::session::{Session, SessionHandle, WorkRef};
-use crate::store::{PreparedCommit, Writer};
+use crate::store::{PreparedCommit, SessionStore, Writer};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
+
+#[derive(Clone, Debug)]
+pub(super) struct WorkspaceRulesSnapshot {
+    pub workspace_root: PathBuf,
+    pub raw_text: String,
+    pub rules: Vec<crate::permission::CommandRule>,
+}
 
 pub(super) struct Entry {
     pub target: SessionTarget,
     pub state: Mutex<State>,
     pub changed: Notify,
     pub wake: Notify,
+    pub store: Option<SessionStore>,
+    pub io: Arc<Semaphore>,
     #[cfg(test)]
     pub panic_owner: Notify,
     #[cfg(test)]
@@ -40,6 +50,7 @@ pub(super) struct State {
     pub close_in_flight: bool,
     pub close_outcome: Option<CloseOutcome>,
     pub open_report: OpenReport,
+    pub workspace_rules_snapshot: Option<WorkspaceRulesSnapshot>,
     /// Title and last-activity time of the last stored record.
     pub saved: crate::store::RecordMetadata,
     /// Non-fatal prelude diagnostics recorded during creation or last submit.
@@ -50,6 +61,8 @@ impl Entry {
         target: SessionTarget,
         prepared: Option<PreparedCreate>,
         snapshot_clones: Arc<std::sync::atomic::AtomicU64>,
+        store: Option<SessionStore>,
+        io: Arc<Semaphore>,
     ) -> Self {
         let persistent = prepared.as_ref().is_none_or(|p| p.persistent);
         let version = MaterialVersion {
@@ -63,6 +76,8 @@ impl Entry {
             .unwrap_or_default();
         Self {
             target,
+            store,
+            io,
             snapshot_clones,
             state: Mutex::new(State {
                 definition: prepared.as_ref().map(|p| p.definition.clone()),
@@ -94,6 +109,7 @@ impl Entry {
                 close_in_flight: false,
                 close_outcome: None,
                 open_report: OpenReport::default(),
+                workspace_rules_snapshot: None,
                 saved,
                 prelude_diagnostics,
             }),

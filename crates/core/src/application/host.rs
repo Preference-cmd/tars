@@ -61,6 +61,19 @@ impl SessionHost {
             .external_tools = Some(tools);
         self
     }
+    /// Attach an optional user-level command permissions file path (`permissions.toml`).
+    ///
+    /// By default no user-level rules file is read, keeping tests and unconfigured
+    /// hosts isolated from `~/.tars/permissions.toml`. Entry points pass
+    /// `config.config_dir().map(|dir| dir.join("permissions.toml"))`.
+    #[must_use]
+    pub fn with_user_rules_path(mut self, path: Option<PathBuf>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("user rules path is attached before the host is cloned")
+            .options
+            .user_rules_path = path;
+        self
+    }
     /// Construct with validated count limits; no directory or credential is read yet.
     pub fn with_options(
         store_root: Option<PathBuf>,
@@ -181,6 +194,8 @@ impl SessionHost {
             target,
             prepared,
             self.inner.snapshot_clones.clone(),
+            self.inner.store.clone(),
+            self.inner.io.clone(),
         ));
         // Registration and supervision are synchronous; no caller-owned await gap.
         entries.insert(id, entry.clone());

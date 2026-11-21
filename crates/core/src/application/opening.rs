@@ -56,7 +56,7 @@ pub(super) async fn initialize(
         context,
         revision,
         current_mode,
-        open_report,
+        mut open_report,
         history,
         auto_compact,
         compact_threshold,
@@ -105,6 +105,7 @@ pub(super) async fn initialize(
                 mode,
                 OpenReport {
                     permission_downgraded,
+                    workspace_rules: WorkspaceRulesReport::default(),
                 },
                 record.history,
                 record.auto_compact,
@@ -115,6 +116,10 @@ pub(super) async fn initialize(
         }
     };
     definition.validate()?;
+    let loaded_rules = load_command_rules(host, &definition).await?;
+    open_report.workspace_rules = loaded_rules.report;
+    let workspace_rules_snapshot = loaded_rules.snapshot;
+    let command_rules = loaded_rules.rule_set;
     let pending = if persistent && let Some(prepared) = &prepared {
         entry.cloned_snapshot();
         let (title, updated_at_ms) = saved.next(&context, 0);
@@ -164,6 +169,7 @@ pub(super) async fn initialize(
             compact_threshold,
             usage,
             prepared.as_ref().and_then(|p| p.skill_registry.clone()),
+            command_rules,
         )
         .await?
     };
@@ -182,6 +188,7 @@ pub(super) async fn initialize(
         compact_threshold,
         usage,
         prepared.as_ref().and_then(|p| p.skill_registry.clone()),
+        command_rules,
     )
     .await?;
     let mut state = entry.lock();
@@ -191,6 +198,7 @@ pub(super) async fn initialize(
     state.revision = revision;
     state.pending = pending;
     state.open_report = open_report;
+    state.workspace_rules_snapshot = workspace_rules_snapshot;
     state.saved = saved;
     if state.closing.is_some() {
         state
@@ -218,6 +226,173 @@ pub(super) async fn initialize(
     Ok(())
 }
 
+struct LoadedCommandRules {
+    rule_set: crate::permission::CommandRuleSet,
+    report: WorkspaceRulesReport,
+    snapshot: Option<super::entry::WorkspaceRulesSnapshot>,
+}
+
+async fn load_command_rules(
+    host: &Arc<HostInner>,
+    definition: &crate::definition::SessionDefinition,
+) -> Result<LoadedCommandRules, ApplicationError> {
+    let user_rules = match host.options.user_rules_path.clone() {
+        Some(path) => saving::io_semaphore(&host.io, move || {
+            crate::permission::rules::load_rules_file(&path)
+        })
+        .await?
+        .map(|loaded| loaded.rules)
+        .unwrap_or_default(),
+        None => Vec::new(),
+    };
+
+    let Some(root) = definition.workspace_root.clone() else {
+        return Ok(LoadedCommandRules {
+            rule_set: crate::permission::CommandRuleSet::with_layers(
+                user_rules,
+                Vec::new(),
+                Vec::new(),
+            ),
+            report: WorkspaceRulesReport {
+                can_trust: host.store.is_some(),
+                trusted: true,
+                ..WorkspaceRulesReport::default()
+            },
+            snapshot: None,
+        });
+    };
+
+    let store = host.store.clone();
+    let ws_loaded = saving::io_semaphore(&host.io, move || {
+        let canonical_root = match std::fs::canonicalize(&root) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok::<_, ApplicationError>(None);
+            }
+            Err(error) => {
+                return Err(ApplicationError::PermissionRules(
+                    crate::permission::rules::RulesFileError::Io {
+                        path: root.join(".tars").join("permissions.toml"),
+                        kind: error.kind(),
+                    },
+                ));
+            }
+        };
+        let rules_path = canonical_root.join(".tars").join("permissions.toml");
+        let loaded = crate::permission::rules::load_rules_file(&rules_path)?;
+        let trusted_copy = match (&loaded, &store) {
+            (Some(_), Some(store)) => store.read_workspace_rules_trust(&canonical_root)?,
+            _ => None,
+        };
+        Ok(Some((canonical_root, rules_path, loaded, trusted_copy)))
+    })
+    .await?;
+
+    let (canonical_root, rules_path, loaded, trusted_copy) = match ws_loaded {
+        Some((canonical_root, rules_path, Some(loaded), trusted_copy)) => {
+            (canonical_root, rules_path, loaded, trusted_copy)
+        }
+        Some((_, rules_path, None, _)) => {
+            return Ok(LoadedCommandRules {
+                rule_set: crate::permission::CommandRuleSet::with_layers(
+                    user_rules,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                report: WorkspaceRulesReport {
+                    file_path: Some(rules_path),
+                    can_trust: host.store.is_some(),
+                    trusted: true,
+                    ..WorkspaceRulesReport::default()
+                },
+                snapshot: None,
+            });
+        }
+        None => {
+            let file_path = definition
+                .workspace_root
+                .as_ref()
+                .expect("root")
+                .join(".tars")
+                .join("permissions.toml");
+            return Ok(LoadedCommandRules {
+                rule_set: crate::permission::CommandRuleSet::with_layers(
+                    user_rules,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+                report: WorkspaceRulesReport {
+                    file_path: Some(file_path),
+                    can_trust: host.store.is_some(),
+                    trusted: true,
+                    ..WorkspaceRulesReport::default()
+                },
+                snapshot: None,
+            });
+        }
+    };
+
+    let is_trusted = trusted_copy
+        .as_ref()
+        .is_some_and(|previous| previous.as_bytes() == loaded.raw_text.as_bytes());
+    let (active_ws_rules, report) = if is_trusted {
+        (
+            loaded.rules.clone(),
+            WorkspaceRulesReport {
+                allow_rules: Vec::new(),
+                file_path: Some(rules_path),
+                previous_trusted_text: None,
+                diff: None,
+                can_trust: true,
+                trusted: true,
+            },
+        )
+    } else {
+        let active = loaded
+            .rules
+            .iter()
+            .filter(|rule| rule.decision != crate::permission::RuleDecision::Allow)
+            .cloned()
+            .collect();
+        let allow_rules = loaded
+            .rules
+            .iter()
+            .filter(|rule| rule.decision == crate::permission::RuleDecision::Allow)
+            .cloned()
+            .collect();
+        let diff = trusted_copy.as_deref().map(|previous| {
+            crate::permission::rules::workspace_rules_diff(previous, &loaded.raw_text)
+        });
+        (
+            active,
+            WorkspaceRulesReport {
+                allow_rules,
+                file_path: Some(rules_path),
+                previous_trusted_text: trusted_copy,
+                diff,
+                can_trust: host.store.is_some(),
+                trusted: false,
+            },
+        )
+    };
+
+    let snapshot = Some(super::entry::WorkspaceRulesSnapshot {
+        workspace_root: canonical_root,
+        raw_text: loaded.raw_text,
+        rules: loaded.rules,
+    });
+
+    Ok(LoadedCommandRules {
+        rule_set: crate::permission::CommandRuleSet::with_layers(
+            user_rules,
+            active_ws_rules,
+            Vec::new(),
+        ),
+        report,
+        snapshot,
+    })
+}
+
 async fn start_mcp(
     definition: &crate::definition::SessionDefinition,
 ) -> Result<Option<Arc<crate::mcp::McpRuntime>>, ApplicationError> {
@@ -241,6 +416,7 @@ async fn assembled(
     compact_threshold: Option<u8>,
     usage: Option<crate::usage::SessionUsage>,
     initial_skills: Option<crate::skills::SkillRegistry>,
+    command_rules: crate::permission::CommandRuleSet,
 ) -> Result<crate::session::Session, ApplicationError> {
     let registry = match initial_skills {
         Some(registry) => registry,
@@ -263,6 +439,7 @@ async fn assembled(
         .with_compaction(history, auto_compact, compact_threshold)
         .with_usage(usage)
         .with_skills(Arc::new(std::sync::RwLock::new(registry)))
+        .with_command_rules(command_rules)
         .persistent(persistent);
     let base = match host.external_tools.clone() {
         Some(tools) => base.with_external_tools(tools),

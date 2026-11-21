@@ -56,6 +56,8 @@ Create options:
   --no-skills         Disable skills discovery, <available_skills> injection, and load_skill
                       (conflicts with --skill-dir)
   --load              Initial Context material file; creates a new conversation
+  --trust-workspace-rules
+                      Trust and activate allow rules in <workspace>/.tars/permissions.toml
   --recovery-dir      Material recovery directory on initial save failure
                       (default: configured recovery_dir, else current directory)
 
@@ -65,6 +67,8 @@ Run options:
   --permission-mode   read-only | ask | accept-edits | full-access
                       Change and save the current permission mode for this session.
                       Reopening reverts full-access to ask unless created as full-access.
+  --trust-workspace-rules
+                      Trust and activate allow rules in <workspace>/.tars/permissions.toml
   --recovery-dir      Material recovery directory on save failure
                       (default: configured recovery_dir, else current directory)
 

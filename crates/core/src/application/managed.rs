@@ -196,7 +196,84 @@ impl ManagedSession {
     }
     /// Facts learned while this instance was opened.
     pub fn open_report(&self) -> OpenReport {
-        self.entry.lock().open_report
+        self.entry.lock().open_report.clone()
+    }
+
+    /// Whether the workspace `.tars/permissions.toml` file is trusted (also `true`
+    /// when no workspace or no workspace rules file is present).
+    pub fn workspace_rules_trusted(&self) -> bool {
+        self.entry.lock().open_report.workspace_rules.trusted
+    }
+
+    /// Snapshot of the currently active three-layer command permission rules.
+    pub fn command_rules_snapshot(&self) -> crate::permission::CommandRuleSet {
+        let state = self.entry.lock();
+        state
+            .owner
+            .as_ref()
+            .map_or_else(crate::permission::CommandRuleSet::new, |owner| {
+                owner.command_rules()
+            })
+    }
+
+    /// Trust the workspace `.tars/permissions.toml` snapshot captured when this
+    /// session opened, write it to the Store trust copy, and activate its
+    /// `allow` rules in the live session.
+    ///
+    /// Never re-reads `.tars/permissions.toml` from disk, avoiding TOCTOU races.
+    /// Returns the number of newly activated `allow` rules, or
+    /// `Err(ApplicationError::StoreUnavailable)` when the host has no Store.
+    pub async fn trust_workspace_rules(&self) -> Result<usize, ApplicationError> {
+        let (store, io, snapshot) = {
+            let state = self.entry.lock();
+            if state.lifecycle == Lifecycle::Closed {
+                return Err(ApplicationError::Closed);
+            }
+            if state.lifecycle == Lifecycle::Closing {
+                return Err(ApplicationError::Closing);
+            }
+            let store = self
+                .entry
+                .store
+                .clone()
+                .ok_or(ApplicationError::StoreUnavailable)?;
+            if state.open_report.workspace_rules.trusted {
+                return Ok(0);
+            }
+            let snapshot = state.workspace_rules_snapshot.clone();
+            (store, self.entry.io.clone(), snapshot)
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok(0);
+        };
+        let workspace_root = snapshot.workspace_root.clone();
+        let raw_text = snapshot.raw_text.clone();
+        saving::io_semaphore(&io, move || {
+            store.write_workspace_rules_trust(&workspace_root, &raw_text)
+        })
+        .await?;
+        let mut state = self.entry.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return Err(ApplicationError::Closed);
+        }
+        if state.lifecycle == Lifecycle::Closing {
+            return Err(ApplicationError::Closing);
+        }
+        if state.open_report.workspace_rules.trusted {
+            return Ok(0);
+        }
+        let owner = state.owner.as_ref().ok_or(ApplicationError::InstanceGone)?;
+        let activated = snapshot
+            .rules
+            .iter()
+            .filter(|rule| rule.decision == crate::permission::RuleDecision::Allow)
+            .count();
+        owner.set_workspace_rules(snapshot.rules);
+        state.open_report.workspace_rules.allow_rules.clear();
+        state.open_report.workspace_rules.previous_trusted_text = None;
+        state.open_report.workspace_rules.diff = None;
+        state.open_report.workspace_rules.trusted = true;
+        Ok(activated)
     }
     /// Non-fatal prelude diagnostics recorded during preparation or the most recent submit.
     pub fn prelude_diagnostics(&self) -> Vec<crate::prelude::PreludeDiagnostic> {

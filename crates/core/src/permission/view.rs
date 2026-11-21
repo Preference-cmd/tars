@@ -3,7 +3,7 @@
 use super::approval::{ApprovalReceiver, ApprovalsHub};
 use super::mode::PermissionMode;
 use super::processor::{ToolPermissionClass, decide};
-use super::rules::{CommandRuleSet, EvaluatedPermission, apply_command_rule};
+use super::rules::{CommandRule, CommandRuleSet, EvaluatedPermission, apply_command_rule};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -179,6 +179,7 @@ impl PermissionHub {
         Self::with_mcp_table(initial_mode, Arc::new(McpPermissionTable::new()))
     }
 
+    #[cfg(test)]
     pub(crate) fn with_mcp_table(
         initial_mode: PermissionMode,
         mcp_table: Arc<McpPermissionTable>,
@@ -208,6 +209,17 @@ impl PermissionHub {
             mcp_table: self.mcp_table.clone(),
             rules: self.rules.clone(),
         }
+    }
+
+    pub(crate) fn set_workspace_rules(&self, rules: Vec<CommandRule>) {
+        self.rules
+            .write()
+            .expect("command rules lock")
+            .set_workspace_rules(rules);
+    }
+
+    pub(crate) fn command_rules(&self) -> CommandRuleSet {
+        self.rules.read().expect("command rules lock").clone()
     }
 
     #[cfg(test)]

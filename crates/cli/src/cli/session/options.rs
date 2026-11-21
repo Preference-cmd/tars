@@ -16,6 +16,8 @@ pub(crate) enum SessionCommand {
         definition: Box<SessionDefinition>,
         /// Resolved once from the loaded configuration and handed to the host.
         external_tools: ExternalTools,
+        user_rules_path: Option<PathBuf>,
+        trust_workspace_rules: bool,
         load: Option<PathBuf>,
         recovery_dir: PathBuf,
         json: bool,
@@ -25,6 +27,8 @@ pub(crate) enum SessionCommand {
         id: String,
         /// Resolved once from the loaded configuration and handed to the host.
         external_tools: ExternalTools,
+        user_rules_path: Option<PathBuf>,
+        trust_workspace_rules: bool,
         input: Option<String>,
         permission_mode: Option<tars_core::permission::PermissionMode>,
         recovery_dir: PathBuf,
@@ -109,6 +113,7 @@ impl SessionCommand {
         let mut stdin = false;
         let mut json = false;
         let mut no_config = false;
+        let mut trust_workspace_rules = false;
         let mut apply = false;
         let mut dry_run = false;
         let mut args = args.iter();
@@ -117,6 +122,11 @@ impl SessionCommand {
             match flag {
                 "--json" if !json => json = true,
                 "--no-config" if !no_config => no_config = true,
+                "--trust-workspace-rules"
+                    if matches!(command, "create" | "run") && !trust_workspace_rules =>
+                {
+                    trust_workspace_rules = true;
+                }
                 "--no-skills" if command == "create" && !no_skills => no_skills = true,
                 "--stdin" if command == "run" && !stdin => stdin = true,
                 "--apply" if command == "repair" && !apply => apply = true,
@@ -193,6 +203,7 @@ impl SessionCommand {
                 .transpose()
         };
         let config = configuration::load(&values, no_config)?;
+        let user_rules_path = config.config_dir().map(|dir| dir.join("permissions.toml"));
         let store = values
             .get("--store")
             .map(PathBuf::from)
@@ -244,6 +255,8 @@ impl SessionCommand {
                     store,
                     definition: Box::new(definition),
                     external_tools: ExternalTools::resolve(&config),
+                    user_rules_path,
+                    trust_workspace_rules,
                     load: values.get("--load").map(PathBuf::from),
                     recovery_dir: values
                         .get("--recovery-dir")
@@ -272,6 +285,8 @@ impl SessionCommand {
                     store,
                     id: id.expect("run ID parsed"),
                     external_tools: ExternalTools::resolve(&config),
+                    user_rules_path,
+                    trust_workspace_rules,
                     input,
                     permission_mode,
                     recovery_dir: values

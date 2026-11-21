@@ -53,17 +53,31 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 store,
                 definition,
                 external_tools,
+                user_rules_path,
+                trust_workspace_rules,
                 load,
                 recovery_dir,
                 json,
             } => (
-                create(store, *definition, external_tools, load, recovery_dir, json).await,
+                create(
+                    store,
+                    *definition,
+                    external_tools,
+                    user_rules_path,
+                    trust_workspace_rules,
+                    load,
+                    recovery_dir,
+                    json,
+                )
+                .await,
                 false,
             ),
             SessionCommand::Run {
                 store,
                 id,
                 external_tools,
+                user_rules_path,
+                trust_workspace_rules,
                 input,
                 permission_mode,
                 recovery_dir,
@@ -73,6 +87,8 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                     store,
                     id,
                     external_tools,
+                    user_rules_path,
+                    trust_workspace_rules,
                     input,
                     permission_mode,
                     recovery_dir,
@@ -125,10 +141,13 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
     code
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create(
     store: PathBuf,
     definition: SessionDefinition,
     external_tools: tars_core::external_tools::ExternalTools,
+    user_rules_path: Option<PathBuf>,
+    trust_workspace_rules: bool,
     load: Option<PathBuf>,
     recovery_dir: PathBuf,
     json_output: bool,
@@ -153,7 +172,9 @@ async fn create(
     let recovery_context = prepared.context().clone();
     let id = prepared.conversation_id().clone();
     // Creating saves the definition and closes; it starts no MCP server.
-    let host = managed_execution::definition_host(store).with_external_tools(external_tools);
+    let host = managed_execution::definition_host(store)
+        .with_external_tools(external_tools)
+        .with_user_rules_path(user_rules_path);
     let session = match host.create(prepared).await {
         Ok(session) => session,
         Err(error) => {
@@ -204,6 +225,16 @@ async fn create(
         }
     };
     let revision = revision(&session.status().save);
+    if trust_workspace_rules {
+        if !session.workspace_rules_trusted()
+            && let Err(error) = session.trust_workspace_rules().await
+        {
+            let _ = host.close(&session.target(), ClosePolicy::Save).await;
+            return early_failure(json_output, &error.to_string());
+        }
+    } else {
+        managed_execution::report_workspace_rules_notice(&session);
+    }
     managed_execution::report_command_details(&session);
     if let Err(error) = host.close(&session.target(), ClosePolicy::Save).await {
         return early_failure(json_output, &error.to_string());
@@ -231,10 +262,13 @@ fn export_initial_recovery(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_saved(
     store: PathBuf,
     id: String,
     external_tools: tars_core::external_tools::ExternalTools,
+    user_rules_path: Option<PathBuf>,
+    trust_workspace_rules: bool,
     input: Option<String>,
     permission_mode: Option<tars_core::permission::PermissionMode>,
     recovery_dir: PathBuf,
@@ -245,11 +279,25 @@ async fn run_saved(
         Ok(input) => input,
         Err(error) => return (early_failure(json_output, error), false),
     };
-    let host = SessionHost::new(Some(store)).with_external_tools(external_tools);
+    let host = SessionHost::new(Some(store))
+        .with_external_tools(external_tools)
+        .with_user_rules_path(user_rules_path);
     let session = match host.open(id.into()).await {
         Ok(session) => session,
         Err(error) => return (early_failure(json_output, &error.to_string()), false),
     };
+    if trust_workspace_rules {
+        if !session.workspace_rules_trusted()
+            && let Err(error) = session.trust_workspace_rules().await
+        {
+            let _ = host
+                .close(&session.target(), ClosePolicy::DiscardLocal)
+                .await;
+            return (early_failure(json_output, &error.to_string()), false);
+        }
+    } else {
+        managed_execution::report_workspace_rules_notice(&session);
+    }
     managed_execution::report_mcp_status(&session);
     managed_execution::report_command_brief(&session);
     if let Some(mode) = permission_mode {

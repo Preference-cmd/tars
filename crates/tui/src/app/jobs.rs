@@ -62,6 +62,7 @@ pub(super) enum Message {
     ),
     Listed(Result<Vec<SessionListing>, ApplicationError>),
     Opened(Key, Result<ManagedSession, ApplicationError>),
+    WorkspaceRulesTrusted(Key, Result<usize, ApplicationError>),
     Finished(
         Key,
         WorkRef,
@@ -95,6 +96,7 @@ pub(super) enum Message {
 pub(super) enum JobKind {
     List,
     Open,
+    TrustWorkspaceRules,
     Work,
     Close,
     Retry,
@@ -324,22 +326,42 @@ impl App {
                             entry.title = session.title();
                             entry.updated_at_ms = session.updated_at_ms();
                             entry.prompt_cache = session.definition().prompt_cache;
+                            let report = session.open_report();
+                            entry.workspace_rules_trust =
+                                super::state::WorkspaceRulesTrustPrompt::from_report(
+                                    &report.workspace_rules,
+                                );
                             let command_notice = session
                                 .command_status()
                                 .and_then(|status| command_sandbox_notice(status.is_available()));
                             entry.notice = opened_notice(
                                 &session.mcp_status(),
-                                session.open_report().permission_downgraded,
+                                report.permission_downgraded,
                                 command_notice,
                             );
                             entry.session = Some(session);
                             entry.prepared = None;
+                            self.refresh_size_flags();
+                            self.update_workspace_trust_guard();
                         }
                         Err(error) => {
                             entry.notice =
                                 format!("Open failed: {error}; F3 retries the same operation")
                         }
                     }
+                }
+            }
+            Message::WorkspaceRulesTrusted(key, result) => {
+                if let Some(entry) = self.entry_mut(&key) {
+                    if entry.busy == Some("trusting workspace rules") {
+                        entry.busy = None;
+                    }
+                    entry.notice = match result {
+                        Ok(count) => {
+                            format!("Trusted workspace rules; {count} allow rule(s) active")
+                        }
+                        Err(error) => format!("Failed to trust workspace rules: {error}"),
+                    };
                 }
             }
             Message::Finished(key, work, result) => {
@@ -665,6 +687,10 @@ impl App {
                         }
                         JobKind::Open => {
                             clear_busy(entry, "opening");
+                            entry.notice = message.clone();
+                        }
+                        JobKind::TrustWorkspaceRules => {
+                            clear_busy(entry, "trusting workspace rules");
                             entry.notice = message.clone();
                         }
                         JobKind::Close => {

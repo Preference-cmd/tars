@@ -49,10 +49,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         return;
     }
     let area = frame.area();
-    let pending = app
-        .entries
-        .get(app.selected)
-        .is_some_and(|entry| !entry.approval_queue.is_empty());
+    let pending = app.entries.get(app.selected).is_some_and(|entry| {
+        entry.workspace_rules_trust.is_some() || !entry.approval_queue.is_empty()
+    });
     let approval_visible =
         pending && app.panel.is_none() && app.form.is_none() && app.confirmation.is_none();
     let minimum_height = if approval_visible { 19 } else { 12 };
@@ -127,6 +126,20 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                 ..body
             },
         );
+        return;
+    }
+    if app.panel.is_none() && entry.is_some_and(|e| e.workspace_rules_trust.is_some()) {
+        super::panels::workspace_rules_trust(
+            frame,
+            app,
+            entry.unwrap(),
+            Rect {
+                y: regions[1].y,
+                height: regions[1].height + regions[2].height,
+                ..body
+            },
+        );
+        footer(frame, app, regions[3]);
         return;
     }
     if app.panel.is_none() && entry.is_some_and(|e| !e.approval_queue.is_empty()) {

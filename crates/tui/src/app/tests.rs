@@ -23,3 +23,4 @@ mod compaction;
 mod history;
 mod prompt_cache;
 mod sessions;
+mod workspace_rules;

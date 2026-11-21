@@ -8,6 +8,7 @@
 mod error;
 mod json;
 mod record;
+mod trust;
 
 pub use error::{CommitStage, StoreError};
 pub(crate) use json::{CommitResolution, SessionStore, Writer};

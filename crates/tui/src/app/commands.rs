@@ -570,6 +570,7 @@ impl App {
                         self.refresh_size_flags();
                         self.open();
                         self.update_approval_guard();
+                        self.update_workspace_trust_guard();
                     }
                     return;
                 }

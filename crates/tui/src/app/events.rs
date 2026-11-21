@@ -59,8 +59,10 @@ impl App {
             return;
         }
         self.update_approval_guard();
+        self.update_workspace_trust_guard();
         self.update_repair_guard();
         let is_guarded = self.is_approval_guarded();
+        let is_workspace_trust_guarded = self.is_workspace_trust_guarded();
         if let Event::Resize(width, height) = event {
             self.view_width = render::transcript_width(width);
             self.view_height = height;
@@ -81,6 +83,7 @@ impl App {
                 );
             }
             self.update_approval_guard();
+            self.update_workspace_trust_guard();
             return;
         }
         if let Event::Paste(text) = &event {
@@ -99,6 +102,9 @@ impl App {
             if let Some(form) = &mut self.form {
                 input::paste(&mut form.fields[form.selected], text, false);
             } else if let Some(entry) = self.entries.get_mut(self.selected) {
+                if entry.workspace_rules_trust.is_some() {
+                    return;
+                }
                 if let Some(reason) = &mut entry.approval_reason {
                     if !is_guarded {
                         reason.extend(text.chars().filter(|c| !c.is_control()));
@@ -130,6 +136,7 @@ impl App {
                 _ => self.confirmation = Some(confirmation),
             }
             self.update_approval_guard();
+            self.update_workspace_trust_guard();
             return;
         }
         if self.quitting {
@@ -142,6 +149,7 @@ impl App {
         if self.panel.is_some() {
             self.panel_key(key);
             self.update_approval_guard();
+            self.update_workspace_trust_guard();
             return;
         }
         if let Some(form) = &mut self.form {
@@ -153,6 +161,70 @@ impl App {
                 form.key(key);
             }
             self.update_approval_guard();
+            self.update_workspace_trust_guard();
+            return;
+        }
+        if let Some(entry) = self.entries.get_mut(self.selected)
+            && entry.workspace_rules_trust.is_some()
+        {
+            if key.kind != KeyEventKind::Press {
+                return;
+            }
+            if self.too_small || self.view_height < 19 || self.view_width.saturating_add(4) < 30 {
+                if key.code == KeyCode::Esc {
+                    entry.workspace_rules_trust = None;
+                    entry.notice =
+                        "Declined workspace allow rules; only deny/ask and user rules are active"
+                            .into();
+                    self.update_workspace_trust_guard();
+                }
+                return;
+            }
+            if is_workspace_trust_guarded {
+                if let Some(prompt) = entry.workspace_rules_trust.as_mut() {
+                    scroll_workspace_trust(prompt, key.code);
+                }
+                return;
+            }
+            if input::control(key, 'w') {
+                self.request_close();
+                return;
+            }
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y' | 'Y')
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.trust_workspace_rules();
+                    return;
+                }
+                KeyCode::Char('n' | 'N')
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    entry.workspace_rules_trust = None;
+                    entry.notice =
+                        "Declined workspace allow rules; only deny/ask and user rules are active"
+                            .into();
+                    self.update_workspace_trust_guard();
+                    return;
+                }
+                KeyCode::Esc => {
+                    entry.workspace_rules_trust = None;
+                    entry.notice =
+                        "Declined workspace allow rules; only deny/ask and user rules are active"
+                            .into();
+                    self.update_workspace_trust_guard();
+                    return;
+                }
+                code => {
+                    if let Some(prompt) = entry.workspace_rules_trust.as_mut() {
+                        scroll_workspace_trust(prompt, code);
+                    }
+                }
+            }
             return;
         }
         if let Some(entry) = self.entries.get_mut(self.selected)
@@ -342,6 +414,7 @@ impl App {
                         self.selected = (self.selected + 1) % self.entries.len();
                         self.refresh_size_flags();
                         self.update_approval_guard();
+                        self.update_workspace_trust_guard();
                     }
                 }
                 KeyCode::F(5) if key.kind == KeyEventKind::Press => self.list(),
@@ -375,6 +448,17 @@ impl App {
             }
         }
     }
+}
+
+fn scroll_workspace_trust(prompt: &mut super::state::WorkspaceRulesTrustPrompt, code: KeyCode) {
+    let max = prompt.body_lines.len().saturating_sub(1);
+    prompt.scroll = match code {
+        KeyCode::Up => prompt.scroll.saturating_sub(1),
+        KeyCode::Down => prompt.scroll.saturating_add(1).min(max),
+        KeyCode::PageUp => prompt.scroll.saturating_sub(5),
+        KeyCode::PageDown => prompt.scroll.saturating_add(5).min(max),
+        _ => return,
+    };
 }
 
 fn clear_approvals(entry: &mut super::Entry) {

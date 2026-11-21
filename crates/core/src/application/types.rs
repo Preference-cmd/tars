@@ -188,6 +188,10 @@ pub struct HostOptions {
     /// A host that only saves or repairs definitions turns this off so it
     /// starts no server processes; its sessions then offer only built-in tools.
     pub connect_mcp_servers: bool,
+    /// Optional path to the user-level permissions rules file (`permissions.toml`).
+    /// Defaults to `None` so hosts without explicit configuration stay isolated
+    /// from the process user's `~/.tars/permissions.toml`.
+    pub user_rules_path: Option<std::path::PathBuf>,
 }
 impl Default for HostOptions {
     fn default() -> Self {
@@ -195,6 +199,7 @@ impl Default for HostOptions {
             max_active_sessions: 32,
             max_storage_operations: 4,
             connect_mcp_servers: true,
+            user_rules_path: None,
         }
     }
 }
@@ -282,12 +287,44 @@ pub enum SaveStatus {
     },
 }
 
+/// Workspace-level command rules status observed when opening or creating a session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceRulesReport {
+    /// Untrusted `allow` rules currently ignored until the user trusts the file.
+    pub allow_rules: Vec<crate::permission::CommandRule>,
+    /// Path to `<canonical_workspace_root>/.tars/permissions.toml`, when a workspace is configured.
+    pub file_path: Option<std::path::PathBuf>,
+    /// Previously trusted file text from the Store when the workspace file changed.
+    pub previous_trusted_text: Option<String>,
+    /// Unified diff between `previous_trusted_text` and the current file text, when changed.
+    pub diff: Option<String>,
+    /// Whether this session has a Store that can persist workspace trust.
+    pub can_trust: bool,
+    /// Whether the workspace rules file is currently trusted (also `true` when absent).
+    pub trusted: bool,
+}
+
+impl Default for WorkspaceRulesReport {
+    fn default() -> Self {
+        Self {
+            allow_rules: Vec::new(),
+            file_path: None,
+            previous_trusted_text: None,
+            diff: None,
+            can_trust: false,
+            trusted: true,
+        }
+    }
+}
+
 /// Facts learned while an instance was opened, for optional caller reporting.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OpenReport {
     /// A saved `full-access` mode was replaced by `ask` because the frozen
     /// definition was not created with `full-access`.
     pub permission_downgraded: bool,
+    /// Trust and activation status of workspace command permission rules.
+    pub workspace_rules: WorkspaceRulesReport,
 }
 
 /// Running compaction settings for one open session.
@@ -425,6 +462,9 @@ pub enum ApplicationError {
     /// Permission state is not available on this session instance.
     #[error("permission state is not available for this session instance")]
     PermissionUnavailable,
+    /// User-level or workspace-level command permission rules file is invalid.
+    #[error(transparent)]
+    PermissionRules(#[from] crate::permission::rules::RulesFileError),
 }
 impl From<StoreError> for ApplicationError {
     fn from(error: StoreError) -> Self {

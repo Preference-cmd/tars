@@ -214,8 +214,14 @@ pub(super) async fn io<T: Send + 'static>(
     host: &Arc<HostInner>,
     operation: impl FnOnce() -> Result<T, crate::store::StoreError> + Send + 'static,
 ) -> Result<T, ApplicationError> {
-    let permit = host
-        .io
+    io_semaphore(&host.io, operation).await
+}
+
+pub(super) async fn io_semaphore<T: Send + 'static, E: Into<ApplicationError> + Send + 'static>(
+    semaphore: &Arc<tokio::sync::Semaphore>,
+    operation: impl FnOnce() -> Result<T, E> + Send + 'static,
+) -> Result<T, ApplicationError> {
+    let permit = semaphore
         .clone()
         .acquire_owned()
         .await

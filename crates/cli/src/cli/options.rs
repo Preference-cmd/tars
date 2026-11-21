@@ -9,6 +9,7 @@ pub(super) struct RunOptions {
     pub definition: SessionDefinition,
     /// Resolved once from the loaded configuration and handed to the host.
     pub external_tools: ExternalTools,
+    pub user_rules_path: Option<PathBuf>,
     pub input: Option<String>,
     pub load: Option<PathBuf>,
     pub save: Option<PathBuf>,
@@ -89,6 +90,7 @@ impl RunOptions {
         };
         let config = configuration::load(&values, no_config)?;
         let external_tools = ExternalTools::resolve(&config);
+        let user_rules_path = config.config_dir().map(|dir| dir.join("permissions.toml"));
         let mut definition = configuration::definition(
             &config,
             &values,
@@ -110,6 +112,7 @@ impl RunOptions {
         Ok(Self {
             definition,
             external_tools,
+            user_rules_path,
             input,
             load: values.get("--load").map(PathBuf::from),
             save: values.get("--save").map(PathBuf::from),

@@ -87,6 +87,7 @@ impl App {
         entry.approval_queue.clear();
         entry.approval_reason = None;
         entry.approval_scroll = 0;
+        entry.workspace_rules_trust = None;
         entry.material_version = None;
         entry.requested_material_version = None;
         entry.material_retry_after = None;
@@ -166,6 +167,29 @@ impl App {
             }
         }
     }
+    pub(super) fn trust_workspace_rules(&mut self) {
+        if !self.capacity() {
+            return;
+        }
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            return;
+        };
+        let Some(session) = entry.session.clone() else {
+            return;
+        };
+        entry.workspace_rules_trust = None;
+        entry.busy = Some("trusting workspace rules");
+        let key = entry.key.clone();
+        self.spawn_job(
+            Some(key.clone()),
+            super::jobs::JobKind::TrustWorkspaceRules,
+            async move {
+                let result = session.trust_workspace_rules().await;
+                Message::WorkspaceRulesTrusted(key, result)
+            },
+        );
+        self.update_workspace_trust_guard();
+    }
     pub(super) fn cancel(&mut self) {
         if let Some(entry) = self.entries.get_mut(self.selected)
             && let (Some(session), Some(work)) = (&entry.session, &entry.work)
@@ -193,6 +217,7 @@ impl App {
         entry.approval_queue.clear();
         entry.approval_reason = None;
         entry.approval_scroll = 0;
+        entry.workspace_rules_trust = None;
         let host = self.host.clone();
         let key = entry.key.clone();
         self.spawn_job(Some(key.clone()), super::jobs::JobKind::Close, async move {
@@ -370,6 +395,7 @@ impl App {
         }
         self.refresh_size_flags();
         self.update_approval_guard();
+        self.update_workspace_trust_guard();
         self.update_repair_guard();
         if self.quitting {
             for index in 0..self.entries.len() {

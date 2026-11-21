@@ -49,11 +49,14 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
     };
     let initial_diagnostics = prepared.prelude_diagnostics().to_vec();
     managed_execution::report_prelude_diagnostics(&initial_diagnostics);
-    let host = SessionHost::new(None).with_external_tools(options.external_tools);
+    let host = SessionHost::new(None)
+        .with_external_tools(options.external_tools)
+        .with_user_rules_path(options.user_rules_path);
     let session = match host.create(prepared).await {
         Ok(session) => session,
         Err(error) => return (early_failure(options.json, &error.to_string()), false),
     };
+    managed_execution::report_workspace_rules_notice(&session);
     managed_execution::report_mcp_status(&session);
     managed_execution::report_command_brief(&session);
     let connect_approvals = super::approval::should_connect_stdio(used_stdin_input);

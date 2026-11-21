@@ -48,6 +48,26 @@ pub(super) fn report_open_notices(session: &ManagedSession) {
     }
 }
 
+/// Warn on `stderr` when untrusted workspace `allow` rules were ignored on open.
+pub(super) fn report_workspace_rules_notice(session: &ManagedSession) {
+    let report = session.open_report();
+    let count = report.workspace_rules.allow_rules.len();
+    if count == 0 {
+        return;
+    }
+    if report.workspace_rules.can_trust {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "TARS: workspace rules are untrusted; ignored {count} allow rule(s) (use --trust-workspace-rules to trust)"
+        );
+    } else {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "TARS: workspace rules are untrusted; ignored {count} allow rule(s) (transient tars run cannot trust workspace allow rules; use a persistent session with --trust-workspace-rules)"
+        );
+    }
+}
+
 /// A host for commands that save or repair a session and run no work: it
 /// opens sessions without starting their MCP servers.
 pub(super) fn definition_host(store: PathBuf) -> SessionHost {

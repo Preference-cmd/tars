@@ -121,6 +121,22 @@ impl Session {
         )
     }
 
+    /// Replace the active workspace-level command rules on the instance's permission hub.
+    pub(crate) fn set_workspace_rules(&self, rules: Vec<crate::permission::CommandRule>) {
+        if let Some(permissions) = &self.permissions {
+            permissions.set_workspace_rules(rules);
+        }
+    }
+
+    /// Snapshot the active command rule layers on the instance's permission hub.
+    pub(crate) fn command_rules(&self) -> crate::permission::CommandRuleSet {
+        self.permissions
+            .as_ref()
+            .map_or_else(crate::permission::CommandRuleSet::new, |permissions| {
+                permissions.command_rules()
+            })
+    }
+
     /// Replace command approval rules on the instance's permission hub during test runs.
     #[cfg(test)]
     #[cfg_attr(not(unix), allow(dead_code))]

@@ -29,7 +29,7 @@ pub struct LoadedRulesFile {
 /// Errors returned when loading or validating a permissions rules file.
 ///
 /// Error messages never echo TOML values or rule contents.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RulesFileError {
     /// File access failed, without echoing its contents.
     #[error("permissions file {path:?}: {kind:?}")]
@@ -262,6 +262,16 @@ pub fn format_command_rule_block(rule: &CommandRule) -> String {
         out.push_str("outside_sandbox = true\n");
     }
     out
+}
+
+/// Compute a unified diff between `previous_trusted` and `current_text` for
+/// `<workspace_root>/.tars/permissions.toml`.
+pub fn workspace_rules_diff(previous_trusted: &str, current_text: &str) -> String {
+    similar::TextDiff::from_lines(previous_trusted, current_text)
+        .unified_diff()
+        .context_radius(3)
+        .header("a/.tars/permissions.toml", "b/.tars/permissions.toml")
+        .to_string()
 }
 
 pub(crate) fn is_forbidden_single_word_allow(word: &str) -> bool {

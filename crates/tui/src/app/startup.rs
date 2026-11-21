@@ -515,8 +515,14 @@ impl App {
         };
         self.sandbox = startup.sandbox;
         if let Some(ToolCheck { tools, .. }) = startup.tools {
+            let user_rules_path = self
+                .options
+                .config
+                .config_dir()
+                .map(|dir| dir.join("permissions.toml"));
             self.host = tars_core::application::SessionHost::new(Some(self.options.store.clone()))
-                .with_external_tools(tools.clone());
+                .with_external_tools(tools.clone())
+                .with_user_rules_path(user_rules_path);
             self.external_tools = Some(tools);
         }
         self.search_reason = reason;

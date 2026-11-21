@@ -52,6 +52,8 @@ pub(crate) struct SessionResources {
     pub(crate) initial_usage: Option<crate::usage::SessionUsage>,
     /// Shared session skill registry bound to `load_skill`.
     pub(crate) skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    /// Initial layered command approval rules loaded for this session.
+    pub(crate) command_rules: crate::permission::CommandRuleSet,
     /// Test-only command sandbox probe result injected into the real assembly
     /// path. Mirrors `CommandRuntime::bind_with_sandbox`: no production code
     /// can choose a backend or a probe result.
@@ -76,6 +78,7 @@ impl SessionResources {
             external_tools: None,
             initial_usage: None,
             skill_registry: None,
+            command_rules: crate::permission::CommandRuleSet::new(),
             #[cfg(test)]
             gateway_override: None,
             #[cfg(test)]
@@ -103,6 +106,15 @@ impl SessionResources {
         skill_registry: Arc<std::sync::RwLock<crate::skills::SkillRegistry>>,
     ) -> Self {
         self.skill_registry = Some(skill_registry);
+        self
+    }
+
+    /// Attach the initial command approval rule set loaded when opening the session.
+    pub(crate) fn with_command_rules(
+        mut self,
+        command_rules: crate::permission::CommandRuleSet,
+    ) -> Self {
+        self.command_rules = command_rules;
         self
     }
 
@@ -180,6 +192,7 @@ pub(crate) fn assemble(
         external_tools,
         initial_usage,
         skill_registry,
+        command_rules,
         #[cfg(test)]
         gateway_override,
         #[cfg(test)]
@@ -366,9 +379,10 @@ pub(crate) fn assemble(
         .as_ref()
         .map(|m| m.permission_table())
         .unwrap_or_else(|| Arc::new(crate::permission::McpPermissionTable::new()));
-    let permissions = Arc::new(crate::permission::PermissionHub::with_mcp_table(
+    let permissions = Arc::new(crate::permission::PermissionHub::with_rules(
         current_mode,
         mcp_table,
+        command_rules,
     ));
     let view = permissions.view();
     let approvals = permissions.approvals();

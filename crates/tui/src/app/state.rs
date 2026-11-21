@@ -122,6 +122,95 @@ impl PendingApproval {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorkspaceTrustLineKind {
+    Plain,
+    Rule,
+    RuleOutsideSandbox,
+    Heading,
+    DiffAdd,
+    DiffRemove,
+    DiffHunk,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkspaceTrustLine {
+    pub(crate) kind: WorkspaceTrustLineKind,
+    pub(crate) text: String,
+}
+
+/// Untrusted workspace `.tars/permissions.toml` allow-rules prompt shown on open.
+#[derive(Clone, Debug)]
+pub(crate) struct WorkspaceRulesTrustPrompt {
+    pub(crate) file_path: std::path::PathBuf,
+    pub(crate) has_outside_sandbox: bool,
+    pub(crate) body_lines: Vec<WorkspaceTrustLine>,
+    pub(crate) scroll: usize,
+}
+
+impl WorkspaceRulesTrustPrompt {
+    pub(crate) fn from_report(
+        report: &tars_core::application::WorkspaceRulesReport,
+    ) -> Option<Self> {
+        if report.allow_rules.is_empty() || !report.can_trust {
+            return None;
+        }
+        let file_path = report
+            .file_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(".tars/permissions.toml"));
+        let mut has_outside_sandbox = false;
+        let mut body_lines = Vec::new();
+        for rule in &report.allow_rules {
+            let prefix = tars_core::permission::escape_untrusted_text(&rule.prefix.join(" "));
+            if rule.outside_sandbox {
+                has_outside_sandbox = true;
+                body_lines.push(WorkspaceTrustLine {
+                    kind: WorkspaceTrustLineKind::RuleOutsideSandbox,
+                    text: format!("  allow: {prefix}  [OUTSIDE SANDBOX]"),
+                });
+            } else {
+                body_lines.push(WorkspaceTrustLine {
+                    kind: WorkspaceTrustLineKind::Rule,
+                    text: format!("  allow: {prefix}"),
+                });
+            }
+        }
+        if let Some(diff) = &report.diff {
+            body_lines.push(WorkspaceTrustLine {
+                kind: WorkspaceTrustLineKind::Plain,
+                text: String::new(),
+            });
+            body_lines.push(WorkspaceTrustLine {
+                kind: WorkspaceTrustLineKind::Heading,
+                text: "Changes since last trusted version:".into(),
+            });
+            for line in diff.lines() {
+                let escaped = tars_core::permission::escape_untrusted_text(line);
+                let kind = if escaped.starts_with('+') && !escaped.starts_with("+++") {
+                    WorkspaceTrustLineKind::DiffAdd
+                } else if escaped.starts_with('-') && !escaped.starts_with("---") {
+                    WorkspaceTrustLineKind::DiffRemove
+                } else if escaped.starts_with("@@") {
+                    WorkspaceTrustLineKind::DiffHunk
+                } else {
+                    WorkspaceTrustLineKind::Plain
+                };
+                body_lines.push(WorkspaceTrustLine {
+                    kind,
+                    text: escaped,
+                });
+            }
+        }
+        Some(Self {
+            file_path,
+            has_outside_sandbox,
+            body_lines,
+            scroll: 0,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct ScrollAnchor {
     pub(super) index: usize,
@@ -171,6 +260,7 @@ pub(crate) struct Entry {
     pub(crate) approval_queue: VecDeque<PendingApproval>,
     pub(crate) approval_reason: Option<String>,
     pub(crate) approval_scroll: usize,
+    pub(crate) workspace_rules_trust: Option<WorkspaceRulesTrustPrompt>,
 }
 impl Entry {
     pub(super) fn new(id: String, model: String) -> Self {
@@ -215,6 +305,7 @@ impl Entry {
             approval_queue: VecDeque::new(),
             approval_reason: None,
             approval_scroll: 0,
+            workspace_rules_trust: None,
         }
     }
     pub fn id(&self) -> &str {
@@ -273,6 +364,8 @@ pub(crate) struct App {
     pub(crate) clock: Clock,
     pub(crate) last_visible_approval: Option<VisibleApproval>,
     pub(crate) approval_guard: GuardWindow,
+    pub(super) last_visible_workspace_trust: Option<Key>,
+    pub(crate) workspace_trust_guard: GuardWindow,
     /// The startup environment check; `None` once the main screen is reached.
     pub(crate) startup: Option<super::startup::Startup>,
     /// The checks and the installation the startup splash draws from.
@@ -289,7 +382,12 @@ pub(crate) struct App {
 }
 impl App {
     pub fn new(options: Options) -> Self {
-        let host = SessionHost::new(Some(options.store.clone()));
+        let user_rules_path = options
+            .config
+            .config_dir()
+            .map(|dir| dir.join("permissions.toml"));
+        let host =
+            SessionHost::new(Some(options.store.clone())).with_user_rules_path(user_rules_path);
         let startup_backend: Arc<dyn super::startup::StartupBackend> =
             Arc::new(super::startup::ProcessBackend::new(options.config.clone()));
         let notice = if let Some(warning) = options.config.warnings().first() {
@@ -324,6 +422,8 @@ impl App {
             clock: Clock::real(),
             last_visible_approval: None,
             approval_guard: GuardWindow::new(),
+            last_visible_workspace_trust: None,
+            workspace_trust_guard: GuardWindow::new(),
             startup: None,
             startup_backend,
             #[cfg(test)]
@@ -340,10 +440,9 @@ impl App {
     /// that size its decisions are not offered at all.
     pub(super) fn refresh_size_flags(&mut self) {
         let width = self.view_width.saturating_add(4);
-        let pending = self
-            .entries
-            .get(self.selected)
-            .is_some_and(|entry| !entry.approval_queue.is_empty());
+        let pending = self.entries.get(self.selected).is_some_and(|entry| {
+            entry.workspace_rules_trust.is_some() || !entry.approval_queue.is_empty()
+        });
         let approval_visible =
             pending && self.panel.is_none() && self.form.is_none() && self.confirmation.is_none();
         let minimum_height = if approval_visible { 19 } else { 12 };
@@ -370,6 +469,9 @@ impl App {
             return None;
         }
         let entry = self.entries.get(self.selected)?;
+        if entry.workspace_rules_trust.is_some() {
+            return None;
+        }
         let front = entry.approval_queue.front()?;
         Some(VisibleApproval {
             session_id: entry.id().to_string(),
@@ -403,6 +505,48 @@ impl App {
         }
         self.approval_guard.is_guarded(self.clock.now())
     }
+    /// The workspace rules trust prompt actually on screen, or `None` when obscured.
+    pub(super) fn current_visible_workspace_trust(&self) -> Option<Key> {
+        if self.panel.is_some()
+            || self.form.is_some()
+            || self.confirmation.is_some()
+            || self.quitting
+        {
+            return None;
+        }
+        if self.too_small || self.view_height < 19 || self.view_width.saturating_add(4) < 30 {
+            return None;
+        }
+        let entry = self.entries.get(self.selected)?;
+        entry.workspace_rules_trust.as_ref()?;
+        Some(entry.key.clone())
+    }
+    /// Re-arm the 500 ms window whenever the visible workspace rules trust prompt changes.
+    pub(crate) fn update_workspace_trust_guard(&mut self) {
+        let current = self.current_visible_workspace_trust();
+        if current != self.last_visible_workspace_trust {
+            self.last_visible_workspace_trust = current;
+            if self.last_visible_workspace_trust.is_some() {
+                self.workspace_trust_guard
+                    .arm(self.clock.now(), CONFIRM_GUARD_WINDOW);
+                self.dirty = true;
+            } else {
+                self.workspace_trust_guard.disarm();
+            }
+        } else if self.workspace_trust_guard.check_expired(self.clock.now()) {
+            self.dirty = true;
+        }
+    }
+    pub(crate) fn is_workspace_trust_guarded(&self) -> bool {
+        let current = self.current_visible_workspace_trust();
+        if current.is_none() {
+            return false;
+        }
+        if current != self.last_visible_workspace_trust {
+            return true;
+        }
+        self.workspace_trust_guard.is_guarded(self.clock.now())
+    }
     /// Mark the UI dirty when the repair guard expires so the hint is redrawn.
     pub(crate) fn update_repair_guard(&mut self) {
         if let Some(super::Panel::Repair(panel)) = self.panel.as_mut()
@@ -423,6 +567,7 @@ impl App {
     pub(crate) fn advance_clock(&mut self, duration: Duration) {
         self.clock.advance(duration);
         self.update_approval_guard();
+        self.update_workspace_trust_guard();
         self.update_repair_guard();
         self.update_startup_guard();
     }
