@@ -1138,3 +1138,227 @@ async fn confirmation_reread_stops_at_the_edit_limit_after_external_growth() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), grown);
     assert!(!has_temporary_files(dir.path()));
 }
+
+#[tokio::test]
+async fn write_tools_refuse_dot_tars_and_in_workspace_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_root = dir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(ws_root.join(".tars/skills/a")).unwrap();
+    std::fs::write(ws_root.join(".tars/skills/a/SKILL.md"), "skill body\n").unwrap();
+    std::fs::create_dir_all(ws_root.join("nested/data/sessions")).unwrap();
+    std::fs::write(ws_root.join("nested/data/sessions/s.json"), "{\"v\":1}\n").unwrap();
+
+    let workspace = Workspace::open(&ws_root).unwrap();
+    let shared = WorkspaceTools::with_write_limits(
+        workspace,
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+    )
+    .with_storage(&ws_root, Some(&ws_root.join("nested/data")));
+
+    for path in [
+        ".tars",
+        ".tars/x",
+        ".tars/skills/a/SKILL.md",
+        ".TARS/x",
+        "./.tars/x",
+    ] {
+        let res = invoke(
+            &shared,
+            WorkspaceTool::WriteFile,
+            json!({"path": path, "content": "pwn"}),
+        )
+        .await;
+        assert_eq!(res.status, ToolResultStatus::Rejected, "{path}");
+        assert!(
+            res.output.content["error"]
+                .as_str()
+                .is_some_and(|error| error.contains(".tars directory")),
+            "{path}: {}",
+            res.output.content
+        );
+    }
+
+    invoke(
+        &shared,
+        WorkspaceTool::ReadFile,
+        json!({"path": ".tars/skills/a/SKILL.md"}),
+    )
+    .await;
+    let edit_skill = invoke(
+        &shared,
+        WorkspaceTool::EditFile,
+        json!({
+            "path": ".tars/skills/a/SKILL.md",
+            "edits": [{"old_text": "skill body", "new_text": "pwned"}]
+        }),
+    )
+    .await;
+    assert_eq!(edit_skill.status, ToolResultStatus::Rejected);
+    assert!(
+        edit_skill.output.content["error"]
+            .as_str()
+            .is_some_and(|error| error.contains(".tars directory"))
+    );
+
+    for path in [
+        "nested/data",
+        "nested/data/new.json",
+        "nested/data/sessions/s.json",
+    ] {
+        let res = invoke(
+            &shared,
+            WorkspaceTool::WriteFile,
+            json!({"path": path, "content": "pwn"}),
+        )
+        .await;
+        assert_eq!(res.status, ToolResultStatus::Rejected, "{path}");
+        assert!(
+            res.output.content["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("session store directory")),
+            "{path}: {}",
+            res.output.content
+        );
+    }
+
+    invoke(
+        &shared,
+        WorkspaceTool::ReadFile,
+        json!({"path": "nested/data/sessions/s.json"}),
+    )
+    .await;
+    let edit_store = invoke(
+        &shared,
+        WorkspaceTool::EditFile,
+        json!({
+            "path": "nested/data/sessions/s.json",
+            "edits": [{"old_text": "\"v\":1", "new_text": "\"v\":2"}]
+        }),
+    )
+    .await;
+    assert_eq!(edit_store.status, ToolResultStatus::Rejected);
+    assert!(
+        edit_store.output.content["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("session store directory"))
+    );
+
+    for path in [
+        ".tarsignore",
+        "sub/.tars/note.txt",
+        "nested/other.txt",
+        "nested/data_other/file.txt",
+    ] {
+        let res = invoke(
+            &shared,
+            WorkspaceTool::WriteFile,
+            json!({"path": path, "content": "ok\n"}),
+        )
+        .await;
+        assert_eq!(res.status, ToolResultStatus::Succeeded, "{path}");
+    }
+
+    // Store equal to workspace refuses every write.
+    let whole_shared = WorkspaceTools::with_write_limits(
+        Workspace::open(&ws_root).unwrap(),
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+    )
+    .with_storage(&ws_root, Some(&ws_root));
+    let whole_res = invoke(
+        &whole_shared,
+        WorkspaceTool::WriteFile,
+        json!({"path": "ordinary.txt", "content": "ok\n"}),
+    )
+    .await;
+    assert_eq!(whole_res.status, ToolResultStatus::Rejected);
+    assert!(
+        whole_res.output.content["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("session store directory"))
+    );
+
+    // Missing intermediate directory with `..` folds lexically for both
+    // `Subdir` and `WholeWorkspace` store detection.
+    let collapsed_subdir = WorkspaceTools::with_write_limits(
+        Workspace::open(&ws_root).unwrap(),
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+    )
+    .with_storage(&ws_root, Some(&ws_root.join("missing_dir/../store")));
+    let collapsed_subdir_res = invoke(
+        &collapsed_subdir,
+        WorkspaceTool::WriteFile,
+        json!({"path": "store/forged.json", "content": "x"}),
+    )
+    .await;
+    assert_eq!(collapsed_subdir_res.status, ToolResultStatus::Rejected);
+    assert!(
+        collapsed_subdir_res.output.content["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("session store directory"))
+    );
+
+    let collapsed_whole = WorkspaceTools::with_write_limits(
+        Workspace::open(&ws_root).unwrap(),
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+    )
+    .with_storage(&ws_root, Some(&ws_root.join("missing_dir/..")));
+    let collapsed_whole_res = invoke(
+        &collapsed_whole,
+        WorkspaceTool::WriteFile,
+        json!({"path": "ordinary.txt", "content": "x"}),
+    )
+    .await;
+    assert_eq!(collapsed_whole_res.status, ToolResultStatus::Rejected);
+    assert!(
+        collapsed_whole_res.output.content["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("session store directory"))
+    );
+
+    // Existing symlink followed by `..` resolves via canonicalize first (matching
+    // `SessionStore::new`), so `<ws>/ext_link/..` points outside the workspace.
+    let ext_base = tempfile::tempdir().unwrap();
+    let ext_sub = ext_base.path().join("sub");
+    std::fs::create_dir(&ext_sub).unwrap();
+    symlink(&ext_sub, ws_root.join("ext_link")).unwrap();
+    let ext_parent_shared = WorkspaceTools::with_write_limits(
+        Workspace::open(&ws_root).unwrap(),
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+    )
+    .with_storage(&ws_root, Some(&ws_root.join("ext_link/..")));
+    let ext_parent_res = invoke(
+        &ext_parent_shared,
+        WorkspaceTool::WriteFile,
+        json!({"path": "allowed_after_ext_link.txt", "content": "ok\n"}),
+    )
+    .await;
+    assert_eq!(ext_parent_res.status, ToolResultStatus::Succeeded);
+
+    // Store outside workspace leaves normal writes allowed.
+    let outside_dir = tempfile::tempdir().unwrap();
+    let outside_shared = WorkspaceTools::with_write_limits(
+        Workspace::open(&ws_root).unwrap(),
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+    )
+    .with_storage(&ws_root, Some(outside_dir.path()));
+    let outside_res = invoke(
+        &outside_shared,
+        WorkspaceTool::WriteFile,
+        json!({"path": "ordinary.txt", "content": "ok\n"}),
+    )
+    .await;
+    assert_eq!(outside_res.status, ToolResultStatus::Succeeded);
+    assert!(!has_temporary_files(dir.path()));
+}

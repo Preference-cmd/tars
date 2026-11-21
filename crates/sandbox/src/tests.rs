@@ -174,6 +174,164 @@ fn read_only_subpath_must_be_inside_a_writable_root() {
 }
 
 #[test]
+fn protected_read_only_path_protects_ancestors_and_handles_missing_and_outside_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    let ws = root.join("ws");
+    let other = root.join("other");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::create_dir(&other).unwrap();
+
+    // `root` must be in `write_roots`, even if present in `read_roots`.
+    let read_only_policy = SandboxPolicy::new(vec![ws.clone()], Vec::new()).unwrap();
+    assert!(matches!(
+        read_only_policy.with_protected_read_only_path(&ws, ws.join(".tars")),
+        Err(SandboxPolicyError::OutsideWritable(_))
+    ));
+
+    let policy = SandboxPolicy::new(vec![ws.clone()], vec![ws.clone()]).unwrap();
+    assert!(matches!(
+        policy.clone().with_protected_read_only_path(&ws, &ws),
+        Err(SandboxPolicyError::OutsideWritable(_))
+    ));
+    assert!(matches!(
+        policy
+            .clone()
+            .with_protected_read_only_path(&ws, other.join("store")),
+        Err(SandboxPolicyError::OutsideWritable(_))
+    ));
+
+    let nested = ws.join("sub/deep/store");
+    let protected = policy.with_protected_read_only_path(&ws, &nested).unwrap();
+    assert_eq!(protected.read_only_subpaths, vec![nested.clone()]);
+    assert_eq!(
+        protected.protected_entries,
+        vec![ws.join("sub"), ws.join("sub/deep"), nested]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn protected_read_only_path_tracks_in_root_symlink_and_allows_outside_symlink() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    let ws = root.join("ws");
+    let outside = root.join("outside");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+
+    let real_store = ws.join("nested/real_store");
+    let link_store = ws.join("link_store");
+    std::os::unix::fs::symlink("nested/real_store", &link_store).unwrap();
+    let outside_link = ws.join("outside_link");
+    std::os::unix::fs::symlink(&outside, &outside_link).unwrap();
+
+    let policy = SandboxPolicy::new(vec![ws.clone()], vec![ws.clone()])
+        .unwrap()
+        .with_protected_read_only_path(&ws, &link_store)
+        .unwrap()
+        .with_protected_read_only_path(&ws, &outside_link)
+        .unwrap();
+
+    assert!(policy.read_only_subpaths.contains(&link_store));
+    assert!(policy.read_only_subpaths.contains(&real_store));
+    assert!(policy.read_only_subpaths.contains(&outside_link));
+    assert!(!policy.read_only_subpaths.contains(&outside));
+    assert!(policy.protected_entries.contains(&link_store));
+    assert!(policy.protected_entries.contains(&ws.join("nested")));
+    assert!(policy.protected_entries.contains(&real_store));
+    assert!(policy.protected_entries.contains(&outside_link));
+}
+
+#[cfg(unix)]
+#[test]
+fn protected_read_only_path_protects_intermediate_symlinks_and_resolved_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    let ws = root.join("ws");
+    let outside = root.join("outside");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+
+    // Existing intermediate symlink inside workspace: `ws/a -> ws/real_a`.
+    std::fs::create_dir(ws.join("real_a")).unwrap();
+    std::os::unix::fs::symlink("real_a", ws.join("a")).unwrap();
+
+    // Dangling intermediate symlink inside workspace: `ws/dangling -> ws/missing_a`.
+    std::os::unix::fs::symlink("missing_a", ws.join("dangling")).unwrap();
+
+    // External intermediate symlink: `ws/ext -> outside`.
+    std::os::unix::fs::symlink(&outside, ws.join("ext")).unwrap();
+
+    // Symlink-out-and-back into a workspace subdirectory:
+    // `ws/bounce -> outside/back_dir`, `outside/back_dir/link -> ws/real_a`.
+    std::fs::create_dir(outside.join("back_dir")).unwrap();
+    std::os::unix::fs::symlink(ws.join("real_a"), outside.join("back_dir/link")).unwrap();
+    std::os::unix::fs::symlink(outside.join("back_dir"), ws.join("bounce")).unwrap();
+
+    let policy = SandboxPolicy::new(vec![ws.clone()], vec![ws.clone()])
+        .unwrap()
+        .with_protected_read_only_path(&ws, ws.join("a/b/store"))
+        .unwrap()
+        .with_protected_read_only_path(&ws, ws.join("dangling/b/store"))
+        .unwrap()
+        .with_protected_read_only_path(&ws, ws.join("ext/b/store"))
+        .unwrap()
+        .with_protected_read_only_path(&ws, ws.join("bounce/link/c/store"))
+        .unwrap();
+
+    // Both lexical and resolved chains are protected.
+    assert!(policy.protected_entries.contains(&ws.join("a")));
+    assert!(policy.protected_entries.contains(&ws.join("a/b")));
+    assert!(policy.protected_entries.contains(&ws.join("a/b/store")));
+    assert!(policy.read_only_subpaths.contains(&ws.join("a/b/store")));
+    assert!(policy.protected_entries.contains(&ws.join("real_a")));
+    assert!(policy.protected_entries.contains(&ws.join("real_a/b")));
+    assert!(
+        policy
+            .protected_entries
+            .contains(&ws.join("real_a/b/store"))
+    );
+    assert!(
+        policy
+            .read_only_subpaths
+            .contains(&ws.join("real_a/b/store"))
+    );
+
+    // Dangling intermediate symlink protects both link and missing target chain.
+    assert!(policy.protected_entries.contains(&ws.join("dangling")));
+    assert!(policy.protected_entries.contains(&ws.join("missing_a")));
+    assert!(
+        policy
+            .protected_entries
+            .contains(&ws.join("missing_a/b/store"))
+    );
+    assert!(
+        policy
+            .read_only_subpaths
+            .contains(&ws.join("missing_a/b/store"))
+    );
+
+    // External intermediate symlink keeps `ws/ext` protected without OutsideWritable error.
+    assert!(policy.protected_entries.contains(&ws.join("ext")));
+    assert!(!policy.read_only_subpaths.contains(&outside.join("b/store")));
+
+    // Symlink-out-and-back protects the target chain back inside the workspace.
+    assert!(policy.protected_entries.contains(&ws.join("bounce")));
+    assert!(policy.protected_entries.contains(&ws.join("real_a/c")));
+    assert!(
+        policy
+            .protected_entries
+            .contains(&ws.join("real_a/c/store"))
+    );
+    assert!(
+        policy
+            .read_only_subpaths
+            .contains(&ws.join("real_a/c/store"))
+    );
+}
+
+#[test]
 fn report_accepts_full_capabilities_and_partial_descendants() {
     let (_directory, policy) = policy();
     assert!(full_report().check(&policy).is_ok());
@@ -2017,5 +2175,254 @@ int main(int argc, char **argv) {
         assert!(!profile.contains("(allow file-read-metadata)"));
         assert!(!profile.contains("(allow mach-lookup"));
         assert!(!profile.contains("(subpath \"/usr\")"));
+    }
+
+    #[tokio::test]
+    async fn protected_read_only_path_denies_creating_missing_target() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = canonical(base.path()).join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+
+        let target = workspace.join("protected");
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_protected_read_only_path(&workspace, &target)
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+if mkdir "$ws/protected" 2>/dev/null; then exit 1; fi
+if touch "$ws/protected" 2>/dev/null; then exit 2; fi
+if ln -s "$ws/other" "$ws/protected" 2>/dev/null; then exit 3; fi
+printf ok > "$ws/other" || exit 4
+echo missing-protected-ok
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("missing-protected-ok"));
+        assert!(!target.exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("other")).unwrap(),
+            "ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_read_only_path_keeps_existing_subtree_read_only_and_unremovable() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = canonical(base.path()).join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(workspace.join("protected/sub")).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(workspace.join("protected/sub/file.txt"), "keep\n").unwrap();
+
+        let target = workspace.join("protected");
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_protected_read_only_path(&workspace, &target)
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+if ! grep -q keep "$ws/protected/sub/file.txt"; then exit 1; fi
+if printf x > "$ws/protected/new.txt" 2>/dev/null; then exit 2; fi
+if printf x > "$ws/protected/sub/file.txt" 2>/dev/null; then exit 3; fi
+if rm "$ws/protected/sub/file.txt" 2>/dev/null; then exit 4; fi
+if mv "$ws/protected" "$ws/protected_moved" 2>/dev/null; then exit 5; fi
+if rm -rf "$ws/protected" 2>/dev/null; then exit 6; fi
+echo existing-protected-ok
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("existing-protected-ok"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("protected/sub/file.txt")).unwrap(),
+            "keep\n"
+        );
+        assert!(!workspace.join("protected/new.txt").exists());
+        assert!(!workspace.join("protected_moved").exists());
+    }
+
+    #[tokio::test]
+    async fn protected_read_only_path_locks_intermediate_ancestors_while_siblings_stay_writable() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = canonical(base.path()).join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(workspace.join("sub/store")).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(workspace.join("sub/store/record.json"), "secret\n").unwrap();
+
+        let target = workspace.join("sub/store");
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_protected_read_only_path(&workspace, &target)
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+if ! grep -q secret "$ws/sub/store/record.json"; then exit 1; fi
+if printf x > "$ws/sub/store/record.json" 2>/dev/null; then exit 2; fi
+if printf x > "$ws/sub/store/new.json" 2>/dev/null; then exit 3; fi
+if mv "$ws/sub" "$ws/sub_bak" 2>/dev/null; then exit 4; fi
+if mv "$ws/sub/store" "$ws/sub/store_bak" 2>/dev/null; then exit 5; fi
+printf sibling > "$ws/sub/other.txt" || exit 6
+echo nested-protected-ok
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("nested-protected-ok"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("sub/store/record.json")).unwrap(),
+            "secret\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("sub/other.txt")).unwrap(),
+            "sibling"
+        );
+        assert!(!workspace.join("sub_bak").exists());
+        assert!(!workspace.join("sub/store_bak").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn protected_read_only_path_protects_in_workspace_symlink_targets() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = canonical(base.path()).join("workspace");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(workspace.join("real_target")).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(workspace.join("real_target/data.txt"), "keep\n").unwrap();
+        std::os::unix::fs::symlink(workspace.join("real_target"), workspace.join("link_target"))
+            .unwrap();
+
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_protected_read_only_path(&workspace, workspace.join("link_target"))
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+if ! grep -q keep "$ws/link_target/data.txt"; then exit 1; fi
+if printf x > "$ws/link_target/data.txt" 2>/dev/null; then exit 2; fi
+if printf x > "$ws/link_target/new.txt" 2>/dev/null; then exit 3; fi
+if printf x > "$ws/real_target/data.txt" 2>/dev/null; then exit 4; fi
+if printf x > "$ws/real_target/new.txt" 2>/dev/null; then exit 5; fi
+if rm "$ws/link_target" 2>/dev/null; then exit 6; fi
+if mv "$ws/real_target" "$ws/real_moved" 2>/dev/null; then exit 7; fi
+echo symlink-target-protected-ok
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("symlink-target-protected-ok"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("real_target/data.txt")).unwrap(),
+            "keep\n"
+        );
+        assert!(!workspace.join("real_target/new.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn protected_read_only_path_blocks_intermediate_symlink_bypass() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = canonical(base.path()).join("workspace");
+        let outside = canonical(base.path()).join("outside");
+        let private_tmp = base.path().join("private-tmp");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(workspace.join("real_a/b/store")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::create_dir(&private_tmp).unwrap();
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(workspace.join("real_a/b/store/item.txt"), "keep\n").unwrap();
+        std::os::unix::fs::symlink("real_a", workspace.join("a")).unwrap();
+        std::os::unix::fs::symlink("missing_a", workspace.join("dangling")).unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("ext")).unwrap();
+        std::fs::create_dir(outside.join("back_dir")).unwrap();
+        std::os::unix::fs::symlink(workspace.join("real_a"), outside.join("back_dir/link"))
+            .unwrap();
+        std::os::unix::fs::symlink(outside.join("back_dir"), workspace.join("bounce")).unwrap();
+
+        let policy = base_policy(&workspace, &private_tmp)
+            .with_protected_read_only_path(&workspace, workspace.join("a/b/store"))
+            .unwrap()
+            .with_protected_read_only_path(&workspace, workspace.join("dangling/b/store"))
+            .unwrap()
+            .with_protected_read_only_path(&workspace, workspace.join("ext/b/store"))
+            .unwrap()
+            .with_protected_read_only_path(&workspace, workspace.join("bounce/link/c/store"))
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let sandbox = open_sandbox();
+        let script = r#"set -u
+ws=$1
+if rm "$ws/a" 2>/dev/null; then exit 1; fi
+if mv "$ws/a" "$ws/a_old" 2>/dev/null; then exit 2; fi
+if printf pwn > "$ws/a/b/store/x" 2>/dev/null; then exit 3; fi
+if printf pwn > "$ws/real_a/b/store/x" 2>/dev/null; then exit 4; fi
+if rm "$ws/dangling" 2>/dev/null; then exit 5; fi
+if mkdir -p "$ws/missing_a/b/store" 2>/dev/null; then exit 6; fi
+if rm "$ws/ext" 2>/dev/null; then exit 7; fi
+if mv "$ws/ext" "$ws/ext_old" 2>/dev/null; then exit 8; fi
+if mkdir -p "$ws/real_a/c/store" 2>/dev/null; then exit 9; fi
+if printf pwn > "$ws/bounce/link/c/store/x" 2>/dev/null; then exit 10; fi
+if rm "$ws/bounce" 2>/dev/null; then exit 11; fi
+printf sibling > "$ws/real_a/sibling.txt" || exit 12
+echo intermediate-symlink-protected-ok
+"#;
+        let launch = bash_launch(script, &workspace, &private_tmp, &home, &[&workspace]);
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("intermediate-symlink-protected-ok"));
+        assert!(!workspace.join("real_a/b/store/x").exists());
+        assert!(!workspace.join("real_a/c").exists());
+        assert!(!workspace.join("missing_a").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("real_a/sibling.txt")).unwrap(),
+            "sibling"
+        );
     }
 }

@@ -58,6 +58,7 @@ pub(crate) struct PreparedCommand {
 }
 
 /// The result of one command attempt, including bounded output.
+#[derive(Debug)]
 pub(crate) struct CommandExecution {
     pub(crate) status: ToolResultStatus,
     pub(crate) content: Value,
@@ -106,10 +107,7 @@ impl CommandRuntime {
         let sandbox = sandbox.map(Arc::new);
         let temp_dir = tempfile::tempdir().map_err(CommandBindError::Temporary)?;
         let temp = std::fs::canonicalize(temp_dir.path()).map_err(CommandBindError::Temporary)?;
-        let storage = storage.map(|path| {
-            let absolute = std::path::absolute(&path).unwrap_or(path);
-            std::fs::canonicalize(&absolute).unwrap_or(absolute)
-        });
+        let storage = storage.map(|path| super::execute::project_storage_path(&path));
         Ok(Arc::new(Self {
             settings,
             sandbox,
@@ -144,25 +142,43 @@ impl CommandRuntime {
     }
 
     pub(super) fn policy(&self) -> Result<SandboxPolicy, String> {
-        let roots = [self.root.clone(), self.temp.clone()];
+        let storage_wraps_root = self
+            .storage
+            .as_ref()
+            .is_some_and(|storage| self.root.starts_with(storage));
+        let read_roots = vec![self.root.clone(), self.temp.clone()];
+        let write_roots = if storage_wraps_root {
+            vec![self.temp.clone()]
+        } else {
+            vec![self.root.clone(), self.temp.clone()]
+        };
         let network = match self.settings.network {
             CommandNetwork::None => NetworkAccess::None,
             CommandNetwork::Open => NetworkAccess::Open,
         };
-        let mut policy = SandboxPolicy::new(roots.to_vec(), roots.to_vec())
+        let mut policy = SandboxPolicy::new(read_roots, write_roots)
             .and_then(|policy| policy.with_git_metadata_protection(&self.root))
             .map_err(|error| error.to_string())?
             .with_read_scope(ReadScope::Host)
             .with_network(network);
-        // Records of other sessions may contain pasted secrets; the current
-        // store stays unreadable unless it overlaps a writable root.
-        if let Some(storage) = &self.storage
-            && !overlaps(storage, &self.root)
-            && !overlaps(storage, &self.temp)
-        {
+        if !storage_wraps_root {
             policy = policy
-                .with_denied_path(storage)
+                .with_protected_read_only_path(&self.root, self.root.join(".tars"))
                 .map_err(|error| error.to_string())?;
+        }
+        // Records of other sessions may contain pasted secrets; an external
+        // store stays unreadable unless it overlaps a writable root, while an
+        // in-workspace store stays read-only so commands cannot forge records.
+        if let Some(storage) = &self.storage {
+            if storage.starts_with(&self.root) && storage != &self.root {
+                policy = policy
+                    .with_protected_read_only_path(&self.root, storage)
+                    .map_err(|error| error.to_string())?;
+            } else if !overlaps(storage, &self.root) && !overlaps(storage, &self.temp) {
+                policy = policy
+                    .with_denied_path(storage)
+                    .map_err(|error| error.to_string())?;
+            }
         }
         Ok(policy)
     }
@@ -658,5 +674,241 @@ mod tests {
         assert_eq!(result.status, ToolResultStatus::Succeeded);
         assert_ne!(result.content["exit_code"], 0);
         assert!(!outside.exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_dot_tars_is_read_only_and_non_creatable_in_sandbox() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = CommandRuntime::bind(root.path(), CommandSettings::default(), None).unwrap();
+
+        // When `.tars` does not exist yet, creating it (including case variants on
+        // macOS) is denied while normal workspace writes succeed.
+        let missing_script = r#"set -u
+if mkdir .tars 2>/dev/null; then exit 1; fi
+if mkdir .TARS 2>/dev/null; then exit 2; fi
+if printf x > .tars 2>/dev/null; then exit 3; fi
+if printf x > .TARS 2>/dev/null; then exit 4; fi
+if mkdir -p .tars/skills/a 2>/dev/null; then exit 5; fi
+printf ok > normal.txt || exit 6
+echo missing-tars-ok
+"#;
+        let missing = run(
+            &runtime,
+            params(missing_script, None),
+            Duration::from_secs(5),
+            64 * 1024,
+        )
+        .await;
+        assert_eq!(missing.status, ToolResultStatus::Succeeded, "{missing:?}");
+        assert_eq!(missing.content["exit_code"], 0, "{missing:?}");
+        assert!(
+            missing.content["output"]
+                .as_str()
+                .unwrap()
+                .contains("missing-tars-ok")
+        );
+        assert!(!root.path().join(".tars").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("normal.txt")).unwrap(),
+            "ok"
+        );
+
+        // Once `.tars/skills/...` exists, reading it succeeds while modifying,
+        // creating, renaming or deleting `.tars` or its contents fails.
+        std::fs::create_dir_all(root.path().join(".tars/skills/alpha")).unwrap();
+        std::fs::write(
+            root.path().join(".tars/skills/alpha/SKILL.md"),
+            "---\nname: alpha\ndescription: test\n---\nbody\n",
+        )
+        .unwrap();
+        let runtime = CommandRuntime::bind(root.path(), CommandSettings::default(), None).unwrap();
+        let existing_script = r#"set -u
+if ! grep -q 'name: alpha' .tars/skills/alpha/SKILL.md; then exit 1; fi
+if printf pwn > .tars/skills/alpha/SKILL.md 2>/dev/null; then exit 2; fi
+if printf pwn > .TARS/skills/alpha/SKILL.md 2>/dev/null; then exit 3; fi
+if printf pwn > .tars/new.txt 2>/dev/null; then exit 4; fi
+if printf pwn > .TARS/new.txt 2>/dev/null; then exit 5; fi
+if mv .tars .tars_moved 2>/dev/null; then exit 6; fi
+if rm -rf .tars 2>/dev/null; then exit 7; fi
+echo existing-tars-ok
+"#;
+        let existing = run(
+            &runtime,
+            params(existing_script, None),
+            Duration::from_secs(5),
+            64 * 1024,
+        )
+        .await;
+        assert_eq!(existing.status, ToolResultStatus::Succeeded, "{existing:?}");
+        assert_eq!(existing.content["exit_code"], 0, "{existing:?}");
+        assert!(
+            existing.content["output"]
+                .as_str()
+                .unwrap()
+                .contains("existing-tars-ok")
+        );
+        assert!(
+            std::fs::read_to_string(root.path().join(".tars/skills/alpha/SKILL.md"))
+                .unwrap()
+                .contains("name: alpha")
+        );
+        assert!(!root.path().join(".tars/new.txt").exists());
+        assert!(!root.path().join(".tars_moved").exists());
+    }
+
+    #[tokio::test]
+    async fn in_workspace_store_is_read_only_and_ancestor_locked_in_sandbox() {
+        // Direct child store: `root/data`.
+        let root_direct = tempfile::tempdir().unwrap();
+        let store_direct = root_direct.path().join("data");
+        std::fs::create_dir_all(store_direct.join("sessions")).unwrap();
+        std::fs::write(store_direct.join("sessions/s1.json"), "{\"ok\":true}\n").unwrap();
+
+        let runtime = CommandRuntime::bind(
+            root_direct.path(),
+            CommandSettings::default(),
+            Some(store_direct.clone()),
+        )
+        .unwrap();
+        let direct_script = r#"set -u
+if ! grep -q '"ok":true' data/sessions/s1.json; then exit 1; fi
+if printf pwn > data/sessions/s1.json 2>/dev/null; then exit 2; fi
+if printf pwn > data/sessions/new.json 2>/dev/null; then exit 3; fi
+if mv data data_bak 2>/dev/null; then exit 4; fi
+if rm -rf data 2>/dev/null; then exit 5; fi
+printf ok > work.txt || exit 6
+echo direct-store-ok
+"#;
+        let direct = run(
+            &runtime,
+            params(direct_script, None),
+            Duration::from_secs(5),
+            64 * 1024,
+        )
+        .await;
+        assert_eq!(direct.status, ToolResultStatus::Succeeded, "{direct:?}");
+        assert_eq!(direct.content["exit_code"], 0, "{direct:?}");
+        assert!(
+            direct.content["output"]
+                .as_str()
+                .unwrap()
+                .contains("direct-store-ok")
+        );
+        assert_eq!(
+            std::fs::read_to_string(store_direct.join("sessions/s1.json")).unwrap(),
+            "{\"ok\":true}\n"
+        );
+        assert!(!store_direct.join("sessions/new.json").exists());
+        assert!(!root_direct.path().join("data_bak").exists());
+
+        // Nested store: `root/nested/data`.
+        let root_nested = tempfile::tempdir().unwrap();
+        let store_nested = root_nested.path().join("nested/data");
+        std::fs::create_dir_all(store_nested.join("sessions")).unwrap();
+        std::fs::write(store_nested.join("sessions/s2.json"), "{\"nested\":true}\n").unwrap();
+
+        let runtime = CommandRuntime::bind(
+            root_nested.path(),
+            CommandSettings::default(),
+            Some(store_nested.clone()),
+        )
+        .unwrap();
+        let nested_script = r#"set -u
+if ! grep -q '"nested":true' nested/data/sessions/s2.json; then exit 1; fi
+if printf pwn > nested/data/sessions/s2.json 2>/dev/null; then exit 2; fi
+if printf pwn > nested/data/new.json 2>/dev/null; then exit 3; fi
+if mv nested/data nested/data_bak 2>/dev/null; then exit 4; fi
+if mv nested nested_bak 2>/dev/null; then exit 5; fi
+if rm -rf nested/data 2>/dev/null; then exit 6; fi
+printf sibling > nested/sibling.txt || exit 7
+echo nested-store-ok
+"#;
+        let nested = run(
+            &runtime,
+            params(nested_script, None),
+            Duration::from_secs(5),
+            64 * 1024,
+        )
+        .await;
+        assert_eq!(nested.status, ToolResultStatus::Succeeded, "{nested:?}");
+        assert_eq!(nested.content["exit_code"], 0, "{nested:?}");
+        assert!(
+            nested.content["output"]
+                .as_str()
+                .unwrap()
+                .contains("nested-store-ok")
+        );
+        assert_eq!(
+            std::fs::read_to_string(store_nested.join("sessions/s2.json")).unwrap(),
+            "{\"nested\":true}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root_nested.path().join("nested/sibling.txt")).unwrap(),
+            "sibling"
+        );
+        assert!(!root_nested.path().join("nested_bak").exists());
+    }
+
+    #[tokio::test]
+    async fn storage_equal_or_wrapping_workspace_makes_entire_workspace_read_only() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("existing.txt"), "keep\n").unwrap();
+        let runtime = CommandRuntime::bind(
+            root.path(),
+            CommandSettings::default(),
+            Some(root.path().to_path_buf()),
+        )
+        .unwrap();
+
+        let script = r#"set -u
+if ! grep -q keep existing.txt; then exit 1; fi
+if printf pwn > existing.txt 2>/dev/null; then exit 2; fi
+if printf pwn > new.txt 2>/dev/null; then exit 3; fi
+if mkdir subdir 2>/dev/null; then exit 4; fi
+echo whole-workspace-ro-ok
+"#;
+        let result = run(
+            &runtime,
+            params(script, None),
+            Duration::from_secs(5),
+            64 * 1024,
+        )
+        .await;
+        assert_eq!(result.status, ToolResultStatus::Succeeded, "{result:?}");
+        assert_eq!(result.content["exit_code"], 0, "{result:?}");
+        assert!(
+            result.content["output"]
+                .as_str()
+                .unwrap()
+                .contains("whole-workspace-ro-ok")
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("existing.txt")).unwrap(),
+            "keep\n"
+        );
+        assert!(!root.path().join("new.txt").exists());
+        assert!(!root.path().join("subdir").exists());
+    }
+
+    #[test]
+    fn outside_storage_uses_denied_paths_without_extra_read_only_subpaths() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let outside = base.path().join("store");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+
+        let runtime = CommandRuntime::bind(
+            &workspace,
+            CommandSettings::default(),
+            Some(outside.clone()),
+        )
+        .unwrap();
+        let policy = runtime.policy().unwrap();
+        let [_, _, read_only_subpaths, _, denied_paths] =
+            crate::sandbox::test_support::policy_paths(&policy);
+        let canonical_outside = outside.canonicalize().unwrap();
+        assert!(denied_paths.contains(&canonical_outside));
+        assert!(!read_only_subpaths.contains(&canonical_outside));
     }
 }

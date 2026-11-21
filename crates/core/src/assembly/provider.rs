@@ -207,12 +207,15 @@ pub(crate) fn assemble(
             #[cfg(test)]
             let command = match command_sandbox {
                 Some(sandbox) => crate::tools::CommandRuntime::bind_with_sandbox(
-                    root, settings, sandbox, storage,
+                    root,
+                    settings,
+                    sandbox,
+                    storage.clone(),
                 ),
-                None => crate::tools::CommandRuntime::bind(root, settings, storage),
+                None => crate::tools::CommandRuntime::bind(root, settings, storage.clone()),
             };
             #[cfg(not(test))]
-            let command = crate::tools::CommandRuntime::bind(root, settings, storage);
+            let command = crate::tools::CommandRuntime::bind(root, settings, storage.clone());
             let command =
                 command.map_err(|error| AssemblyError::CommandUnavailable(error.to_string()))?;
             // Creating a session fails closed without a backend; reopening may
@@ -260,7 +263,7 @@ pub(crate) fn assemble(
         let tool_limits = definition.tool_limits.clone();
         let write_limits = definition.write_limits.unwrap_or_default();
         let settings = command_settings.unwrap_or_default();
-        Some(match (command, search) {
+        let workspace_tools = match (command, search) {
             (None, None) => {
                 WorkspaceTools::with_write_limits(workspace, tool_limits, write_limits, tools)
             }
@@ -281,7 +284,9 @@ pub(crate) fn assemble(
                 command,
                 search,
             ),
-        })
+        }
+        .with_storage(root, storage.as_deref());
+        Some(workspace_tools)
     };
     // Tests may substitute only the protocol gateway, so the retry and
     // counting layers still wrap the fixture.

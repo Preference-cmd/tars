@@ -282,6 +282,215 @@ async fn direct_modes_refuse_writes_into_version_control_metadata() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_access_refuses_writes_into_dot_tars_and_in_workspace_store() {
+    // 1. Direct child store (`root/data` -> `root/data/sessions`) + `.tars` + `.TARS` + normal file.
+    {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("data");
+        std::fs::create_dir_all(root.path().join(".tars/skills/a")).unwrap();
+        std::fs::write(
+            root.path().join(".tars/skills/a/SKILL.md"),
+            "---\nname: a\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("normal.txt"), "before\n").unwrap();
+        std::fs::create_dir_all(store.join("sessions")).unwrap();
+        std::fs::write(store.join("sessions/existing.json"), "{\"v\":1}\n").unwrap();
+
+        let replies = vec![
+            Reply::Calls(vec![
+                ScriptedToolCall {
+                    name: "read_file".into(),
+                    arguments: json!({"path": ".tars/skills/a/SKILL.md"}),
+                },
+                ScriptedToolCall {
+                    name: "read_file".into(),
+                    arguments: json!({"path": "data/sessions/existing.json"}),
+                },
+                ScriptedToolCall {
+                    name: "read_file".into(),
+                    arguments: json!({"path": "normal.txt"}),
+                },
+            ]),
+            Reply::Calls(vec![
+                ScriptedToolCall {
+                    name: "write_file".into(),
+                    arguments: json!({"path": ".tars", "content": "pwn"}),
+                },
+                ScriptedToolCall {
+                    name: "write_file".into(),
+                    arguments: json!({"path": ".tars/x", "content": "pwn"}),
+                },
+                ScriptedToolCall {
+                    name: "edit_file".into(),
+                    arguments: json!({
+                        "path": ".tars/skills/a/SKILL.md",
+                        "edits": [{"old_text": "body", "new_text": "pwned"}]
+                    }),
+                },
+                ScriptedToolCall {
+                    name: "write_file".into(),
+                    arguments: json!({"path": ".TARS/x", "content": "pwn"}),
+                },
+                ScriptedToolCall {
+                    name: "write_file".into(),
+                    arguments: json!({"path": "data/sessions/forged.json", "content": "{}"}),
+                },
+                ScriptedToolCall {
+                    name: "edit_file".into(),
+                    arguments: json!({
+                        "path": "data/sessions/existing.json",
+                        "edits": [{"old_text": "\"v\":1", "new_text": "\"v\":2"}]
+                    }),
+                },
+                ScriptedToolCall {
+                    name: "edit_file".into(),
+                    arguments: json!({
+                        "path": "normal.txt",
+                        "edits": [{"old_text": "before", "new_text": "after"}]
+                    }),
+                },
+            ]),
+            Reply::Answer,
+        ];
+
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let host = SessionHost::new(Some(store.clone()));
+        let mut def = base_definition(&fixture.endpoint, root.path());
+        def.max_tool_calls = 16;
+        def.permission_mode = Some(PermissionMode::FullAccess);
+        let session = host
+            .create(PreparedCreate::persistent(def, Context::default()))
+            .await
+            .unwrap();
+
+        let work = submit(&session, "full access protected paths");
+        let obs = finish(&session, &work).await;
+        assert_eq!(obs.tools.calls.len(), 10);
+        for idx in 0..=2 {
+            assert_eq!(
+                obs.tools.calls[idx].status,
+                Some(ToolResultStatus::Succeeded)
+            );
+        }
+        for idx in 3..=8 {
+            assert_eq!(
+                obs.tools.calls[idx].status,
+                Some(ToolResultStatus::Rejected),
+                "call {idx} ({}) must be rejected",
+                obs.tools.calls[idx].tool_name
+            );
+        }
+        assert_eq!(obs.tools.calls[9].status, Some(ToolResultStatus::Succeeded));
+        assert!(!root.path().join(".tars/x").exists());
+        assert!(!store.join("sessions/forged.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(store.join("sessions/existing.json")).unwrap(),
+            "{\"v\":1}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("normal.txt")).unwrap(),
+            "after\n"
+        );
+        host.close(&session.target(), ClosePolicy::DiscardLocal)
+            .await
+            .unwrap();
+    }
+
+    // 2. Nested in-workspace store (`root/nested/data` -> `root/nested/data/sessions`)
+    // blocks store writes while leaving `nested/other.txt` writable.
+    {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("nested/data");
+        let replies = vec![
+            Reply::Calls(vec![
+                ScriptedToolCall {
+                    name: "write_file".into(),
+                    arguments: json!({"path": "nested/data/sessions/forged.json", "content": "{}"}),
+                },
+                ScriptedToolCall {
+                    name: "write_file".into(),
+                    arguments: json!({"path": "nested/other.txt", "content": "ok\n"}),
+                },
+            ]),
+            Reply::Answer,
+        ];
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let host = SessionHost::new(Some(store.clone()));
+        let mut def = base_definition(&fixture.endpoint, root.path());
+        def.permission_mode = Some(PermissionMode::FullAccess);
+        let session = host
+            .create(PreparedCreate::persistent(def, Context::default()))
+            .await
+            .unwrap();
+        let work = submit(&session, "nested store");
+        let obs = finish(&session, &work).await;
+        assert_eq!(obs.tools.calls.len(), 2);
+        assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+        assert_eq!(obs.tools.calls[1].status, Some(ToolResultStatus::Succeeded));
+        assert!(!store.join("sessions/forged.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("nested/other.txt")).unwrap(),
+            "ok\n"
+        );
+        host.close(&session.target(), ClosePolicy::DiscardLocal)
+            .await
+            .unwrap();
+    }
+
+    // 3. Store directory equal to workspace root (`dir/sessions` == `workspace_root`)
+    // refuses all writes.
+    {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("sessions");
+        std::fs::create_dir_all(&root).unwrap();
+        let replies = vec![call_write("ordinary.txt", "blocked\n"), Reply::Answer];
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let host = SessionHost::new(Some(base.path().to_path_buf()));
+        let mut def = base_definition(&fixture.endpoint, &root);
+        def.permission_mode = Some(PermissionMode::FullAccess);
+        let session = host
+            .create(PreparedCreate::persistent(def, Context::default()))
+            .await
+            .unwrap();
+        let work = submit(&session, "store equals root");
+        let obs = finish(&session, &work).await;
+        assert_eq!(obs.tools.calls.len(), 1);
+        assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+        assert!(!root.join("ordinary.txt").exists());
+        host.close(&session.target(), ClosePolicy::DiscardLocal)
+            .await
+            .unwrap();
+    }
+
+    // 4. External store leaves normal workspace writes unaffected.
+    {
+        let root = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let replies = vec![call_write("ordinary.txt", "allowed\n"), Reply::Answer];
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let host = SessionHost::new(Some(store.path().to_path_buf()));
+        let mut def = base_definition(&fixture.endpoint, root.path());
+        def.permission_mode = Some(PermissionMode::FullAccess);
+        let session = host
+            .create(PreparedCreate::persistent(def, Context::default()))
+            .await
+            .unwrap();
+        let work = submit(&session, "external store");
+        let obs = finish(&session, &work).await;
+        assert_eq!(obs.tools.calls.len(), 1);
+        assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("ordinary.txt")).unwrap(),
+            "allowed\n"
+        );
+        host.close(&session.target(), ClosePolicy::DiscardLocal)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wm05_core_allow_deny_and_batch_ordering() {
     let root = tempfile::tempdir().unwrap();
     let replies = vec![

@@ -334,6 +334,32 @@ fn reject_vcs_metadata(tool: &str, components: &[String]) -> Result<(), Operatio
     }
 }
 
+/// Refuse writes into workspace-private `.tars/` or an in-workspace session store.
+///
+/// Both remain read-only to write tools in every permission mode, before
+/// read-before-write checks and confirmation prompts.
+#[cfg(unix)]
+fn reject_protected_workspace_paths(
+    tool: &str,
+    components: &[String],
+    protected_storage: Option<&super::execute::ProtectedStorage>,
+) -> Result<(), OperationError> {
+    if components
+        .first()
+        .is_some_and(|name| name.eq_ignore_ascii_case(".tars"))
+    {
+        return Err(OperationError::Rejected(format!(
+            "{tool} cannot write inside .tars directory"
+        )));
+    }
+    if protected_storage.is_some_and(|storage| storage.contains_components(components)) {
+        return Err(OperationError::Rejected(format!(
+            "{tool} cannot write inside the session store directory"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 pub(crate) fn precheck_write(
     workspace: &Workspace,
@@ -341,6 +367,7 @@ pub(crate) fn precheck_write(
     limits: &WorkspaceToolLimits,
     write_limits: &WriteToolLimits,
     observations: &Mutex<HashMap<String, FileVersion>>,
+    protected_storage: Option<&super::execute::ProtectedStorage>,
     control: &OperationControl,
 ) -> Result<PreparedWrite, OperationError> {
     control.check()?;
@@ -351,6 +378,7 @@ pub(crate) fn precheck_write(
         ));
     }
     reject_vcs_metadata("write_file", &components)?;
+    reject_protected_workspace_paths("write_file", &components, protected_storage)?;
     let normalized = components.join("/");
     let parent_components: Vec<String> = components[..components.len() - 1]
         .iter()
@@ -483,6 +511,7 @@ pub(crate) fn precheck_edit(
     limits: &WorkspaceToolLimits,
     write_limits: &WriteToolLimits,
     observations: &Mutex<HashMap<String, FileVersion>>,
+    protected_storage: Option<&super::execute::ProtectedStorage>,
     control: &OperationControl,
 ) -> Result<PreparedWrite, OperationError> {
     control.check()?;
@@ -493,6 +522,7 @@ pub(crate) fn precheck_edit(
         ));
     }
     reject_vcs_metadata("edit_file", &components)?;
+    reject_protected_workspace_paths("edit_file", &components, protected_storage)?;
     let normalized = components.join("/");
     let parent_components: Vec<String> = components[..components.len() - 1]
         .iter()
@@ -807,6 +837,7 @@ pub(crate) fn precheck_write(
     _limits: &WorkspaceToolLimits,
     _write_limits: &WriteToolLimits,
     _observations: &Mutex<HashMap<String, FileVersion>>,
+    _protected_storage: Option<&super::execute::ProtectedStorage>,
     _control: &OperationControl,
 ) -> Result<PreparedWrite, OperationError> {
     Err(WorkspaceError::UnsupportedPlatform.into())
@@ -819,6 +850,7 @@ pub(crate) fn precheck_edit(
     _limits: &WorkspaceToolLimits,
     _write_limits: &WriteToolLimits,
     _observations: &Mutex<HashMap<String, FileVersion>>,
+    _protected_storage: Option<&super::execute::ProtectedStorage>,
     _control: &OperationControl,
 ) -> Result<PreparedWrite, OperationError> {
     Err(WorkspaceError::UnsupportedPlatform.into())
@@ -846,7 +878,15 @@ fn write_operation(
     control: &OperationControl,
     #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
 ) -> Result<Value, OperationError> {
-    let prepared = precheck_write(workspace, p, limits, write_limits, observations, control)?;
+    let prepared = precheck_write(
+        workspace,
+        p,
+        limits,
+        write_limits,
+        observations,
+        None,
+        control,
+    )?;
     execute_prepared_write(
         workspace,
         &prepared,
@@ -868,7 +908,15 @@ fn edit_operation(
     control: &OperationControl,
     #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
 ) -> Result<Value, OperationError> {
-    let prepared = precheck_edit(workspace, p, limits, write_limits, observations, control)?;
+    let prepared = precheck_edit(
+        workspace,
+        p,
+        limits,
+        write_limits,
+        observations,
+        None,
+        control,
+    )?;
     execute_prepared_write(
         workspace,
         &prepared,

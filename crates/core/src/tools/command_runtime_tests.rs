@@ -7,7 +7,7 @@
 use super::command::{CommandRuntime, bounded_timeout};
 use super::parameters::CommandParams;
 use crate::definition::{CommandSettings, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
-use crate::sandbox::test_support::{RecordingBackend, denied_paths};
+use crate::sandbox::test_support::{RecordingBackend, denied_paths, policy_paths};
 use crate::sandbox::{
     BackendId, BackendReport, Capability, Limitation, ReadScope, Sandbox, SandboxUnavailable,
 };
@@ -227,6 +227,49 @@ fn storage_denial_is_skipped_only_when_it_overlaps_a_writable_root() {
         denied_paths(&policy).to_vec(),
         vec![outside.canonicalize().unwrap()]
     );
+    assert!(
+        !policy_paths(&policy)[2].contains(&outside.canonicalize().unwrap()),
+        "outside store must stay in denied_paths, not read_only_subpaths"
+    );
+
+    let root_canon = root.path().canonicalize().unwrap();
+    assert!(policy_paths(&policy)[2].contains(&root_canon.join(".tars")));
+    assert!(policy_paths(&policy)[3].contains(&root_canon.join(".tars")));
+
+    let equal_runtime = recording_runtime(root.path(), Some(root.path().to_path_buf()));
+    let equal_policy = equal_runtime.policy().unwrap();
+    assert!(policy_paths(&equal_policy)[0].contains(&root_canon));
+    assert!(!policy_paths(&equal_policy)[1].contains(&root_canon));
+
+    // Missing intermediate directory with `..` folds lexically before projection.
+    let collapsed_store_runtime =
+        recording_runtime(root.path(), Some(root.path().join("missing_dir/../store")));
+    let collapsed_store_policy = collapsed_store_runtime.policy().unwrap();
+    assert!(policy_paths(&collapsed_store_policy)[2].contains(&root_canon.join("store")));
+    assert!(policy_paths(&collapsed_store_policy)[3].contains(&root_canon.join("store")));
+
+    let collapsed_root_runtime =
+        recording_runtime(root.path(), Some(root.path().join("missing_dir/..")));
+    let collapsed_root_policy = collapsed_root_runtime.policy().unwrap();
+    assert!(policy_paths(&collapsed_root_policy)[0].contains(&root_canon));
+    assert!(!policy_paths(&collapsed_root_policy)[1].contains(&root_canon));
+
+    // Existing symlink followed by `..` resolves like `SessionStore::new`
+    // (canonicalize first) rather than lexically collapsing back to `root`.
+    #[cfg(unix)]
+    {
+        let ext_base = tempfile::tempdir().unwrap();
+        let ext_sub = ext_base.path().join("sub");
+        std::fs::create_dir(&ext_sub).unwrap();
+        std::os::unix::fs::symlink(&ext_sub, root.path().join("ext_link")).unwrap();
+        let ext_runtime = recording_runtime(root.path(), Some(root.path().join("ext_link/..")));
+        let ext_policy = ext_runtime.policy().unwrap();
+        assert!(policy_paths(&ext_policy)[1].contains(&root_canon));
+        assert_eq!(
+            denied_paths(&ext_policy).to_vec(),
+            vec![ext_base.path().canonicalize().unwrap()]
+        );
+    }
 }
 
 #[test]

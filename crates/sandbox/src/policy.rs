@@ -1,5 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
+const MAX_SYMLINK_PROTECTION_DEPTH: usize = 32;
+
 /// Network access requested by a sandbox policy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -118,6 +120,97 @@ impl SandboxPolicy {
         {
             self.read_only_subpaths.push(resolved);
         }
+        normalize(&mut self.read_only_subpaths);
+        Ok(self)
+    }
+
+    /// Keep a path inside a writable root read-only and non-modifiable.
+    ///
+    /// `root` must resolve to an existing directory inside `write_roots`.
+    /// `path` is aligned onto `root` without dereferencing intermediate or leaf
+    /// symlinks inside `root`, and must fall strictly inside `root` (missing
+    /// intermediate or leaf directories are allowed).
+    ///
+    /// Every lexical component strictly below `root` — including intermediate
+    /// directories, intermediate symlinks, and the leaf entry — is added to
+    /// `protected_entries` so a command cannot rename, delete, or replace an
+    /// ancestor or symlink to bypass the protection, while sibling entries under
+    /// those intermediate directories remain writable. The final lexical path is
+    /// also added to `read_only_subpaths` so its entire subtree stays read-only.
+    /// Whenever the final path or any intermediate component is a symlink whose
+    /// normalized target falls inside a writable root, that target chain is
+    /// recursively protected by the same rules; symlinks pointing outside
+    /// `write_roots` still keep their in-root link entry protected without
+    /// failing with [`SandboxPolicyError::OutsideWritable`].
+    pub fn with_protected_read_only_path(
+        self,
+        root: impl AsRef<Path>,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, SandboxPolicyError> {
+        let root = canonical_directory(root.as_ref())?;
+        if !self.write_roots.contains(&root) {
+            return Err(SandboxPolicyError::OutsideWritable(root));
+        }
+        let path = path.as_ref();
+        validate_path(path)?;
+        let Some(rel) = split_under_root(&root, path) else {
+            let projected = canonical_or_projected(path)?;
+            return Err(SandboxPolicyError::OutsideWritable(projected));
+        };
+        if rel.is_empty() {
+            return Err(SandboxPolicyError::OutsideWritable(root));
+        }
+        let mut visited = std::collections::HashSet::new();
+        self.protect_read_only_within_root(&root, &rel, &mut visited, 0)
+    }
+
+    fn protect_read_only_within_root(
+        mut self,
+        root: &Path,
+        rel_components: &[std::ffi::OsString],
+        visited: &mut std::collections::HashSet<PathBuf>,
+        depth: usize,
+    ) -> Result<Self, SandboxPolicyError> {
+        if rel_components.is_empty() || depth > MAX_SYMLINK_PROTECTION_DEPTH {
+            return Ok(self);
+        }
+        let lexical_target = rel_components
+            .iter()
+            .fold(root.to_path_buf(), |path, part| path.join(part));
+        validate_path(&lexical_target)?;
+        if !visited.insert(lexical_target) {
+            return Ok(self);
+        }
+
+        let mut current = root.to_path_buf();
+        let last_index = rel_components.len() - 1;
+        for (index, part) in rel_components.iter().enumerate() {
+            current.push(part);
+            validate_path(&current)?;
+            self.protected_entries.push(current.clone());
+            if index == last_index {
+                self.read_only_subpaths.push(current.clone());
+            }
+
+            if let Some(target) = symlink_target(&current) {
+                let target_path = rel_components[index + 1..]
+                    .iter()
+                    .fold(target, |path, rest| path.join(rest));
+                let normalized = lexical_normalize(&target_path);
+                if validate_path(&normalized).is_ok()
+                    && let Some((target_root, target_rel)) =
+                        find_containing_write_root(&self.write_roots, &normalized, depth + 1)
+                {
+                    self = self.protect_read_only_within_root(
+                        &target_root,
+                        &target_rel,
+                        visited,
+                        depth + 1,
+                    )?;
+                }
+            }
+        }
+        normalize(&mut self.protected_entries);
         normalize(&mut self.read_only_subpaths);
         Ok(self)
     }
@@ -379,6 +472,111 @@ fn symlink_target(path: &Path) -> Option<PathBuf> {
     } else {
         Some(path.parent()?.join(target))
     }
+}
+
+fn split_under_root(root: &Path, path: &Path) -> Option<Vec<std::ffi::OsString>> {
+    if let Ok(rel) = path.strip_prefix(root) {
+        return Some(
+            rel.components()
+                .filter_map(|component| match component {
+                    Component::Normal(name) => Some(name.to_os_string()),
+                    _ => None,
+                })
+                .collect(),
+        );
+    }
+    let mut prefix = PathBuf::new();
+    let mut iter = path.components();
+    while let Some(component) = iter.next() {
+        prefix.push(component.as_os_str());
+        if matches!(component, Component::Normal(_))
+            && let Ok(canon) = std::fs::canonicalize(&prefix)
+            && canon == root
+        {
+            let rel = iter
+                .filter_map(|part| match part {
+                    Component::Normal(name) => Some(name.to_os_string()),
+                    _ => None,
+                })
+                .collect();
+            return Some(rel);
+        }
+    }
+    None
+}
+
+fn find_containing_write_root(
+    write_roots: &[PathBuf],
+    path: &Path,
+    depth: usize,
+) -> Option<(PathBuf, Vec<std::ffi::OsString>)> {
+    if depth > MAX_SYMLINK_PROTECTION_DEPTH {
+        return None;
+    }
+    let mut best: Option<(PathBuf, Vec<std::ffi::OsString>)> = None;
+    for writable in write_roots {
+        if let Some(rel) = split_under_root(writable, path)
+            && !rel.is_empty()
+            && best.as_ref().is_none_or(|(best_root, _)| {
+                writable.components().count() > best_root.components().count()
+            })
+        {
+            best = Some((writable.clone(), rel));
+        }
+    }
+    if best.is_some() {
+        return best;
+    }
+
+    // Handle `symlink-out-and-back`: `path` may live outside `write_roots`
+    // while an intermediate component resolves back into a `write_root`
+    // subdirectory (or dangles back into one).
+    let mut prefix = PathBuf::new();
+    let components: Vec<_> = path.components().collect();
+    for (index, component) in components.iter().enumerate() {
+        prefix.push(component.as_os_str());
+        if !matches!(component, Component::Normal(_)) {
+            continue;
+        }
+        let tail = &components[index + 1..];
+        if let Ok(canon) = std::fs::canonicalize(&prefix) {
+            let mut matched: Option<(PathBuf, Vec<std::ffi::OsString>)> = None;
+            for writable in write_roots {
+                if let Ok(inside) = canon.strip_prefix(writable) {
+                    let mut rel: Vec<std::ffi::OsString> = inside
+                        .components()
+                        .filter_map(|part| match part {
+                            Component::Normal(name) => Some(name.to_os_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    rel.extend(tail.iter().filter_map(|part| match part {
+                        Component::Normal(name) => Some(name.to_os_string()),
+                        _ => None,
+                    }));
+                    if !rel.is_empty()
+                        && matched.as_ref().is_none_or(|(best_root, _)| {
+                            writable.components().count() > best_root.components().count()
+                        })
+                    {
+                        matched = Some((writable.clone(), rel));
+                    }
+                }
+            }
+            if matched.is_some() {
+                return matched;
+            }
+        } else if let Some(target) = symlink_target(&prefix) {
+            let next = tail
+                .iter()
+                .fold(target, |acc, part| acc.join(part.as_os_str()));
+            let normalized = lexical_normalize(&next);
+            if validate_path(&normalized).is_ok() {
+                return find_containing_write_root(write_roots, &normalized, depth + 1);
+            }
+        }
+    }
+    None
 }
 
 /// Remove `.` and `..` without touching the filesystem.

@@ -244,6 +244,7 @@ impl ToolBatchProcessor for PrecheckProcessor {
                         tools.limits(),
                         tools.write_limits(),
                         tools.observations(),
+                        tools.protected_storage(),
                         &worker_control,
                     ),
                     Params::Edit(p) => precheck_edit(
@@ -252,6 +253,7 @@ impl ToolBatchProcessor for PrecheckProcessor {
                         tools.limits(),
                         tools.write_limits(),
                         tools.observations(),
+                        tools.protected_storage(),
                         &worker_control,
                     ),
                     _ => unreachable!(),

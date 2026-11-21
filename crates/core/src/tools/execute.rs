@@ -15,6 +15,7 @@ use causa::kernel::{
     CallControl, Tool, ToolCallContext, ToolDefinition, ToolOutput, ToolResultPayload,
     ToolResultStatus,
 };
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -36,6 +37,110 @@ pub(crate) struct PreparedWrite {
     pub(crate) bytes_written: usize,
 }
 
+/// Restriction derived when the session store overlaps the workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProtectedStorage {
+    /// The store equals or wraps the workspace root, so all writes are refused.
+    WholeWorkspace,
+    /// The store lives inside the workspace at these relative components.
+    Subdir(Vec<String>),
+}
+
+impl ProtectedStorage {
+    pub(crate) fn resolve(workspace_root: &Path, storage: &Path) -> Option<Self> {
+        let root = std::fs::canonicalize(workspace_root).ok()?;
+        let absolute = std::path::absolute(storage).ok()?;
+        let projected = if let Ok(canonical) = std::fs::canonicalize(&absolute) {
+            canonical
+        } else {
+            let normalized = normalize_lexical(&absolute);
+            canonical_or_projected(&normalized)
+        };
+        if root.starts_with(&projected) {
+            return Some(Self::WholeWorkspace);
+        }
+        let rel = projected.strip_prefix(&root).ok()?;
+        let components = rel
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => name.to_str().map(str::to_owned),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if components.is_empty() {
+            Some(Self::WholeWorkspace)
+        } else {
+            Some(Self::Subdir(components))
+        }
+    }
+
+    pub(crate) fn contains_components(&self, components: &[String]) -> bool {
+        match self {
+            Self::WholeWorkspace => true,
+            Self::Subdir(prefix) => {
+                components.len() >= prefix.len()
+                    && prefix
+                        .iter()
+                        .zip(components.iter())
+                        .all(|(left, right)| component_matches(left, right))
+            }
+        }
+    }
+}
+
+fn component_matches(left: &str, right: &str) -> bool {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        left.eq_ignore_ascii_case(right)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        left == right
+    }
+}
+
+pub(super) fn project_storage_path(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Ok(canonical) = std::fs::canonicalize(&absolute) {
+        return canonical;
+    }
+    let normalized = normalize_lexical(&absolute);
+    canonical_or_projected(&normalized)
+}
+
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn canonical_or_projected(path: &Path) -> PathBuf {
+    let mut tail = Vec::new();
+    let mut current = path.to_path_buf();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(&current) {
+            let mut projected = canonical;
+            for name in tail.iter().rev() {
+                projected.push(name);
+            }
+            return projected;
+        }
+        let Some(name) = current.file_name() else {
+            return path.to_path_buf();
+        };
+        tail.push(name.to_os_string());
+        current.pop();
+    }
+}
+
 /// Fixed workspace resources reused by independently bound work wrappers.
 pub struct WorkspaceTools {
     workspace: Arc<Workspace>,
@@ -44,6 +149,7 @@ pub struct WorkspaceTools {
     command_settings: CommandSettings,
     pub(super) command: Option<Arc<super::CommandRuntime>>,
     pub(super) search: Option<Arc<super::SearchRuntime>>,
+    protected_storage: Option<ProtectedStorage>,
     outside_sandbox_grants: Arc<crate::permission::OutsideSandboxGrants>,
     pub(super) local: Arc<Semaphore>,
     host: Arc<ToolResources>,
@@ -77,6 +183,20 @@ impl WorkspaceTools {
     }
     pub(crate) fn workspace(&self) -> &Workspace {
         &self.workspace
+    }
+    pub(crate) fn protected_storage(&self) -> Option<&ProtectedStorage> {
+        self.protected_storage.as_ref()
+    }
+    pub(crate) fn with_storage(
+        mut self: Arc<Self>,
+        workspace_root: &Path,
+        storage: Option<&Path>,
+    ) -> Arc<Self> {
+        let protected = storage.and_then(|path| ProtectedStorage::resolve(workspace_root, path));
+        Arc::get_mut(&mut self)
+            .expect("WorkspaceTools is uniquely owned during construction")
+            .protected_storage = protected;
+        self
     }
     pub(crate) fn host(&self) -> &ToolResources {
         &self.host
@@ -196,6 +316,7 @@ impl WorkspaceTools {
             command_settings,
             command,
             search,
+            protected_storage: None,
             outside_sandbox_grants: crate::permission::OutsideSandboxGrants::new(),
             host,
             counters: Arc::new(Counters::default()),
