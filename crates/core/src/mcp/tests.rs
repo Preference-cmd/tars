@@ -92,6 +92,7 @@ fn definition(endpoint: &str, root: &Path, servers: Vec<McpServerConfig>) -> Ses
         auto_compact: true,
         compact_threshold: 70,
         prompt_cache: true,
+        prelude: Default::default(),
     }
 }
 

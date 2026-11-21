@@ -26,6 +26,7 @@ fn definition() -> SessionDefinition {
         auto_compact: true,
         compact_threshold: 70,
         prompt_cache: true,
+        prelude: Default::default(),
     }
 }
 
@@ -858,4 +859,44 @@ fn compaction_settings_validate_ranges_and_read_defaults_when_absent() {
     assert!(decoded.auto_compact);
     assert_eq!(decoded.compact_threshold, 70);
     assert_eq!(decoded.context_window, None);
+}
+
+#[test]
+fn prelude_definition_roundtrips_and_rejects_relative_or_empty_paths() {
+    use crate::prelude::{DynamicCustomSlot, PreludeDefinition, StaticCustomSlot};
+
+    let mut candidate = definition();
+    candidate.prelude = PreludeDefinition {
+        static_custom: Some(StaticCustomSlot::new("frozen system")),
+        dynamic_custom: Some(DynamicCustomSlot::File(std::env::temp_dir().join("dyn.md"))),
+        config_dir: Some(std::env::temp_dir()),
+        skill_dirs: vec![std::env::temp_dir().join("skills")],
+        include_workspace_skills: false,
+        skills_enabled: true,
+    };
+    candidate.validate().unwrap();
+    let encoded = serde_json::to_value(&candidate).unwrap();
+    let decoded: SessionDefinition = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded, candidate);
+
+    let mut bad_dyn = candidate.clone();
+    bad_dyn.prelude.dynamic_custom = Some(DynamicCustomSlot::File("relative.md".into()));
+    assert_eq!(
+        bad_dyn.validate(),
+        Err(DefinitionError::InvalidPreludeConfig)
+    );
+
+    let mut bad_cfg = candidate.clone();
+    bad_cfg.prelude.config_dir = Some("relative-cfg".into());
+    assert_eq!(
+        bad_cfg.validate(),
+        Err(DefinitionError::InvalidPreludeConfig)
+    );
+
+    let mut bad_skill = candidate;
+    bad_skill.prelude.skill_dirs = vec!["relative-skills".into()];
+    assert_eq!(
+        bad_skill.validate(),
+        Err(DefinitionError::InvalidPreludeConfig)
+    );
 }

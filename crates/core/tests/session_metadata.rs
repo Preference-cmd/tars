@@ -32,6 +32,7 @@ fn test_definition() -> SessionDefinition {
         auto_compact: true,
         compact_threshold: 70,
         prompt_cache: true,
+        prelude: Default::default(),
     }
 }
 

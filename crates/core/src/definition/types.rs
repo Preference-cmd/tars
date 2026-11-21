@@ -1,6 +1,7 @@
 use super::command::CommandSettings;
 use super::mcp::McpServerConfig;
 use super::workspace::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
+use crate::prelude::PreludeDefinition;
 use crate::session::SessionConfig;
 use causa::kernel::ModelRef;
 use causa::providers::{AnthropicRenderOptions, ChatRenderOptions, ResponsesRenderOptions};
@@ -142,6 +143,9 @@ pub struct SessionDefinition {
     /// reads as empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Frozen prelude and skill-discovery configuration for this session.
+    #[serde(default)]
+    pub prelude: PreludeDefinition,
 }
 
 // Unlike sparse startup configuration, a record must explicitly retain no-root
@@ -228,6 +232,7 @@ impl SessionDefinition {
                 return Err(DefinitionError::InvalidMcpConfig);
             }
         }
+        self.prelude.validate()?;
         Ok(())
     }
 
@@ -367,4 +372,7 @@ pub enum DefinitionError {
     /// Command settings may not be present without selecting `run_command`.
     #[error("command settings require the run_command tool")]
     CommandSettingsWithoutTool,
+    /// A prelude path or skill directory is empty or not absolute.
+    #[error("prelude paths and skill directories must be nonempty absolute paths")]
+    InvalidPreludeConfig,
 }

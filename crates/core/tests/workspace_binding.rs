@@ -44,6 +44,7 @@ fn definition(provider: Provider, endpoint: &str, root: &Path) -> SessionDefinit
         auto_compact: true,
         compact_threshold: 70,
         prompt_cache: true,
+        prelude: Default::default(),
     }
 }
 fn submit(session: &ManagedSession, key: &str) -> WorkRef {

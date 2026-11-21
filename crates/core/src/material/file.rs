@@ -171,7 +171,11 @@ impl SessionMaterials {
     fn into_context(self) -> Result<Context, MaterialError> {
         if !matches!(
             self.format.as_str(),
-            "tars-session-v1" | "tars-session-v2" | "tars-session-v2.1" | "tars-session-v2.2"
+            "tars-session-v1"
+                | "tars-session-v2"
+                | "tars-session-v2.1"
+                | "tars-session-v2.2"
+                | "tars-session-v2.3"
         ) {
             return Err(MaterialError::SessionEnvelope("unsupported format"));
         }

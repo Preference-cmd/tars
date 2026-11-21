@@ -44,6 +44,7 @@ fn test_definition(
         auto_compact: true,
         compact_threshold: 70,
         prompt_cache,
+        prelude: Default::default(),
     }
 }
 

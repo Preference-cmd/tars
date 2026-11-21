@@ -301,6 +301,7 @@ pub(super) fn history_definition(
         auto_compact: true,
         compact_threshold: 70,
         prompt_cache: true,
+        prelude: Default::default(),
     }
 }
 
@@ -376,7 +377,7 @@ pub(super) fn write_history_session(
     blocks.extend(current.blocks().iter().cloned());
     let context = causa::kernel::Context::from_blocks(blocks).unwrap();
     let record = serde_json::json!({
-        "format": "tars-session-v2.2",
+        "format": "tars-session-v2.3",
         "conversation_id": conversation_id,
         "revision": 1u64,
         "last_commit_id": causa::runtime::new_block_id().0.to_string(),

@@ -1,6 +1,10 @@
-use super::model::{self, DefinitionOverrides, Profile};
+use super::model::{
+    self, DefinitionOverrides, Profile, ResolvedPreludeDefaults, read_explicit_prelude_file,
+    resolve_and_validate_dynamic_file, resolve_explicit_skill_dir,
+};
 use crate::definition::{DefinitionError, McpServerConfig, SessionDefinition};
 use crate::external_tools::ToolSource;
+use crate::prelude::DynamicCustomSlot;
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -30,6 +34,26 @@ struct FileConfig {
     #[serde(default)]
     mcp_servers: Option<toml::Value>,
     external_tools: Option<FileExternalTools>,
+    prelude: Option<FilePrelude>,
+    skills: Option<FileSkills>,
+}
+
+/// The `[prelude]` table of the shared configuration.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FilePrelude {
+    system_prompt: Option<String>,
+    system_prompt_file: Option<PathBuf>,
+    dynamic_context: Option<String>,
+    dynamic_context_file: Option<PathBuf>,
+}
+
+/// The `[skills]` table of the shared configuration.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileSkills {
+    dirs: Option<Vec<PathBuf>>,
+    include_workspace: Option<bool>,
 }
 
 /// The `[external_tools]` table of the shared configuration.
@@ -44,6 +68,7 @@ struct FileExternalTools {
 #[derive(Debug, Default)]
 pub struct Config {
     source: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
     mcp_source: Option<PathBuf>,
     store: Option<PathBuf>,
     recovery_dir: Option<PathBuf>,
@@ -51,6 +76,7 @@ pub struct Config {
     profiles: BTreeMap<String, Profile>,
     mcp_servers: BTreeMap<String, McpServerConfig>,
     ripgrep: ToolSource,
+    prelude_defaults: ResolvedPreludeDefaults,
     warnings: Vec<String>,
 }
 
@@ -108,7 +134,12 @@ impl Config {
                 }
                 Err(error) if !toml_required && error.kind() == io::ErrorKind::NotFound => {
                     let base = path.parent().unwrap_or(Path::new(".")).to_owned();
-                    (Self::default(), Some(base))
+                    let mut empty = Self::default();
+                    let canonical_base =
+                        std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
+                    empty.config_dir = Some(canonical_base.clone());
+                    empty.prelude_defaults.config_dir = Some(canonical_base);
+                    (empty, Some(base))
                 }
                 Err(error) => {
                     return Err(ConfigError::Io {
@@ -180,6 +211,7 @@ impl Config {
                 Some(profile),
                 DefinitionOverrides::default(),
                 &config.mcp_servers,
+                &config.prelude_defaults,
             )?;
         }
         config.selected(None)?;
@@ -202,6 +234,7 @@ impl Config {
             return Err(ConfigError::Version(raw.version));
         }
         let base = source.parent().unwrap_or(Path::new("."));
+        let canonical_base = std::fs::canonicalize(base).unwrap_or_else(|_| base.to_owned());
         let resolve = |path: Option<PathBuf>| -> Result<Option<PathBuf>, ConfigError> {
             path.map(|path| {
                 if path.as_os_str().is_empty() {
@@ -221,6 +254,46 @@ impl Config {
             }
             None => ToolSource::Managed,
         };
+        let mut prelude_defaults = ResolvedPreludeDefaults {
+            config_dir: Some(canonical_base),
+            ..Default::default()
+        };
+        if let Some(prelude) = raw.prelude {
+            if prelude.system_prompt.is_some() && prelude.system_prompt_file.is_some() {
+                return Err(ConfigError::ConflictingSystemPrompt);
+            }
+            if prelude.dynamic_context.is_some() && prelude.dynamic_context_file.is_some() {
+                return Err(ConfigError::ConflictingDynamicContext);
+            }
+            prelude_defaults.static_custom =
+                match (prelude.system_prompt, prelude.system_prompt_file) {
+                    (Some(text), None) => Some(text),
+                    (None, Some(path)) => Some(read_explicit_prelude_file(path, Some(base))?),
+                    (None, None) => None,
+                    (Some(_), Some(_)) => unreachable!(),
+                };
+            prelude_defaults.dynamic_custom =
+                match (prelude.dynamic_context, prelude.dynamic_context_file) {
+                    (Some(text), None) => {
+                        (!text.trim().is_empty()).then_some(DynamicCustomSlot::Inline(text))
+                    }
+                    (None, Some(path)) => Some(DynamicCustomSlot::File(
+                        resolve_and_validate_dynamic_file(path, Some(base))?,
+                    )),
+                    (None, None) => None,
+                    (Some(_), Some(_)) => unreachable!(),
+                };
+        }
+        if let Some(skills) = raw.skills {
+            if let Some(dirs) = skills.dirs {
+                let mut resolved = Vec::with_capacity(dirs.len());
+                for dir in dirs {
+                    resolved.push(resolve_explicit_skill_dir(dir, Some(base))?);
+                }
+                prelude_defaults.skill_dirs = Some(resolved);
+            }
+            prelude_defaults.include_workspace_skills = skills.include_workspace;
+        }
         let mut profiles = raw.profiles;
         for profile in profiles.values_mut() {
             profile.workspace_root = profile
@@ -228,9 +301,43 @@ impl Config {
                 .take()
                 .map(|path| model::absolute_root(path, Some(base)))
                 .transpose()?;
+            if profile.system_prompt.is_some() && profile.system_prompt_file.is_some() {
+                return Err(ConfigError::ConflictingSystemPrompt);
+            }
+            if profile.dynamic_context.is_some() && profile.dynamic_context_file.is_some() {
+                return Err(ConfigError::ConflictingDynamicContext);
+            }
+            profile.resolved_system_prompt = match (
+                profile.system_prompt.clone(),
+                profile.system_prompt_file.take(),
+            ) {
+                (Some(text), None) => Some(text),
+                (None, Some(path)) => Some(read_explicit_prelude_file(path, Some(base))?),
+                (None, None) => None,
+                (Some(_), Some(_)) => unreachable!(),
+            };
+            profile.resolved_dynamic_custom = match (
+                profile.dynamic_context.clone(),
+                profile.dynamic_context_file.take(),
+            ) {
+                (Some(text), None) => Some(DynamicCustomSlot::Inline(text)),
+                (None, Some(path)) => Some(DynamicCustomSlot::File(
+                    resolve_and_validate_dynamic_file(path, Some(base))?,
+                )),
+                (None, None) => None,
+                (Some(_), Some(_)) => unreachable!(),
+            };
+            if let Some(dirs) = profile.skill_dirs.take() {
+                let mut resolved = Vec::with_capacity(dirs.len());
+                for dir in dirs {
+                    resolved.push(resolve_explicit_skill_dir(dir, Some(base))?);
+                }
+                profile.resolved_skill_dirs = Some(resolved);
+            }
         }
         Ok(Self {
             source: Some(source.to_owned()),
+            config_dir: prelude_defaults.config_dir.clone(),
             mcp_source: None,
             store: resolve(raw.store)?,
             recovery_dir: resolve(raw.recovery_dir)?,
@@ -238,6 +345,7 @@ impl Config {
             profiles,
             mcp_servers: BTreeMap::new(),
             ripgrep,
+            prelude_defaults,
             warnings: Vec::new(),
         })
     }
@@ -260,6 +368,7 @@ impl Config {
                     Some(profile),
                     DefinitionOverrides::default(),
                     &self.mcp_servers,
+                    &self.prelude_defaults,
                 )
             })
             .transpose()
@@ -272,12 +381,22 @@ impl Config {
         name: Option<&str>,
         overrides: DefinitionOverrides,
     ) -> Result<SessionDefinition, ConfigError> {
-        model::resolve(self.selected(name)?, overrides, &self.mcp_servers)
+        model::resolve(
+            self.selected(name)?,
+            overrides,
+            &self.mcp_servers,
+            &self.prelude_defaults,
+        )
     }
 
     /// File actually read, or None when defaults are empty/disabled.
     pub fn source(&self) -> Option<&Path> {
         self.source.as_deref()
+    }
+
+    /// Configuration directory associated with this configuration source, if any.
+    pub fn config_dir(&self) -> Option<&Path> {
+        self.config_dir.as_deref()
     }
 
     /// mcp.json file actually read, or None when none was read.
@@ -400,6 +519,28 @@ pub enum ConfigError {
     /// A selected server id has no top-level definition.
     #[error("unknown MCP server {0:?}")]
     UnknownMcpServer(String),
+    /// Both `system_prompt` and `system_prompt_file` were set at the same level.
+    #[error("system_prompt and system_prompt_file cannot both be set")]
+    ConflictingSystemPrompt,
+    /// Both `dynamic_context` and `dynamic_context_file` were set at the same level.
+    #[error("dynamic_context and dynamic_context_file cannot both be set")]
+    ConflictingDynamicContext,
+    /// An explicit `system_prompt_file` or `dynamic_context_file` is missing, non-UTF-8, or not a regular file.
+    #[error("prelude file {path:?}: {reason}")]
+    PreludeFile {
+        /// Configured file path.
+        path: PathBuf,
+        /// Validation failure reason.
+        reason: String,
+    },
+    /// An explicit skill directory is unavailable or is not a directory.
+    #[error("skill directory {path:?} is unavailable or is not a directory: {kind:?}")]
+    SkillDirectory {
+        /// Configured directory path.
+        path: PathBuf,
+        /// Original filesystem error category.
+        kind: io::ErrorKind,
+    },
     /// A fixed-definition value is invalid.
     #[error(transparent)]
     Definition(DefinitionError),

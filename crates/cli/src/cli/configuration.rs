@@ -221,6 +221,7 @@ pub(super) fn definition(
                     .map_err(|_| CliError::argument("--render-options must be a JSON object"))
             })
             .transpose()?,
+        prelude: Default::default(),
     };
     config
         .definition(string(values, "--profile")?.as_deref(), overrides)

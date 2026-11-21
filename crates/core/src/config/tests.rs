@@ -1137,3 +1137,159 @@ fn external_tools_section_selects_the_ripgrep_source_and_defaults_to_managed() {
         assert!(Config::load(ConfigSource::File(path.clone())).is_err());
     }
 }
+
+#[test]
+fn prelude_and_skills_top_level_and_profile_overrides_and_relative_paths() {
+    use crate::prelude::{DynamicCustomSlot, StaticCustomSlot};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_dir = dir.path().join("cfg");
+    let top_skills = cfg_dir.join("top-skills");
+    let prof_skills = cfg_dir.join("prof-skills");
+    let default_skills = cfg_dir.join("skills");
+    std::fs::create_dir_all(&top_skills).unwrap();
+    std::fs::create_dir_all(&prof_skills).unwrap();
+    std::fs::create_dir_all(&default_skills).unwrap();
+    std::fs::write(cfg_dir.join("sys.md"), "Top system from file").unwrap();
+    std::fs::write(cfg_dir.join("dyn.md"), "Top dynamic from file").unwrap();
+    std::fs::write(cfg_dir.join("prof-dyn.md"), "Profile dynamic from file").unwrap();
+
+    let cfg_path = cfg_dir.join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        r#"
+version = 1
+default_profile = "base"
+
+[prelude]
+system_prompt_file = "sys.md"
+dynamic_context_file = "dyn.md"
+
+[skills]
+dirs = ["top-skills"]
+include_workspace = true
+
+[profiles.base]
+provider = "openai-chat"
+model = "base-model"
+
+[profiles.custom]
+provider = "openai-chat"
+model = "custom-model"
+system_prompt = "Profile inline system"
+dynamic_context_file = "prof-dyn.md"
+skill_dirs = ["prof-skills"]
+include_workspace_skills = false
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(ConfigSource::File(cfg_path)).unwrap();
+    let canon_cfg_dir = cfg_dir.canonicalize().unwrap();
+    assert_eq!(config.config_dir(), Some(canon_cfg_dir.as_path()));
+
+    // Base profile inherits top-level [prelude] and [skills]
+    let base_def = config
+        .definition(Some("base"), DefinitionOverrides::default())
+        .unwrap();
+    assert_eq!(
+        base_def.prelude.static_custom,
+        Some(StaticCustomSlot::new("Top system from file"))
+    );
+    assert_eq!(
+        base_def.prelude.dynamic_custom,
+        Some(DynamicCustomSlot::File(
+            cfg_dir.join("dyn.md").canonicalize().unwrap()
+        ))
+    );
+    assert_eq!(base_def.prelude.config_dir, Some(canon_cfg_dir.clone()));
+    assert_eq!(
+        base_def.prelude.skill_dirs,
+        vec![top_skills.canonicalize().unwrap()]
+    );
+    assert!(base_def.prelude.include_workspace_skills);
+    assert!(base_def.prelude.skills_enabled);
+
+    // Custom profile overrides top-level fields (even switching file <-> inline)
+    let custom_def = config
+        .definition(Some("custom"), DefinitionOverrides::default())
+        .unwrap();
+    assert_eq!(
+        custom_def.prelude.static_custom,
+        Some(StaticCustomSlot::new("Profile inline system"))
+    );
+    assert_eq!(
+        custom_def.prelude.dynamic_custom,
+        Some(DynamicCustomSlot::File(
+            cfg_dir.join("prof-dyn.md").canonicalize().unwrap()
+        ))
+    );
+    assert_eq!(
+        custom_def.prelude.skill_dirs,
+        vec![prof_skills.canonicalize().unwrap()]
+    );
+    assert!(!custom_def.prelude.include_workspace_skills);
+
+    // When [skills] is omitted, default <config_dir>/skills is included if it exists
+    let minimal_path = cfg_dir.join("minimal.toml");
+    std::fs::write(
+        &minimal_path,
+        r#"
+version = 1
+[profiles.base]
+provider = "openai-chat"
+model = "base-model"
+"#,
+    )
+    .unwrap();
+    let minimal_cfg = Config::load(ConfigSource::File(minimal_path)).unwrap();
+    let minimal_def = minimal_cfg
+        .definition(Some("base"), DefinitionOverrides::default())
+        .unwrap();
+    assert_eq!(
+        minimal_def.prelude.skill_dirs,
+        vec![default_skills.canonicalize().unwrap()]
+    );
+
+    // Missing default <config_dir>/skills is silently skipped; explicit dirs=[] suppresses default
+    std::fs::remove_dir_all(&default_skills).unwrap();
+    let no_default_cfg = Config::load(ConfigSource::File(cfg_dir.join("minimal.toml"))).unwrap();
+    let no_default_def = no_default_cfg
+        .definition(Some("base"), DefinitionOverrides::default())
+        .unwrap();
+    assert!(no_default_def.prelude.skill_dirs.is_empty());
+}
+
+#[test]
+fn prelude_and_skills_reject_same_level_conflicts_and_missing_or_wrong_type_explicit_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.toml");
+    let existing_file = dir.path().join("file.txt");
+    let existing_dir = dir.path().join("subdir");
+    std::fs::write(&existing_file, "ok").unwrap();
+    std::fs::create_dir_all(&existing_dir).unwrap();
+
+    // Same-level inline + file conflict at top-level or profile
+    for bad in [
+        "version = 1\n[prelude]\nsystem_prompt = \"a\"\nsystem_prompt_file = \"file.txt\"\n",
+        "version = 1\n[prelude]\ndynamic_context = \"a\"\ndynamic_context_file = \"file.txt\"\n",
+        "version = 1\n[profiles.p]\nprovider = \"openai-chat\"\nmodel = \"m\"\nsystem_prompt = \"a\"\nsystem_prompt_file = \"file.txt\"\n",
+        "version = 1\n[profiles.p]\nprovider = \"openai-chat\"\nmodel = \"m\"\ndynamic_context = \"a\"\ndynamic_context_file = \"file.txt\"\n",
+        // Missing explicit paths and wrong types
+        "version = 1\n[prelude]\nsystem_prompt_file = \"missing.md\"\n",
+        "version = 1\n[prelude]\nsystem_prompt_file = \"subdir\"\n",
+        "version = 1\n[prelude]\ndynamic_context_file = \"missing.md\"\n",
+        "version = 1\n[prelude]\ndynamic_context_file = \"subdir\"\n",
+        "version = 1\n[skills]\ndirs = [\"missing-dir\"]\n",
+        "version = 1\n[skills]\ndirs = [\"file.txt\"]\n",
+        // No ~ or $VAR expansion (literal missing path fails)
+        "version = 1\n[skills]\ndirs = [\"~/skills\"]\n",
+        "version = 1\n[prelude]\nsystem_prompt_file = \"$HOME/sys.md\"\n",
+    ] {
+        std::fs::write(&cfg_path, bad).unwrap();
+        assert!(
+            Config::load(ConfigSource::File(cfg_path.clone())).is_err(),
+            "should reject:\n{bad}"
+        );
+    }
+}

@@ -4,11 +4,51 @@ use crate::definition::{
     WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
 };
 use crate::permission::PermissionMode;
+use crate::prelude::{DynamicCustomSlot, PreludeDefinition, StaticCustomSlot};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
+    fs::{self, File},
+    io::{self, Read},
     path::{Path, PathBuf},
 };
+
+const MAX_PRELUDE_FILE_BYTES: usize = 1024 * 1024;
+
+/// Override for the static custom prompt (`--system` or `--system-file`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StaticCustomOverride {
+    /// Inline system prompt text.
+    Inline(String),
+    /// File path resolved relative to the current working directory.
+    File(PathBuf),
+}
+
+/// Override for the dynamic custom context (`--dynamic-context` or `--dynamic-context-file`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DynamicCustomOverride {
+    /// Inline dynamic context text.
+    Inline(String),
+    /// File path resolved relative to the current working directory.
+    File(PathBuf),
+}
+
+/// Entry-point overrides for prelude slots and skill discovery.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreludeOverrides {
+    /// Explicit override for `tars:prelude:static-custom`.
+    pub static_custom: Option<StaticCustomOverride>,
+    /// Explicit override for `tars:prelude:dynamic-custom`.
+    pub dynamic_custom: Option<DynamicCustomOverride>,
+    /// Optional replacement list of skill directories (resolved relative to CWD).
+    pub skill_dirs: Option<Vec<PathBuf>>,
+    /// Additional skill directories appended after configured dirs and before workspace skills.
+    pub extra_skill_dirs: Vec<PathBuf>,
+    /// Override for whether `<workspace_root>/.tars/skills` is scanned.
+    pub include_workspace_skills: Option<bool>,
+    /// Override for whether skills discovery and `load_skill` are enabled.
+    pub skills_enabled: Option<bool>,
+}
 
 /// Explicit entry-point choices layered over a selected model preset.
 #[derive(Default)]
@@ -61,6 +101,17 @@ pub struct DefinitionOverrides {
     pub permission_mode: Option<PermissionMode>,
     /// Explicit MCP server ids; Some(empty) disables preset servers.
     pub mcp: Option<Vec<String>>,
+    /// Explicit prelude and skills overrides.
+    pub prelude: PreludeOverrides,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct ResolvedPreludeDefaults {
+    pub(super) config_dir: Option<PathBuf>,
+    pub(super) static_custom: Option<String>,
+    pub(super) dynamic_custom: Option<DynamicCustomSlot>,
+    pub(super) skill_dirs: Option<Vec<PathBuf>>,
+    pub(super) include_workspace_skills: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +141,18 @@ pub(super) struct Profile {
     command: Option<ProfileCommand>,
     permission_mode: Option<PermissionMode>,
     mcp: Option<Vec<String>>,
+    pub(super) system_prompt: Option<String>,
+    pub(super) system_prompt_file: Option<PathBuf>,
+    pub(super) dynamic_context: Option<String>,
+    pub(super) dynamic_context_file: Option<PathBuf>,
+    pub(super) skill_dirs: Option<Vec<PathBuf>>,
+    pub(super) include_workspace_skills: Option<bool>,
+    #[serde(skip)]
+    pub(super) resolved_system_prompt: Option<String>,
+    #[serde(skip)]
+    pub(super) resolved_dynamic_custom: Option<DynamicCustomSlot>,
+    #[serde(skip)]
+    pub(super) resolved_skill_dirs: Option<Vec<PathBuf>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,6 +239,7 @@ pub(super) fn resolve(
     profile: Option<&Profile>,
     options: DefinitionOverrides,
     servers: &BTreeMap<String, McpServerConfig>,
+    prelude_defaults: &ResolvedPreludeDefaults,
 ) -> Result<SessionDefinition, ConfigError> {
     let provider = options
         .provider
@@ -324,9 +388,217 @@ pub(super) fn resolve(
             Some(mode) => Some(mode),
         },
         mcp_servers,
+        prelude: resolve_prelude(profile, options.prelude, prelude_defaults)?,
     };
     definition.validate().map_err(ConfigError::Definition)?;
     Ok(definition)
+}
+
+fn resolve_prelude(
+    profile: Option<&Profile>,
+    overrides: PreludeOverrides,
+    defaults: &ResolvedPreludeDefaults,
+) -> Result<PreludeDefinition, ConfigError> {
+    let static_text = match overrides.static_custom {
+        Some(StaticCustomOverride::Inline(text)) => Some(text),
+        Some(StaticCustomOverride::File(path)) => Some(read_explicit_prelude_file(path, None)?),
+        None => profile
+            .and_then(|p| p.resolved_system_prompt.clone())
+            .or_else(|| defaults.static_custom.clone()),
+    };
+    let static_custom = static_text
+        .filter(|t| !t.trim().is_empty())
+        .map(StaticCustomSlot::new);
+
+    let dynamic_custom = match overrides.dynamic_custom {
+        Some(DynamicCustomOverride::Inline(text)) => Some(DynamicCustomSlot::Inline(text)),
+        Some(DynamicCustomOverride::File(path)) => {
+            let canonical = resolve_and_validate_dynamic_file(path, None)?;
+            Some(DynamicCustomSlot::File(canonical))
+        }
+        None => profile
+            .and_then(|p| p.resolved_dynamic_custom.clone())
+            .or_else(|| defaults.dynamic_custom.clone()),
+    }
+    .filter(|slot| !matches!(slot, DynamicCustomSlot::Inline(text) if text.trim().is_empty()));
+
+    let mut skill_dirs = match overrides.skill_dirs {
+        Some(dirs) => {
+            let mut resolved = Vec::with_capacity(dirs.len());
+            for dir in dirs {
+                resolved.push(resolve_explicit_skill_dir(dir, None)?);
+            }
+            resolved
+        }
+        None => {
+            if let Some(dirs) = profile.and_then(|p| p.resolved_skill_dirs.as_ref()) {
+                dirs.clone()
+            } else if let Some(dirs) = defaults.skill_dirs.as_ref() {
+                dirs.clone()
+            } else if let Some(config_dir) = defaults.config_dir.as_deref() {
+                default_config_skills_dir(config_dir)
+            } else {
+                Vec::new()
+            }
+        }
+    };
+
+    for extra in overrides.extra_skill_dirs {
+        skill_dirs.push(resolve_explicit_skill_dir(extra, None)?);
+    }
+
+    let include_workspace_skills = overrides
+        .include_workspace_skills
+        .or_else(|| profile.and_then(|p| p.include_workspace_skills))
+        .or(defaults.include_workspace_skills)
+        .unwrap_or(true);
+    let skills_enabled = overrides.skills_enabled.unwrap_or(true);
+
+    Ok(PreludeDefinition {
+        static_custom,
+        dynamic_custom,
+        config_dir: defaults.config_dir.clone(),
+        skill_dirs,
+        include_workspace_skills,
+        skills_enabled,
+    })
+}
+
+fn default_config_skills_dir(config_dir: &Path) -> Vec<PathBuf> {
+    let candidate = config_dir.join("skills");
+    match fs::canonicalize(&candidate) {
+        Ok(canon) if fs::metadata(&canon).is_ok_and(|m| m.is_dir()) => vec![canon],
+        _ => Vec::new(),
+    }
+}
+
+pub(super) fn resolve_relative_to_base(
+    path: PathBuf,
+    base: Option<&Path>,
+) -> Result<PathBuf, ConfigError> {
+    if path.as_os_str().is_empty() {
+        return Err(ConfigError::EmptyPath);
+    }
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    let base = match base {
+        Some(base) => base.to_owned(),
+        None => std::env::current_dir().map_err(|error| ConfigError::Io {
+            path: path.clone(),
+            kind: error.kind(),
+        })?,
+    };
+    Ok(base.join(path))
+}
+
+pub(super) fn read_explicit_prelude_file(
+    path: PathBuf,
+    base: Option<&Path>,
+) -> Result<String, ConfigError> {
+    let resolved = resolve_relative_to_base(path, base)?;
+    let canon = fs::canonicalize(&resolved).map_err(|error| ConfigError::PreludeFile {
+        path: resolved.clone(),
+        reason: error.to_string(),
+    })?;
+    let meta = fs::metadata(&canon).map_err(|error| ConfigError::PreludeFile {
+        path: canon.clone(),
+        reason: error.to_string(),
+    })?;
+    if !meta.is_file() {
+        return Err(ConfigError::PreludeFile {
+            path: canon,
+            reason: "path is not a regular file".into(),
+        });
+    }
+    let file = File::open(&canon).map_err(|error| ConfigError::PreludeFile {
+        path: canon.clone(),
+        reason: error.to_string(),
+    })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PRELUDE_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| ConfigError::PreludeFile {
+            path: canon.clone(),
+            reason: error.to_string(),
+        })?;
+    if bytes.len() > MAX_PRELUDE_FILE_BYTES {
+        return Err(ConfigError::PreludeFile {
+            path: canon,
+            reason: format!("file exceeds {MAX_PRELUDE_FILE_BYTES} bytes"),
+        });
+    }
+    String::from_utf8(bytes).map_err(|_| ConfigError::PreludeFile {
+        path: canon,
+        reason: "file is not valid UTF-8".into(),
+    })
+}
+
+pub(super) fn resolve_and_validate_dynamic_file(
+    path: PathBuf,
+    base: Option<&Path>,
+) -> Result<PathBuf, ConfigError> {
+    let resolved = resolve_relative_to_base(path, base)?;
+    let canon = fs::canonicalize(&resolved).map_err(|error| ConfigError::PreludeFile {
+        path: resolved.clone(),
+        reason: error.to_string(),
+    })?;
+    let meta = fs::metadata(&canon).map_err(|error| ConfigError::PreludeFile {
+        path: canon.clone(),
+        reason: error.to_string(),
+    })?;
+    if !meta.is_file() {
+        return Err(ConfigError::PreludeFile {
+            path: canon,
+            reason: "path is not a regular file".into(),
+        });
+    }
+    let file = File::open(&canon).map_err(|error| ConfigError::PreludeFile {
+        path: canon.clone(),
+        reason: error.to_string(),
+    })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_PRELUDE_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| ConfigError::PreludeFile {
+            path: canon.clone(),
+            reason: error.to_string(),
+        })?;
+    if bytes.len() > MAX_PRELUDE_FILE_BYTES {
+        return Err(ConfigError::PreludeFile {
+            path: canon,
+            reason: format!("file exceeds {MAX_PRELUDE_FILE_BYTES} bytes"),
+        });
+    }
+    if std::str::from_utf8(&bytes).is_err() {
+        return Err(ConfigError::PreludeFile {
+            path: canon,
+            reason: "file is not valid UTF-8".into(),
+        });
+    }
+    Ok(canon)
+}
+
+pub(super) fn resolve_explicit_skill_dir(
+    path: PathBuf,
+    base: Option<&Path>,
+) -> Result<PathBuf, ConfigError> {
+    let resolved = resolve_relative_to_base(path, base)?;
+    let canon = fs::canonicalize(&resolved).map_err(|error| ConfigError::SkillDirectory {
+        path: resolved.clone(),
+        kind: error.kind(),
+    })?;
+    match fs::metadata(&canon) {
+        Ok(meta) if meta.is_dir() => Ok(canon),
+        Ok(_) => Err(ConfigError::SkillDirectory {
+            path: canon,
+            kind: io::ErrorKind::NotADirectory,
+        }),
+        Err(error) => Err(ConfigError::SkillDirectory {
+            path: canon,
+            kind: error.kind(),
+        }),
+    }
 }
 
 pub(super) fn absolute_root(path: PathBuf, base: Option<&Path>) -> Result<PathBuf, ConfigError> {

@@ -37,6 +37,7 @@ fn definition() -> SessionDefinition {
         auto_compact: true,
         compact_threshold: 70,
         prompt_cache: true,
+        prelude: Default::default(),
     }
 }
 fn context(text: &str) -> Context {
@@ -560,7 +561,7 @@ fn session_records_written_before_message_roles_load_and_save_in_the_current_for
     let written = String::from_utf8(fs::read(&path).unwrap()).unwrap();
     assert!(written.contains(r#""shape":"message""#));
     assert!(!written.contains(r#""shape":"parts""#));
-    assert!(written.contains(r#""format":"tars-session-v2.2""#));
+    assert!(written.contains(r#""format":"tars-session-v2.3""#));
 }
 
 #[test]
@@ -736,13 +737,13 @@ fn test_be02_new_sessions_write_v2_2_and_opening_v2_1_fails_with_both_versions_a
  {
     let (folder, store, id, writer) = setup();
 
-    // 1. New sessions write tars-session-v2.2
+    // 1. New sessions write tars-session-v2.3
     let initial = op(&id, None, "new session text");
     writer.commit(&initial).unwrap();
     let path = folder.path().join("sessions").join(format!("{id}.json"));
     let bytes = fs::read(&path).unwrap();
     let text = String::from_utf8(bytes.clone()).unwrap();
-    assert!(text.contains(r#""format":"tars-session-v2.2""#));
+    assert!(text.contains(r#""format":"tars-session-v2.3""#));
 
     // 2. Opening v2.1 fixture fails with both version names, advice, and leaves bytes/mtime unchanged
     let v2_1_id = Uuid::now_v7().to_string();
@@ -766,7 +767,7 @@ fn test_be02_new_sessions_write_v2_2_and_opening_v2_1_fails_with_both_versions_a
         "error must name found version: {err_msg}"
     );
     assert!(
-        err_msg.contains("tars-session-v2.2"),
+        err_msg.contains("tars-session-v2.3"),
         "error must name supported version: {err_msg}"
     );
     assert!(
@@ -790,7 +791,7 @@ fn test_be02_new_sessions_write_v2_2_and_opening_v2_1_fails_with_both_versions_a
     assert!(found.record.is_err());
     let list_err = found.record.as_ref().unwrap_err().to_string();
     assert!(list_err.contains("tars-session-v2.1"));
-    assert!(list_err.contains("tars-session-v2.2"));
+    assert!(list_err.contains("tars-session-v2.3"));
 
     // 3. Reading a v1 history record fails with both version names and export-materials advice
     let history_dir = folder.path().join("sessions").join(format!("{id}.history"));
@@ -838,4 +839,89 @@ fn test_be02_new_sessions_write_v2_2_and_opening_v2_1_fails_with_both_versions_a
         fs::metadata(&v1_history_path).unwrap().modified().unwrap(),
         v1_mtime_before
     );
+}
+
+#[test]
+fn title_derivation_skips_prelude_and_compaction_blocks() {
+    use crate::prelude::{
+        PRELUDE_BASE_SOURCE, PRELUDE_ENV_SOURCE, PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE,
+    };
+    use causa::kernel::Role;
+
+    let prelude_only = Context::from_blocks(vec![
+        ContextBlock::new(
+            new_block_id(),
+            BlockContent::text(Role::System, "host contract"),
+            BlockMeta::from_source(PRELUDE_BASE_SOURCE),
+        ),
+        ContextBlock::new(
+            new_block_id(),
+            BlockContent::text(
+                Role::User,
+                "<workspace_instructions>\nIgnore me\n</workspace_instructions>",
+            ),
+            BlockMeta::from_source(PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE),
+        ),
+        ContextBlock::new(
+            new_block_id(),
+            BlockContent::text(Role::User, "<env>\nplatform: linux\n</env>"),
+            BlockMeta::from_source(PRELUDE_ENV_SOURCE),
+        ),
+        ContextBlock::new(
+            new_block_id(),
+            BlockContent::text(Role::User, "compacted brief"),
+            BlockMeta::from_source(crate::compact::SUMMARY_SOURCE),
+        ),
+    ])
+    .unwrap();
+
+    let id = Uuid::now_v7().to_string();
+    let initial_record = SavedSessionRecord::new(
+        id.clone(),
+        Uuid::now_v7().to_string(),
+        None,
+        definition(),
+        prelude_only.clone(),
+        None,
+        None,
+        1_000,
+    )
+    .unwrap();
+    let meta_after_prelude = super::RecordMetadata::of(&initial_record);
+    assert_eq!(meta_after_prelude.title, None);
+    assert!(!meta_after_prelude.title_settled);
+
+    // Next commit includes an incremental prelude update AND the real first user prompt
+    let mut blocks = prelude_only.blocks().to_vec();
+    blocks.push(ContextBlock::new(
+        new_block_id(),
+        BlockContent::text(
+            Role::User,
+            "<env updated=\"true\">\nmode: accept-edits\n</env>",
+        ),
+        BlockMeta::from_source("tars:prelude:update:env"),
+    ));
+    blocks.push(ContextBlock::new(
+        new_block_id(),
+        BlockContent::text(Role::User, "   Fix   the   login   bug  \nsecond line"),
+        BlockMeta::from_source("user"),
+    ));
+    let with_user = Context::from_blocks(blocks).unwrap();
+    let (derived_title, _) = meta_after_prelude.next(&with_user, 1_000);
+    assert_eq!(derived_title.as_deref(), Some("Fix the login bug"));
+
+    let saved_with_user = SavedSessionRecord::new(
+        id,
+        Uuid::now_v7().to_string(),
+        Some(1),
+        definition(),
+        with_user,
+        None,
+        derived_title,
+        2_000,
+    )
+    .unwrap();
+    let settled = super::RecordMetadata::of(&saved_with_user);
+    assert_eq!(settled.title.as_deref(), Some("Fix the login bug"));
+    assert!(settled.title_settled);
 }

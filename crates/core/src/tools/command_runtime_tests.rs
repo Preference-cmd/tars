@@ -256,6 +256,7 @@ fn command_definition_exposes_the_sandbox_and_timeout() {
         auto_compact: true,
         compact_threshold: 70,
         prompt_cache: true,
+        prelude: Default::default(),
     };
     definition.validate().unwrap();
     assert!(definition.effective_command_settings().is_some());
