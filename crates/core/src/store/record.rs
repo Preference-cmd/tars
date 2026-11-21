@@ -245,6 +245,7 @@ fn first_user_parts(context: &Context) -> Option<&[causa::kernel::ContentPart]> 
         if block.meta().source.as_deref().is_some_and(|source| {
             source.starts_with(crate::prelude::PRELUDE_SOURCE_PREFIX)
                 || source == crate::compact::SUMMARY_SOURCE
+                || source == crate::skills::SKILL_SOURCE
         }) {
             return None;
         }

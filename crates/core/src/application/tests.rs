@@ -12,6 +12,7 @@ mod repair_originals;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod repair_write;
 mod saving;
+mod skills;
 pub(crate) mod support;
 mod usage;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

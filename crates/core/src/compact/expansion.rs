@@ -162,6 +162,8 @@ pub struct ExpansionCursor {
     supplied: Vec<bool>,
     /// Inserted blocks of each record expanded so far.
     consumed: Vec<usize>,
+    /// Whether each record's non-stripped rewrite divider has already been emitted.
+    mark_emitted: Vec<bool>,
     /// Supplied records that still have inserted blocks to expand.
     records: HashMap<usize, Result<Arc<HistoryRecord>, String>>,
     waiting: Option<Waiting>,
@@ -195,6 +197,7 @@ impl ExpansionCursor {
             reached: vec![false; count],
             supplied: vec![false; count],
             consumed: vec![0; count],
+            mark_emitted: vec![false; count],
             records: HashMap::new(),
             waiting: None,
             queued: VecDeque::new(),
@@ -318,15 +321,15 @@ impl ExpansionCursor {
                 })
                 .collect(),
             Ok(record) => {
-                let mark = RewriteMark {
+                let mark = (!self.mark_emitted[owner]).then(|| RewriteMark {
                     record_id: record_id.clone(),
                     trigger: record.trigger,
                     kind: record.kind,
                     estimate_before: record.estimate_before,
                     estimate_after: record.estimate_after,
-                };
+                });
                 match run {
-                    Some(run) => self.match_run(&record, &run, mark),
+                    Some(run) => self.match_run(owner, &record, &run, mark),
                     // Put-back blocks stand elsewhere in the conversation;
                     // only the removed originals belong here.
                     None => {
@@ -342,7 +345,10 @@ impl ExpansionCursor {
                             })
                             .map(|block| Item::Expand(block, None))
                             .collect();
-                        items.push(Item::Rewrite(mark));
+                        if let Some(mark) = mark {
+                            self.mark_emitted[owner] = true;
+                            items.push(Item::Rewrite(mark));
+                        }
                         items
                     }
                 }
@@ -372,15 +378,16 @@ impl ExpansionCursor {
     /// something; stripped-only pieces after it come after the divider.
     fn match_run(
         &mut self,
+        owner: usize,
         record: &HistoryRecord,
         run: &[(ContextBlock, BlockStatus)],
-        mark: RewriteMark,
+        mark: Option<RewriteMark>,
     ) -> Vec<Item> {
         let pieces: Vec<Piece<'_>> = record.replacements.iter().flat_map(pieces).collect();
         let mut newest_first = Vec::new();
         let mut end = run.len();
         let mut stray = false;
-        let mut mark_to_insert = Some(mark);
+        let mut mark_to_insert = mark;
         while end > 0 {
             let tail = &run[..end];
             let matched = pieces.iter().find(|piece| {
@@ -400,6 +407,7 @@ impl ExpansionCursor {
                     // and do not emit a compaction divider.
                     let stripped = is_stripped(piece, inserted) || is_prelude_fold(piece, inserted);
                     if !stripped && let Some(m) = mark_to_insert.take() {
+                        self.mark_emitted[owner] = true;
                         newest_first.push(Item::Rewrite(m));
                     }
                     newest_first.extend(piece.originals.iter().rev().map(|block| {
@@ -418,6 +426,7 @@ impl ExpansionCursor {
                 None => {
                     stray = true;
                     if let Some(m) = mark_to_insert.take() {
+                        self.mark_emitted[owner] = true;
                         newest_first.push(Item::Rewrite(m));
                     }
                     newest_first.push(Item::Show(ExpandedBlock {

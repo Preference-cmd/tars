@@ -240,3 +240,220 @@ fn symlinked_skill_dirs_work_while_escaping_skill_md_and_resource_cycles_are_gua
             .any(|d| d.kind == SkillDiagnosticKind::SymlinkEscape)
     );
 }
+
+fn make_load_skill_tool(
+    registry: SkillRegistry,
+) -> (
+    Arc<LoadSkillTool>,
+    Arc<LoadedSkillsState>,
+    Arc<RwLock<SkillRegistry>>,
+) {
+    let shared_reg = Arc::new(RwLock::new(registry));
+    let loaded = Arc::new(LoadedSkillsState::new());
+    let reporter = crate::session::ToolReporter::new(
+        crate::session::WorkRef {
+            conversation_id: "0190a000-0000-7000-8000-000000000099".into(),
+            turn_id: causa::kernel::TurnId::new("t-skill"),
+        },
+        tokio::sync::broadcast::channel(16).0,
+    );
+    let tool = Arc::new(LoadSkillTool::new(
+        shared_reg.clone(),
+        loaded.clone(),
+        reporter,
+        10,
+    ));
+    (tool, loaded, shared_reg)
+}
+
+use std::sync::{Arc, RwLock};
+
+#[test]
+fn test_si06_static_schema_has_no_enum_and_readonly_hints() {
+    let def = load_skill_tool_definition();
+    assert_eq!(def.name, LOAD_SKILL_TOOL_NAME);
+    let serialized = serde_json::to_string(&def.parameters).unwrap();
+    assert!(
+        !serialized.contains("\"enum\""),
+        "load_skill schema must be purely static without enum: {serialized}"
+    );
+    assert_eq!(def.parameters["required"], serde_json::json!(["name"]));
+    assert_eq!(def.parameters["additionalProperties"], false);
+    assert_eq!(def.parameters["properties"]["name"]["type"], "string");
+}
+
+#[tokio::test]
+async fn test_si06_load_skill_reads_external_dir_dedups_reloads_and_lists_available() {
+    use causa::kernel::{
+        BlockId, CallControl, CancellationToken, Tool, ToolCallContext, ToolCallPayload,
+        ToolResultStatus,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let external_dir = temp.path().join("external-skills");
+    fs::create_dir_all(&external_dir).unwrap();
+
+    let alpha_file = write_skill(
+        &external_dir,
+        "alpha",
+        "---\nname: alpha\ndescription: Alpha helper\n---\n# Alpha Guide\nUse step 1.\n",
+    );
+    write_skill(
+        &external_dir,
+        "zeta",
+        "---\nname: zeta\ndescription: Zeta helper\n---\n# Zeta Guide\n",
+    );
+    // Bundle resources with non-UTF-8 content to prove contents are never pre-read
+    fs::create_dir_all(external_dir.join("alpha/scripts")).unwrap();
+    fs::create_dir_all(external_dir.join("alpha/references")).unwrap();
+    fs::create_dir_all(external_dir.join("alpha/assets")).unwrap();
+    fs::write(
+        external_dir.join("alpha/scripts/run.sh"),
+        [0xff, 0xfe, 0x00],
+    )
+    .unwrap();
+    fs::write(
+        external_dir.join("alpha/references/doc.md"),
+        "SECRET_REF_BODY",
+    )
+    .unwrap();
+    fs::write(external_dir.join("alpha/assets/icon.bin"), [1u8, 2, 3]).unwrap();
+
+    let discovery = SkillDiscovery::discover(std::slice::from_ref(&external_dir), None, false);
+    let (tool, _loaded, _reg) = make_load_skill_tool(discovery.registry);
+    assert_eq!(tool.hints().read_only, Some(true));
+    assert_eq!(tool.hints().destructive, Some(false));
+    assert_eq!(tool.hints().idempotent, Some(true));
+    assert_eq!(tool.hints().open_world, Some(false));
+
+    let control = CallControl::new(CancellationToken::new(), None);
+    let make_call = |name: &str| {
+        ToolCallContext::new(
+            BlockId::new(uuid::Uuid::now_v7()),
+            ToolCallPayload::new("load_skill", serde_json::json!({ "name": name })),
+        )
+    };
+
+    // 1. Load alpha: frontmatter stripped, <skill_content> wrapped, resources listed by path only
+    let call1 = make_call("alpha");
+    let res1 = tool.execute(&call1, &control, None).await;
+    assert_eq!(res1.status, ToolResultStatus::Succeeded);
+    let text1 = res1.output.content.as_str().unwrap();
+    assert!(text1.starts_with("<skill_content name=\"alpha\">"));
+    assert!(text1.ends_with("</skill_content>"));
+    assert!(!text1.contains("description: Alpha helper"));
+    assert!(text1.contains("# Alpha Guide"));
+    assert!(text1.contains("scripts/run.sh"));
+    assert!(text1.contains("references/doc.md"));
+    assert!(text1.contains("assets/icon.bin"));
+    assert!(!text1.contains("SECRET_REF_BODY"));
+    let extra1 = res1.output.meta.as_ref().unwrap().extra.as_ref().unwrap();
+    assert_eq!(extra1["source"], SKILL_SOURCE);
+    assert_eq!(extra1["skill"], "alpha");
+
+    // 2. Duplicate call when unchanged: concise dedup hint citing block_id, no full body
+    let res2 = tool.execute(&make_call("alpha"), &control, None).await;
+    assert_eq!(res2.status, ToolResultStatus::Succeeded);
+    let text2 = res2.output.content.as_str().unwrap();
+    assert!(text2.contains("already loaded"));
+    assert!(text2.contains(&call1.call_block_id.0.to_string()));
+    assert!(!text2.contains("# Alpha Guide"));
+    assert!(
+        res2.output.meta.is_none(),
+        "dedup response must not tag tars:skill"
+    );
+
+    // 3. Modify SKILL.md on disk -> reloads updated body with new sha256
+    fs::write(
+        &alpha_file,
+        "---\nname: alpha\ndescription: Alpha helper\n---\n# Alpha v2\nUpdated instructions.\n",
+    )
+    .unwrap();
+    let res3 = tool.execute(&make_call("alpha"), &control, None).await;
+    assert_eq!(res3.status, ToolResultStatus::Succeeded);
+    let text3 = res3.output.content.as_str().unwrap();
+    assert!(text3.contains("# Alpha v2"));
+    assert!(text3.contains("Updated instructions."));
+    let extra3 = res3.output.meta.as_ref().unwrap().extra.as_ref().unwrap();
+    assert_ne!(extra3["sha256"], extra1["sha256"]);
+
+    // 4. Unknown skill name returns error listing available skills in lexicographical order
+    let res_unknown = tool.execute(&make_call("missing"), &control, None).await;
+    assert_eq!(res_unknown.status, ToolResultStatus::Failed);
+    let err = res_unknown.output.content["error"].as_str().unwrap();
+    assert!(err.contains("alpha, zeta"), "got: {err}");
+
+    // 5. File exceeding 64 KiB cap is rejected at load_skill time
+    let oversized = format!(
+        "---\nname: alpha\ndescription: Alpha helper\n---\n{}\n",
+        "x".repeat(tool::MAX_LOAD_SKILL_BYTES + 128)
+    );
+    fs::write(&alpha_file, oversized).unwrap();
+    let res_huge = tool.execute(&make_call("alpha"), &control, None).await;
+    assert_eq!(res_huge.status, ToolResultStatus::Failed);
+    assert!(
+        res_huge.output.content["error"]
+            .as_str()
+            .unwrap()
+            .contains("exceeds")
+    );
+}
+
+#[tokio::test]
+async fn test_si08_load_skill_blocks_path_traversal_and_runtime_symlink_escape() {
+    use causa::kernel::{
+        BlockId, CallControl, CancellationToken, Tool, ToolCallContext, ToolCallPayload,
+        ToolResultStatus,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let skills_root = temp.path().join("skills");
+    fs::create_dir_all(&skills_root).unwrap();
+    let skill_file = write_skill(
+        &skills_root,
+        "safe",
+        "---\nname: safe\ndescription: Safe skill\n---\nSafe body\n",
+    );
+    let outside_secret = temp.path().join("secret.txt");
+    fs::write(&outside_secret, "TOP_SECRET_VALUE").unwrap();
+
+    let discovery = SkillDiscovery::discover(std::slice::from_ref(&skills_root), None, false);
+    let (tool, _loaded, _reg) = make_load_skill_tool(discovery.registry);
+    let control = CallControl::new(CancellationToken::new(), None);
+    let make_call = |name: &str| {
+        ToolCallContext::new(
+            BlockId::new(uuid::Uuid::now_v7()),
+            ToolCallPayload::new("load_skill", serde_json::json!({ "name": name })),
+        )
+    };
+
+    // Traversal names fail allowlist lookup without touching filesystem
+    for bad in [
+        "../secret.txt",
+        "../../etc/passwd",
+        "safe/../secret.txt",
+        "",
+    ] {
+        let res = tool.execute(&make_call(bad), &control, None).await;
+        assert_eq!(res.status, ToolResultStatus::Failed);
+        assert!(
+            res.output.content["error"]
+                .as_str()
+                .unwrap()
+                .contains("safe")
+        );
+    }
+
+    // Runtime symlink swap after discovery is blocked
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        fs::remove_file(&skill_file).unwrap();
+        symlink(&outside_secret, &skill_file).unwrap();
+        let res = tool.execute(&make_call("safe"), &control, None).await;
+        assert_eq!(res.status, ToolResultStatus::Failed);
+        let msg = res.output.content["error"].as_str().unwrap();
+        assert!(msg.contains("outside"), "got: {msg}");
+        assert!(!res.output.content.to_string().contains("TOP_SECRET_VALUE"));
+    }
+}

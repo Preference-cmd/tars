@@ -50,6 +50,8 @@ pub(crate) struct SessionResources {
     pub(crate) external_tools: Option<ExternalTools>,
     /// Initial session-wide usage statistics restored from a saved record.
     pub(crate) initial_usage: Option<crate::usage::SessionUsage>,
+    /// Shared session skill registry bound to `load_skill`.
+    pub(crate) skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
     /// Test-only command sandbox probe result injected into the real assembly
     /// path. Mirrors `CommandRuntime::bind_with_sandbox`: no production code
     /// can choose a backend or a probe result.
@@ -73,6 +75,7 @@ impl SessionResources {
             persistent: false,
             external_tools: None,
             initial_usage: None,
+            skill_registry: None,
             #[cfg(test)]
             gateway_override: None,
             #[cfg(test)]
@@ -91,6 +94,15 @@ impl SessionResources {
     /// Restore the reopened session's cumulative usage statistics.
     pub(crate) fn with_usage(mut self, usage: Option<crate::usage::SessionUsage>) -> Self {
         self.initial_usage = usage;
+        self
+    }
+
+    /// Attach the session-shared skill registry for `load_skill`.
+    pub(crate) fn with_skills(
+        mut self,
+        skill_registry: Arc<std::sync::RwLock<crate::skills::SkillRegistry>>,
+    ) -> Self {
+        self.skill_registry = Some(skill_registry);
         self
     }
 
@@ -167,6 +179,7 @@ pub(crate) fn assemble(
         persistent,
         external_tools,
         initial_usage,
+        skill_registry,
         #[cfg(test)]
         gateway_override,
         #[cfg(test)]
@@ -318,10 +331,15 @@ pub(crate) fn assemble(
         .map(|window| (window, Arc::new(ProtectedInputs::default())));
     let options = definition.run_options();
     let max_tokens = definition.max_tokens;
+    let skill_registry = skill_registry
+        .unwrap_or_else(|| Arc::new(std::sync::RwLock::new(crate::skills::SkillRegistry::new())));
+    let loaded_skills = Arc::new(crate::skills::LoadedSkillsState::new());
+    loaded_skills.sync_from_context(context.blocks());
+    let skills_enabled = definition.prelude.skills_enabled;
     let selected = definition.tools.clone();
     let has_persistent_compaction = compaction.is_some();
     let call_timeout_secs = definition.tool_limits.call_timeout_secs;
-    let builtin_timeout = (!selected.is_empty() || has_persistent_compaction)
+    let builtin_timeout = (!selected.is_empty() || has_persistent_compaction || skills_enabled)
         .then(|| std::time::Duration::from_secs(call_timeout_secs));
     let builtin_timeout = match (
         builtin_timeout,
@@ -372,6 +390,8 @@ pub(crate) fn assemble(
     let compaction_for_work = compaction.clone();
     let transient_trim_for_work = transient_trim.clone();
     let usage_for_trim = usage;
+    let skill_registry_for_work = skill_registry.clone();
+    let loaded_skills_for_work = loaded_skills.clone();
     let session = Session::new_with_tools(
         conversation_id,
         context,
@@ -381,6 +401,8 @@ pub(crate) fn assemble(
             let transient_trim_for_work = transient_trim_for_work.clone();
             let usage_for_trim = usage_for_trim.clone();
             let reporter_for_compaction = reporter.clone();
+            let skill_registry_for_work = skill_registry_for_work.clone();
+            let loaded_skills_for_work = loaded_skills_for_work.clone();
             let options = options
                 .clone()
                 .with_processor_data(causa::kernel::ProcessorData::new(view.clone()));
@@ -398,8 +420,25 @@ pub(crate) fn assemble(
                     call_timeout_secs,
                 )));
             }
+            let bind_load_skill = skills_enabled
+                && !skill_registry_for_work
+                    .read()
+                    .expect("skill registry lock")
+                    .is_empty();
+            if bind_load_skill {
+                tools.push(Arc::new(crate::skills::LoadSkillTool::new(
+                    skill_registry_for_work,
+                    loaded_skills_for_work.clone(),
+                    reporter.clone(),
+                    call_timeout_secs,
+                )));
+            }
             let mut before: Vec<Arc<dyn ToolBatchProcessor>> = Vec::new();
-            if workspace_tools.is_some() || mcp_for_work.is_some() || compact_for_work.is_some() {
+            if workspace_tools.is_some()
+                || mcp_for_work.is_some()
+                || compact_for_work.is_some()
+                || bind_load_skill
+            {
                 before.push(Arc::new(crate::permission::ModeGateProcessor::new(
                     reporter.clone(),
                     approvals.clone(),
@@ -421,7 +460,11 @@ pub(crate) fn assemble(
             }
             // Every tool that can have effects is gated: built-in tools and
             // MCP tools alike pass the permission processor.
-            if workspace_tools.is_some() || mcp_for_work.is_some() || compact_for_work.is_some() {
+            if workspace_tools.is_some()
+                || mcp_for_work.is_some()
+                || compact_for_work.is_some()
+                || bind_load_skill
+            {
                 before.push(Arc::new(crate::permission::PermissionProcessor::new(
                     work,
                     reporter,
@@ -452,6 +495,11 @@ pub(crate) fn assemble(
                 )));
                 artifact_store = Some(store);
             }
+            if bind_load_skill {
+                after.push(Arc::new(crate::skills::LoadedSkillTrackerProcessor::new(
+                    loaded_skills_for_work.clone(),
+                )));
+            }
             async move {
                 let executor = ToolExecutor::new(tools, {
                     let mut options = ToolExecutorOptions::default();
@@ -471,18 +519,21 @@ pub(crate) fn assemble(
                 }
                 let mut options = options;
                 if let Some(runtime) = compact_for_work {
-                    options = options.with_preparer(Arc::new(CompactionPreparer::new(
-                        runtime,
-                        reporter_for_compaction,
-                    )));
+                    options = options.with_preparer(Arc::new(
+                        CompactionPreparer::new(runtime, reporter_for_compaction)
+                            .with_loaded_skills(loaded_skills_for_work),
+                    ));
                 } else if let Some((window, protected)) = transient_trim_for_work {
-                    options = options.with_preparer(Arc::new(TransientTrimPreparer::new(
-                        window,
-                        max_tokens,
-                        usage_for_trim,
-                        protected,
-                        reporter_for_compaction,
-                    )));
+                    options = options.with_preparer(Arc::new(
+                        TransientTrimPreparer::new(
+                            window,
+                            max_tokens,
+                            usage_for_trim,
+                            protected,
+                            reporter_for_compaction,
+                        )
+                        .with_loaded_skills(loaded_skills_for_work),
+                    ));
                 }
                 Ok((
                     Arc::new(TurnRunner::new(gateway, Arc::new(executor))),
@@ -493,7 +544,8 @@ pub(crate) fn assemble(
         definition.session_config(),
     )
     .allow_builtin_repair()
-    .with_permissions(session_permissions);
+    .with_permissions(session_permissions)
+    .with_skills(skill_registry, loaded_skills);
     let session = match mcp {
         Some(mcp) => session.with_mcp(mcp),
         None => session,

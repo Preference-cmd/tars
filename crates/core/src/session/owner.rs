@@ -6,7 +6,7 @@ use causa::runtime::{TurnRunOptions, TurnRunner};
 use std::collections::HashMap;
 use std::error::Error;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Exclusive lifecycle owner for one conversation's current materials.
 pub struct Session {
@@ -15,6 +15,8 @@ pub struct Session {
     pub(crate) permissions: Option<Arc<crate::permission::PermissionHub>>,
     mcp: Option<Arc<crate::mcp::McpRuntime>>,
     command_status: Option<crate::sandbox::SandboxStatus>,
+    skill_registry: Arc<RwLock<crate::skills::SkillRegistry>>,
+    loaded_skills: Arc<crate::skills::LoadedSkillsState>,
     #[cfg(test)]
     pub(crate) workspace_tools: Option<Arc<crate::tools::WorkspaceTools>>,
     #[cfg(test)]
@@ -42,6 +44,24 @@ impl Session {
     pub(crate) fn with_command_status(mut self, status: crate::sandbox::SandboxStatus) -> Self {
         self.command_status = Some(status);
         self
+    }
+
+    pub(crate) fn with_skills(
+        mut self,
+        skill_registry: Arc<RwLock<crate::skills::SkillRegistry>>,
+        loaded_skills: Arc<crate::skills::LoadedSkillsState>,
+    ) -> Self {
+        self.skill_registry = skill_registry;
+        self.loaded_skills = loaded_skills;
+        self
+    }
+
+    pub(crate) fn skill_registry(&self) -> Arc<RwLock<crate::skills::SkillRegistry>> {
+        self.skill_registry.clone()
+    }
+
+    pub(crate) fn loaded_skills(&self) -> Arc<crate::skills::LoadedSkillsState> {
+        self.loaded_skills.clone()
     }
 
     /// The probed command sandbox captured when this instance was assembled.
@@ -166,6 +186,8 @@ impl Session {
             permissions: None,
             mcp: None,
             command_status: None,
+            skill_registry: Arc::new(RwLock::new(crate::skills::SkillRegistry::new())),
+            loaded_skills: Arc::new(crate::skills::LoadedSkillsState::new()),
             #[cfg(test)]
             workspace_tools: None,
             #[cfg(test)]

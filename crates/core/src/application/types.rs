@@ -1,7 +1,7 @@
 use crate::definition::SessionDefinition;
 use crate::prelude::{
     PreludeBudgetConfig, PreludeDiagnostic, PreludeError, PreludeRuntimeState,
-    build_initial_prelude, has_prelude,
+    build_initial_prelude_with_skills, discover_skills_for_prelude, has_prelude,
 };
 use crate::session::{ConversationId, SessionError, SubmitRequest, WorkRef};
 use crate::store::StoreError;
@@ -31,15 +31,16 @@ pub struct PreparedCreate {
     pub(super) context: Context,
     pub(super) persistent: bool,
     pub(super) prelude_diagnostics: Vec<PreludeDiagnostic>,
+    pub(super) skill_registry: Option<crate::skills::SkillRegistry>,
 }
 impl PreparedCreate {
     /// Prepare a durable initial snapshot before any asynchronous operation.
     pub fn persistent(definition: SessionDefinition, context: Context) -> Self {
-        Self::new(definition, context, true, Vec::new())
+        Self::new(definition, context, true, Vec::new(), None)
     }
     /// Prepare a temporary conversation with no implicit store writes.
     pub fn transient(definition: SessionDefinition, context: Context) -> Self {
-        Self::new(definition, context, false, Vec::new())
+        Self::new(definition, context, false, Vec::new(), None)
     }
     /// Prepare a durable initial snapshot with unified prelude injection when
     /// `imported_context` does not already begin with prelude blocks.
@@ -63,16 +64,31 @@ impl PreparedCreate {
         persistent: bool,
     ) -> Result<Self, PreludeError> {
         let base_context = imported_context.unwrap_or_default();
-        if has_prelude(base_context.blocks()) {
-            return Ok(Self::new(definition, base_context, persistent, Vec::new()));
-        }
         let state = PreludeRuntimeState::from_definition(
             &definition,
             definition.initial_permission_mode(),
             persistent,
         );
-        let budget = prelude_budget_config(&definition, persistent);
-        let initial = build_initial_prelude(&definition.prelude, &state, &budget)?;
+        let (registry, skill_diagnostics) =
+            discover_skills_for_prelude(&definition.prelude, &state);
+        if has_prelude(base_context.blocks()) {
+            return Ok(Self::new(
+                definition,
+                base_context,
+                persistent,
+                Vec::new(),
+                Some(registry),
+            ));
+        }
+        let include_load_skill = definition.prelude.skills_enabled && !registry.is_empty();
+        let budget = prelude_budget_config(&definition, persistent, include_load_skill);
+        let initial = build_initial_prelude_with_skills(
+            &definition.prelude,
+            &state,
+            &budget,
+            registry,
+            skill_diagnostics,
+        )?;
         let mut blocks = initial.blocks;
         blocks.extend(base_context.into_blocks());
         let context =
@@ -82,6 +98,7 @@ impl PreparedCreate {
             context,
             persistent,
             initial.diagnostics,
+            Some(initial.registry),
         ))
     }
     fn new(
@@ -89,6 +106,7 @@ impl PreparedCreate {
         context: Context,
         persistent: bool,
         prelude_diagnostics: Vec<PreludeDiagnostic>,
+        skill_registry: Option<crate::skills::SkillRegistry>,
     ) -> Self {
         Self {
             conversation_id: uuid::Uuid::now_v7().to_string().into(),
@@ -97,6 +115,7 @@ impl PreparedCreate {
             context,
             persistent,
             prelude_diagnostics,
+            skill_registry,
         }
     }
     /// Read the identity allocated synchronously by preparation.
@@ -116,6 +135,7 @@ impl PreparedCreate {
 pub(crate) fn prelude_budget_config(
     definition: &SessionDefinition,
     persistent: bool,
+    include_load_skill: bool,
 ) -> PreludeBudgetConfig {
     let command_settings = definition.effective_command_settings().unwrap_or_default();
     let write_limits = definition.write_limits.unwrap_or_default();
@@ -133,6 +153,9 @@ pub(crate) fn prelude_budget_config(
         .collect();
     if persistent {
         tools.push(crate::compact::recall::recall_tool_definition());
+    }
+    if include_load_skill {
+        tools.push(crate::skills::load_skill_tool_definition());
     }
     let folded_tool_declaration_estimate = if tools.is_empty() {
         0

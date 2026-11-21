@@ -252,12 +252,15 @@ impl ManagedSession {
             .expect("published definition")
             .clone();
         let owner = state.owner.as_mut().expect("published owner");
+        let skill_registry = owner.skill_registry();
+        let loaded_skills = owner.loaded_skills();
         let current_mode = owner
             .permission_mode()
             .map(|(m, _)| m)
             .unwrap_or_else(|| definition.initial_permission_mode());
         let prelude_evaluation = owner.with_context(|context| {
             let blocks = context.blocks();
+            loaded_skills.sync_from_context(blocks);
             if !crate::prelude::has_prelude(blocks) {
                 return None;
             }
@@ -266,17 +269,23 @@ impl ManagedSession {
                 current_mode,
                 persistent,
             );
-            let budget = prelude_budget_config(&definition, persistent);
-            Some(crate::prelude::evaluate_dynamic_updates(
+            let (discovered_registry, skill_diagnostics) =
+                crate::prelude::discover_skills_for_prelude(&definition.prelude, &runtime_state);
+            let include_load_skill =
+                definition.prelude.skills_enabled && !discovered_registry.is_empty();
+            let budget = prelude_budget_config(&definition, persistent, include_load_skill);
+            Some(crate::prelude::evaluate_dynamic_updates_with_skills(
                 blocks,
                 &definition.prelude,
                 &runtime_state,
                 &budget,
+                discovered_registry,
+                skill_diagnostics,
             ))
         });
-        let (prelude_updates, update_diagnostics) = match prelude_evaluation {
-            Ok(Some(update)) => (update.blocks, update.diagnostics),
-            Ok(None) => (Vec::new(), Vec::new()),
+        let (prelude_updates, update_diagnostics, next_registry) = match prelude_evaluation {
+            Ok(Some(update)) => (update.blocks, update.diagnostics, Some(update.registry)),
+            Ok(None) => (Vec::new(), Vec::new(), None),
             Err(error) => {
                 return Err(ManagedSubmitRejection {
                     reason: error.into(),
@@ -284,6 +293,9 @@ impl ManagedSession {
                 });
             }
         };
+        if let Some(next_registry) = next_registry {
+            *skill_registry.write().expect("skill registry lock") = next_registry;
+        }
         let receipt = handle
             .submit_with_prelude_updates(request, prelude_updates)
             .map_err(|failure| ManagedSubmitRejection {

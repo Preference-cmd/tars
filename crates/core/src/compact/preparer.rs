@@ -22,12 +22,27 @@ use std::sync::Arc;
 pub(crate) struct CompactionPreparer {
     runtime: Arc<CompactionRuntime>,
     reporter: ToolReporter,
+    loaded_skills: Option<Arc<crate::skills::LoadedSkillsState>>,
 }
 
 impl CompactionPreparer {
     /// Bind the session's runtime to one accepted work.
     pub(crate) fn new(runtime: Arc<CompactionRuntime>, reporter: ToolReporter) -> Self {
-        Self { runtime, reporter }
+        Self {
+            runtime,
+            reporter,
+            loaded_skills: None,
+        }
+    }
+
+    /// Attach the session's loaded-skills view so compactions clear evicted skills
+    /// and refresh promoted `tars:skill` block IDs.
+    pub(crate) fn with_loaded_skills(
+        mut self,
+        loaded_skills: Arc<crate::skills::LoadedSkillsState>,
+    ) -> Self {
+        self.loaded_skills = Some(loaded_skills);
+        self
     }
 
     fn report(&self, round: &RoundInfo<'_>, progress: CompactionProgress) {
@@ -122,6 +137,9 @@ impl ContextPreparer for CompactionPreparer {
                 }
             }
         }
+        if let Some(loaded) = &self.loaded_skills {
+            loaded.sync_from_context(context.blocks());
+        }
         Ok(self.finish_frame(context, round))
     }
 }
@@ -133,6 +151,7 @@ pub(crate) struct TransientTrimPreparer {
     usage: Arc<UsageTracker>,
     protected: Arc<ProtectedInputs>,
     reporter: ToolReporter,
+    loaded_skills: Option<Arc<crate::skills::LoadedSkillsState>>,
 }
 
 impl TransientTrimPreparer {
@@ -151,7 +170,18 @@ impl TransientTrimPreparer {
             usage,
             protected,
             reporter,
+            loaded_skills: None,
         }
+    }
+
+    /// Attach the session's loaded-skills view so round transitions keep exact
+    /// committed `ToolResult` block IDs in sync.
+    pub(crate) fn with_loaded_skills(
+        mut self,
+        loaded_skills: Arc<crate::skills::LoadedSkillsState>,
+    ) -> Self {
+        self.loaded_skills = Some(loaded_skills);
+        self
     }
 }
 
@@ -163,6 +193,9 @@ impl ContextPreparer for TransientTrimPreparer {
         round: &RoundInfo<'_>,
         _control: &CallControl,
     ) -> Result<ContextFrame, PrepareError> {
+        if let Some(loaded) = &self.loaded_skills {
+            loaded.sync_from_context(context.blocks());
+        }
         let bytes = estimate::context_bytes(context);
         let estimate_tokens = self.usage.estimate(bytes);
         let protected = self.protected.snapshot();

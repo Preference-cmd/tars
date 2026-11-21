@@ -20,8 +20,11 @@ pub use contract::{
     dynamic_section_from_prefix_source, dynamic_section_from_update_source, has_prelude,
     is_any_prelude_source, is_prelude_prefix_source, is_prelude_update_source,
 };
-pub(crate) use engine::fold_dynamic_prefix;
 pub use engine::{build_initial_prelude, effective_section_contents, evaluate_dynamic_updates};
+pub(crate) use engine::{
+    build_initial_prelude_with_skills, discover_skills_for_prelude,
+    evaluate_dynamic_updates_with_skills, fold_dynamic_prefix,
+};
 pub use types::{
     CapabilityCategory, DynamicCustomSlot, DynamicUpdate, InitialPrelude, PreludeBudgetConfig,
     PreludeDefinition, PreludeDiagnostic, PreludeDiagnosticKind, PreludeError, PreludeRuntimeState,

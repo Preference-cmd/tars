@@ -872,6 +872,14 @@ fn title_derivation_skips_prelude_and_compaction_blocks() {
             BlockContent::text(Role::User, "compacted brief"),
             BlockMeta::from_source(crate::compact::SUMMARY_SOURCE),
         ),
+        ContextBlock::new(
+            new_block_id(),
+            BlockContent::text(
+                Role::User,
+                "<skill_content name=\"alpha\" sha256=\"abc\">\nSkill body\n</skill_content>",
+            ),
+            BlockMeta::from_source(crate::skills::SKILL_SOURCE),
+        ),
     ])
     .unwrap();
 

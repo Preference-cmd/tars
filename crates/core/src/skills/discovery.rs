@@ -264,7 +264,7 @@ fn load_skill_from_dir(
     })
 }
 
-fn collect_resources(
+pub(super) fn collect_resources(
     canon_skill_dir: &Path,
     diagnostics: &mut Vec<SkillDiagnostic>,
 ) -> SkillResources {
@@ -417,12 +417,15 @@ fn read_sorted_dir(dir: &Path) -> io::Result<Vec<(std::ffi::OsString, PathBuf)>>
     Ok(entries)
 }
 
-enum BoundedReadError {
+pub(super) enum BoundedReadError {
     TooLarge,
     Io(io::Error),
 }
 
-fn read_bounded_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>, BoundedReadError> {
+pub(super) fn read_bounded_file(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, BoundedReadError> {
     let file = File::open(path).map_err(BoundedReadError::Io)?;
     let mut buf = Vec::new();
     file.take(max_bytes as u64 + 1)
@@ -434,7 +437,7 @@ fn read_bounded_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>, BoundedRe
     Ok(buf)
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(super) fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(digest.len() * 2);
     for byte in digest {

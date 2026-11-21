@@ -32,11 +32,21 @@ pub fn build_initial_prelude(
     state: &PreludeRuntimeState,
     budget: &PreludeBudgetConfig,
 ) -> Result<InitialPrelude, PreludeError> {
+    let (registry, diagnostics) = discover_skills_for_prelude(definition, state);
+    build_initial_prelude_with_skills(definition, state, budget, registry, diagnostics)
+}
+
+pub(crate) fn build_initial_prelude_with_skills(
+    definition: &PreludeDefinition,
+    state: &PreludeRuntimeState,
+    budget: &PreludeBudgetConfig,
+    registry: SkillRegistry,
+    diagnostics: Vec<PreludeDiagnostic>,
+) -> Result<InitialPrelude, PreludeError> {
     let static_blocks = build_static_blocks(definition);
     let static_bytes = blocks_text_bytes(&static_blocks);
     let effective_budget = effective_budget_bytes(budget);
 
-    let (registry, diagnostics) = discover_skills_for_prelude(definition, state);
     let skills: Vec<SkillEntry> = registry.iter().cloned().collect();
 
     let user_instructions = read_optional_agents_md_strict(
@@ -127,11 +137,29 @@ pub fn evaluate_dynamic_updates(
     state: &PreludeRuntimeState,
     budget: &PreludeBudgetConfig,
 ) -> DynamicUpdate {
+    let (registry, diagnostics) = discover_skills_for_prelude(definition, state);
+    evaluate_dynamic_updates_with_skills(
+        existing_blocks,
+        definition,
+        state,
+        budget,
+        registry,
+        diagnostics,
+    )
+}
+
+pub(crate) fn evaluate_dynamic_updates_with_skills(
+    existing_blocks: &[ContextBlock],
+    definition: &PreludeDefinition,
+    state: &PreludeRuntimeState,
+    budget: &PreludeBudgetConfig,
+    registry: SkillRegistry,
+    mut diagnostics: Vec<PreludeDiagnostic>,
+) -> DynamicUpdate {
     let previous = effective_section_contents(existing_blocks);
     let (static_blocks, static_bytes) = leading_static_blocks(existing_blocks, definition);
     let effective_budget = effective_budget_bytes(budget);
 
-    let (registry, mut diagnostics) = discover_skills_for_prelude(definition, state);
     let skills: Vec<SkillEntry> = registry.iter().cloned().collect();
 
     let mut keep_previous = [false; 5];
@@ -462,7 +490,7 @@ fn tighten_loop(
     (rendered, current_budget)
 }
 
-fn discover_skills_for_prelude(
+pub(crate) fn discover_skills_for_prelude(
     definition: &PreludeDefinition,
     state: &PreludeRuntimeState,
 ) -> (SkillRegistry, Vec<PreludeDiagnostic>) {

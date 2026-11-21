@@ -312,6 +312,48 @@ async fn test_be16_after_processor_skips_under_threshold_recall_and_existing_art
 }
 
 #[tokio::test]
+async fn test_si06_output_spill_exempts_tars_skill_tool_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let conv_id = "0190a000-0000-7000-8000-000000000021";
+    let store = Arc::new(HistoryStore::new(dir.path(), conv_id, Vec::new()));
+    let artifacts = Arc::new(HistoryArtifacts::new(store));
+    let processor = OutputSpillProcessor::new(artifacts);
+
+    // > 6 KiB (over 4,000 tokens = 12,000+ bytes) `load_skill` output with `tars:skill` metadata
+    let body = format!(
+        "<skill_content name=\"big-skill\">\n{}\n</skill_content>",
+        "line: skill instruction text\n".repeat(600)
+    );
+    assert!(estimate::estimate_bytes(body.len() as u64) > SPILL_THRESHOLD_TOKENS);
+    let mut out = ToolOutput::new(serde_json::Value::String(body.clone()));
+    let mut meta = ToolOutputMeta::default();
+    meta.extra = Some(serde_json::json!({
+        "source": crate::skills::SKILL_SOURCE,
+        "skill": "big-skill",
+        "sha256": "deadbeef",
+    }));
+    out.meta = Some(meta);
+
+    let (mut batch, ids) = batch_for(vec![(
+        "load_skill",
+        ToolResultStatus::Succeeded,
+        out,
+        Vec::new(),
+        Vec::new(),
+    )]);
+    let turn_id = TurnId::new("t-skill");
+    let control = CallControl::new(CancellationToken::new(), None);
+    let ctx = ProcessorContext::new(&turn_id, RoundId(1), &ids, &control);
+    processor.process(&mut batch, &ctx).await.unwrap();
+
+    let (_, res) = batch.results()[0].result().unwrap();
+    assert_eq!(res.output.truncation, Truncation::None);
+    assert!(res.output.artifact.is_none());
+    assert_eq!(res.output.content.as_str().unwrap(), body);
+    assert!(!dir.path().join(format!("{conv_id}.artifacts")).exists());
+}
+
+#[tokio::test]
 async fn test_be16_after_processor_degrades_on_persist_failure_without_failing_batch() {
     let processor = OutputSpillProcessor::new(Arc::new(FailingArtifactStore));
     let large = "z".repeat(20_000);

@@ -393,12 +393,13 @@ async fn test_si03_dynamic_tail_append_reopen_readonly_open_and_request_key_idem
     let blocks_t5 = session.read_materials().unwrap().context.blocks().to_vec();
     assert_eq!(blocks_t5.len(), blocks_t4.len() + 2);
 
-    // Turn 6: add SKILL.md -> skills updated AND env updated (capabilities gain `skills`)
+    // Turn 6: add SKILL.md -> skills updated, env updated (capabilities gain `skills`),
+    // and `load_skill` is bound via one ToolChange (0 -> >0).
     write_skill(&ws.join(".tars/skills"), "s1", "First skill");
     run_turn(&session, "t6", "turn 6").await;
     let blocks_t6 = session.read_materials().unwrap().context.blocks().to_vec();
     let added_t6 = &blocks_t6[blocks_t5.len()..];
-    assert_eq!(added_t6.len(), 4);
+    assert_eq!(added_t6.len(), 5);
     assert_eq!(
         added_t6[0].meta().source.as_deref(),
         Some(DynamicSection::Skills.update_source())
@@ -409,8 +410,15 @@ async fn test_si03_dynamic_tail_append_reopen_readonly_open_and_request_key_idem
         Some(DynamicSection::Env.update_source())
     );
     assert!(text_of(&added_t6[1]).contains("capabilities: workspace_read, recall, skills"));
+    assert!(
+        added_t6.iter().any(|b| matches!(
+            b.content(),
+            BlockContent::ToolChange(tc) if tc.added.iter().any(|t| t.name == "load_skill")
+        )),
+        "0 -> >0 skills must bind load_skill via ToolChange"
+    );
 
-    // Turn 7: modify SKILL.md -> only skills updated
+    // Turn 7: modify SKILL.md -> only skills updated, zero ToolChange (>0 -> >0)
     write_skill(&ws.join(".tars/skills"), "s1", "Updated skill desc");
     run_turn(&session, "t7", "turn 7").await;
     let blocks_t7 = session.read_materials().unwrap().context.blocks().to_vec();
@@ -422,12 +430,12 @@ async fn test_si03_dynamic_tail_append_reopen_readonly_open_and_request_key_idem
     );
     assert!(text_of(&added_t7[0]).contains("Updated skill desc"));
 
-    // Turn 8: delete SKILL.md -> skills removed tombstone + env loses `skills`
+    // Turn 8: delete SKILL.md -> skills removed tombstone + env loses `skills` + ToolChange removes `load_skill`
     fs::remove_dir_all(ws.join(".tars/skills/s1")).unwrap();
     run_turn(&session, "t8", "turn 8").await;
     let blocks_t8 = session.read_materials().unwrap().context.blocks().to_vec();
     let added_t8 = &blocks_t8[blocks_t7.len()..];
-    assert_eq!(added_t8.len(), 4);
+    assert_eq!(added_t8.len(), 5);
     assert_eq!(
         text_of(&added_t8[0]),
         "<available_skills removed=\"true\" />"
@@ -437,6 +445,13 @@ async fn test_si03_dynamic_tail_append_reopen_readonly_open_and_request_key_idem
         Some(DynamicSection::Env.update_source())
     );
     assert!(!text_of(&added_t8[1]).contains("skills"));
+    assert!(
+        added_t8.iter().any(|b| matches!(
+            b.content(),
+            BlockContent::ToolChange(tc) if tc.removed.iter().any(|name| name == "load_skill")
+        )),
+        ">0 -> 0 skills must unbind load_skill via ToolChange"
+    );
 
     // Turn 9: switch permission mode at runtime -> only update:env emitted
     session

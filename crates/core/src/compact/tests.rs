@@ -25,6 +25,7 @@ mod brief_reply;
 mod merge;
 mod partial;
 mod prelude_fold;
+mod skill_protection;
 mod spill;
 mod thinking;
 mod trim;

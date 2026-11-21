@@ -295,6 +295,8 @@ impl CompactionRuntime {
             head_end,
             k,
             ref protected,
+            request_in_progress,
+            promoted_skills: _,
         } = interval;
 
         // Only material over the whole window would be refused; it is then
@@ -309,7 +311,7 @@ impl CompactionRuntime {
             });
         let mut request_blocks = summary::request_material(blocks, head_end, k, protected, limit);
         request_blocks.push(summary::instruction_block(summary::instruction(
-            !protected.is_empty(),
+            request_in_progress,
         )));
         let text = self
             .brief(request_blocks, model, generation, control)
@@ -357,18 +359,23 @@ impl CompactionRuntime {
         }
         let head_end = segment::head_end(blocks);
         let (_, threshold) = self.settings();
-        let budget = segment::retained_tail_budget(
-            self.window,
-            threshold,
-            segment::fixed_prefix_estimate(blocks),
-        )
-        .map_err(|_| CompactionAbandon::PrefixTooLarge)?;
+        let fixed_prefix = segment::fixed_prefix_estimate(blocks);
+        let budget = segment::retained_tail_budget(self.window, threshold, fixed_prefix)
+            .map_err(|_| CompactionAbandon::PrefixTooLarge)?;
         let k = sealed::tail_start_outside_open_loop(
             blocks,
             segment::tail_start(blocks, head_end, budget),
         );
-        let protected =
+        let work_inputs =
             segment::protected_positions(blocks, head_end, k, &self.current_work_inputs());
+        let request_in_progress = !work_inputs.is_empty();
+        let skill_budget = segment::skill_protection_budget(self.window, threshold, fixed_prefix);
+        let (skill_protected, promoted_skills) =
+            plan_skill_protection(blocks, head_end, k, skill_budget);
+        let mut protected = work_inputs;
+        protected.extend(skill_protected);
+        protected.sort_unstable();
+        protected.dedup();
         // Protected blocks stay and declarations are only folded, so an
         // interval of nothing else has nothing to summarize.
         let summarizable = (head_end..k).any(|index| {
@@ -382,6 +389,8 @@ impl CompactionRuntime {
             head_end,
             k,
             protected,
+            request_in_progress,
+            promoted_skills,
         })
     }
 
@@ -599,12 +608,103 @@ impl CompactionRuntime {
     }
 }
 
-/// Where a summary cuts: the end of the head, the tail start `k` and the
-/// protected positions between them.
+/// Where a summary cuts: the end of the head, the tail start `k`, the
+/// protected positions between them, and promoted `load_skill` blocks.
 struct SummaryInterval {
     head_end: usize,
     k: usize,
     protected: Vec<usize>,
+    request_in_progress: bool,
+    promoted_skills: Vec<(usize, ContextBlock)>,
+}
+
+enum SkillOccurrenceKind {
+    Standalone,
+    ToolResult { promoted_text: String },
+}
+
+struct SkillOccurrence {
+    index: usize,
+    name: String,
+    kind: SkillOccurrenceKind,
+}
+
+fn plan_skill_protection(
+    blocks: &[ContextBlock],
+    head_end: usize,
+    k: usize,
+    budget_tokens: u64,
+) -> (Vec<usize>, Vec<(usize, ContextBlock)>) {
+    let mut occurrences = Vec::new();
+    let mut latest_by_name: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+
+    for (index, block) in blocks.iter().enumerate().skip(head_end) {
+        if let Some((name, _sha256)) = crate::skills::parse_standalone_skill_block(block) {
+            latest_by_name.insert(name.clone(), index);
+            occurrences.push(SkillOccurrence {
+                index,
+                name,
+                kind: SkillOccurrenceKind::Standalone,
+            });
+        } else if let Some((name, _sha256, promoted_text)) =
+            crate::skills::parse_tool_result_skill(block)
+        {
+            latest_by_name.insert(name.clone(), index);
+            occurrences.push(SkillOccurrence {
+                index,
+                name,
+                kind: SkillOccurrenceKind::ToolResult { promoted_text },
+            });
+        }
+    }
+
+    let mut used_bytes = 0u64;
+    let mut interval_candidates = Vec::new();
+    for occ in occurrences {
+        if latest_by_name.get(&occ.name) != Some(&occ.index) {
+            continue;
+        }
+        if occ.index >= k {
+            used_bytes = used_bytes.saturating_add(segment::block_bytes(&blocks[occ.index]));
+        } else {
+            interval_candidates.push(occ);
+        }
+    }
+
+    let mut protected_indices = Vec::new();
+    let mut promoted_skills = Vec::new();
+    // Retain newest active skills first; once a skill exceeds the protection
+    // budget, evict it and all older skills into the summary.
+    for occ in interval_candidates.into_iter().rev() {
+        match occ.kind {
+            SkillOccurrenceKind::Standalone => {
+                let bytes = segment::block_bytes(&blocks[occ.index]);
+                let next_bytes = used_bytes.saturating_add(bytes);
+                if estimate::estimate_bytes(next_bytes) <= budget_tokens {
+                    used_bytes = next_bytes;
+                    protected_indices.push(occ.index);
+                } else {
+                    break;
+                }
+            }
+            SkillOccurrenceKind::ToolResult { promoted_text } => {
+                let promoted_block = crate::skills::make_standalone_skill_block(promoted_text);
+                let bytes = segment::block_bytes(&promoted_block);
+                let next_bytes = used_bytes.saturating_add(bytes);
+                if estimate::estimate_bytes(next_bytes) <= budget_tokens {
+                    used_bytes = next_bytes;
+                    promoted_skills.push((occ.index, promoted_block));
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    protected_indices.sort_unstable();
+    promoted_skills.sort_by_key(|(index, _)| *index);
+    (protected_indices, promoted_skills)
 }
 
 /// The replacements of a summary over `interval` with `brief` standing for it,
@@ -720,11 +820,12 @@ fn build_summary_replacements(
     sealed::strip_after(
         blocks,
         interval.head_end,
-        segment::replacements(
+        segment::replacements_with_skills(
             blocks,
             interval.head_end,
             interval.k,
             &interval.protected,
+            &interval.promoted_skills,
             new_blocks,
         ),
     )
@@ -748,11 +849,12 @@ fn summary_replacements(
     sealed::strip_after(
         blocks,
         interval.head_end,
-        segment::replacements(
+        segment::replacements_with_skills(
             blocks,
             interval.head_end,
             interval.k,
             &interval.protected,
+            &interval.promoted_skills,
             new_blocks,
         ),
     )

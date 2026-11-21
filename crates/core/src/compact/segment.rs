@@ -48,6 +48,13 @@ pub(crate) const CHAIN_BUDGET_FLOOR: u64 = 4_000;
 /// conversation on tiny windows.
 pub(crate) const CHAIN_MAX_SHARE: u64 = 2;
 
+/// Maximum token budget across all protected `tars:skill` blocks in Context.
+pub(crate) const SKILL_PROTECTION_CAP: u64 = 12_000;
+
+/// Protected skills get at most this fraction (1/4) of the trigger line
+/// minus the fixed prefix, capped at [`SKILL_PROTECTION_CAP`].
+pub(crate) const SKILL_PROTECTION_SHARE: u64 = 4;
+
 /// The chain is merged once it holds more briefs than this.
 pub(crate) const MAX_CHAIN_BRIEFS: usize = 8;
 
@@ -213,6 +220,21 @@ pub(crate) fn retained_tail_budget(
     Ok(RETAINED_TAIL_CAP.min(line.saturating_sub(fixed_prefix) / RETAINED_TAIL_SHARE))
 }
 
+/// Token budget for all protected `tars:skill` blocks in Context:
+/// `min((line − fixed_prefix) / 4, 12_000)` when the window is known, or
+/// `12_000` when it is unknown.
+pub(crate) fn skill_protection_budget(
+    window: Option<u64>,
+    threshold_percent: u8,
+    fixed_prefix: u64,
+) -> u64 {
+    let Some(window) = window else {
+        return SKILL_PROTECTION_CAP;
+    };
+    let line = trigger_line(window, threshold_percent);
+    SKILL_PROTECTION_CAP.min(line.saturating_sub(fixed_prefix) / SKILL_PROTECTION_SHARE)
+}
+
 /// Token budget of the brief chain: `max((line − prefix) / 8, min(4_000, (line − prefix) / 2))`,
 /// or none when the window is unknown and only the number of briefs counts.
 pub(crate) fn chain_budget(
@@ -328,6 +350,7 @@ pub(crate) fn tool_delta(before: &[ContextBlock], after: &[ContextBlock]) -> Opt
 /// range's originals back where its inserted blocks stand. A protected block
 /// therefore appears both among a range's originals and its inserted ids;
 /// Causa accepts the reuse because content and metadata are unchanged.
+#[cfg(test)]
 pub(crate) fn replacements(
     blocks: &[ContextBlock],
     head_end: usize,
@@ -335,8 +358,30 @@ pub(crate) fn replacements(
     protected: &[usize],
     new_blocks: Vec<ContextBlock>,
 ) -> Vec<PlannedReplacement> {
+    replacements_with_skills(blocks, head_end, k, protected, &[], new_blocks)
+}
+
+/// Like [`replacements`], also inserting promoted standalone `tars:skill` blocks
+/// at the exact `load_skill` `ToolResult` positions they replace.
+pub(crate) fn replacements_with_skills(
+    blocks: &[ContextBlock],
+    head_end: usize,
+    k: usize,
+    protected: &[usize],
+    promoted_skills: &[(usize, ContextBlock)],
+    new_blocks: Vec<ContextBlock>,
+) -> Vec<PlannedReplacement> {
+    let mut split_points: Vec<usize> = protected
+        .iter()
+        .copied()
+        .chain(promoted_skills.iter().map(|(index, _)| *index))
+        .filter(|&index| index > head_end && index < k)
+        .collect();
+    split_points.sort_unstable();
+    split_points.dedup();
+
     let mut starts = vec![head_end];
-    starts.extend(protected.iter().copied().filter(|&index| index > head_end));
+    starts.extend(split_points);
     let mut new_blocks = Some(new_blocks);
     starts
         .iter()
@@ -344,6 +389,9 @@ pub(crate) fn replacements(
         .map(|(position, &start)| {
             let end = starts.get(position + 1).copied().unwrap_or(k);
             let mut with = new_blocks.take().unwrap_or_default();
+            if let Some((_, promoted)) = promoted_skills.iter().find(|(index, _)| *index == start) {
+                with.push(promoted.clone());
+            }
             if protected.contains(&start) {
                 with.push(blocks[start].clone());
             }

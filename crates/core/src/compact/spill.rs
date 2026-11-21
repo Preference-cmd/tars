@@ -64,7 +64,7 @@ impl ToolBatchProcessor for OutputSpillProcessor {
             let Some(output) = entry.output_mut() else {
                 continue;
             };
-            if output.artifact.is_some() {
+            if output.artifact.is_some() || crate::skills::is_skill_tool_output(output) {
                 continue;
             }
 

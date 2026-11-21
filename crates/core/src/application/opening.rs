@@ -163,6 +163,7 @@ pub(super) async fn initialize(
             auto_compact,
             compact_threshold,
             usage,
+            prepared.as_ref().and_then(|p| p.skill_registry.clone()),
         )
         .await?
     };
@@ -180,6 +181,7 @@ pub(super) async fn initialize(
         auto_compact,
         compact_threshold,
         usage,
+        prepared.as_ref().and_then(|p| p.skill_registry.clone()),
     )
     .await?;
     let mut state = entry.lock();
@@ -238,7 +240,20 @@ async fn assembled(
     auto_compact: Option<bool>,
     compact_threshold: Option<u8>,
     usage: Option<crate::usage::SessionUsage>,
+    initial_skills: Option<crate::skills::SkillRegistry>,
 ) -> Result<crate::session::Session, ApplicationError> {
+    let registry = match initial_skills {
+        Some(registry) => registry,
+        None if definition.prelude.skills_enabled => {
+            crate::skills::SkillDiscovery::discover(
+                &definition.prelude.skill_dirs,
+                definition.workspace_root.as_deref(),
+                definition.prelude.include_workspace_skills,
+            )
+            .registry
+        }
+        None => crate::skills::SkillRegistry::new(),
+    };
     let base = crate::assembly::SessionResources::new(host.tool_resources.clone())
         .with_storage(
             host.store
@@ -247,6 +262,7 @@ async fn assembled(
         )
         .with_compaction(history, auto_compact, compact_threshold)
         .with_usage(usage)
+        .with_skills(Arc::new(std::sync::RwLock::new(registry)))
         .persistent(persistent);
     let base = match host.external_tools.clone() {
         Some(tools) => base.with_external_tools(tools),
