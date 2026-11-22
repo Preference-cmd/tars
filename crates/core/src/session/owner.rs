@@ -8,6 +8,9 @@ use std::error::Error;
 use std::future::Future;
 use std::sync::{Arc, Mutex, RwLock};
 
+#[cfg(test)]
+type AfterPrepareHook = Arc<dyn Fn() + Send + Sync>;
+
 /// Exclusive lifecycle owner for one conversation's current materials.
 pub struct Session {
     pub(super) shared: Arc<Shared>,
@@ -22,8 +25,7 @@ pub struct Session {
     pub(crate) test_before_processors:
         Arc<std::sync::Mutex<Vec<Arc<dyn causa::kernel::ToolBatchProcessor>>>>,
     #[cfg(test)]
-    pub(crate) test_intermediate_processors:
-        Arc<std::sync::Mutex<Vec<Arc<dyn causa::kernel::ToolBatchProcessor>>>>,
+    pub(crate) test_after_prepare_hook: Arc<std::sync::Mutex<Option<AfterPrepareHook>>>,
 }
 
 impl Session {
@@ -87,17 +89,14 @@ impl Session {
             .push(processor);
     }
 
-    /// Append an extra before processor between the mode gate and precheck/permission processors during test runs.
+    /// Register a test hook invoked after `prepare` and before live re-decision in `ToolPolicyProcessor`.
     #[cfg(test)]
     #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) fn add_test_intermediate_processor(
-        &self,
-        processor: Arc<dyn causa::kernel::ToolBatchProcessor>,
-    ) {
-        self.test_intermediate_processors
+    pub(crate) fn set_test_after_prepare_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *self
+            .test_after_prepare_hook
             .lock()
-            .expect("test intermediate processors lock")
-            .push(processor);
+            .expect("test after prepare hook lock") = Some(hook);
     }
     /// Construct without assembly, worker creation, input edits or history recovery.
     pub fn new<F, Fut>(
@@ -145,7 +144,7 @@ impl Session {
             #[cfg(test)]
             test_before_processors: Arc::new(std::sync::Mutex::new(Vec::new())),
             #[cfg(test)]
-            test_intermediate_processors: Arc::new(std::sync::Mutex::new(Vec::new())),
+            test_after_prepare_hook: Arc::new(std::sync::Mutex::new(None)),
             shared: Arc::new(Shared {
                 conversation_id,
                 state: Mutex::new(State {

@@ -143,16 +143,13 @@ impl ManagedSession {
         }
     }
 
-    /// Append an extra before processor between the mode gate and precheck/permission processors during test runs.
+    /// Register a test hook invoked after `prepare` and before live re-decision in `ToolPolicyProcessor`.
     #[cfg(test)]
     #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) fn add_test_intermediate_processor(
-        &self,
-        processor: Arc<dyn causa::kernel::ToolBatchProcessor>,
-    ) {
+    pub(crate) fn set_test_after_prepare_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         let state = self.entry.lock();
         if let Some(owner) = &state.owner {
-            owner.add_test_intermediate_processor(processor);
+            owner.set_test_after_prepare_hook(hook);
         }
     }
     /// Subscribe to this instance's bounded, temporary model observations.

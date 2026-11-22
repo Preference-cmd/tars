@@ -1,10 +1,7 @@
-//! Permission modes, approval channels, and execution pipeline processors.
+//! Permission modes, approval channels, and execution pipeline orchestrator.
 
 mod approval;
-mod gate;
-mod grants;
-mod precheck;
-mod processor;
+mod orchestrator;
 pub mod rules;
 mod view;
 
@@ -24,10 +21,7 @@ pub use view::PermissionView;
 #[cfg(test)]
 #[cfg_attr(not(unix), allow(unused_imports))]
 use crate::policy::{PermissionVerdict, decide};
-pub(crate) use gate::ModeGateProcessor;
-pub(crate) use grants::{OutsideSandboxGrant, OutsideSandboxGrants};
-pub(crate) use precheck::PrecheckProcessor;
-pub(crate) use processor::PermissionProcessor;
+pub(crate) use orchestrator::ToolPolicyProcessor;
 pub(crate) use view::{PermissionHub, WorkspaceRulesBackend};
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]

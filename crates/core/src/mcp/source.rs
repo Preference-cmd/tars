@@ -1,12 +1,11 @@
 //! One MCP server connection exposed as a dynamic tool source.
 
-use super::permissions::{McpPermissionTable, McpToolInfo};
+use super::permissions::{McpPermissionTable, McpToolInfo, classify_mcp_tool};
 use super::status::{
     MAX_SKIPPED_TOOLS, McpServerStatus, McpSkippedTool, bounded_name, bounded_reason,
 };
 use super::stderr::StderrCapture;
-use crate::definition::{BuiltinTool, McpApproval, McpServerConfig, redact_substitutions};
-use crate::policy::ToolPermissionClass;
+use crate::definition::{BuiltinTool, McpServerConfig, redact_substitutions};
 use causa::extension::McpToolSource;
 use causa::kernel::{
     ArtifactStore, CallControl, DynamicToolSource, SourceError, ToolCallContext, ToolDefinition,
@@ -138,19 +137,7 @@ impl McpServerSource {
                 .get(raw)
                 .map(|t| t.approval)
                 .unwrap_or(self.config.approval);
-            let category = match approval {
-                McpApproval::Approve => ToolPermissionClass::McpApprove,
-                McpApproval::Prompt => ToolPermissionClass::McpPrompt,
-                McpApproval::Writes => {
-                    if description.hints.read_only == Some(true)
-                        && description.hints.destructive != Some(true)
-                    {
-                        ToolPermissionClass::KnownReadOnly
-                    } else {
-                        ToolPermissionClass::McpPrompt
-                    }
-                }
-            };
+            let category = classify_mcp_tool(approval, &description.hints);
             server_tools.push((
                 name.clone(),
                 McpToolInfo {

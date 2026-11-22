@@ -1,7 +1,7 @@
 // Workspace tools run only on Unix; elsewhere this code is compiled but unused.
 #![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
-use super::PreparedWrite;
 use super::compute_diff;
+use super::execute::PreparedWrite;
 use super::parameters::{EditParams, EditSegment, ListParams, Params, ReadParams, WriteParams};
 use super::resources::Counters;
 use crate::definition::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
@@ -361,7 +361,7 @@ fn reject_protected_workspace_paths(
 }
 
 #[cfg(unix)]
-pub(crate) fn precheck_write(
+pub(super) fn precheck_write(
     workspace: &Workspace,
     p: &WriteParams,
     limits: &WorkspaceToolLimits,
@@ -506,7 +506,7 @@ pub(crate) fn precheck_write(
 }
 
 #[cfg(unix)]
-pub(crate) fn precheck_edit(
+pub(super) fn precheck_edit(
     workspace: &Workspace,
     p: &EditParams,
     limits: &WorkspaceToolLimits,
@@ -723,7 +723,7 @@ pub(crate) fn precheck_edit(
 }
 
 #[cfg(unix)]
-pub(crate) fn execute_prepared_write(
+pub(super) fn execute_prepared_write(
     workspace: &Workspace,
     prepared: &PreparedWrite,
     write_limits: &WriteToolLimits,
@@ -833,7 +833,7 @@ pub(crate) fn execute_prepared_write(
 }
 
 #[cfg(not(unix))]
-pub(crate) fn precheck_write(
+pub(super) fn precheck_write(
     _workspace: &Workspace,
     _p: &WriteParams,
     _limits: &WorkspaceToolLimits,
@@ -846,7 +846,7 @@ pub(crate) fn precheck_write(
 }
 
 #[cfg(not(unix))]
-pub(crate) fn precheck_edit(
+pub(super) fn precheck_edit(
     _workspace: &Workspace,
     _p: &EditParams,
     _limits: &WorkspaceToolLimits,
@@ -859,7 +859,7 @@ pub(crate) fn precheck_edit(
 }
 
 #[cfg(not(unix))]
-pub(crate) fn execute_prepared_write(
+pub(super) fn execute_prepared_write(
     _workspace: &Workspace,
     _prepared: &PreparedWrite,
     _write_limits: &WriteToolLimits,

@@ -1,5 +1,5 @@
 use super::support::*;
-use crate::permission::{PermissionDecisionKind, PermissionMode, PermissionView};
+use crate::permission::{PermissionDecisionKind, PermissionMode};
 use crate::prelude::DynamicSection;
 use crate::session::WorkObservation;
 use crate::skills::{LOAD_SKILL_TOOL_NAME, SKILL_SOURCE};
@@ -395,21 +395,24 @@ async fn test_si07_evicted_skill_can_be_reloaded_after_compaction_and_kept_skill
 
 #[test]
 fn test_si08_permission_classification_is_readonly() {
-    use crate::permission::{PermissionHub, ToolPermissionClass};
+    use crate::permission::ToolPermissionClass;
+    use crate::tools::ManagedTool;
 
-    for mode in [
-        PermissionMode::ReadOnly,
-        PermissionMode::Ask,
-        PermissionMode::AcceptEdits,
-        PermissionMode::FullAccess,
-    ] {
-        let hub = PermissionHub::new(mode);
-        let view: PermissionView = hub.view();
-        assert_eq!(
-            view.classify_tool(LOAD_SKILL_TOOL_NAME),
-            Some(ToolPermissionClass::KnownReadOnly)
-        );
-    }
+    let registry = Arc::new(std::sync::RwLock::new(crate::skills::SkillRegistry::new()));
+    let loaded = Arc::new(crate::skills::LoadedSkillsState::new());
+    let turn_id = causa::kernel::TurnId::new("si08");
+    let reporter = crate::session::ToolReporter::new(
+        crate::session::WorkRef {
+            conversation_id: "si08".into(),
+            turn_id,
+        },
+        tokio::sync::broadcast::channel(8).0,
+    );
+    let tool = crate::skills::LoadSkillTool::new(registry, loaded, reporter, 10);
+    assert_eq!(
+        tool.classify(&serde_json::json!({"name": "alpha"})).class,
+        ToolPermissionClass::KnownReadOnly
+    );
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -212,8 +212,8 @@ pub(crate) struct EvaluatedPermission {
 
 /// Combine the base permission mode verdict with a command rule match.
 ///
-/// Both `ModeGateProcessor` and `PermissionProcessor` evaluate calls through
-/// this single transition table so gating and execution never diverge.
+/// [`ToolPolicyProcessor`](crate::permission::ToolPolicyProcessor) evaluates calls
+/// through this single transition table in both fast gating and post-prepare review.
 pub(crate) fn apply_command_rule(
     base: PermissionVerdict,
     matched: Option<RuleMatch>,

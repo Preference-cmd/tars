@@ -773,19 +773,29 @@ async fn max_matches_stops_the_search_and_leaves_no_process() {
 
 #[tokio::test]
 async fn read_only_mode_allows_search_without_a_prompt() {
-    use crate::permission::{PermissionHub, PermissionMode, ToolPermissionClass};
-    // The exhaustive `wm17` matrix already pins `KnownReadOnly` to direct
-    // execution in read-only mode; here the bound tool must keep that class.
-    let view = PermissionHub::new(PermissionMode::ReadOnly).view();
-    assert_eq!(
-        view.classify_tool("search_text"),
-        Some(ToolPermissionClass::KnownReadOnly)
-    );
+    use crate::permission::ToolPermissionClass;
     let tools = require_tools!();
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("workspace");
     std::fs::create_dir(&root).unwrap();
     write(&root, "file.txt", "needle\n");
+    let workspace = Workspace::open(&root.canonicalize().unwrap()).unwrap();
+    let shared = WorkspaceTools::with_write_limits(
+        workspace,
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+    );
+    let (_, managed) = shared
+        .bind_managed_for_test(&[WorkspaceTool::SearchText], reporter(&[]))
+        .pop()
+        .unwrap();
+    assert_eq!(
+        managed
+            .classify(&json!({"path": ".", "query": "needle"}))
+            .class,
+        ToolPermissionClass::KnownReadOnly
+    );
     let output = search(
         &root,
         &tools,

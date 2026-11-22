@@ -3,6 +3,7 @@
 mod command;
 mod diff;
 mod execute;
+pub(crate) mod lifecycle;
 pub(crate) mod operations;
 pub(crate) mod parameters;
 pub(crate) mod resources;
@@ -15,12 +16,15 @@ pub(crate) use search::SearchRuntime;
 #[cfg_attr(not(unix), allow(unused_imports))]
 pub use diff::DiffSummary;
 pub use diff::compute_diff;
-pub(crate) use execute::PreparedWrite;
 #[cfg(test)]
 #[cfg_attr(not(unix), allow(unused_imports))]
 pub(crate) use execute::TestGate;
 pub use execute::WorkspaceTools;
-pub(crate) use execute::{result, workspace_tool_definition};
+pub(crate) use execute::workspace_tool_definition;
+pub(crate) use lifecycle::{
+    ApprovalPreview, BatchPrepareState, CommandPreviewTarget, DynamicToolCatalog, ExecutionGrant,
+    ManagedTool, PreparedCall, ToolCallIntent, ToolCatalog,
+};
 #[cfg(test)]
 pub use resources::ToolMetrics;
 pub use resources::ToolResources;

@@ -74,6 +74,8 @@ pub(crate) struct CommandRuntime {
     storage: Option<PathBuf>,
     _temp_dir: tempfile::TempDir,
     gate: Arc<Semaphore>,
+    #[cfg(test)]
+    check_count: std::sync::atomic::AtomicUsize,
 }
 
 impl CommandRuntime {
@@ -116,7 +118,15 @@ impl CommandRuntime {
             storage,
             _temp_dir: temp_dir,
             gate: Arc::new(Semaphore::new(1)),
+            #[cfg(test)]
+            check_count: std::sync::atomic::AtomicUsize::new(0),
         }))
+    }
+
+    #[cfg(test)]
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn check_count(&self) -> usize {
+        self.check_count.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Why this platform cannot host a command runtime, if it has no backend.
@@ -184,6 +194,9 @@ impl CommandRuntime {
     }
 
     pub(crate) fn check(&self, params: &CommandParams) -> Result<PreparedCommand, String> {
+        #[cfg(test)]
+        self.check_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let timeout_secs = params
             .timeout_secs
             .unwrap_or(self.settings.default_timeout_secs);
@@ -250,12 +263,12 @@ impl CommandRuntime {
     pub(crate) async fn run(
         &self,
         prepared: PreparedCommand,
-        grant: Option<crate::permission::OutsideSandboxGrant>,
+        grant: super::lifecycle::ExecutionGrant,
         _permit: OwnedSemaphorePermit,
         control: &CallControl,
         max_output_bytes: usize,
     ) -> CommandExecution {
-        if prepared.outside_sandbox && grant.is_none() {
+        if prepared.outside_sandbox && !grant.allow_outside_sandbox {
             return rejected("outside-sandbox execution was not granted");
         }
         let sandbox = match &self.sandbox {
@@ -534,7 +547,13 @@ mod tests {
         let command_control = outer.with_timeout(timeout);
         let permit = runtime.acquire(&command_control).await.unwrap();
         runtime
-            .run(prepared, None, permit, &command_control, max_output_bytes)
+            .run(
+                prepared,
+                super::super::lifecycle::ExecutionGrant::default(),
+                permit,
+                &command_control,
+                max_output_bytes,
+            )
             .await
     }
 

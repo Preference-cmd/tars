@@ -1314,142 +1314,90 @@ async fn turn_isolation_prepared_write_cannot_be_executed_in_subsequent_turn() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unprepared_write_in_ask_mode_records_unprepared_decision() {
+async fn unprepared_preview_in_ask_mode_records_unprepared_decision() {
+    use crate::tools::{ManagedTool, ToolCallIntent, ToolCatalog};
     use causa::kernel::{
-        CallControl, InvocationId, RoundId, ToolCallContext, ToolCallPayload, TurnId,
+        CallControl, InvocationId, RoundId, ToolCallContext, ToolCallPayload, ToolDefinition,
+        ToolDescription, TurnId,
     };
     use tokio_util::sync::CancellationToken;
 
-    let call_id = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
-    let call = ToolCallContext::new(
-        call_id,
-        ToolCallPayload::new(
-            "write_file",
-            json!({
-                "path": "unprepared.txt",
-                "content": "hello",
-            }),
+    struct NoPreviewTool(crate::policy::ToolPermissionClass);
+    #[async_trait::async_trait]
+    impl ManagedTool for NoPreviewTool {
+        fn classify(&self, _arguments: &serde_json::Value) -> ToolCallIntent {
+            ToolCallIntent {
+                class: self.0,
+                command_subject: None,
+            }
+        }
+    }
+
+    for (class, expected_kind) in [
+        (
+            crate::policy::ToolPermissionClass::BuiltinWrite,
+            PermissionDecisionKind::Unprepared,
         ),
-    );
-    let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
-    let work = WorkRef {
-        conversation_id: "test".into(),
-        turn_id: turn_id.clone(),
-    };
-    let reporter =
-        crate::session::ToolReporter::new(work.clone(), tokio::sync::broadcast::channel(128).0);
-    let batch_initial = ToolBatch::new(vec![call.clone()]).unwrap();
-    reporter.batch_ready(
-        &InvocationId {
-            turn_id: turn_id.clone(),
-            round_id: RoundId(0),
-        },
-        &batch_initial,
-    );
-
-    let perm_hub = Arc::new(crate::permission::PermissionHub::new(PermissionMode::Ask));
-    let prepared_empty = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-
-    let processor = crate::permission::PermissionProcessor::new(
-        work,
-        reporter.clone(),
-        perm_hub.clone(),
-        crate::definition::CommandSettings::default(),
-        prepared_empty,
-        crate::permission::OutsideSandboxGrants::new(),
-    );
-
-    let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
-    let declaration_order = [call.call_block_id];
-    let control = CallControl::new(CancellationToken::new(), None);
-    let view = perm_hub.view();
-    let processor_data = causa::kernel::ProcessorData::new(view);
-    let ctx = ProcessorContext::new(&turn_id, RoundId(0), &declaration_order, &control)
-        .with_data(&processor_data);
-
-    processor.process(&mut batch, &ctx).await.unwrap();
-
-    let snap = reporter.snapshot();
-    assert_eq!(snap.calls.len(), 1);
-    let decision = snap.calls[0].permission_decision.as_ref().unwrap();
-    assert_eq!(decision.mode, PermissionMode::Ask);
-    assert_eq!(decision.kind, PermissionDecisionKind::Unprepared);
-
-    let (_, result) = batch.results().first().unwrap().result().unwrap();
-    assert_eq!(result.status, ToolResultStatus::Rejected);
-    assert_eq!(
-        result.output.content["error"],
-        "write operation was not prepared by precheck"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unprepared_outside_command_records_unprepared_outside_decision() {
-    use causa::kernel::{
-        CallControl, InvocationId, RoundId, ToolCallContext, ToolCallPayload, TurnId,
-    };
-    use tokio_util::sync::CancellationToken;
-
-    let call_id = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
-    let call = ToolCallContext::new(
-        call_id,
-        ToolCallPayload::new(
-            "run_command",
-            json!({
-                "command": "true",
-                "outside_sandbox": "yes",
-                "justification": "reason",
-            }),
+        (
+            crate::policy::ToolPermissionClass::CommandOutsideSandbox,
+            PermissionDecisionKind::UnpreparedOutsideSandbox,
         ),
-    );
-    let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
-    let work = WorkRef {
-        conversation_id: "test".into(),
-        turn_id: turn_id.clone(),
-    };
-    let reporter =
-        crate::session::ToolReporter::new(work.clone(), tokio::sync::broadcast::channel(128).0);
-    let batch_initial = ToolBatch::new(vec![call.clone()]).unwrap();
-    reporter.batch_ready(
-        &InvocationId {
+    ] {
+        let call_id = causa::kernel::BlockId::new(uuid::Uuid::now_v7());
+        let call = ToolCallContext::new(call_id, ToolCallPayload::new("mock_tool", json!({})));
+        let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
+        let work = WorkRef {
+            conversation_id: "test".into(),
             turn_id: turn_id.clone(),
-            round_id: RoundId(0),
-        },
-        &batch_initial,
-    );
+        };
+        let reporter =
+            crate::session::ToolReporter::new(work.clone(), tokio::sync::broadcast::channel(128).0);
+        let batch_initial = ToolBatch::new(vec![call.clone()]).unwrap();
+        reporter.batch_ready(
+            &InvocationId {
+                turn_id: turn_id.clone(),
+                round_id: RoundId(0),
+            },
+            &batch_initial,
+        );
 
-    let perm_hub = Arc::new(crate::permission::PermissionHub::new(PermissionMode::Ask));
-    let processor = crate::permission::PermissionProcessor::new(
-        work,
-        reporter.clone(),
-        perm_hub.clone(),
-        crate::definition::CommandSettings::default(),
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        crate::permission::OutsideSandboxGrants::new(),
-    );
+        let perm_hub = Arc::new(crate::permission::PermissionHub::new(PermissionMode::Ask));
+        let _rx = perm_hub.connect_approvals();
+        let mut catalog = ToolCatalog::new();
+        catalog.register("mock_tool", Arc::new(NoPreviewTool(class)));
+        let processor = crate::permission::ToolPolicyProcessor::new(
+            work,
+            reporter.clone(),
+            perm_hub,
+            Arc::new(catalog),
+        );
 
-    let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
-    let declaration_order = [call.call_block_id];
-    let control = CallControl::new(CancellationToken::new(), None);
-    let view = perm_hub.view();
-    let processor_data = causa::kernel::ProcessorData::new(view);
-    let ctx = ProcessorContext::new(&turn_id, RoundId(0), &declaration_order, &control)
-        .with_data(&processor_data);
+        let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
+        let declaration_order = [call.call_block_id];
+        let control = CallControl::new(CancellationToken::new(), None);
+        let bound_tools = [ToolDescription::new(ToolDefinition::new(
+            "mock_tool",
+            "mock",
+            json!({"type": "object"}),
+        ))];
+        let ctx = ProcessorContext::new(&turn_id, RoundId(0), &declaration_order, &control)
+            .with_tools(&bound_tools);
 
-    processor.process(&mut batch, &ctx).await.unwrap();
+        processor.process(&mut batch, &ctx).await.unwrap();
 
-    let snap = reporter.snapshot();
-    assert_eq!(snap.calls.len(), 1);
-    assert_eq!(
-        snap.calls[0].permission_decision.as_ref().unwrap().kind,
-        PermissionDecisionKind::UnpreparedOutsideSandbox
-    );
-    let (_, result) = batch.results().first().unwrap().result().unwrap();
-    assert_eq!(result.status, ToolResultStatus::Rejected);
-    assert_eq!(
-        result.output.content["error"],
-        "command parameters were not prepared by precheck"
-    );
+        let snap = reporter.snapshot();
+        assert_eq!(snap.calls.len(), 1);
+        let decision = snap.calls[0].permission_decision.as_ref().unwrap();
+        assert_eq!(decision.mode, PermissionMode::Ask);
+        assert_eq!(decision.kind, expected_kind);
+
+        let (_, result) = batch.results().first().unwrap().result().unwrap();
+        assert_eq!(result.status, ToolResultStatus::Rejected);
+        assert_eq!(
+            result.output.content["error"],
+            "tool call could not produce an approval preview"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2158,19 +2106,36 @@ fn wm17_decide_24_cells_exhaustive() {
 #[test]
 fn malformed_run_command_arguments_take_the_outside_class() {
     use crate::permission::ToolPermissionClass;
+    use crate::tools::{ToolResources, WorkspaceTools};
+    use crate::workspace::Workspace;
 
-    let view = crate::permission::PermissionHub::new(PermissionMode::Ask).view();
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = Workspace::open(&dir.path().canonicalize().unwrap()).unwrap();
+    let shared = WorkspaceTools::new(workspace, Default::default(), ToolResources::new(4));
+    let turn_id = causa::kernel::TurnId::new("classify");
+    let reporter = crate::session::ToolReporter::new(
+        WorkRef {
+            conversation_id: "classify".into(),
+            turn_id,
+        },
+        tokio::sync::broadcast::channel(8).0,
+    );
+    let (_, managed) = shared
+        .bind_managed_for_test(&[WorkspaceTool::RunCommand], reporter)
+        .pop()
+        .unwrap();
+
     assert_eq!(
-        view.classify_call("run_command", &json!("not an object")),
-        Some(ToolPermissionClass::CommandOutsideSandbox)
+        managed.classify(&json!("not an object")).class,
+        ToolPermissionClass::CommandOutsideSandbox
     );
     assert_eq!(
-        view.classify_call("run_command", &json!({"outside_sandbox": null})),
-        Some(ToolPermissionClass::CommandOutsideSandbox)
+        managed.classify(&json!({"outside_sandbox": null})).class,
+        ToolPermissionClass::CommandOutsideSandbox
     );
     assert_eq!(
-        view.classify_call("run_command", &json!({"command": "true"})),
-        Some(ToolPermissionClass::BuiltinCommand)
+        managed.classify(&json!({"command": "true"})).class,
+        ToolPermissionClass::BuiltinCommand
     );
 }
 
@@ -2253,27 +2218,13 @@ async fn wm17_mode_switch_between_gate_and_confirmation() {
         .await
         .unwrap();
 
-    struct SwitchModeProcessor {
-        session: ManagedSession,
-    }
-    #[async_trait::async_trait]
-    impl causa::kernel::ToolBatchProcessor for SwitchModeProcessor {
-        async fn process(
-            &self,
-            _batch: &mut causa::kernel::ToolBatch,
-            _context: &causa::kernel::ProcessorContext<'_>,
-        ) -> Result<(), causa::kernel::ProcessorError> {
-            self.session
-                .set_permission_mode(PermissionMode::ReadOnly)
-                .unwrap();
-            Ok(())
-        }
-    }
-
     let _rx = session.connect_approvals();
 
-    session.add_test_intermediate_processor(Arc::new(SwitchModeProcessor {
-        session: session.clone(),
+    let session_clone = session.clone();
+    session.set_test_after_prepare_hook(Arc::new(move || {
+        session_clone
+            .set_permission_mode(PermissionMode::ReadOnly)
+            .unwrap();
     }));
 
     let work = submit(&session, "write that gets mode switched mid-chain");
@@ -2291,6 +2242,11 @@ async fn wm17_mode_switch_between_gate_and_confirmation() {
         "the current permission mode 'read-only' does not allow this write"
     );
     assert!(!root.path().join("between.txt").exists());
+    assert_eq!(
+        session.workspace_tools().unwrap().staged_counts(),
+        (0, 0),
+        "mode switch to read-only after prepare must not leak staged writes"
+    );
 }
 
 fn command_definition(endpoint: &str, root: &Path) -> SessionDefinition {
@@ -3577,17 +3533,19 @@ async fn command_cancel_repair_case(outside: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes() {
+async fn rc03_orchestrator_evaluates_modes_rules_and_routes_consistently() {
+    use crate::definition::{CommandSettings, WriteToolLimits};
     use crate::permission::rules::{
         CommandRule, CommandRuleSet, RuleDecision, RuleScope, RuleSource,
     };
-    use crate::permission::{
-        ModeGateProcessor, OutsideSandboxGrants, PermissionHub, PermissionProcessor,
-    };
+    use crate::permission::{PermissionHub, ToolPolicyProcessor};
+    use crate::tools::{CommandRuntime, ToolCatalog, ToolResources, WorkspaceTools};
+    use crate::workspace::Workspace;
     use causa::kernel::{
-        CallControl, InvocationId, ProcessorContext, ProcessorData, RoundId, ToolBatch,
-        ToolCallContext, ToolCallPayload, TurnId,
+        CallControl, InvocationId, ProcessorContext, RoundId, ToolBatch, ToolCallContext,
+        ToolCallPayload, ToolDescription, TurnId,
     };
+    use tars_sandbox::{BackendId, BackendReport, Capability, Limitation, Sandbox};
     use tokio_util::sync::CancellationToken;
 
     let rules = CommandRuleSet::with_layers(
@@ -3635,6 +3593,44 @@ async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes(
             ToolCallPayload::new("run_command", args),
         )
     };
+
+    let root = tempfile::tempdir().unwrap();
+    let workspace = Workspace::open(&root.path().canonicalize().unwrap()).unwrap();
+    let report = BackendReport::new(
+        BackendId::RECORDING,
+        Capability::Full,
+        Capability::Full,
+        Capability::Full,
+        Capability::Full,
+        Capability::Partial(Limitation::ProcessGroupEscape),
+    );
+    let sandbox = Sandbox::open_with(Box::new(
+        tars_sandbox::test_support::RecordingBackend::available(report),
+    ))
+    .unwrap();
+    let cmd_runtime = CommandRuntime::bind_with_sandbox(
+        root.path(),
+        CommandSettings::default(),
+        Ok(sandbox),
+        None,
+    )
+    .unwrap();
+    let ws_tools = WorkspaceTools::with_command(
+        workspace,
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(4),
+        CommandSettings::default(),
+        Some(cmd_runtime),
+    );
+    let bound_desc = [ToolDescription::new(
+        crate::tools::workspace_tool_definition(
+            WorkspaceTool::RunCommand,
+            ws_tools.limits(),
+            ws_tools.write_limits(),
+            ws_tools.command_settings(),
+        ),
+    )];
 
     for mode in [
         PermissionMode::ReadOnly,
@@ -3727,11 +3723,8 @@ async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes(
                 },
             ),
         ] {
-            // Test without confirmation route: ModeGateProcessor and PermissionProcessor must match.
             let perm_hub = Arc::new(PermissionHub::new(mode));
             perm_hub.set_rules(rules.clone());
-            let view = perm_hub.view();
-            let data = ProcessorData::new(view.clone());
             let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
             let work = WorkRef {
                 conversation_id: "test".into(),
@@ -3744,37 +3737,26 @@ async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes(
             let call = make_call(outside, command);
             let decl = [call.call_block_id];
             let control = CallControl::new(CancellationToken::new(), None);
-            let ctx = ProcessorContext::new(&turn_id, RoundId(0), &decl, &control).with_data(&data);
+            let ctx = ProcessorContext::new(&turn_id, RoundId(0), &decl, &control)
+                .with_tools(&bound_desc);
 
-            // Gate run
-            let gate_reporter = crate::session::ToolReporter::new(
+            let reporter = crate::session::ToolReporter::new(
                 work.clone(),
                 tokio::sync::broadcast::channel(16).0,
             );
-            let mut gate_batch = ToolBatch::new(vec![call.clone()]).unwrap();
-            gate_reporter.batch_ready(&inv, &gate_batch);
-            let gate = ModeGateProcessor::new(gate_reporter.clone(), perm_hub.approvals());
-            gate.process(&mut gate_batch, &ctx).await.unwrap();
+            let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
+            reporter.batch_ready(&inv, &batch);
+            let mut catalog = ToolCatalog::new();
+            let (tool, managed) = ws_tools
+                .bind_managed_for_test(&[WorkspaceTool::RunCommand], reporter.clone())
+                .pop()
+                .unwrap();
+            catalog.register("run_command", managed);
+            let processor =
+                ToolPolicyProcessor::new(work, reporter.clone(), perm_hub, Arc::new(catalog));
+            processor.process(&mut batch, &ctx).await.unwrap();
 
-            // Processor run
-            let proc_reporter = crate::session::ToolReporter::new(
-                work.clone(),
-                tokio::sync::broadcast::channel(16).0,
-            );
-            let mut proc_batch = ToolBatch::new(vec![call.clone()]).unwrap();
-            proc_reporter.batch_ready(&inv, &proc_batch);
-            let grants = OutsideSandboxGrants::new();
-            let processor = PermissionProcessor::new(
-                work,
-                proc_reporter.clone(),
-                perm_hub.clone(),
-                crate::definition::CommandSettings::default(),
-                Arc::new(Mutex::new(std::collections::HashMap::new())),
-                grants.clone(),
-            );
-            processor.process(&mut proc_batch, &ctx).await.unwrap();
-
-            let proc_decision = proc_reporter.snapshot().calls[0]
+            let proc_decision = reporter.snapshot().calls[0]
                 .permission_decision
                 .clone()
                 .unwrap();
@@ -3793,27 +3775,24 @@ async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes(
                     | PermissionDecisionKind::ModeRefused
                     | PermissionDecisionKind::NoConfirmationRoute
             ) {
-                let gate_decision = gate_reporter.snapshot().calls[0]
-                    .permission_decision
-                    .clone()
-                    .unwrap();
-                assert_eq!(gate_decision, proc_decision);
-                let (_, gate_res) = gate_batch.results()[0].result().unwrap();
-                let (_, proc_res) = proc_batch.results()[0].result().unwrap();
-                assert_eq!(gate_res.status, ToolResultStatus::Rejected);
+                let (_, proc_res) = batch.results()[0].result().unwrap();
                 assert_eq!(proc_res.status, ToolResultStatus::Rejected);
-                assert_eq!(gate_res.output.content, proc_res.output.content);
                 if expected_kind == PermissionDecisionKind::RuleDenied {
                     let err = proc_res.output.content["error"].as_str().unwrap();
                     assert!(err.contains("user permission rule"));
                     assert!(!err.contains("cargo"));
                     assert!(!err.contains("git"));
                 }
-                assert!(grants.take(call.call_block_id).is_none());
+                assert_eq!(ws_tools.staged_counts(), (0, 0));
             } else {
-                assert!(gate_batch.results().is_empty());
-                assert!(proc_batch.results().is_empty());
-                assert_eq!(grants.take(call.call_block_id).is_some(), outside);
+                assert!(batch.results().is_empty());
+                assert_eq!(ws_tools.staged_counts(), (0, 1));
+                let out = tool.execute(&call, &control, None).await;
+                assert_eq!(ws_tools.staged_counts(), (0, 0));
+                assert_ne!(
+                    out.output.content["error"],
+                    "outside-sandbox execution was not granted"
+                );
             }
         }
     }
@@ -3835,8 +3814,6 @@ async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes(
             });
         });
 
-        let view = perm_hub.view();
-        let data = ProcessorData::new(view);
         let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
         let work = WorkRef {
             conversation_id: "test".into(),
@@ -3849,36 +3826,26 @@ async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes(
         let call = make_call(false, "curl https://example.com");
         let decl = [call.call_block_id];
         let control = CallControl::new(CancellationToken::new(), None);
-        let ctx = ProcessorContext::new(&turn_id, RoundId(0), &decl, &control).with_data(&data);
+        let ctx =
+            ProcessorContext::new(&turn_id, RoundId(0), &decl, &control).with_tools(&bound_desc);
 
-        let gate_reporter =
+        let reporter =
             crate::session::ToolReporter::new(work.clone(), tokio::sync::broadcast::channel(16).0);
-        let mut gate_batch = ToolBatch::new(vec![call.clone()]).unwrap();
-        gate_reporter.batch_ready(&inv, &gate_batch);
-        ModeGateProcessor::new(gate_reporter.clone(), perm_hub.approvals())
-            .process(&mut gate_batch, &ctx)
+        let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
+        reporter.batch_ready(&inv, &batch);
+        let mut catalog = ToolCatalog::new();
+        let (tool, managed) = ws_tools
+            .bind_managed_for_test(&[WorkspaceTool::RunCommand], reporter.clone())
+            .pop()
+            .unwrap();
+        catalog.register("run_command", managed);
+        ToolPolicyProcessor::new(work, reporter.clone(), perm_hub.clone(), Arc::new(catalog))
+            .process(&mut batch, &ctx)
             .await
             .unwrap();
-        assert!(gate_batch.results().is_empty());
-
-        let proc_reporter =
-            crate::session::ToolReporter::new(work.clone(), tokio::sync::broadcast::channel(16).0);
-        let mut proc_batch = ToolBatch::new(vec![call.clone()]).unwrap();
-        proc_reporter.batch_ready(&inv, &proc_batch);
-        PermissionProcessor::new(
-            work,
-            proc_reporter.clone(),
-            perm_hub.clone(),
-            crate::definition::CommandSettings::default(),
-            Arc::new(Mutex::new(std::collections::HashMap::new())),
-            OutsideSandboxGrants::new(),
-        )
-        .process(&mut proc_batch, &ctx)
-        .await
-        .unwrap();
         responder.await.unwrap();
 
-        let decision = proc_reporter.snapshot().calls[0]
+        let decision = reporter.snapshot().calls[0]
             .permission_decision
             .clone()
             .unwrap();
@@ -3897,6 +3864,13 @@ async fn rc03_gate_and_processor_share_evaluation_across_modes_rules_and_routes(
                 prefix: vec!["curl".into()],
             })
         );
+        if approved {
+            assert_eq!(ws_tools.staged_counts(), (0, 1));
+            let _ = tool.execute(&call, &control, None).await;
+            assert_eq!(ws_tools.staged_counts(), (0, 0));
+        } else {
+            assert_eq!(ws_tools.staged_counts(), (0, 0));
+        }
     }
 }
 
@@ -4089,6 +4063,465 @@ async fn rc03_end_to_end_command_rules_execution_and_grants() {
     );
     assert!(outside_allowed.exists());
     let _ = std::fs::remove_file(&outside_allowed);
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tl04_t7_unselected_builtin_tools_match_unknown_tools_with_unavailable_decision() {
+    for mode in [
+        PermissionMode::ReadOnly,
+        PermissionMode::Ask,
+        PermissionMode::AcceptEdits,
+        PermissionMode::FullAccess,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let replies = vec![
+            Reply::Calls(vec![
+                ScriptedToolCall {
+                    name: "write_file".into(),
+                    arguments: json!({"path": "unselected.txt", "content": "nope"}),
+                },
+                ScriptedToolCall {
+                    name: "run_command".into(),
+                    arguments: json!({"command": "echo nope"}),
+                },
+                ScriptedToolCall {
+                    name: "nonexistent_tool".into(),
+                    arguments: json!({"x": 1}),
+                },
+            ]),
+            Reply::Answer,
+        ];
+
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let host = SessionHost::new(None);
+        let mut def = base_definition(&fixture.endpoint, root.path());
+        // Only enable read_file; write_file and run_command are NOT selected.
+        def.tools = vec![WorkspaceTool::ReadFile];
+        def.permission_mode = Some(mode);
+        let session = host
+            .create(PreparedCreate::transient(def, Context::default()))
+            .await
+            .unwrap();
+        let mut rx = session.connect_approvals();
+
+        let work = submit(&session, "call unselected builtins and unknown tool");
+        let obs = finish(&session, &work).await;
+        assert_eq!(obs.tools.calls.len(), 3, "{mode}");
+
+        for (idx, expected_name) in ["write_file", "run_command", "nonexistent_tool"]
+            .iter()
+            .enumerate()
+        {
+            let call = &obs.tools.calls[idx];
+            assert_eq!(call.status, Some(ToolResultStatus::Rejected), "{mode}");
+            let decision = call
+                .permission_decision
+                .as_ref()
+                .expect("unavailable call must record decision");
+            assert_eq!(decision.mode, mode);
+            assert_eq!(decision.kind, PermissionDecisionKind::Unavailable);
+            assert_eq!(
+                tool_result_error(&session, call.call_block_id),
+                format!("tool '{expected_name}' is not available")
+            );
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "unavailable tools must never trigger approval prompts"
+        );
+        assert!(!root.path().join("unselected.txt").exists());
+
+        host.close(&session.target(), ClosePolicy::DiscardLocal)
+            .await
+            .unwrap();
+    }
+}
+
+#[test]
+fn tl05_mcp_trust_boundary_enforces_frozen_approval_over_hints() {
+    use crate::definition::McpApproval;
+    use crate::mcp::{McpToolAdapter, McpToolInfo, classify_mcp_tool};
+    use crate::permission::ToolPermissionClass;
+    use crate::tools::{ApprovalPreview, ManagedTool, PreparedCall};
+
+    let mut read_only_hint = ToolHints::default();
+    read_only_hint.read_only = Some(true);
+    read_only_hint.destructive = Some(false);
+    // Frozen `Prompt` (`ask`) must still require confirmation even when server claims readOnlyHint: true.
+    assert_eq!(
+        classify_mcp_tool(McpApproval::Prompt, &read_only_hint),
+        ToolPermissionClass::McpPrompt
+    );
+    // Unannotated tool under `Writes` defaults to `McpPrompt` (effectful).
+    assert_eq!(
+        classify_mcp_tool(McpApproval::Writes, &ToolHints::default()),
+        ToolPermissionClass::McpPrompt
+    );
+    // `Writes` + `readOnlyHint: true` + `destructiveHint: true` remains `McpPrompt`.
+    let mut destructive_hint = ToolHints::default();
+    destructive_hint.read_only = Some(true);
+    destructive_hint.destructive = Some(true);
+    assert_eq!(
+        classify_mcp_tool(McpApproval::Writes, &destructive_hint),
+        ToolPermissionClass::McpPrompt
+    );
+    // Only `Writes` + `readOnlyHint: true` without `destructiveHint: true` relaxes to `KnownReadOnly`.
+    assert_eq!(
+        classify_mcp_tool(McpApproval::Writes, &read_only_hint),
+        ToolPermissionClass::KnownReadOnly
+    );
+
+    let adapter = McpToolAdapter::new(McpToolInfo {
+        server_id: "srv".into(),
+        raw_tool_name: "lookup".into(),
+        category: classify_mcp_tool(McpApproval::Prompt, &read_only_hint),
+    });
+    assert_eq!(
+        adapter.classify(&json!({"q": "x"})).class,
+        ToolPermissionClass::McpPrompt
+    );
+    let call = causa::kernel::ToolCallContext::new(
+        causa::kernel::BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::ToolCallPayload::new("mcp_srv_lookup", json!({"q": "x"})),
+    );
+    assert_eq!(
+        adapter.approval_preview(&call, &PreparedCall::empty()),
+        Some(ApprovalPreview::McpCall {
+            server: "srv".into(),
+            tool: "lookup".into(),
+            arguments: r#"{"q":"x"}"#.into(),
+        })
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tl06_run_command_decodes_and_checks_exactly_once_per_execution() {
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![call_command(
+            json!({"command": "printf ok > once.txt"}),
+        )]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    let mut rx = session.connect_approvals();
+    let approver = tokio::spawn(async move {
+        let req = rx.recv().await.expect("command approval");
+        req.reply.send(ApprovalDecision::Allow).unwrap();
+    });
+
+    let work = submit(&session, "single decode and check");
+    let obs = finish(&session, &work).await;
+    approver.await.unwrap();
+
+    assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("once.txt")).unwrap(),
+        "ok"
+    );
+
+    let ws_tools = session.workspace_tools().unwrap();
+    assert_eq!(ws_tools.command_decode_count(), 1);
+    assert_eq!(ws_tools.command().unwrap().check_count(), 1);
+    assert_eq!(ws_tools.staged_counts(), (0, 0));
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tl07_t5_staging_clears_across_rejections_cancels_and_execution() {
+    // 1. Mode refused (ReadOnly), 2. User declined (Ask + Deny),
+    // 3. No confirmation route (Ask without receiver), 4. Mode switched after prepare,
+    // 5. Allowed execution clears staged entries afterwards.
+    for case in [
+        "mode_refused",
+        "user_declined",
+        "no_route",
+        "mode_switched",
+        "allowed",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let replies = vec![call_write("t5.txt", "data"), Reply::Answer];
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let host = SessionHost::new(None);
+        let mut def = base_definition(&fixture.endpoint, root.path());
+        def.permission_mode = Some(if case == "mode_refused" {
+            PermissionMode::ReadOnly
+        } else {
+            PermissionMode::Ask
+        });
+        let session = host
+            .create(PreparedCreate::transient(def, Context::default()))
+            .await
+            .unwrap();
+
+        let mut _rx_keep = None;
+        let _rx_guard = match case {
+            "user_declined" => {
+                let mut rx = session.connect_approvals();
+                Some(tokio::spawn(async move {
+                    let req = rx.recv().await.unwrap();
+                    req.reply
+                        .send(ApprovalDecision::Deny {
+                            reason: Some("no".into()),
+                        })
+                        .unwrap();
+                }))
+            }
+            "allowed" => {
+                let mut rx = session.connect_approvals();
+                Some(tokio::spawn(async move {
+                    let req = rx.recv().await.unwrap();
+                    req.reply.send(ApprovalDecision::Allow).unwrap();
+                }))
+            }
+            "mode_switched" => {
+                _rx_keep = Some(session.connect_approvals());
+                let session_clone = session.clone();
+                session.set_test_after_prepare_hook(Arc::new(move || {
+                    session_clone
+                        .set_permission_mode(PermissionMode::ReadOnly)
+                        .unwrap();
+                }));
+                None
+            }
+            _ => None,
+        };
+
+        let work = submit(&session, case);
+        let obs = finish(&session, &work).await;
+        if let Some(handle) = _rx_guard {
+            let _ = handle.await;
+        }
+
+        let ws_tools = session.workspace_tools().unwrap();
+        assert_eq!(ws_tools.staged_counts(), (0, 0), "case={case}");
+        if case == "allowed" {
+            assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
+            assert!(root.path().join("t5.txt").exists());
+        } else {
+            assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+            assert!(!root.path().join("t5.txt").exists());
+            assert_eq!(
+                obs.tools.calls[0]
+                    .permission_decision
+                    .as_ref()
+                    .unwrap()
+                    .kind,
+                match case {
+                    "mode_refused" | "mode_switched" => PermissionDecisionKind::ModeRefused,
+                    "user_declined" => PermissionDecisionKind::AskedAndDenied,
+                    "no_route" => PermissionDecisionKind::NoConfirmationRoute,
+                    _ => unreachable!(),
+                },
+                "case={case}"
+            );
+            assert_eq!(
+                ws_tools.metrics().started,
+                if matches!(case, "mode_switched" | "user_declined") {
+                    1
+                } else {
+                    0
+                },
+                "case={case}"
+            );
+        }
+
+        host.close(&session.target(), ClosePolicy::DiscardLocal)
+            .await
+            .unwrap();
+    }
+
+    // 6. Cancel during approval wait on 1st call prevents 2nd call disk precheck and clears staging,
+    //    AND approving 1st call then cancelling during 2nd call's approval wait rolls back 1st call's staged entry.
+    for cancel_on_first in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let replies = vec![
+            Reply::Calls(vec![
+                ScriptedToolCall {
+                    name: "write_file".into(),
+                    arguments: json!({"path": "first.txt", "content": "1"}),
+                },
+                ScriptedToolCall {
+                    name: "write_file".into(),
+                    arguments: json!({"path": "second.txt", "content": "2"}),
+                },
+            ]),
+            Reply::Answer,
+        ];
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let host = SessionHost::new(None);
+        let session = host
+            .create(PreparedCreate::transient(
+                base_definition(&fixture.endpoint, root.path()),
+                Context::default(),
+            ))
+            .await
+            .unwrap();
+
+        let mut rx = session.connect_approvals();
+        let target_entered = Arc::new(tokio::sync::Notify::new());
+        let notify = target_entered.clone();
+        let approval_task = tokio::spawn(async move {
+            let req1 = rx.recv().await.expect("first approval");
+            if cancel_on_first {
+                notify.notify_one();
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            } else {
+                req1.reply.send(ApprovalDecision::Allow).unwrap();
+                let _req2 = rx.recv().await.expect("second approval");
+                notify.notify_one();
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+
+        let work = submit(&session, "cancel during batch");
+        target_entered.notified().await;
+        session.cancel(&work).unwrap();
+        let _obs = session.wait(&work, Duration::from_secs(5)).await.unwrap();
+        approval_task.abort();
+        session.wait_saved().await.unwrap();
+
+        let ws_tools = session.workspace_tools().unwrap();
+        assert_eq!(ws_tools.staged_counts(), (0, 0));
+        assert!(!root.path().join("first.txt").exists());
+        assert!(!root.path().join("second.txt").exists());
+        if cancel_on_first {
+            // Only the 1st write performed disk prepare; the 2nd never ran prepare.
+            assert_eq!(ws_tools.metrics().started, 1);
+        } else {
+            assert_eq!(ws_tools.metrics().started, 2);
+        }
+
+        host.close(&session.target(), ClosePolicy::DiscardLocal)
+            .await
+            .unwrap();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tl07_t5_rule_denied_command_leaves_staging_empty_and_skips_prepare() {
+    use crate::permission::rules::{CommandRule, CommandRuleSet, RuleDecision};
+
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![call_command(json!({"command": "echo forbidden"}))]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let mut def = command_definition(&fixture.endpoint, root.path());
+    def.permission_mode = Some(PermissionMode::FullAccess);
+    let session = host
+        .create(PreparedCreate::transient(def, Context::default()))
+        .await
+        .unwrap();
+    session.set_command_rules(CommandRuleSet::with_layers(
+        vec![CommandRule {
+            prefix: vec!["echo".into()],
+            decision: RuleDecision::Deny,
+            outside_sandbox: false,
+        }],
+        vec![],
+        vec![],
+    ));
+
+    let work = submit(&session, "rule denied");
+    let obs = finish(&session, &work).await;
+    assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Rejected));
+    assert_eq!(
+        obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::RuleDenied
+    );
+    let ws_tools = session.workspace_tools().unwrap();
+    assert_eq!(ws_tools.staged_counts(), (0, 0));
+    assert_eq!(ws_tools.command_decode_count(), 0);
+    assert_eq!(ws_tools.command().unwrap().check_count(), 0);
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tl08_allow_for_session_applies_to_subsequent_calls_in_same_batch() {
+    use crate::permission::rules::CommandRuleSet;
+
+    let root = tempfile::tempdir().unwrap();
+    let replies = vec![
+        Reply::Calls(vec![
+            call_command(json!({"command": "echo first a"})),
+            call_command(json!({"command": "echo first b"})),
+        ]),
+        Reply::Answer,
+    ];
+    let fixture = Fixture::new("openai-chat", replies, None);
+    let host = SessionHost::new(None);
+    let session = host
+        .create(PreparedCreate::transient(
+            command_definition(&fixture.endpoint, root.path()),
+            Context::default(),
+        ))
+        .await
+        .unwrap();
+    session.set_command_rules(CommandRuleSet::new());
+
+    let mut rx = session.connect_approvals();
+    let approver = tokio::spawn(async move {
+        let req = rx.recv().await.expect("first approval");
+        req.reply.send(ApprovalDecision::AllowForSession).unwrap();
+        let second = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(
+            second.is_err(),
+            "AllowForSession on call 1 must immediately allow matching call 2 in same batch"
+        );
+    });
+
+    let work = submit(&session, "same batch session rule");
+    let obs = finish(&session, &work).await;
+    approver.await.unwrap();
+
+    assert_eq!(obs.tools.calls.len(), 2);
+    assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
+    assert_eq!(obs.tools.calls[1].status, Some(ToolResultStatus::Succeeded));
+    assert_eq!(
+        obs.tools.calls[0]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::AskedAndAllowed
+    );
+    assert_eq!(
+        obs.tools.calls[1]
+            .permission_decision
+            .as_ref()
+            .unwrap()
+            .kind,
+        PermissionDecisionKind::RuleAllowed
+    );
+    assert_eq!(session.workspace_tools().unwrap().staged_counts(), (0, 0));
 
     host.close(&session.target(), ClosePolicy::DiscardLocal)
         .await

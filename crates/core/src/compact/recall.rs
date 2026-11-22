@@ -810,6 +810,16 @@ pub(crate) fn recall_tool_definition() -> ToolDefinition {
 }
 
 #[async_trait]
+impl crate::tools::ManagedTool for RecallTool {
+    fn classify(&self, _arguments: &serde_json::Value) -> crate::tools::ToolCallIntent {
+        crate::tools::ToolCallIntent {
+            class: crate::policy::ToolPermissionClass::KnownReadOnly,
+            command_subject: None,
+        }
+    }
+}
+
+#[async_trait]
 impl Tool for RecallTool {
     fn definition(&self) -> ToolDefinition {
         recall_tool_definition()

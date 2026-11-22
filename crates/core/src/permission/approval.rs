@@ -165,21 +165,6 @@ pub fn command_body(subject: &ApprovalSubject) -> Option<Vec<String>> {
     Some(lines)
 }
 
-/// Formats arguments JSON compactly, truncated at a UTF-8 character boundary to at most 1024 bytes.
-/// If truncated, an ellipsis is appended.
-pub(crate) fn format_mcp_arguments(value: &serde_json::Value) -> String {
-    let full = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
-    if full.len() <= 1024 {
-        full
-    } else {
-        let mut end = 1024;
-        while !full.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &full[..end])
-    }
-}
-
 /// Single-use handle for replying to an approval request.
 pub struct ApprovalReply {
     sender: oneshot::Sender<ApprovalDecision>,
@@ -244,7 +229,6 @@ impl ApprovalsHub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn command_body_describes_both_targets_and_escapes_untrusted_text() {
@@ -297,50 +281,5 @@ mod tests {
             arguments: "{}".into(),
         };
         assert!(command_body(&mcp).is_none());
-    }
-
-    #[test]
-    fn format_mcp_arguments_within_limit_outputs_compact_json() {
-        let val = json!({
-            "key": "value",
-            "nested": {
-                "num": 42,
-                "bool": true,
-            }
-        });
-        let formatted = format_mcp_arguments(&val);
-        assert_eq!(
-            formatted,
-            r#"{"key":"value","nested":{"bool":true,"num":42}}"#
-        );
-        assert!(!formatted.ends_with('…'));
-        assert!(formatted.len() <= 1024);
-    }
-
-    #[test]
-    fn format_mcp_arguments_exceeding_1024_bytes_truncates_with_ellipsis() {
-        let long_string = "a".repeat(1200);
-        let val = json!({ "data": long_string });
-        let formatted = format_mcp_arguments(&val);
-        assert!(formatted.ends_with('…'));
-        let without_ellipsis = formatted.strip_suffix('…').unwrap();
-        assert_eq!(without_ellipsis.len(), 1024);
-    }
-
-    #[test]
-    fn format_mcp_arguments_multibyte_utf8_boundary_truncation() {
-        // The JSON prefix is 8 bytes, so 1015 'a's put the first byte of 中
-        // at 1023 and its next byte at 1024, inside the character.
-        let padding = "a".repeat(1015);
-        let val = json!({ "msg": format!("{padding}中extra") });
-        let full = serde_json::to_string(&val).unwrap();
-        assert!(!full.is_char_boundary(1024));
-
-        let formatted = format_mcp_arguments(&val);
-        assert!(formatted.ends_with('…'));
-        let without_ellipsis = formatted.strip_suffix('…').unwrap();
-        assert_eq!(without_ellipsis.len(), 1023);
-        assert!(without_ellipsis.is_char_boundary(without_ellipsis.len()));
-        assert_eq!(&without_ellipsis[without_ellipsis.len() - 1..], "a");
     }
 }

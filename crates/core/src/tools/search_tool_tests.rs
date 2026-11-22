@@ -793,13 +793,24 @@ fn fifo_outside_links_and_missing_paths_never_reach_a_launch() {
 
 #[test]
 fn read_only_mode_executes_search_without_asking() {
-    use crate::permission::{PermissionHub, PermissionMode, ToolPermissionClass};
-    // The exhaustive `wm17` matrix already pins `KnownReadOnly` to direct
-    // execution in read-only mode; here the bound tool must keep that class.
-    let view = PermissionHub::new(PermissionMode::ReadOnly).view();
+    use crate::permission::ToolPermissionClass;
+    let directory = tempfile::tempdir().unwrap();
+    let workspace = Workspace::open(&directory.path().canonicalize().unwrap()).unwrap();
+    let shared = WorkspaceTools::with_write_limits(
+        workspace,
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(16),
+    );
+    let (_, managed) = shared
+        .bind_managed_for_test(&[WorkspaceTool::SearchText], reporter(&[]))
+        .pop()
+        .unwrap();
     assert_eq!(
-        view.classify_tool("search_text"),
-        Some(ToolPermissionClass::KnownReadOnly)
+        managed
+            .classify(&json!({"path": ".", "query": "needle"}))
+            .class,
+        ToolPermissionClass::KnownReadOnly
     );
 }
 

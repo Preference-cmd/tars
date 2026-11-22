@@ -1,9 +1,10 @@
 use super::execute::TestGate;
-use super::{DiffSummary, ToolResources, WorkspaceTools, compute_diff};
+use super::{
+    BatchPrepareState, DiffSummary, ExecutionGrant, ToolResources, WorkspaceTools, compute_diff,
+};
 use crate::definition::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::session::{ToolReporter, WorkRef};
 use crate::workspace::Workspace;
-use causa::kernel::ToolBatchProcessor;
 use causa::kernel::{
     BlockId, CallControl, InvocationId, RoundId, ToolBatch, ToolCallContext, ToolCallPayload,
     ToolResultPayload, ToolResultStatus, TurnId,
@@ -72,31 +73,25 @@ async fn invoke_with_control(
 ) -> ToolResultPayload {
     let call = call(kind.name(), arguments);
     let reporter = reporter(std::slice::from_ref(&call));
-    let prepared_writes = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    let tool = shared
-        .bind_with_prepared(&[kind], reporter.clone(), prepared_writes.clone())
+    let (tool, managed) = shared
+        .bind_managed_for_test(&[kind], reporter.clone())
         .pop()
         .unwrap();
 
     if matches!(kind, WorkspaceTool::WriteFile | WorkspaceTool::EditFile) {
-        let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
-        let turn_id = TurnId::new("precheck");
-        let declaration_order = [call.call_block_id];
-        let ctx = causa::kernel::ProcessorContext::new(
-            &turn_id,
-            RoundId(0),
-            &declaration_order,
-            &control,
-        );
-        let precheck = crate::permission::PrecheckProcessor::new(
-            shared.clone(),
-            reporter.clone(),
-            prepared_writes,
-        );
-        let _ = precheck.process(&mut batch, &ctx).await;
-        if let Some((_, res)) = batch.results().first().and_then(|e| e.result()) {
-            reporter.drain().await;
-            return res.clone();
+        let mut batch_state = BatchPrepareState::new();
+        match managed.prepare(&call, &mut batch_state, &control).await {
+            Ok(prepared) => {
+                managed.commit_prepared(call.call_block_id, prepared, ExecutionGrant::default());
+            }
+            Err(rejection) => {
+                reporter.drain().await;
+                return ToolResultPayload::new(
+                    call.call_block_id,
+                    rejection.status,
+                    rejection.output,
+                );
+            }
         }
     }
 
@@ -1082,28 +1077,17 @@ async fn confirmation_reread_stops_at_the_edit_limit_after_external_growth() {
         json!({"path": "bounded.txt", "content": "replacement"}),
     );
     let reporter = reporter(std::slice::from_ref(&call));
-    let prepared_writes = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-    let tool = shared
-        .bind_with_prepared(
-            &[WorkspaceTool::WriteFile],
-            reporter.clone(),
-            prepared_writes.clone(),
-        )
+    let (tool, managed) = shared
+        .bind_managed_for_test(&[WorkspaceTool::WriteFile], reporter.clone())
         .pop()
         .unwrap();
     let control = control();
-    let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
-    let turn_id = TurnId::new("bounded-precheck");
-    let declaration_order = [call.call_block_id];
-    let ctx =
-        causa::kernel::ProcessorContext::new(&turn_id, RoundId(0), &declaration_order, &control);
-    let precheck = crate::permission::PrecheckProcessor::new(
-        shared.clone(),
-        reporter.clone(),
-        prepared_writes,
-    );
-    let _ = precheck.process(&mut batch, &ctx).await;
-    assert!(batch.results().is_empty(), "precheck accepted the write");
+    let mut batch_state = BatchPrepareState::new();
+    let prepared = managed
+        .prepare(&call, &mut batch_state, &control)
+        .await
+        .expect("precheck accepted the write");
+    managed.commit_prepared(call.call_block_id, prepared, ExecutionGrant::default());
 
     // Grow the file after the successful precheck. The confirmation reread may
     // consume one byte past the configured limit, never the grown file.

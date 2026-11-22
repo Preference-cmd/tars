@@ -531,6 +531,16 @@ fn read_and_verify_skill(
 }
 
 #[async_trait]
+impl crate::tools::ManagedTool for LoadSkillTool {
+    fn classify(&self, _arguments: &serde_json::Value) -> crate::tools::ToolCallIntent {
+        crate::tools::ToolCallIntent {
+            class: crate::policy::ToolPermissionClass::KnownReadOnly,
+            command_subject: None,
+        }
+    }
+}
+
+#[async_trait]
 impl Tool for LoadSkillTool {
     fn definition(&self) -> ToolDefinition {
         load_skill_tool_definition()

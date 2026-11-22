@@ -7,7 +7,7 @@ use crate::session::{ConversationId, Session};
 use crate::tools::{ToolResources, WorkspaceTools};
 use crate::workspace::{Workspace, WorkspaceError};
 use causa::kernel::ToolBatchProcessor;
-use causa::kernel::{Context, ModelGateway};
+use causa::kernel::{Context, ModelGateway, Tool};
 use causa::providers::{
     AnthropicMessagesGateway, OpenAiChatCompletionsGateway, OpenAiResponsesGateway,
 };
@@ -222,7 +222,6 @@ pub(crate) fn assemble(
     let storage_for_history = storage.clone();
     definition.validate()?;
     let command_settings = definition.effective_command_settings();
-    let definition_command_settings = command_settings.unwrap_or_default();
     let mut command_status = None;
     let workspace_tools = if definition.tools.is_empty() {
         None
@@ -400,13 +399,10 @@ pub(crate) fn assemble(
         .unwrap_or_else(|| Arc::new(crate::mcp::McpPermissionTable::new()));
     let permissions = Arc::new(crate::permission::PermissionHub::with_rules_and_backend(
         current_mode,
-        mcp_table,
         command_rules,
         workspace_rules_backend,
     ));
     let view = permissions.view();
-    let approvals = permissions.approvals();
-    let mcp_for_work = mcp.clone();
     #[cfg(test)]
     let test_processors = Arc::new(std::sync::Mutex::new(
         Vec::<Arc<dyn ToolBatchProcessor>>::new(),
@@ -414,16 +410,12 @@ pub(crate) fn assemble(
     #[cfg(test)]
     let test_processors_capture = test_processors.clone();
     #[cfg(test)]
-    let test_intermediate = Arc::new(std::sync::Mutex::new(
-        Vec::<Arc<dyn ToolBatchProcessor>>::new(),
-    ));
+    let test_after_prepare_hook =
+        Arc::new(std::sync::Mutex::new(None::<Arc<dyn Fn() + Send + Sync>>));
     #[cfg(test)]
-    let test_intermediate_capture = test_intermediate.clone();
+    let test_after_prepare_hook_capture = test_after_prepare_hook.clone();
     #[cfg(test)]
     let tools_for_session = workspace_tools.clone();
-    let outside_sandbox_grants = workspace_tools
-        .as_ref()
-        .map(|tools| tools.outside_sandbox_grants());
 
     let compaction_for_work = compaction.clone();
     let transient_trim_for_work = transient_trim.clone();
@@ -431,6 +423,7 @@ pub(crate) fn assemble(
     let skill_registry_for_work = skill_registry.clone();
     let loaded_skills_for_work = loaded_skills.clone();
     let permissions_for_work = permissions.clone();
+    let mcp_for_work = mcp.clone();
     let session = Session::new_with_tools(
         conversation_id,
         context,
@@ -445,19 +438,22 @@ pub(crate) fn assemble(
             let options = options
                 .clone()
                 .with_processor_data(causa::kernel::ProcessorData::new(view.clone()));
-            let prepared_writes = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
-                causa::kernel::BlockId,
-                crate::tools::PreparedWrite,
-            >::new()));
-            let mut tools = workspace_tools.as_ref().map_or_else(Vec::new, |tools| {
-                tools.bind_with_prepared(&selected, reporter.clone(), prepared_writes.clone())
-            });
+            let mut catalog = crate::tools::ToolCatalog::with_dynamic(mcp_table.clone());
+            let mut tools: Vec<Arc<dyn causa::kernel::Tool>> = Vec::new();
+            if let Some(wt) = &workspace_tools {
+                for (tool, managed) in wt.bind_work(&selected, reporter.clone()) {
+                    catalog.register(tool.definition().name, managed);
+                    tools.push(tool);
+                }
+            }
             if let Some(runtime) = &compact_for_work {
-                tools.push(Arc::new(crate::compact::RecallTool::new(
+                let recall = Arc::new(crate::compact::RecallTool::new(
                     runtime.clone(),
                     reporter.clone(),
                     call_timeout_secs,
-                )));
+                ));
+                catalog.register(recall.definition().name, recall.clone());
+                tools.push(recall);
             }
             let bind_load_skill = skills_enabled
                 && !skill_registry_for_work
@@ -465,56 +461,32 @@ pub(crate) fn assemble(
                     .expect("skill registry lock")
                     .is_empty();
             if bind_load_skill {
-                tools.push(Arc::new(crate::skills::LoadSkillTool::new(
+                let load_skill = Arc::new(crate::skills::LoadSkillTool::new(
                     skill_registry_for_work,
                     loaded_skills_for_work.clone(),
                     reporter.clone(),
                     call_timeout_secs,
-                )));
+                ));
+                catalog.register(load_skill.definition().name, load_skill.clone());
+                tools.push(load_skill);
             }
             let mut before: Vec<Arc<dyn ToolBatchProcessor>> = Vec::new();
-            if workspace_tools.is_some()
-                || mcp_for_work.is_some()
-                || compact_for_work.is_some()
-                || bind_load_skill
-            {
-                before.push(Arc::new(crate::permission::ModeGateProcessor::new(
-                    reporter.clone(),
-                    approvals.clone(),
-                )));
-            }
+            let orchestrator = crate::permission::ToolPolicyProcessor::new(
+                work,
+                reporter,
+                permissions_for_work.clone(),
+                Arc::new(catalog),
+            );
             #[cfg(test)]
+            let orchestrator = match test_after_prepare_hook_capture
+                .lock()
+                .expect("test after prepare hook lock")
+                .clone()
             {
-                let extras = test_intermediate_capture
-                    .lock()
-                    .expect("test intermediate processors lock");
-                before.extend(extras.iter().cloned());
-            }
-            if let Some(wt) = &workspace_tools {
-                before.push(Arc::new(crate::permission::PrecheckProcessor::new(
-                    wt.clone(),
-                    reporter.clone(),
-                    prepared_writes.clone(),
-                )));
-            }
-            // Every tool that can have effects is gated: built-in tools and
-            // MCP tools alike pass the permission processor.
-            if workspace_tools.is_some()
-                || mcp_for_work.is_some()
-                || compact_for_work.is_some()
-                || bind_load_skill
-            {
-                before.push(Arc::new(crate::permission::PermissionProcessor::new(
-                    work,
-                    reporter,
-                    permissions_for_work.clone(),
-                    definition_command_settings,
-                    prepared_writes,
-                    outside_sandbox_grants
-                        .clone()
-                        .unwrap_or_else(crate::permission::OutsideSandboxGrants::new),
-                )));
-            }
+                Some(hook) => orchestrator.with_after_prepare_hook(hook),
+                None => orchestrator,
+            };
+            before.push(Arc::new(orchestrator));
             let mcp = mcp_for_work.clone();
             #[cfg(test)]
             {
@@ -605,7 +577,7 @@ pub(crate) fn assemble(
     let session = {
         let mut session = session;
         session.test_before_processors = test_processors;
-        session.test_intermediate_processors = test_intermediate;
+        session.test_after_prepare_hook = test_after_prepare_hook;
         session.workspace_tools = tools_for_session;
         session
     };

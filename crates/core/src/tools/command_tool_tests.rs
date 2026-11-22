@@ -272,16 +272,25 @@ async fn granted_outside_command_uses_the_unconfined_launch() {
         CommandSettings::default(),
         Some(runtime),
     );
-    shared
-        .outside_sandbox_grants()
-        .grant(invocation.call_block_id);
-    let tool = shared
-        .bind_for_test(
+    let (tool, managed) = shared
+        .bind_managed_for_test(
             &[WorkspaceTool::RunCommand],
             reporter(std::slice::from_ref(&invocation)),
         )
         .pop()
         .unwrap();
+    let mut batch_state = super::BatchPrepareState::new();
+    let prepared = managed
+        .prepare(&invocation, &mut batch_state, &control())
+        .await
+        .expect("outside command prepares");
+    managed.commit_prepared(
+        invocation.call_block_id,
+        prepared,
+        super::ExecutionGrant {
+            allow_outside_sandbox: true,
+        },
+    );
     let output = tool.execute(&invocation, &control(), None).await;
     assert_eq!(output.status, ToolResultStatus::Succeeded);
     assert_eq!(output.output.content["exit_code"], 0);
@@ -414,20 +423,26 @@ async fn a_failed_probe_rejects_every_tool_call_without_launching() {
         CommandSettings::default(),
         Some(runtime),
     );
-    shared.outside_sandbox_grants().grant(outside.call_block_id);
     let calls = vec![
         call(json!({"command": "printf first > first.txt"})),
         call(json!({"command": "printf second > second.txt"})),
         outside,
     ];
-    let tool = shared
-        .bind_for_test(&[WorkspaceTool::RunCommand], reporter(&calls))
+    let (_tool, managed) = shared
+        .bind_managed_for_test(&[WorkspaceTool::RunCommand], reporter(&calls))
         .pop()
         .unwrap();
+    let mut batch_state = super::BatchPrepareState::new();
     for invocation in &calls {
-        let output = tool.execute(invocation, &control(), None).await;
-        assert_eq!(output.status, ToolResultStatus::Rejected);
-        let reason = output.output.content["error"].as_str().unwrap_or_default();
+        let err = match managed
+            .prepare(invocation, &mut batch_state, &control())
+            .await
+        {
+            Ok(_) => panic!("a failed probe must reject in prepare"),
+            Err(err) => err,
+        };
+        assert_eq!(err.status, ToolResultStatus::Rejected);
+        let reason = err.output.content["error"].as_str().unwrap_or_default();
         assert!(reason.contains("unavailable"), "{reason}");
         assert!(reason.contains("probe failed"), "{reason}");
     }

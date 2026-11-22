@@ -1816,21 +1816,11 @@ async fn wm17_four_modes_six_categories_session_integration() {
 
 #[test]
 fn wm13_no_mcp_prefix_in_permission_logic() {
+    use crate::tools::{DynamicToolCatalog, ToolCatalog};
+
     let table = std::sync::Arc::new(super::McpPermissionTable::default());
-    let hub = crate::permission::PermissionHub::with_mcp_table(
-        crate::policy::PermissionMode::Ask,
-        table.clone(),
-    );
-    let view = hub.view();
-    assert_eq!(
-        view.classify_tool("read_file"),
-        Some(ToolPermissionClass::KnownReadOnly)
-    );
-    assert_eq!(
-        view.classify_tool("write_file"),
-        Some(ToolPermissionClass::BuiltinWrite)
-    );
-    assert_eq!(view.classify_tool("mcp_server_fake"), None);
+    let catalog = ToolCatalog::with_dynamic(table.clone());
+    assert!(catalog.get("mcp_server_fake").is_none());
 
     table.update_server_tools(
         "custom",
@@ -1843,10 +1833,14 @@ fn wm13_no_mcp_prefix_in_permission_logic() {
             },
         )],
     );
+    let adapter = catalog
+        .get("my_special_tool")
+        .expect("non-prefixed MCP tool name must resolve through catalog");
     assert_eq!(
-        view.classify_tool("my_special_tool"),
-        Some(ToolPermissionClass::McpPrompt)
+        adapter.classify(&json!({})).class,
+        ToolPermissionClass::McpPrompt
     );
+    assert!(DynamicToolCatalog::get(&*table, "my_special_tool").is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

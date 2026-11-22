@@ -19,6 +19,12 @@ mod stderr;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;
 
-pub(crate) use permissions::{McpPermissionTable, McpToolInfo};
+pub(crate) use permissions::McpPermissionTable;
+#[cfg(test)]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos")),
+    allow(unused_imports)
+)]
+pub(crate) use permissions::{McpToolAdapter, McpToolInfo, classify_mcp_tool};
 pub(crate) use runtime::McpRuntime;
 pub use status::{McpServerStatus, McpSkippedTool};
