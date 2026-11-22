@@ -70,7 +70,7 @@ impl ToolBatchProcessor for PrecheckProcessor {
             };
             let call = entry.call().clone();
 
-            if call.input.tool_name == "run_command" {
+            if call.input.tool_name == WorkspaceTool::RunCommand.name() {
                 let params = Params::decode(
                     WorkspaceTool::RunCommand,
                     &call.input.arguments,
@@ -120,9 +120,8 @@ impl ToolBatchProcessor for PrecheckProcessor {
                 continue;
             }
 
-            let kind = match call.input.tool_name.as_str() {
-                "write_file" => WorkspaceTool::WriteFile,
-                "edit_file" => WorkspaceTool::EditFile,
+            let kind = match WorkspaceTool::from_name(&call.input.tool_name) {
+                Some(kind @ (WorkspaceTool::WriteFile | WorkspaceTool::EditFile)) => kind,
                 _ => continue,
             };
 
@@ -147,8 +146,8 @@ impl ToolBatchProcessor for PrecheckProcessor {
             };
 
             let (raw_path, tool_label) = match &params {
-                Params::Write(p) => (&p.path, "write_file"),
-                Params::Edit(p) => (&p.path, "edit_file"),
+                Params::Write(p) => (&p.path, WorkspaceTool::WriteFile.name()),
+                Params::Edit(p) => (&p.path, WorkspaceTool::EditFile.name()),
                 _ => continue,
             };
 

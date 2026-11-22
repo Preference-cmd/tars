@@ -4,7 +4,7 @@ use super::PreparedWrite;
 use super::compute_diff;
 use super::parameters::{EditParams, EditSegment, ListParams, Params, ReadParams, WriteParams};
 use super::resources::Counters;
-use crate::definition::{WorkspaceToolLimits, WriteToolLimits};
+use crate::definition::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::policy::WriteAction;
 use crate::workspace::{FileVersion, Workspace, WorkspaceError};
 use causa::kernel::{CallControl, ControlError, ToolResultStatus};
@@ -371,14 +371,15 @@ pub(crate) fn precheck_write(
     control: &OperationControl,
 ) -> Result<PreparedWrite, OperationError> {
     control.check()?;
+    let tool_name = WorkspaceTool::WriteFile.name();
     let components = Workspace::components(&p.path)?;
     if components.is_empty() {
-        return Err(OperationError::Rejected(
-            "write_file requires a file path".into(),
-        ));
+        return Err(OperationError::Rejected(format!(
+            "{tool_name} requires a file path"
+        )));
     }
-    reject_vcs_metadata("write_file", &components)?;
-    reject_protected_workspace_paths("write_file", &components, protected_storage)?;
+    reject_vcs_metadata(tool_name, &components)?;
+    reject_protected_workspace_paths(tool_name, &components, protected_storage)?;
     let normalized = components.join("/");
     let parent_components: Vec<String> = components[..components.len() - 1]
         .iter()
@@ -515,14 +516,15 @@ pub(crate) fn precheck_edit(
     control: &OperationControl,
 ) -> Result<PreparedWrite, OperationError> {
     control.check()?;
+    let tool_name = WorkspaceTool::EditFile.name();
     let components = Workspace::components(&p.path)?;
     if components.is_empty() {
-        return Err(OperationError::Rejected(
-            "edit_file requires a file path".into(),
-        ));
+        return Err(OperationError::Rejected(format!(
+            "{tool_name} requires a file path"
+        )));
     }
-    reject_vcs_metadata("edit_file", &components)?;
-    reject_protected_workspace_paths("edit_file", &components, protected_storage)?;
+    reject_vcs_metadata(tool_name, &components)?;
+    reject_protected_workspace_paths(tool_name, &components, protected_storage)?;
     let normalized = components.join("/");
     let parent_components: Vec<String> = components[..components.len() - 1]
         .iter()

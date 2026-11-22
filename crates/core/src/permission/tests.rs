@@ -1176,35 +1176,19 @@ async fn processor_chain_order_and_hints_wm17() {
     let hints = verifier.seen_hints.lock().unwrap().clone();
     assert_eq!(hints.len(), 5);
 
-    assert_eq!(hints[0].0, "read_file");
-    assert_eq!(hints[0].1.read_only, Some(true));
-    assert_eq!(hints[0].1.destructive, None);
-    assert_eq!(hints[0].1.idempotent, None);
-    assert_eq!(hints[0].1.open_world, Some(false));
-
-    assert_eq!(hints[1].0, "list_directory");
-    assert_eq!(hints[1].1.read_only, Some(true));
-    assert_eq!(hints[1].1.destructive, None);
-    assert_eq!(hints[1].1.idempotent, None);
-    assert_eq!(hints[1].1.open_world, Some(false));
-
-    assert_eq!(hints[2].0, "search_text");
-    assert_eq!(hints[2].1.read_only, Some(true));
-    assert_eq!(hints[2].1.destructive, None);
-    assert_eq!(hints[2].1.idempotent, None);
-    assert_eq!(hints[2].1.open_world, Some(false));
-
-    assert_eq!(hints[3].0, "write_file");
-    assert_eq!(hints[3].1.read_only, Some(false));
-    assert_eq!(hints[3].1.destructive, Some(true));
-    assert_eq!(hints[3].1.idempotent, Some(true));
-    assert_eq!(hints[3].1.open_world, Some(false));
-
-    assert_eq!(hints[4].0, "edit_file");
-    assert_eq!(hints[4].1.read_only, Some(false));
-    assert_eq!(hints[4].1.destructive, Some(true));
-    assert_eq!(hints[4].1.idempotent, Some(false));
-    assert_eq!(hints[4].1.open_world, Some(false));
+    for (expected_name, hint) in [
+        ("read_file", &hints[0]),
+        ("list_directory", &hints[1]),
+        ("search_text", &hints[2]),
+        ("write_file", &hints[3]),
+        ("edit_file", &hints[4]),
+    ] {
+        assert_eq!(hint.0, expected_name);
+        assert_eq!(hint.1.read_only, None);
+        assert_eq!(hint.1.destructive, None);
+        assert_eq!(hint.1.idempotent, None);
+        assert_eq!(hint.1.open_world, None);
+    }
 
     host.close(&session.target(), ClosePolicy::DiscardLocal)
         .await

@@ -1,13 +1,14 @@
 use super::discovery::{BoundedReadError, collect_resources, read_bounded_file, sha256_hex};
 use super::frontmatter::parse_skill_document;
 use super::types::{SkillEntry, SkillRegistry, SkillResources};
+use crate::definition::BuiltinTool;
 use crate::policy::escape_untrusted_text;
 use crate::session::ToolReporter;
 use async_trait::async_trait;
 use causa::kernel::{
     BlockContent, BlockId, BlockMeta, CallControl, ContentPart, ContextBlock, ProcessorContext,
     ProcessorError, Role, Tool, ToolBatch, ToolBatchProcessor, ToolCallContext, ToolDefinition,
-    ToolHints, ToolOutput, ToolOutputMeta, ToolResultPayload, ToolResultStatus,
+    ToolOutput, ToolOutputMeta, ToolResultPayload, ToolResultStatus,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -21,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 pub const SKILL_SOURCE: &str = "tars:skill";
 
 /// Name of the built-in read-only skill loading tool.
-pub(crate) const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
+pub(crate) const LOAD_SKILL_TOOL_NAME: &str = BuiltinTool::LoadSkill.name();
 
 /// Hard upper bound in bytes for a single `SKILL.md` read by `load_skill` (64 KiB).
 pub(crate) const MAX_LOAD_SKILL_BYTES: usize = 64 * 1024;
@@ -533,14 +534,6 @@ fn read_and_verify_skill(
 impl Tool for LoadSkillTool {
     fn definition(&self) -> ToolDefinition {
         load_skill_tool_definition()
-    }
-
-    fn hints(&self) -> ToolHints {
-        ToolHints::default()
-            .with_read_only(true)
-            .with_destructive(false)
-            .with_idempotent(true)
-            .with_open_world(false)
     }
 
     async fn execute(

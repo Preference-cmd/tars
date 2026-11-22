@@ -7,7 +7,7 @@ mod workspace;
 
 pub use command::{CommandNetwork, CommandSettings};
 pub use mcp::{McpApproval, McpServerConfig, McpToolSetting};
-pub use workspace::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
+pub use workspace::{BuiltinTool, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 
 #[cfg(test)]
 pub(crate) use mcp::expand_template;

@@ -217,9 +217,10 @@ fn run_command_definition_declares_the_sandbox_and_the_default_network() {
     );
     assert!(definition.description.contains("outside_sandbox"));
     let hints = tool.hints();
-    assert_eq!(hints.read_only, Some(false));
-    assert_eq!(hints.destructive, Some(true));
-    assert_eq!(hints.idempotent, Some(false));
+    assert_eq!(hints.read_only, None);
+    assert_eq!(hints.destructive, None);
+    assert_eq!(hints.idempotent, None);
+    assert_eq!(hints.open_world, None);
 }
 
 #[tokio::test]

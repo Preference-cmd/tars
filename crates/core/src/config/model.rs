@@ -652,14 +652,8 @@ pub fn parse_tools(value: &str) -> Result<Vec<WorkspaceTool>, ConfigError> {
     }
     let mut tools = Vec::new();
     for name in value.split(',').map(str::trim) {
-        let tool = match name {
-            "list_directory" => WorkspaceTool::ListDirectory,
-            "read_file" => WorkspaceTool::ReadFile,
-            "search_text" => WorkspaceTool::SearchText,
-            "write_file" => WorkspaceTool::WriteFile,
-            "edit_file" => WorkspaceTool::EditFile,
-            "run_command" => WorkspaceTool::RunCommand,
-            _ => return Err(invalid_tools()),
+        let Some(tool) = WorkspaceTool::from_name(name) else {
+            return Err(invalid_tools());
         };
         if tools.contains(&tool) {
             return Err(invalid_tools());

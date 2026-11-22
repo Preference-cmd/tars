@@ -748,35 +748,13 @@ async fn hints_for_all_five_tools_match_specification() {
         reporter,
     );
 
-    let list_hints = bound[0].hints();
-    assert_eq!(list_hints.read_only, Some(true));
-    assert_eq!(list_hints.destructive, None);
-    assert_eq!(list_hints.idempotent, None);
-    assert_eq!(list_hints.open_world, Some(false));
-
-    let read_hints = bound[1].hints();
-    assert_eq!(read_hints.read_only, Some(true));
-    assert_eq!(read_hints.destructive, None);
-    assert_eq!(read_hints.idempotent, None);
-    assert_eq!(read_hints.open_world, Some(false));
-
-    let search_hints = bound[2].hints();
-    assert_eq!(search_hints.read_only, Some(true));
-    assert_eq!(search_hints.destructive, None);
-    assert_eq!(search_hints.idempotent, None);
-    assert_eq!(search_hints.open_world, Some(false));
-
-    let write_hints = bound[3].hints();
-    assert_eq!(write_hints.read_only, Some(false));
-    assert_eq!(write_hints.destructive, Some(true));
-    assert_eq!(write_hints.idempotent, Some(true));
-    assert_eq!(write_hints.open_world, Some(false));
-
-    let edit_hints = bound[4].hints();
-    assert_eq!(edit_hints.read_only, Some(false));
-    assert_eq!(edit_hints.destructive, Some(true));
-    assert_eq!(edit_hints.idempotent, Some(false));
-    assert_eq!(edit_hints.open_world, Some(false));
+    for tool in &bound {
+        let hints = tool.hints();
+        assert_eq!(hints.read_only, None);
+        assert_eq!(hints.destructive, None);
+        assert_eq!(hints.idempotent, None);
+        assert_eq!(hints.open_world, None);
+    }
 }
 
 #[test]

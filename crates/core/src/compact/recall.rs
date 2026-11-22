@@ -13,11 +13,12 @@ use super::history::{
     ARTIFACT_ID_PREFIX, HistoryRecordEntry, HistoryStore, is_canonical_uuid, parse_artifact_id,
     parse_spilled_artifact_id,
 };
+use crate::definition::BuiltinTool;
 use crate::session::ToolReporter;
 use async_trait::async_trait;
 use causa::kernel::{
     BlockContent, BlockId, CallControl, ContextBlock, Tool, ToolCallContext, ToolDefinition,
-    ToolHints, ToolOutput, ToolResultPayload, ToolResultStatus, Truncation,
+    ToolOutput, ToolResultPayload, ToolResultStatus, Truncation,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -26,7 +27,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Name of the built-in recall tool advertised to models.
-pub(crate) const TOOL_NAME: &str = "recall";
+pub(crate) const TOOL_NAME: &str = BuiltinTool::Recall.name();
 
 /// Model-facing description explaining what recall does and its call forms.
 pub(crate) const TOOL_DESCRIPTION: &str = "\
@@ -812,14 +813,6 @@ pub(crate) fn recall_tool_definition() -> ToolDefinition {
 impl Tool for RecallTool {
     fn definition(&self) -> ToolDefinition {
         recall_tool_definition()
-    }
-
-    fn hints(&self) -> ToolHints {
-        ToolHints::default()
-            .with_read_only(true)
-            .with_destructive(false)
-            .with_idempotent(true)
-            .with_open_world(false)
     }
 
     async fn execute(

@@ -16,10 +16,12 @@ mod tests;
 
 pub use discovery::MAX_SKILL_FILE_BYTES;
 pub use frontmatter::{ParsedSkillDocument, SkillFrontmatter, parse_skill_document};
+#[cfg(test)]
+pub(crate) use tool::LOAD_SKILL_TOOL_NAME;
 pub(crate) use tool::{
-    LOAD_SKILL_TOOL_NAME, LoadSkillTool, LoadedSkillTrackerProcessor, LoadedSkillsState,
-    is_skill_tool_output, load_skill_tool_definition, make_standalone_skill_block,
-    parse_standalone_skill_block, parse_tool_result_skill,
+    LoadSkillTool, LoadedSkillTrackerProcessor, LoadedSkillsState, is_skill_tool_output,
+    load_skill_tool_definition, make_standalone_skill_block, parse_standalone_skill_block,
+    parse_tool_result_skill,
 };
 pub use tool::{SKILL_SOURCE, skill_block_name};
 pub use types::{

@@ -1,7 +1,7 @@
 use super::types::*;
 use crate::application::{ApplicationError, ManagedSession};
 use crate::compact::HistoryRecordEntry;
-use crate::definition::{RenderOptions, SessionDefinition};
+use crate::definition::{BuiltinTool, RenderOptions, SessionDefinition, WorkspaceTool};
 use crate::session::WorkRef;
 use causa::kernel::{
     BlockContent, BlockId, CacheDirective, ContentPart, Context, ModelRef,
@@ -377,19 +377,24 @@ fn json_excerpt(value: &impl serde::Serialize, limit: usize) -> String {
 }
 
 // The explicit adoption allow-list for original results. New capabilities
-// (including MCP) need a separately reviewed policy; adding a workspace tool
+// (including MCP) need a separately reviewed policy; adding a built-in tool
 // variant must not widen it implicitly.
-pub(super) const BUILTIN_TOOL_NAMES: [&str; 6] = [
-    "list_directory",
-    "read_file",
-    "search_text",
-    "write_file",
-    "edit_file",
-    "run_command",
-];
-
 pub(super) fn is_builtin_tool(tool_name: &str) -> bool {
-    BUILTIN_TOOL_NAMES.contains(&tool_name)
+    match BuiltinTool::from_name(tool_name) {
+        Some(
+            BuiltinTool::Workspace(
+                WorkspaceTool::ListDirectory
+                | WorkspaceTool::ReadFile
+                | WorkspaceTool::SearchText
+                | WorkspaceTool::WriteFile
+                | WorkspaceTool::EditFile
+                | WorkspaceTool::RunCommand,
+            )
+            | BuiltinTool::Recall
+            | BuiltinTool::LoadSkill,
+        ) => true,
+        None => false,
+    }
 }
 
 /// Which result status makes a warning relevant for its side-effect kind.
@@ -410,13 +415,19 @@ pub(super) fn warning_status_applies(
 /// file; every other non-builtin name may have had effects on its own server.
 /// Built-in read-only tools carry no warning.
 pub(super) fn warning_kind(tool_name: &str) -> Option<RepairWarningKind> {
-    match tool_name {
-        // The write names must stay a subset of `BUILTIN_TOOL_NAMES`; a
-        // built-in write missing from that list would surface as external.
-        "write_file" | "edit_file" => Some(RepairWarningKind::FileWrite),
-        "run_command" => Some(RepairWarningKind::Command),
-        name if BUILTIN_TOOL_NAMES.contains(&name) => None,
-        _ => Some(RepairWarningKind::External),
+    match BuiltinTool::from_name(tool_name) {
+        Some(BuiltinTool::Workspace(WorkspaceTool::WriteFile | WorkspaceTool::EditFile)) => {
+            Some(RepairWarningKind::FileWrite)
+        }
+        Some(BuiltinTool::Workspace(WorkspaceTool::RunCommand)) => Some(RepairWarningKind::Command),
+        Some(
+            BuiltinTool::Workspace(
+                WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText,
+            )
+            | BuiltinTool::Recall
+            | BuiltinTool::LoadSkill,
+        ) => None,
+        None => Some(RepairWarningKind::External),
     }
 }
 
@@ -539,5 +550,31 @@ mod command_tests {
             &RepairWarningKind::Command,
             &causa::kernel::ToolResultStatus::Succeeded
         ));
+    }
+
+    #[test]
+    fn recall_and_load_skill_are_builtin_and_carry_no_external_warning() {
+        for name in [
+            BuiltinTool::Recall.name(),
+            BuiltinTool::LoadSkill.name(),
+            WorkspaceTool::ListDirectory.name(),
+            WorkspaceTool::ReadFile.name(),
+            WorkspaceTool::SearchText.name(),
+        ] {
+            assert!(is_builtin_tool(name), "{name} must be builtin");
+            assert_eq!(warning_kind(name), None, "{name} must not warn");
+        }
+        for name in [
+            WorkspaceTool::WriteFile.name(),
+            WorkspaceTool::EditFile.name(),
+        ] {
+            assert!(is_builtin_tool(name));
+            assert_eq!(warning_kind(name), Some(RepairWarningKind::FileWrite));
+        }
+        assert!(!is_builtin_tool("mcp_fx_echo"));
+        assert_eq!(
+            warning_kind("mcp_fx_echo"),
+            Some(RepairWarningKind::External)
+        );
     }
 }

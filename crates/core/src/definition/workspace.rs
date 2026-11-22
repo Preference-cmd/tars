@@ -2,7 +2,7 @@ use super::types::DefinitionError;
 use serde::{Deserialize, Serialize};
 
 /// Explicit workspace capabilities.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceTool {
     /// List a bounded single directory.
@@ -20,7 +20,7 @@ pub enum WorkspaceTool {
 }
 
 impl WorkspaceTool {
-    /// Every built-in tool, in declaration order.
+    /// Every workspace tool, in declaration order.
     pub const ALL: [Self; 6] = [
         Self::ListDirectory,
         Self::ReadFile,
@@ -30,13 +30,8 @@ impl WorkspaceTool {
         Self::RunCommand,
     ];
 
-    /// Whether `name` is the model-facing name of a built-in tool.
-    pub(crate) fn is_builtin_name(name: &str) -> bool {
-        Self::ALL.iter().any(|tool| tool.name() == name)
-    }
-
     /// Stable tool name advertised to model providers.
-    pub fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::ListDirectory => "list_directory",
             Self::ReadFile => "read_file",
@@ -45,6 +40,70 @@ impl WorkspaceTool {
             Self::EditFile => "edit_file",
             Self::RunCommand => "run_command",
         }
+    }
+
+    /// Parse a model-facing workspace tool name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "list_directory" => Some(Self::ListDirectory),
+            "read_file" => Some(Self::ReadFile),
+            "search_text" => Some(Self::SearchText),
+            "write_file" => Some(Self::WriteFile),
+            "edit_file" => Some(Self::EditFile),
+            "run_command" => Some(Self::RunCommand),
+            _ => None,
+        }
+    }
+}
+
+/// Every built-in tool advertised by TARS across workspace, history, and skill capabilities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BuiltinTool {
+    /// One of the explicit workspace tools.
+    Workspace(WorkspaceTool),
+    /// History and spilled-artifact inspection (`recall`).
+    Recall,
+    /// On-demand skill loading (`load_skill`).
+    LoadSkill,
+}
+
+impl BuiltinTool {
+    /// Every built-in tool, in canonical declaration order.
+    pub const ALL: [Self; 8] = [
+        Self::Workspace(WorkspaceTool::ListDirectory),
+        Self::Workspace(WorkspaceTool::ReadFile),
+        Self::Workspace(WorkspaceTool::SearchText),
+        Self::Workspace(WorkspaceTool::WriteFile),
+        Self::Workspace(WorkspaceTool::EditFile),
+        Self::Workspace(WorkspaceTool::RunCommand),
+        Self::Recall,
+        Self::LoadSkill,
+    ];
+
+    /// Stable model-facing tool name.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Workspace(tool) => tool.name(),
+            Self::Recall => "recall",
+            Self::LoadSkill => "load_skill",
+        }
+    }
+
+    /// Parse a model-facing name into its built-in tool identity.
+    pub fn from_name(name: &str) -> Option<Self> {
+        if let Some(tool) = WorkspaceTool::from_name(name) {
+            return Some(Self::Workspace(tool));
+        }
+        match name {
+            "recall" => Some(Self::Recall),
+            "load_skill" => Some(Self::LoadSkill),
+            _ => None,
+        }
+    }
+
+    /// Whether `name` is the model-facing name of any built-in tool.
+    pub fn is_builtin_name(name: &str) -> bool {
+        Self::from_name(name).is_some()
     }
 }
 

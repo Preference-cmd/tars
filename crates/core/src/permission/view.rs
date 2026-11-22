@@ -95,24 +95,28 @@ impl PermissionView {
         self.classify_tool(name)
     }
 
-    /// Classify a tool by name, checking built-in workspace tools first,
+    /// Classify a tool by name, checking built-in tools first,
     /// then the registered MCP tools.
     pub(crate) fn classify_tool(&self, name: &str) -> Option<ToolPermissionClass> {
-        if name == crate::compact::recall::TOOL_NAME || name == crate::skills::LOAD_SKILL_TOOL_NAME
-        {
-            return Some(ToolPermissionClass::KnownReadOnly);
-        }
-        if crate::definition::WorkspaceTool::is_builtin_name(name) {
-            match name {
-                "list_directory" | "read_file" | "search_text" => {
-                    Some(ToolPermissionClass::KnownReadOnly)
-                }
-                "write_file" | "edit_file" => Some(ToolPermissionClass::BuiltinWrite),
-                "run_command" => Some(ToolPermissionClass::BuiltinCommand),
-                _ => None,
+        use crate::definition::{BuiltinTool, WorkspaceTool};
+
+        match BuiltinTool::from_name(name) {
+            Some(
+                BuiltinTool::Workspace(
+                    WorkspaceTool::ListDirectory
+                    | WorkspaceTool::ReadFile
+                    | WorkspaceTool::SearchText,
+                )
+                | BuiltinTool::Recall
+                | BuiltinTool::LoadSkill,
+            ) => Some(ToolPermissionClass::KnownReadOnly),
+            Some(BuiltinTool::Workspace(WorkspaceTool::WriteFile | WorkspaceTool::EditFile)) => {
+                Some(ToolPermissionClass::BuiltinWrite)
             }
-        } else {
-            self.mcp_table.get(name).map(|info| info.category)
+            Some(BuiltinTool::Workspace(WorkspaceTool::RunCommand)) => {
+                Some(ToolPermissionClass::BuiltinCommand)
+            }
+            None => self.mcp_table.get(name).map(|info| info.category),
         }
     }
 

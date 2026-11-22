@@ -616,19 +616,16 @@ pub(crate) fn workspace_tool_definition(
     command_settings: CommandSettings,
 ) -> ToolDefinition {
     use serde_json::json;
-    let (name, description, fields) = match kind {
+    let (description, fields) = match kind {
         WorkspaceTool::ListDirectory => (
-            "list_directory",
             "List a single workspace-relative directory without following links.",
             json!({"path":{"type":"string","maxLength":4096},"limit":{"type":"integer","minimum":1,"maximum":limits.max_directory_entries}}),
         ),
         WorkspaceTool::ReadFile => (
-            "read_file",
             "Read UTF-8 lines from a regular workspace-relative file; line numbers start at one.",
             json!({"path":{"type":"string","maxLength":4096},"start_line":{"type":"integer","minimum":1},"max_lines":{"type":"integer","minimum":1,"maximum":2000}}),
         ),
         WorkspaceTool::SearchText => (
-            "search_text",
             "Search a sandboxed workspace tree with ripgrep, honoring .gitignore \
              (including nested and negated rules) and skipping .git. The query is a \
              single-line literal of at most 1024 UTF-8 bytes unless regex is true; \
@@ -645,12 +642,10 @@ pub(crate) fn workspace_tool_definition(
             }),
         ),
         WorkspaceTool::WriteFile => (
-            "write_file",
             "Write full UTF-8 content to a workspace-relative file, creating missing directories or overwriting atomically.",
             json!({"path":{"type":"string","maxLength":4096},"content":{"type":"string"}}),
         ),
         WorkspaceTool::EditFile => (
-            "edit_file",
             "Replace exact text segments in a workspace-relative file; all edits apply simultaneously against the original content.",
             json!({
                 "path": {"type":"string","maxLength":4096},
@@ -671,7 +666,6 @@ pub(crate) fn workspace_tool_definition(
             }),
         ),
         WorkspaceTool::RunCommand => (
-            "run_command",
             "Run one shell command in a sandboxed workspace; network is disabled unless the \
              session enables it. Set outside_sandbox with a justification only when the \
              sandbox blocked a command you need and it requires writes, credentials or \
@@ -693,7 +687,7 @@ pub(crate) fn workspace_tool_definition(
         _ => json!(["path"]),
     };
     ToolDefinition::new(
-        name,
+        kind.name(),
         description,
         json!({"type":"object","properties":fields,"required":required,"additionalProperties":false}),
     )
@@ -710,30 +704,6 @@ impl Tool for WorkspaceToolImpl {
         )
     }
 
-    fn hints(&self) -> causa::kernel::ToolHints {
-        match self.kind {
-            WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText => {
-                causa::kernel::ToolHints::default()
-                    .with_read_only(true)
-                    .with_open_world(false)
-            }
-            WorkspaceTool::WriteFile => causa::kernel::ToolHints::default()
-                .with_read_only(false)
-                .with_destructive(true)
-                .with_idempotent(true)
-                .with_open_world(false),
-            WorkspaceTool::EditFile => causa::kernel::ToolHints::default()
-                .with_read_only(false)
-                .with_destructive(true)
-                .with_idempotent(false)
-                .with_open_world(false),
-            WorkspaceTool::RunCommand => causa::kernel::ToolHints::default()
-                .with_read_only(false)
-                .with_destructive(true)
-                .with_idempotent(false)
-                .with_open_world(false),
-        }
-    }
     async fn execute(
         &self,
         call: &ToolCallContext,

@@ -5,7 +5,7 @@ use super::status::{
     MAX_SKIPPED_TOOLS, McpServerStatus, McpSkippedTool, bounded_name, bounded_reason,
 };
 use super::stderr::StderrCapture;
-use crate::definition::{McpApproval, McpServerConfig, WorkspaceTool, redact_substitutions};
+use crate::definition::{BuiltinTool, McpApproval, McpServerConfig, redact_substitutions};
 use crate::policy::ToolPermissionClass;
 use causa::extension::McpToolSource;
 use causa::kernel::{
@@ -223,35 +223,7 @@ impl McpServerSource {
     }
 
     fn skip_reason(&self, name: &str) -> Option<&'static str> {
-        let Some(raw) = name.strip_prefix(&self.prefix) else {
-            return Some("invalid name");
-        };
-        if let Some(enabled) = &self.config.enabled_tools
-            && !enabled.iter().any(|candidate| candidate == raw)
-        {
-            return Some("not enabled");
-        }
-        if let Some(disabled) = &self.config.disabled_tools
-            && disabled.iter().any(|candidate| candidate == raw)
-        {
-            return Some("disabled");
-        }
-        if name.len() > MAX_TOOL_NAME_BYTES {
-            return Some("too long");
-        }
-        if raw.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-        {
-            return Some("invalid name");
-        }
-        // Causa prefixes every MCP name, so a collision means a malformed
-        // listing; it is still never allowed to shadow a built-in tool.
-        if WorkspaceTool::is_builtin_name(name) {
-            return Some("name collision");
-        }
-        None
+        skip_reason_for(&self.prefix, &self.config, name)
     }
 
     fn redact_tool_error(&self, error: ToolExecutionError) -> ToolExecutionError {
@@ -432,4 +404,92 @@ fn suffix_start(text: &str, budget: usize) -> usize {
         }
     }
     0
+}
+
+fn skip_reason_for(prefix: &str, config: &McpServerConfig, name: &str) -> Option<&'static str> {
+    // Causa prefixes every MCP name, so an unprefixed built-in name means a
+    // malformed listing; it is still never allowed to shadow a built-in tool.
+    if BuiltinTool::is_builtin_name(name) {
+        return Some("name collision");
+    }
+    let Some(raw) = name.strip_prefix(prefix) else {
+        return Some("invalid name");
+    };
+    if let Some(enabled) = &config.enabled_tools
+        && !enabled.iter().any(|candidate| candidate == raw)
+    {
+        return Some("not enabled");
+    }
+    if let Some(disabled) = &config.disabled_tools
+        && disabled.iter().any(|candidate| candidate == raw)
+    {
+        return Some("disabled");
+    }
+    if name.len() > MAX_TOOL_NAME_BYTES {
+        return Some("too long");
+    }
+    if raw.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Some("invalid name");
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::skip_reason_for;
+    use crate::definition::{BuiltinTool, McpApproval, McpServerConfig};
+    use std::collections::BTreeMap;
+
+    fn test_config() -> McpServerConfig {
+        McpServerConfig {
+            id: "fx".into(),
+            command: Some("mcp-fixture".into()),
+            args: Vec::new(),
+            url: None,
+            env: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            startup_timeout_sec: 10,
+            tool_timeout_sec: 10,
+            enabled_tools: None,
+            disabled_tools: None,
+            approval: McpApproval::Prompt,
+            tools: BTreeMap::new(),
+            required: false,
+        }
+    }
+
+    #[test]
+    fn builtin_name_guard_rejects_all_builtin_tools_including_recall_and_load_skill() {
+        let config = test_config();
+        for tool in BuiltinTool::ALL {
+            assert_eq!(
+                skip_reason_for("mcp_fx_", &config, tool.name()),
+                Some("name collision"),
+                "unprefixed {} must collide",
+                tool.name()
+            );
+            assert_eq!(
+                skip_reason_for("mcp_fx_", &config, &format!("mcp_fx_{}", tool.name())),
+                None,
+                "prefixed {} must be allowed",
+                tool.name()
+            );
+        }
+        assert_eq!(
+            skip_reason_for("mcp_fx_", &config, "recall"),
+            Some("name collision")
+        );
+        assert_eq!(
+            skip_reason_for("mcp_fx_", &config, "load_skill"),
+            Some("name collision")
+        );
+        assert_eq!(
+            skip_reason_for("mcp_fx_", &config, "unprefixed_custom"),
+            Some("invalid name")
+        );
+    }
 }

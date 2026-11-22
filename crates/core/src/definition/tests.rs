@@ -900,3 +900,35 @@ fn prelude_definition_roundtrips_and_rejects_relative_or_empty_paths() {
         Err(DefinitionError::InvalidPreludeConfig)
     );
 }
+
+#[test]
+fn workspace_and_builtin_tool_names_roundtrip_exhaustively() {
+    use super::{BuiltinTool, WorkspaceTool};
+    use std::collections::HashSet;
+
+    let mut workspace_names = HashSet::new();
+    for tool in WorkspaceTool::ALL {
+        let name = tool.name();
+        assert!(workspace_names.insert(name));
+        assert_eq!(WorkspaceTool::from_name(name), Some(tool));
+        assert_eq!(
+            BuiltinTool::from_name(name),
+            Some(BuiltinTool::Workspace(tool))
+        );
+        assert!(BuiltinTool::is_builtin_name(name));
+    }
+    assert_eq!(WorkspaceTool::from_name("recall"), None);
+    assert_eq!(WorkspaceTool::from_name("load_skill"), None);
+    assert_eq!(WorkspaceTool::from_name("mcp_fx_echo"), None);
+
+    let mut builtin_names = HashSet::new();
+    for tool in BuiltinTool::ALL {
+        let name = tool.name();
+        assert!(builtin_names.insert(name));
+        assert_eq!(BuiltinTool::from_name(name), Some(tool));
+        assert!(BuiltinTool::is_builtin_name(name));
+    }
+    assert_eq!(builtin_names.len(), 8);
+    assert!(!BuiltinTool::is_builtin_name("mcp_fx_echo"));
+    assert!(!BuiltinTool::is_builtin_name(""));
+}
