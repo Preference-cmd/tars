@@ -11,7 +11,7 @@ TARS is the validation project for Causa: a real agent application that exercise
 Boundaries:
 
 - TARS uses Causa only through its public facade at the version published on crates.io; it does not copy or vendor Causa sources, so what is validated is exactly what external users get.
-- When improving Causa, do not put TARS policy into it. For example, permission modes belong to TARS; Causa carries only tool hints and per-round host data, while TARS keeps the vocabulary and the decision.
+- When improving Causa, do not put TARS policy into it. For example, permission modes and built-in tool classification belong to TARS; Causa carries only server-advertised hints (for MCP) and per-round host data, while TARS keeps the vocabulary, lifecycle orchestration, and the decision.
 - A passing TARS test only shows that this particular wiring works; it does not replace Causa's own tests.
 
 ## Current status
