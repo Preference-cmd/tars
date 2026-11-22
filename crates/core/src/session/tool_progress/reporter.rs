@@ -286,7 +286,7 @@ impl ToolReporter {
         &self,
         call: &ToolCallContext,
         invocation: &InvocationId,
-        decision: crate::permission::PermissionDecision,
+        decision: crate::policy::PermissionDecision,
     ) {
         let event = {
             let mut state = self

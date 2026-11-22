@@ -5,7 +5,7 @@ use super::compute_diff;
 use super::parameters::{EditParams, EditSegment, ListParams, Params, ReadParams, WriteParams};
 use super::resources::Counters;
 use crate::definition::{WorkspaceToolLimits, WriteToolLimits};
-use crate::permission::WriteAction;
+use crate::policy::WriteAction;
 use crate::workspace::{FileVersion, Workspace, WorkspaceError};
 use causa::kernel::{CallControl, ControlError, ToolResultStatus};
 use serde_json::{Value, json};

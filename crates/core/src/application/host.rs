@@ -124,6 +124,13 @@ impl SessionHost {
         *self.inner.gateway_override.lock().expect("test gateway") = gateway;
     }
 
+    /// Override session assembly during tests to construct a fixture without permissions.
+    #[cfg(test)]
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+    pub(crate) fn set_test_assemble(&self, assemble: Option<Arc<TestAssembly>>) {
+        *self.inner.assemble.lock().expect("test fixture") = assemble;
+    }
+
     /// Bind the real assembly path's command runtime with an injected probe
     /// result instead of probing the platform backend during tests.
     #[cfg(test)]

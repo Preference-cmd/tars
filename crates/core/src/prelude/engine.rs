@@ -10,7 +10,7 @@ use super::types::{
     CapabilityCategory, DynamicCustomSlot, DynamicUpdate, InitialPrelude, PreludeBudgetConfig,
     PreludeDefinition, PreludeDiagnostic, PreludeDiagnosticKind, PreludeError, PreludeRuntimeState,
 };
-use crate::permission::escape_untrusted_text;
+use crate::policy::escape_untrusted_text;
 use crate::skills::{SkillDiscovery, SkillEntry, SkillRegistry};
 use causa::kernel::{BlockContent, BlockId, BlockMeta, ContentPart, ContextBlock, Role};
 use std::collections::BTreeMap;

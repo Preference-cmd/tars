@@ -1,6 +1,6 @@
 use super::contract::DynamicSection;
 use crate::definition::{DefinitionError, SessionDefinition, WorkspaceTool};
-use crate::permission::PermissionMode;
+use crate::policy::PermissionMode;
 use crate::skills::{SkillDiagnostic, SkillDiagnosticKind, SkillRegistry};
 use causa::kernel::ContextBlock;
 use serde::{Deserialize, Serialize};

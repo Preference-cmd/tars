@@ -24,10 +24,7 @@ impl ManagedSession {
     /// this returns `None`.
     pub fn permission_mode(&self) -> Option<(crate::permission::PermissionMode, u64)> {
         let state = self.entry.lock();
-        state
-            .owner
-            .as_ref()
-            .and_then(|owner| owner.permission_mode())
+        state.permissions.as_ref().map(|p| p.get())
     }
 
     /// Snapshot of the instance's MCP servers, in definition order.
@@ -76,10 +73,16 @@ impl ManagedSession {
         if state.lifecycle == Lifecycle::Closing {
             return Err(ApplicationError::Closing);
         }
-        let owner = state.owner.as_ref().ok_or(ApplicationError::InstanceGone)?;
-        let prev_mode = owner.permission_mode().map(|(m, _)| m);
-        let (new_mode, rev) = owner.set_permission_mode(mode)?;
-        if prev_mode != Some(new_mode)
+        if state.owner.is_none() {
+            return Err(ApplicationError::InstanceGone);
+        }
+        let permissions = state
+            .permissions
+            .as_ref()
+            .ok_or(ApplicationError::PermissionUnavailable)?;
+        let prev_mode = permissions.get().0;
+        let (new_mode, rev) = permissions.set(mode);
+        if prev_mode != new_mode
             && state.persistent
             && state.active.is_none()
             && state.pending.is_none()
@@ -98,12 +101,12 @@ impl ManagedSession {
     /// state (such as test fixtures), this returns an immediately closed receiver.
     pub fn connect_approvals(&self) -> crate::permission::ApprovalReceiver {
         let state = self.entry.lock();
-        state.owner.as_ref().map_or_else(
+        state.permissions.as_ref().map_or_else(
             || {
                 let (_, rx) = tokio::sync::mpsc::channel(1);
                 rx
             },
-            |owner| owner.connect_approvals(),
+            |p| p.connect_approvals(),
         )
     }
 
@@ -122,8 +125,8 @@ impl ManagedSession {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn set_command_rules(&self, rules: crate::permission::CommandRuleSet) {
         let state = self.entry.lock();
-        if let Some(owner) = &state.owner {
-            owner.set_command_rules(rules);
+        if let Some(permissions) = &state.permissions {
+            permissions.set_rules(rules);
         }
     }
 
@@ -209,10 +212,10 @@ impl ManagedSession {
     pub fn command_rules_snapshot(&self) -> crate::permission::CommandRuleSet {
         let state = self.entry.lock();
         state
-            .owner
+            .permissions
             .as_ref()
-            .map_or_else(crate::permission::CommandRuleSet::new, |owner| {
-                owner.command_rules()
+            .map_or_else(crate::permission::CommandRuleSet::new, |p| {
+                p.command_rules()
             })
     }
 
@@ -228,8 +231,14 @@ impl ManagedSession {
         if state.lifecycle == Lifecycle::Closing {
             return Err(ApplicationError::Closing);
         }
-        let owner = state.owner.as_ref().ok_or(ApplicationError::InstanceGone)?;
-        owner.remove_session_rule(index)
+        if state.owner.is_none() {
+            return Err(ApplicationError::InstanceGone);
+        }
+        let permissions = state
+            .permissions
+            .as_ref()
+            .ok_or(ApplicationError::PermissionUnavailable)?;
+        Ok(permissions.remove_session_rule(index))
     }
 
     /// Clear all in-memory session command rules, returning the number of rules cleared.
@@ -241,8 +250,14 @@ impl ManagedSession {
         if state.lifecycle == Lifecycle::Closing {
             return Err(ApplicationError::Closing);
         }
-        let owner = state.owner.as_ref().ok_or(ApplicationError::InstanceGone)?;
-        owner.clear_session_rules()
+        if state.owner.is_none() {
+            return Err(ApplicationError::InstanceGone);
+        }
+        let permissions = state
+            .permissions
+            .as_ref()
+            .ok_or(ApplicationError::PermissionUnavailable)?;
+        Ok(permissions.clear_session_rules())
     }
 
     /// Trust the workspace `.tars/permissions.toml` snapshot captured when this
@@ -291,13 +306,17 @@ impl ManagedSession {
         if state.open_report.workspace_rules.trusted {
             return Ok(0);
         }
-        let owner = state.owner.as_ref().ok_or(ApplicationError::InstanceGone)?;
+        if state.owner.is_none() {
+            return Err(ApplicationError::InstanceGone);
+        }
         let activated = snapshot
             .rules
             .iter()
             .filter(|rule| rule.decision == crate::permission::RuleDecision::Allow)
             .count();
-        owner.trust_workspace_rules(snapshot.rules, snapshot.raw_text);
+        if let Some(permissions) = &state.permissions {
+            permissions.trust_workspace_rules(snapshot.rules, snapshot.raw_text);
+        }
         state.open_report.workspace_rules.allow_rules.clear();
         state.open_report.workspace_rules.previous_trusted_text = None;
         state.open_report.workspace_rules.diff = None;
@@ -367,13 +386,14 @@ impl ManagedSession {
             .as_ref()
             .expect("published definition")
             .clone();
+        let current_mode = state
+            .permissions
+            .as_ref()
+            .map(|p| p.get().0)
+            .unwrap_or_else(|| definition.initial_permission_mode());
         let owner = state.owner.as_mut().expect("published owner");
         let skill_registry = owner.skill_registry();
         let loaded_skills = owner.loaded_skills();
-        let current_mode = owner
-            .permission_mode()
-            .map(|(m, _)| m)
-            .unwrap_or_else(|| definition.initial_permission_mode());
         let prelude_evaluation = owner.with_context(|context| {
             let blocks = context.blocks();
             loaded_skills.sync_from_context(blocks);
@@ -536,10 +556,7 @@ impl ManagedSession {
             .generation
             .checked_add(1)
             .ok_or_else(|| ApplicationError::Faulted("material generation exhausted".into()))?;
-        let current_mode = state
-            .owner
-            .as_ref()
-            .and_then(|o| o.permission_mode().map(|(m, _)| m));
+        let current_mode = state.permissions.as_ref().map(|p| p.get().0);
         let pending = if state.persistent {
             self.entry.cloned_snapshot();
             let (auto_compact, compact_threshold, history) = saving::compaction_record(state);

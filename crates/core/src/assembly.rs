@@ -2,8 +2,7 @@
 
 mod provider;
 
-pub(crate) use provider::SessionResources;
-pub(crate) use provider::assemble;
+pub(crate) use provider::{AssembledSession, SessionResources, assemble};
 
 #[cfg(test)]
 mod tests;

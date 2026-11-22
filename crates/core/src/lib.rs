@@ -14,6 +14,7 @@ pub mod external_tools;
 pub mod material;
 mod mcp;
 pub mod permission;
+pub mod policy;
 pub mod prelude;
 pub use tars_sandbox as sandbox;
 pub mod session;

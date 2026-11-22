@@ -1,4 +1,4 @@
-use crate::permission::PermissionDecision;
+use crate::policy::PermissionDecision;
 use causa::kernel::{BlockId, InvocationId, ToolResultStatus};
 
 /// Observed execution/material phase, independent of work completion and saving.

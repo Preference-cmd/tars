@@ -1,5 +1,6 @@
 //! Starting, owning and closing the MCP servers of one session.
 
+use super::permissions::McpPermissionTable;
 use super::source::McpServerSource;
 use super::status::{McpServerStatus, bounded_reason};
 use super::stderr::StderrCapture;
@@ -7,7 +8,6 @@ use crate::definition::{
     McpServerConfig, SessionDefinition, expand_template_recording, redact_substitutions,
     valid_http_endpoint,
 };
-use crate::permission::McpPermissionTable;
 use causa::extension::McpToolSource;
 use causa::kernel::DynamicToolSource;
 use std::path::Path;

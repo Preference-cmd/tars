@@ -1,6 +1,6 @@
 //! Bounded, display-safe runtime state for MCP servers.
 
-use crate::permission::escape_untrusted_text;
+use crate::policy::escape_untrusted_text;
 
 /// Longest failure reason retained for display, in bytes.
 pub(crate) const MAX_REASON_BYTES: usize = 512;

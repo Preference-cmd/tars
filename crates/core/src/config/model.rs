@@ -3,7 +3,7 @@ use crate::definition::{
     CommandNetwork, CommandSettings, CredentialRef, McpServerConfig, Provider, SessionDefinition,
     WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
 };
-use crate::permission::PermissionMode;
+use crate::policy::PermissionMode;
 use crate::prelude::{DynamicCustomSlot, PreludeDefinition, StaticCustomSlot};
 use serde::Deserialize;
 use std::{

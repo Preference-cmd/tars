@@ -1,7 +1,6 @@
 use super::*;
-use crate::permission::PermissionMode;
-use crate::permission::processor::{
-    PermissionDecisionKind, PermissionVerdict, ToolPermissionClass, decide,
+use crate::policy::{
+    PermissionDecisionKind, PermissionMode, PermissionVerdict, ToolPermissionClass, decide,
 };
 use std::path::Path;
 

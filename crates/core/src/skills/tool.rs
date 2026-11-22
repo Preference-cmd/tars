@@ -1,7 +1,7 @@
 use super::discovery::{BoundedReadError, collect_resources, read_bounded_file, sha256_hex};
 use super::frontmatter::parse_skill_document;
 use super::types::{SkillEntry, SkillRegistry, SkillResources};
-use crate::permission::escape_untrusted_text;
+use crate::policy::escape_untrusted_text;
 use crate::session::ToolReporter;
 use async_trait::async_trait;
 use causa::kernel::{

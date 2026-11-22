@@ -55,8 +55,8 @@ impl RepairWriteWarning {
     /// surfaces add their own indentation and line punctuation. Names and paths
     /// come from model-provided arguments and are escaped as display text.
     pub fn advice(&self) -> String {
-        let tool_name = crate::permission::escape_untrusted_text(&self.tool_name);
-        let path = crate::permission::escape_untrusted_text(&self.path);
+        let tool_name = crate::policy::escape_untrusted_text(&self.tool_name);
+        let path = crate::policy::escape_untrusted_text(&self.path);
         match self.kind {
             RepairWarningKind::FileWrite if self.path.is_empty() => {
                 format!("{tool_name} may have changed the file; read it again before continuing")

@@ -2,11 +2,9 @@
 
 use super::approval::ApprovalsHub;
 use super::precheck::resolve_call;
-use super::processor::{
-    PermissionDecision, PermissionDecisionKind, PermissionVerdict, mode_refused_message,
-    rule_denied_message,
-};
+use super::processor::{mode_refused_message, rule_denied_message};
 use super::view::PermissionView;
+use crate::policy::{PermissionDecision, PermissionDecisionKind, PermissionVerdict};
 use crate::session::ToolReporter;
 use async_trait::async_trait;
 use causa::kernel::{

@@ -7,7 +7,8 @@ mod parse;
 #[cfg(test)]
 mod tests;
 
-pub use eval::{CommandRule, CommandRuleSet, RuleDecision, RuleMatch, RuleScope, RuleSource};
+pub use crate::policy::{RuleScope, RuleSource};
+pub use eval::{CommandRule, CommandRuleSet, RuleDecision, RuleMatch};
 pub(crate) use eval::{EvaluatedPermission, apply_command_rule};
 pub use file::{
     FORBIDDEN_SINGLE_WORD_ALLOW, LoadedRulesFile, MAX_RULES_COUNT, MAX_RULES_FILE_BYTES,

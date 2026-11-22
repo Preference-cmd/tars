@@ -1,11 +1,12 @@
 //! One MCP server connection exposed as a dynamic tool source.
 
+use super::permissions::{McpPermissionTable, McpToolInfo};
 use super::status::{
     MAX_SKIPPED_TOOLS, McpServerStatus, McpSkippedTool, bounded_name, bounded_reason,
 };
 use super::stderr::StderrCapture;
 use crate::definition::{McpApproval, McpServerConfig, WorkspaceTool, redact_substitutions};
-use crate::permission::{McpPermissionTable, McpToolInfo, ToolPermissionClass};
+use crate::policy::ToolPermissionClass;
 use causa::extension::McpToolSource;
 use causa::kernel::{
     ArtifactStore, CallControl, DynamicToolSource, SourceError, ToolCallContext, ToolDefinition,

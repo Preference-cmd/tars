@@ -309,7 +309,8 @@ fn a_failed_probe_binds_the_session_with_an_unavailable_status() {
         None,
         false,
     )
-    .expect("a failed probe binds the tool with the session still open");
+    .expect("a failed probe binds the tool with the session still open")
+    .session;
     let status = session.command_status().expect("command status");
     assert!(!status.is_available(), "{status}");
     assert!(status.to_string().contains("probe failed"), "{status}");
@@ -376,7 +377,8 @@ async fn a_failed_search_probe_keeps_the_session_open_and_rejects_every_call() {
         None,
         false,
     )
-    .expect("a failed search probe must not close the session");
+    .expect("a failed search probe must not close the session")
+    .session;
     let shared = session.workspace_tools().expect("workspace tools");
     let invocation = search_call(serde_json::json!({"path": ".", "query": "needle"}));
     let tool = shared
@@ -426,7 +428,8 @@ async fn search_creation_without_a_backend_keeps_the_session_open() {
     #[cfg(target_os = "linux")]
     {
         let session = assembled
-            .expect("a platform without a sandbox backend must still create a search session");
+            .expect("a platform without a sandbox backend must still create a search session")
+            .session;
         let shared = session.workspace_tools().expect("workspace tools");
         let invocation = search_call(serde_json::json!({"path": ".", "query": "needle"}));
         let tool = shared

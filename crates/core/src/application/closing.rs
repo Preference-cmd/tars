@@ -110,6 +110,7 @@ pub(super) async fn finish(host: &Arc<HostInner>, entry: &Arc<Entry>, policy: Cl
     state.pending = None;
     state.save_requested = false;
     state.owner = None;
+    state.permissions = None;
     state.writer = None;
     // Publish terminal state and remove the old routing slot under the same
     // directory -> entry lock order as close/claim/register. Successful close

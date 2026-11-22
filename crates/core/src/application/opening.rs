@@ -151,10 +151,13 @@ pub(super) async fn initialize(
         None
     };
     #[cfg(test)]
-    let owner = if let Some(assemble) = fixture {
-        assemble(&definition, entry.target.conversation_id.clone(), context)?
+    let (owner, permissions) = if let Some(assemble) = fixture {
+        (
+            assemble(&definition, entry.target.conversation_id.clone(), context)?,
+            None,
+        )
     } else {
-        assembled(
+        let assembled_session = assembled(
             host,
             &definition,
             entry.target.conversation_id.clone(),
@@ -173,30 +176,41 @@ pub(super) async fn initialize(
             command_rules,
             workspace_rules_backend.clone(),
         )
-        .await?
+        .await?;
+        (
+            assembled_session.session,
+            Some(assembled_session.permissions),
+        )
     };
     #[cfg(not(test))]
-    let owner = assembled(
-        host,
-        &definition,
-        entry.target.conversation_id.clone(),
-        context,
-        current_mode,
-        mcp,
-        prepared.is_none(),
-        persistent,
-        history,
-        auto_compact,
-        compact_threshold,
-        usage,
-        prepared.as_ref().and_then(|p| p.skill_registry.clone()),
-        command_rules,
-        workspace_rules_backend,
-    )
-    .await?;
+    let (owner, permissions) = {
+        let assembled_session = assembled(
+            host,
+            &definition,
+            entry.target.conversation_id.clone(),
+            context,
+            current_mode,
+            mcp,
+            prepared.is_none(),
+            persistent,
+            history,
+            auto_compact,
+            compact_threshold,
+            usage,
+            prepared.as_ref().and_then(|p| p.skill_registry.clone()),
+            command_rules,
+            workspace_rules_backend,
+        )
+        .await?;
+        (
+            assembled_session.session,
+            Some(assembled_session.permissions),
+        )
+    };
     let mut state = entry.lock();
     state.handle = Some(owner.handle());
     state.owner = Some(owner);
+    state.permissions = permissions;
     state.definition = Some(definition);
     state.revision = revision;
     state.pending = pending;
@@ -445,7 +459,7 @@ async fn assembled(
     initial_skills: Option<crate::skills::SkillRegistry>,
     command_rules: crate::permission::CommandRuleSet,
     workspace_rules_backend: Option<crate::permission::WorkspaceRulesBackend>,
-) -> Result<crate::session::Session, ApplicationError> {
+) -> Result<crate::assembly::AssembledSession, ApplicationError> {
     let registry = match initial_skills {
         Some(registry) => registry,
         None if definition.prelude.skills_enabled => {
@@ -505,7 +519,7 @@ async fn assembled(
         mcp.clone(),
         allow_unavailable_command,
     ) {
-        Ok(owner) => Ok(owner),
+        Ok(assembled) => Ok(assembled),
         Err(error) => {
             // Assembly owns nothing yet, so close the connections it cannot use.
             if let Some(mcp) = mcp {

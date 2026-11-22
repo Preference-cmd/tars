@@ -8,7 +8,7 @@ use super::parameters::Params;
 use super::resources::{Counters, OperationGuard, ToolResources};
 use super::search::SearchCheckError;
 use crate::definition::{CommandSettings, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
-use crate::permission::WriteAction;
+use crate::policy::WriteAction;
 use crate::session::ToolReporter;
 use crate::workspace::{FileVersion, Workspace};
 use causa::kernel::{

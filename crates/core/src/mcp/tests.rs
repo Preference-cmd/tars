@@ -1816,9 +1816,9 @@ async fn wm17_four_modes_six_categories_session_integration() {
 
 #[test]
 fn wm13_no_mcp_prefix_in_permission_logic() {
-    let table = std::sync::Arc::new(crate::permission::McpPermissionTable::default());
+    let table = std::sync::Arc::new(super::McpPermissionTable::default());
     let hub = crate::permission::PermissionHub::with_mcp_table(
-        crate::permission::PermissionMode::Ask,
+        crate::policy::PermissionMode::Ask,
         table.clone(),
     );
     let view = hub.view();
@@ -1836,7 +1836,7 @@ fn wm13_no_mcp_prefix_in_permission_logic() {
         "custom",
         vec![(
             "my_special_tool".into(),
-            crate::permission::McpToolInfo {
+            super::McpToolInfo {
                 server_id: "custom".into(),
                 raw_tool_name: "special".into(),
                 category: ToolPermissionClass::McpPrompt,

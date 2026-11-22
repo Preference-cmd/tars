@@ -45,10 +45,7 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
             entry.cloned_snapshot();
             context.clone()
         })?;
-    let current_mode = state
-        .owner
-        .as_ref()
-        .and_then(|o| o.permission_mode().map(|(m, _)| m));
+    let current_mode = state.permissions.as_ref().map(|p| p.get().0);
     let (auto_compact, compact_threshold, history) = compaction_record(state);
     let usage = state.owner.as_ref().map(|o| o.session_usage());
     let (title, updated_at_ms) = next_metadata(state, &context);
@@ -136,13 +133,12 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
                     .definition
                     .as_ref()
                     .map(crate::definition::SessionDefinition::initial_permission_mode)
-                    .unwrap_or(crate::permission::PermissionMode::Ask);
+                    .unwrap_or(crate::policy::PermissionMode::Ask);
                 let committed_mode = record.permission_mode.unwrap_or(initial_mode);
                 let current_mode = state
-                    .owner
+                    .permissions
                     .as_ref()
-                    .and_then(|o| o.permission_mode())
-                    .map(|(m, _)| m)
+                    .map(|p| p.get().0)
                     .unwrap_or(initial_mode);
                 if current_mode != committed_mode
                     && state.active.is_none()

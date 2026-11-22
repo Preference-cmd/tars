@@ -133,7 +133,7 @@ pub struct SessionDefinition {
     /// Initial execution permission mode; None means Ask. Explicit Ask is
     /// normalized to None when creating a session so unchanged records stay unmodified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub permission_mode: Option<crate::permission::PermissionMode>,
+    pub permission_mode: Option<crate::policy::PermissionMode>,
     /// Frozen command-tool settings; present only when `run_command` is selected.
     /// A record saved before this field existed reads as none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -245,9 +245,9 @@ impl SessionDefinition {
     }
 
     /// Effective initial mode; None means Ask.
-    pub fn initial_permission_mode(&self) -> crate::permission::PermissionMode {
+    pub fn initial_permission_mode(&self) -> crate::policy::PermissionMode {
         self.permission_mode
-            .unwrap_or(crate::permission::PermissionMode::Ask)
+            .unwrap_or(crate::policy::PermissionMode::Ask)
     }
 
     /// Construct the low-level session's explicit record and lifetime bounds.

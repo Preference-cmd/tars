@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex, RwLock};
 pub struct Session {
     pub(super) shared: Arc<Shared>,
     standard_builtin_repair: bool,
-    pub(crate) permissions: Option<Arc<crate::permission::PermissionHub>>,
     mcp: Option<Arc<crate::mcp::McpRuntime>>,
     command_status: Option<crate::sandbox::SandboxStatus>,
     skill_registry: Arc<RwLock<crate::skills::SkillRegistry>>,
@@ -28,14 +27,6 @@ pub struct Session {
 }
 
 impl Session {
-    pub(crate) fn with_permissions(
-        mut self,
-        permissions: Arc<crate::permission::PermissionHub>,
-    ) -> Self {
-        self.permissions = Some(permissions);
-        self
-    }
-
     pub(crate) fn with_mcp(mut self, mcp: Arc<crate::mcp::McpRuntime>) -> Self {
         self.mcp = Some(mcp);
         self
@@ -81,98 +72,6 @@ impl Session {
 
     pub(crate) fn mcp_status(&self) -> Vec<crate::McpServerStatus> {
         self.mcp.as_ref().map_or_else(Vec::new, |mcp| mcp.status())
-    }
-
-    /// Read the instance's active permission mode and revision.
-    ///
-    /// Returns `None` for instances constructed without permission state (such as test fixtures).
-    pub fn permission_mode(&self) -> Option<(crate::permission::PermissionMode, u64)> {
-        self.permissions.as_ref().map(|p| p.get())
-    }
-
-    /// Change the instance's active permission mode, incrementing revision on actual change.
-    ///
-    /// Returns an error for instances constructed without permission state (such as test fixtures).
-    pub fn set_permission_mode(
-        &self,
-        mode: crate::permission::PermissionMode,
-    ) -> Result<(crate::permission::PermissionMode, u64), crate::application::ApplicationError>
-    {
-        self.permissions
-            .as_ref()
-            .map(|p| Ok(p.set(mode)))
-            .unwrap_or(Err(
-                crate::application::ApplicationError::PermissionUnavailable,
-            ))
-    }
-
-    /// Connect the instance's approval channel receiver.
-    ///
-    /// At most one receiver is connected at any time; calling this again replaces
-    /// any previously connected receiver. For instances constructed without permission
-    /// state (such as test fixtures), this returns an immediately closed receiver.
-    pub fn connect_approvals(&self) -> crate::permission::ApprovalReceiver {
-        self.permissions.as_ref().map_or_else(
-            || {
-                let (_, rx) = tokio::sync::mpsc::channel(1);
-                rx
-            },
-            |p| p.connect_approvals(),
-        )
-    }
-
-    /// Trust and replace the active workspace-level command rules on the instance's permission hub.
-    pub(crate) fn trust_workspace_rules(
-        &self,
-        rules: Vec<crate::permission::CommandRule>,
-        raw_text: String,
-    ) {
-        if let Some(permissions) = &self.permissions {
-            permissions.trust_workspace_rules(rules, raw_text);
-        }
-    }
-
-    /// Remove one in-memory session rule by 0-based index.
-    pub(crate) fn remove_session_rule(
-        &self,
-        index: usize,
-    ) -> Result<bool, crate::application::ApplicationError> {
-        self.permissions
-            .as_ref()
-            .map(|permissions| Ok(permissions.remove_session_rule(index)))
-            .unwrap_or(Err(
-                crate::application::ApplicationError::PermissionUnavailable,
-            ))
-    }
-
-    /// Clear all in-memory session rules, returning the number removed.
-    pub(crate) fn clear_session_rules(
-        &self,
-    ) -> Result<usize, crate::application::ApplicationError> {
-        self.permissions
-            .as_ref()
-            .map(|permissions| Ok(permissions.clear_session_rules()))
-            .unwrap_or(Err(
-                crate::application::ApplicationError::PermissionUnavailable,
-            ))
-    }
-
-    /// Snapshot the active command rule layers on the instance's permission hub.
-    pub(crate) fn command_rules(&self) -> crate::permission::CommandRuleSet {
-        self.permissions
-            .as_ref()
-            .map_or_else(crate::permission::CommandRuleSet::new, |permissions| {
-                permissions.command_rules()
-            })
-    }
-
-    /// Replace command approval rules on the instance's permission hub during test runs.
-    #[cfg(test)]
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub(crate) fn set_command_rules(&self, rules: crate::permission::CommandRuleSet) {
-        if let Some(permissions) = &self.permissions {
-            permissions.set_rules(rules);
-        }
     }
 
     /// Append an extra before processor after the permission processor during test runs.
@@ -237,7 +136,6 @@ impl Session {
     {
         Self {
             standard_builtin_repair: false,
-            permissions: None,
             mcp: None,
             command_status: None,
             skill_registry: Arc::new(RwLock::new(crate::skills::SkillRegistry::new())),

@@ -9,6 +9,7 @@
 //! MCP servers run as separate processes or remote endpoints with the user's
 //! authority. TARS's workspace boundary does not constrain them.
 
+mod permissions;
 mod runtime;
 mod source;
 mod status;
@@ -18,5 +19,6 @@ mod stderr;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;
 
+pub(crate) use permissions::{McpPermissionTable, McpToolInfo};
 pub(crate) use runtime::McpRuntime;
 pub use status::{McpServerStatus, McpSkippedTool};

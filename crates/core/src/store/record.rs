@@ -37,7 +37,7 @@ pub(crate) struct SavedSessionRecord {
     pub(crate) title: Option<String>,
     pub(crate) updated_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) permission_mode: Option<crate::permission::PermissionMode>,
+    pub(crate) permission_mode: Option<crate::policy::PermissionMode>,
     /// Running automatic-compaction switch when it differs from the definition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) auto_compact: Option<bool>,
@@ -84,7 +84,7 @@ impl SavedSessionRecord {
         expected_revision: Option<u64>,
         definition: SessionDefinition,
         context: Context,
-        current_mode: Option<crate::permission::PermissionMode>,
+        current_mode: Option<crate::policy::PermissionMode>,
         title: Option<String>,
         updated_at_ms: u64,
     ) -> Result<Self, StoreError> {
@@ -111,7 +111,7 @@ impl SavedSessionRecord {
         expected_revision: Option<u64>,
         definition: SessionDefinition,
         context: Context,
-        current_mode: Option<crate::permission::PermissionMode>,
+        current_mode: Option<crate::policy::PermissionMode>,
         auto_compact: Option<bool>,
         compact_threshold: Option<u8>,
         history: Vec<crate::compact::HistoryRecordEntry>,

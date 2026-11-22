@@ -1,8 +1,7 @@
 //! Approval requests, decisions, and reviewer connection channel.
 
-use super::escape::escape_untrusted_text;
-use super::mode::PermissionMode;
 use crate::definition::CommandNetwork;
+use crate::policy::{PermissionMode, WriteAction, escape_untrusted_text};
 use crate::session::WorkRef;
 use causa::kernel::BlockId;
 use std::sync::Mutex;
@@ -23,31 +22,6 @@ pub enum ApprovalDecision {
         /// Optional explanation for why the operation was declined.
         reason: Option<String>,
     },
-}
-
-/// Action performed by a file write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WriteAction {
-    /// A new file was created.
-    Created,
-    /// An existing file was updated.
-    Updated,
-}
-
-impl WriteAction {
-    /// Canonical action text.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Created => "created",
-            Self::Updated => "updated",
-        }
-    }
-}
-
-impl std::fmt::Display for WriteAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
 }
 
 /// Where a confirmed command would run.

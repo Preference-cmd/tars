@@ -185,15 +185,21 @@ impl SessionResources {
     }
 }
 
+/// Assembled session owner paired with its application-level permission hub.
+pub(crate) struct AssembledSession {
+    pub(crate) session: Session,
+    pub(crate) permissions: Arc<crate::permission::PermissionHub>,
+}
+
 pub(crate) fn assemble(
     definition: &SessionDefinition,
     conversation_id: ConversationId,
     context: Context,
     resources: SessionResources,
-    current_mode: crate::permission::PermissionMode,
+    current_mode: crate::policy::PermissionMode,
     mcp: Option<Arc<crate::mcp::McpRuntime>>,
     allow_unavailable_command: bool,
-) -> Result<Session, AssemblyError> {
+) -> Result<AssembledSession, AssemblyError> {
     let SessionResources {
         tools,
         storage,
@@ -391,7 +397,7 @@ pub(crate) fn assemble(
     let mcp_table = mcp
         .as_ref()
         .map(|m| m.permission_table())
-        .unwrap_or_else(|| Arc::new(crate::permission::McpPermissionTable::new()));
+        .unwrap_or_else(|| Arc::new(crate::mcp::McpPermissionTable::new()));
     let permissions = Arc::new(crate::permission::PermissionHub::with_rules_and_backend(
         current_mode,
         mcp_table,
@@ -400,7 +406,6 @@ pub(crate) fn assemble(
     ));
     let view = permissions.view();
     let approvals = permissions.approvals();
-    let session_permissions = permissions.clone();
     let mcp_for_work = mcp.clone();
     #[cfg(test)]
     let test_processors = Arc::new(std::sync::Mutex::new(
@@ -425,6 +430,7 @@ pub(crate) fn assemble(
     let usage_for_trim = usage;
     let skill_registry_for_work = skill_registry.clone();
     let loaded_skills_for_work = loaded_skills.clone();
+    let permissions_for_work = permissions.clone();
     let session = Session::new_with_tools(
         conversation_id,
         context,
@@ -501,7 +507,7 @@ pub(crate) fn assemble(
                 before.push(Arc::new(crate::permission::PermissionProcessor::new(
                     work,
                     reporter,
-                    permissions.clone(),
+                    permissions_for_work.clone(),
                     definition_command_settings,
                     prepared_writes,
                     outside_sandbox_grants
@@ -577,7 +583,6 @@ pub(crate) fn assemble(
         definition.session_config(),
     )
     .allow_builtin_repair()
-    .with_permissions(session_permissions)
     .with_skills(skill_registry, loaded_skills);
     let session = match mcp {
         Some(mcp) => session.with_mcp(mcp),
@@ -605,7 +610,10 @@ pub(crate) fn assemble(
         session
     };
 
-    Ok(session)
+    Ok(AssembledSession {
+        session,
+        permissions,
+    })
 }
 
 /// Count every attempt, then retry around the counter so each retry is

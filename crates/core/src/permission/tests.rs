@@ -1470,21 +1470,23 @@ async fn unprepared_outside_command_records_unprepared_outside_decision() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_without_permissions_behavior() {
-    let conversation_id = crate::session::ConversationId::from("no-perm-test");
-    let context = Context::default();
-    let config = crate::session::SessionConfig {
-        retained_work_capacity: 8,
-        work_timeout: None,
-    };
-
-    let session = crate::session::Session::new(
-        conversation_id,
-        context,
-        move |_work, _control| async {
-            panic!("not called");
-        },
-        config,
-    );
+    let dir = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(None);
+    host.set_test_assemble(Some(Arc::new(|definition, id, context| {
+        Ok(crate::session::Session::new(
+            id,
+            context,
+            move |_work, _control| async {
+                panic!("not called");
+            },
+            definition.session_config(),
+        ))
+    })));
+    let def = base_definition("http://127.0.0.1:0", dir.path());
+    let session = host
+        .create(PreparedCreate::transient(def, Context::default()))
+        .await
+        .unwrap();
 
     assert_eq!(session.permission_mode(), None);
 
@@ -1493,6 +1495,10 @@ async fn session_without_permissions_behavior() {
 
     let mut rx = session.connect_approvals();
     assert!(rx.recv().await.is_none());
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
 }
 
 fn tool_result_error(session: &ManagedSession, call_block_id: causa::kernel::BlockId) -> String {
