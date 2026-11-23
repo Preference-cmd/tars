@@ -252,6 +252,8 @@ impl Form {
                     permission_mode: Some(permission_mode),
                     mcp: Some(parse_mcp(&values[8]).map_err(|e| e.to_string())?),
                     prelude: Default::default(),
+                    code_execution_enabled: None,
+                    code_execution: None,
                 },
             )
             .map_err(|e| e.to_string())?;

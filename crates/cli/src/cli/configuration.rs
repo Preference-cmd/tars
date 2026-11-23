@@ -270,6 +270,8 @@ pub(super) fn definition(
             })
             .transpose()?,
         prelude,
+        code_execution_enabled: None,
+        code_execution: None,
     };
     config
         .definition(string(values, "--profile")?.as_deref(), overrides)

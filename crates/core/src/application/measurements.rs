@@ -59,6 +59,7 @@ fn definition() -> SessionDefinition {
         compact_threshold: 70,
         prompt_cache: true,
         prelude: Default::default(),
+        code_execution: None,
     }
 }
 fn fixture(host: &SessionHost, calls: Arc<AtomicU64>, assemblies: Arc<AtomicU64>) {

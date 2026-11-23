@@ -1,3 +1,4 @@
+use super::code_execution::CodeExecutionSettings;
 use super::command::CommandSettings;
 use super::mcp::McpServerConfig;
 use super::workspace::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
@@ -146,6 +147,10 @@ pub struct SessionDefinition {
     /// Frozen prelude and skill-discovery configuration for this session.
     #[serde(default)]
     pub prelude: PreludeDefinition,
+    /// Frozen code-execution settings when `run_code` is enabled; None disables it.
+    /// A record saved before this field existed reads as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_execution: Option<CodeExecutionSettings>,
 }
 
 // Unlike sparse startup configuration, a record must explicitly retain no-root
@@ -233,6 +238,9 @@ impl SessionDefinition {
             }
         }
         self.prelude.validate()?;
+        if let Some(code_execution) = &self.code_execution {
+            code_execution.validate()?;
+        }
         Ok(())
     }
 
@@ -375,4 +383,7 @@ pub enum DefinitionError {
     /// A prelude path or skill directory is empty or not absolute.
     #[error("prelude paths and skill directories must be nonempty absolute paths")]
     InvalidPreludeConfig,
+    /// Code execution settings have a bound outside supported limits.
+    #[error("code execution settings exceed supported bounds")]
+    InvalidCodeExecutionSettings,
 }

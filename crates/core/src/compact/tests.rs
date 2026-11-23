@@ -57,6 +57,7 @@ fn definition(context_window: Option<u64>, max_tokens: Option<u32>) -> SessionDe
         compact_threshold: 70,
         prompt_cache: true,
         prelude: Default::default(),
+        code_execution: None,
     }
 }
 

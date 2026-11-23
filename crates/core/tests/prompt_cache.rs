@@ -45,6 +45,7 @@ fn test_definition(
         compact_threshold: 70,
         prompt_cache,
         prelude: Default::default(),
+        code_execution: None,
     }
 }
 

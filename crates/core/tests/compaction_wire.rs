@@ -55,6 +55,7 @@ fn definition(provider: Provider, endpoint: &str, root: &std::path::Path) -> Ses
         compact_threshold: 50,
         prompt_cache: true,
         prelude: Default::default(),
+        code_execution: None,
     }
 }
 

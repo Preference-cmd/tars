@@ -905,6 +905,7 @@ mod tests {
             compact_threshold: 70,
             prompt_cache: true,
             prelude: Default::default(),
+            code_execution: None,
         };
 
         let host = SessionHost::new(Some(store)).with_user_rules_path(Some(user_rules.clone()));

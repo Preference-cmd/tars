@@ -56,7 +56,7 @@ impl WorkspaceTool {
     }
 }
 
-/// Every built-in tool advertised by TARS across workspace, history, and skill capabilities.
+/// Every built-in tool advertised by TARS across workspace, history, skill, and code-execution capabilities.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BuiltinTool {
     /// One of the explicit workspace tools.
@@ -65,11 +65,13 @@ pub enum BuiltinTool {
     Recall,
     /// On-demand skill loading (`load_skill`).
     LoadSkill,
+    /// Sandboxed read-only JavaScript orchestration (`run_code`).
+    RunCode,
 }
 
 impl BuiltinTool {
     /// Every built-in tool, in canonical declaration order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Workspace(WorkspaceTool::ListDirectory),
         Self::Workspace(WorkspaceTool::ReadFile),
         Self::Workspace(WorkspaceTool::SearchText),
@@ -78,6 +80,7 @@ impl BuiltinTool {
         Self::Workspace(WorkspaceTool::RunCommand),
         Self::Recall,
         Self::LoadSkill,
+        Self::RunCode,
     ];
 
     /// Stable model-facing tool name.
@@ -86,6 +89,7 @@ impl BuiltinTool {
             Self::Workspace(tool) => tool.name(),
             Self::Recall => "recall",
             Self::LoadSkill => "load_skill",
+            Self::RunCode => "run_code",
         }
     }
 
@@ -97,6 +101,7 @@ impl BuiltinTool {
         match name {
             "recall" => Some(Self::Recall),
             "load_skill" => Some(Self::LoadSkill),
+            "run_code" => Some(Self::RunCode),
             _ => None,
         }
     }

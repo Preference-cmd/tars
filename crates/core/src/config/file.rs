@@ -1,8 +1,10 @@
 use super::model::{
-    self, DefinitionOverrides, Profile, ResolvedPreludeDefaults, read_explicit_prelude_file,
-    resolve_and_validate_dynamic_file, resolve_explicit_skill_dir,
+    self, DefinitionOverrides, Profile, ProfileCodeExecution, ResolvedPreludeDefaults,
+    read_explicit_prelude_file, resolve_and_validate_dynamic_file, resolve_explicit_skill_dir,
 };
-use crate::definition::{DefinitionError, McpServerConfig, SessionDefinition};
+use crate::definition::{
+    CodeExecutionSettings, DefinitionError, McpServerConfig, SessionDefinition,
+};
 use crate::external_tools::ToolSource;
 use crate::prelude::DynamicCustomSlot;
 use serde::Deserialize;
@@ -36,6 +38,7 @@ struct FileConfig {
     external_tools: Option<FileExternalTools>,
     prelude: Option<FilePrelude>,
     skills: Option<FileSkills>,
+    code_execution: Option<ProfileCodeExecution>,
 }
 
 /// The `[prelude]` table of the shared configuration.
@@ -77,6 +80,7 @@ pub struct Config {
     mcp_servers: BTreeMap<String, McpServerConfig>,
     ripgrep: ToolSource,
     prelude_defaults: ResolvedPreludeDefaults,
+    code_execution_defaults: Option<ProfileCodeExecution>,
     warnings: Vec<String>,
 }
 
@@ -212,6 +216,7 @@ impl Config {
                 DefinitionOverrides::default(),
                 &config.mcp_servers,
                 &config.prelude_defaults,
+                config.code_execution_defaults.as_ref(),
             )?;
         }
         config.selected(None)?;
@@ -294,6 +299,12 @@ impl Config {
             }
             prelude_defaults.include_workspace_skills = skills.include_workspace;
         }
+        if let Some(code_execution) = &raw.code_execution {
+            code_execution
+                .effective_over(CodeExecutionSettings::default())
+                .validate()
+                .map_err(ConfigError::Definition)?;
+        }
         let mut profiles = raw.profiles;
         for profile in profiles.values_mut() {
             profile.workspace_root = profile
@@ -346,6 +357,7 @@ impl Config {
             mcp_servers: BTreeMap::new(),
             ripgrep,
             prelude_defaults,
+            code_execution_defaults: raw.code_execution,
             warnings: Vec::new(),
         })
     }
@@ -369,6 +381,7 @@ impl Config {
                     DefinitionOverrides::default(),
                     &self.mcp_servers,
                     &self.prelude_defaults,
+                    self.code_execution_defaults.as_ref(),
                 )
             })
             .transpose()
@@ -386,6 +399,7 @@ impl Config {
             overrides,
             &self.mcp_servers,
             &self.prelude_defaults,
+            self.code_execution_defaults.as_ref(),
         )
     }
 

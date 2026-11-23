@@ -36,3 +36,7 @@ sha2 = "0.10"
 # Regular-expression search in the `recall` tool. Linear-time matching, so a
 # model-supplied pattern cannot cause catastrophic backtracking.
 regex = "1"
+# Sandboxed ES2020 JavaScript engine for read-only programmatic tool calling
+# (`run_code`). Default features (`std`) are disabled to prevent rquickjs from
+# printing promise interrupt errors directly to stdout.
+rquickjs = { version = "0.14.0", default-features = false, features = ["futures"] }

@@ -67,6 +67,7 @@ async fn repair_resource_probe() {
         compact_threshold: 70,
         prompt_cache: true,
         prelude: Default::default(),
+        code_execution: None,
     };
     let directory = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(directory.path().into()));

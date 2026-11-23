@@ -38,6 +38,7 @@ pub(super) fn definition() -> SessionDefinition {
         compact_threshold: 70,
         prompt_cache: true,
         prelude: Default::default(),
+        code_execution: None,
     }
 }
 pub(super) fn request(key: &str) -> SubmitRequest {

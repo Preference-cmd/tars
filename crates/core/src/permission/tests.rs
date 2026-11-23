@@ -59,6 +59,7 @@ fn base_definition(endpoint: &str, root: &Path) -> SessionDefinition {
         compact_threshold: 70,
         prompt_cache: true,
         prelude: Default::default(),
+        code_execution: None,
     }
 }
 

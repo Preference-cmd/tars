@@ -391,7 +391,8 @@ pub(super) fn is_builtin_tool(tool_name: &str) -> bool {
                 | WorkspaceTool::RunCommand,
             )
             | BuiltinTool::Recall
-            | BuiltinTool::LoadSkill,
+            | BuiltinTool::LoadSkill
+            | BuiltinTool::RunCode,
         ) => true,
         None => false,
     }
@@ -425,7 +426,8 @@ pub(super) fn warning_kind(tool_name: &str) -> Option<RepairWarningKind> {
                 WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText,
             )
             | BuiltinTool::Recall
-            | BuiltinTool::LoadSkill,
+            | BuiltinTool::LoadSkill
+            | BuiltinTool::RunCode,
         ) => None,
         None => Some(RepairWarningKind::External),
     }
@@ -472,6 +474,7 @@ mod tests {
             compact_threshold: 70,
             prompt_cache: true,
             prelude: Default::default(),
+            code_execution: None,
         }
     }
 

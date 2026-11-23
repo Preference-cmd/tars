@@ -27,6 +27,7 @@ fn definition() -> SessionDefinition {
         compact_threshold: 70,
         prompt_cache: true,
         prelude: Default::default(),
+        code_execution: None,
     }
 }
 
@@ -928,7 +929,43 @@ fn workspace_and_builtin_tool_names_roundtrip_exhaustively() {
         assert_eq!(BuiltinTool::from_name(name), Some(tool));
         assert!(BuiltinTool::is_builtin_name(name));
     }
-    assert_eq!(builtin_names.len(), 8);
+    assert_eq!(builtin_names.len(), 9);
     assert!(!BuiltinTool::is_builtin_name("mcp_fx_echo"));
     assert!(!BuiltinTool::is_builtin_name(""));
+}
+
+#[test]
+fn code_execution_settings_validate_and_v22_records_deserialize_without_field() {
+    use super::CodeExecutionSettings;
+
+    let base = definition();
+    let mut legacy_json = serde_json::to_value(&base).unwrap();
+    assert!(legacy_json.get("code_execution").is_none());
+    let decoded_legacy: SessionDefinition = serde_json::from_value(legacy_json.clone()).unwrap();
+    assert_eq!(decoded_legacy.code_execution, None);
+    decoded_legacy.validate().unwrap();
+
+    // Simulate an explicit v2.2-shaped payload without optional new fields.
+    legacy_json.as_object_mut().unwrap().remove("prelude");
+    let decoded_v22: SessionDefinition = serde_json::from_value(legacy_json).unwrap();
+    assert_eq!(decoded_v22.code_execution, None);
+
+    let mut enabled = base.clone();
+    enabled.code_execution = Some(CodeExecutionSettings::default());
+    enabled.validate().unwrap();
+    let encoded_enabled = serde_json::to_value(&enabled).unwrap();
+    assert_eq!(
+        serde_json::from_value::<SessionDefinition>(encoded_enabled).unwrap(),
+        enabled
+    );
+
+    let mut invalid = base;
+    invalid.code_execution = Some(CodeExecutionSettings {
+        max_subcalls: 0,
+        ..CodeExecutionSettings::default()
+    });
+    assert_eq!(
+        invalid.validate(),
+        Err(DefinitionError::InvalidCodeExecutionSettings)
+    );
 }

@@ -300,6 +300,7 @@ fn command_definition_exposes_the_sandbox_and_timeout() {
         compact_threshold: 70,
         prompt_cache: true,
         prelude: Default::default(),
+        code_execution: None,
     };
     definition.validate().unwrap();
     assert!(definition.effective_command_settings().is_some());

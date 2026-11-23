@@ -57,6 +57,7 @@ fn minimal_definition(workspace_root: Option<&Path>) -> SessionDefinition {
         compact_threshold: 70,
         prompt_cache: true,
         prelude: Default::default(),
+        code_execution: None,
     }
 }
 

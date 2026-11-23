@@ -27,6 +27,7 @@ flate2.workspace = true
 tar.workspace = true
 sha2.workspace = true
 regex.workspace = true
+rquickjs.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 rustix = { workspace = true, features = ["process"] }

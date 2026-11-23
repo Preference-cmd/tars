@@ -83,6 +83,7 @@ fn prelude_definition(
             include_workspace_skills: true,
             skills_enabled: true,
         },
+        code_execution: None,
     }
 }
 

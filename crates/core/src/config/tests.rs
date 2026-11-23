@@ -1428,3 +1428,209 @@ fn discover_uses_tars_home_then_home_dot_tars_and_handles_missing_roots() {
         None,
     );
 }
+
+#[test]
+fn code_execution_toml_defaults_profiles_overrides_and_validation() {
+    use crate::definition::CodeExecutionSettings;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    // 1. Default disabled when omitted.
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "plain"
+[profiles.plain]
+provider = "openai-chat"
+model = "m"
+"#,
+    )
+    .unwrap();
+    let cfg = Config::load(ConfigSource::File(path.clone())).unwrap();
+    assert_eq!(
+        cfg.definition(None, Default::default())
+            .unwrap()
+            .code_execution,
+        None
+    );
+
+    // 2. Top-level [code_execution] + profile [profiles.<name>.code_execution] + overrides.
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "base"
+
+[code_execution]
+enabled = false
+timeout_secs = 45
+max_subcalls = 128
+
+[profiles.base]
+provider = "openai-chat"
+model = "m"
+
+[profiles.enabled_custom]
+provider = "openai-chat"
+model = "m"
+[profiles.enabled_custom.code_execution]
+enabled = true
+memory_limit_bytes = 16777216
+max_concurrency = 4
+max_output_bytes = 8192
+"#,
+    )
+    .unwrap();
+    let cfg = Config::load(ConfigSource::File(path.clone())).unwrap();
+
+    // Base inherits top-level disabled=false -> normalized to None.
+    let base_def = cfg.definition(Some("base"), Default::default()).unwrap();
+    assert_eq!(base_def.code_execution, None);
+
+    // Explicit enable override activates top-level limits for base profile.
+    let base_enabled = cfg
+        .definition(
+            Some("base"),
+            DefinitionOverrides {
+                code_execution_enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        base_enabled.code_execution,
+        Some(CodeExecutionSettings {
+            timeout_secs: 45,
+            max_subcalls: 128,
+            ..CodeExecutionSettings::default()
+        })
+    );
+
+    // Profile with enabled=true merges top-level + profile limits.
+    let custom_def = cfg
+        .definition(Some("enabled_custom"), Default::default())
+        .unwrap();
+    assert_eq!(
+        custom_def.code_execution,
+        Some(CodeExecutionSettings {
+            timeout_secs: 45,
+            memory_limit_bytes: 16 * 1024 * 1024,
+            max_subcalls: 128,
+            max_concurrency: 4,
+            max_output_bytes: 8192,
+            ..CodeExecutionSettings::default()
+        })
+    );
+
+    // Explicit disable override turns off an enabled profile -> normalized to None.
+    let custom_disabled = cfg
+        .definition(
+            Some("enabled_custom"),
+            DefinitionOverrides {
+                code_execution_enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(custom_disabled.code_execution, None);
+
+    // 3. Unknown field in [code_execution] or [profiles.<name>.code_execution] rejected.
+    for bad_toml in [
+        "version = 1\n[code_execution]\nunknown_key = 1\n",
+        "version = 1\n[profiles.p]\nprovider = \"openai-chat\"\nmodel = \"m\"\n[profiles.p.code_execution]\nunknown_key = 1\n",
+    ] {
+        std::fs::write(&path, bad_toml).unwrap();
+        assert!(matches!(
+            Config::load(ConfigSource::File(path.clone())),
+            Err(super::ConfigError::Syntax { .. })
+        ));
+    }
+
+    // 4. Out-of-range limits rejected even when enabled = false.
+    for invalid_limits_toml in [
+        "version = 1\n[code_execution]\nenabled = false\ntimeout_secs = 121\n",
+        "version = 1\n[code_execution]\nmax_subcalls = 0\n",
+        "version = 1\n[profiles.p]\nprovider = \"openai-chat\"\nmodel = \"m\"\n[profiles.p.code_execution]\nenabled = false\nmemory_limit_bytes = 1024\n",
+        "version = 1\n[profiles.p]\nprovider = \"openai-chat\"\nmodel = \"m\"\n[profiles.p.code_execution]\nmax_output_bytes = 100\n",
+    ] {
+        std::fs::write(&path, invalid_limits_toml).unwrap();
+        assert!(matches!(
+            Config::load(ConfigSource::File(path.clone())),
+            Err(super::ConfigError::Definition(
+                DefinitionError::InvalidCodeExecutionSettings
+            ))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn reopening_saved_session_preserves_saved_code_execution_over_toml_changes() {
+    use crate::application::{ClosePolicy, PreparedCreate, SessionHost};
+    use crate::definition::CodeExecutionSettings;
+    use causa::kernel::Context;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store_dir = dir.path().join("store");
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+version = 1
+default_profile = "dev"
+[profiles.dev]
+provider = "openai-chat"
+model = "fixture"
+api_key_env = "PATH"
+[profiles.dev.code_execution]
+enabled = true
+timeout_secs = 22
+max_subcalls = 64
+"#,
+    )
+    .unwrap();
+
+    let cfg = Config::load(ConfigSource::File(config_path.clone())).unwrap();
+    let def = cfg.definition(None, Default::default()).unwrap();
+    let expected = Some(CodeExecutionSettings {
+        timeout_secs: 22,
+        max_subcalls: 64,
+        ..CodeExecutionSettings::default()
+    });
+    assert_eq!(def.code_execution, expected);
+
+    let host = SessionHost::new(Some(store_dir.clone()));
+    let created = host
+        .create(PreparedCreate::persistent(def, Context::default()))
+        .await
+        .unwrap();
+    let id = created.target().conversation_id().clone();
+    host.close(&created.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // Mutate TOML on disk to disable code_execution; reopening must keep saved definition.
+    std::fs::write(
+        &config_path,
+        r#"
+version = 1
+default_profile = "dev"
+[profiles.dev]
+provider = "openai-chat"
+model = "fixture"
+api_key_env = "PATH"
+[profiles.dev.code_execution]
+enabled = false
+"#,
+    )
+    .unwrap();
+    let _reloaded_cfg = Config::load(ConfigSource::File(config_path)).unwrap();
+    let host2 = SessionHost::new(Some(store_dir));
+    let reopened = host2.open(id).await.unwrap();
+    assert_eq!(reopened.definition().code_execution, expected);
+    host2
+        .close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}

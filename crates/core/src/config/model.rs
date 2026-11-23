@@ -1,7 +1,7 @@
 use super::file::ConfigError;
 use crate::definition::{
-    CommandNetwork, CommandSettings, CredentialRef, McpServerConfig, Provider, SessionDefinition,
-    WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
+    CodeExecutionSettings, CommandNetwork, CommandSettings, CredentialRef, McpServerConfig,
+    Provider, SessionDefinition, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
 };
 use crate::policy::PermissionMode;
 use crate::prelude::{DynamicCustomSlot, PreludeDefinition, StaticCustomSlot};
@@ -103,6 +103,10 @@ pub struct DefinitionOverrides {
     pub mcp: Option<Vec<String>>,
     /// Explicit prelude and skills overrides.
     pub prelude: PreludeOverrides,
+    /// Explicit switch enabling or disabling read-only `run_code` (`--code-execution` / `--no-code-execution`).
+    pub code_execution_enabled: Option<bool>,
+    /// Explicit code-execution limits override.
+    pub code_execution: Option<CodeExecutionSettings>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -141,6 +145,7 @@ pub(super) struct Profile {
     command: Option<ProfileCommand>,
     permission_mode: Option<PermissionMode>,
     mcp: Option<Vec<String>>,
+    code_execution: Option<ProfileCodeExecution>,
     pub(super) system_prompt: Option<String>,
     pub(super) system_prompt_file: Option<PathBuf>,
     pub(super) dynamic_context: Option<String>,
@@ -235,11 +240,37 @@ impl ProfileWriteLimits {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProfileCodeExecution {
+    pub(super) enabled: Option<bool>,
+    pub(super) timeout_secs: Option<u64>,
+    pub(super) memory_limit_bytes: Option<usize>,
+    pub(super) stack_limit_bytes: Option<usize>,
+    pub(super) max_subcalls: Option<usize>,
+    pub(super) max_concurrency: Option<usize>,
+    pub(super) max_output_bytes: Option<usize>,
+}
+
+impl ProfileCodeExecution {
+    pub(super) fn effective_over(&self, base: CodeExecutionSettings) -> CodeExecutionSettings {
+        CodeExecutionSettings {
+            timeout_secs: self.timeout_secs.unwrap_or(base.timeout_secs),
+            memory_limit_bytes: self.memory_limit_bytes.unwrap_or(base.memory_limit_bytes),
+            stack_limit_bytes: self.stack_limit_bytes.unwrap_or(base.stack_limit_bytes),
+            max_subcalls: self.max_subcalls.unwrap_or(base.max_subcalls),
+            max_concurrency: self.max_concurrency.unwrap_or(base.max_concurrency),
+            max_output_bytes: self.max_output_bytes.unwrap_or(base.max_output_bytes),
+        }
+    }
+}
+
 pub(super) fn resolve(
     profile: Option<&Profile>,
     options: DefinitionOverrides,
     servers: &BTreeMap<String, McpServerConfig>,
     prelude_defaults: &ResolvedPreludeDefaults,
+    code_execution_defaults: Option<&ProfileCodeExecution>,
 ) -> Result<SessionDefinition, ConfigError> {
     let provider = options
         .provider
@@ -306,6 +337,28 @@ pub(super) fn resolve(
     } else {
         None
     };
+    let code_execution_settings = match options.code_execution {
+        Some(settings) => settings,
+        None => {
+            let mut settings = CodeExecutionSettings::default();
+            if let Some(top) = code_execution_defaults {
+                settings = top.effective_over(settings);
+            }
+            if let Some(profile_ce) = profile.and_then(|p| p.code_execution.as_ref()) {
+                settings = profile_ce.effective_over(settings);
+            }
+            settings
+        }
+    };
+    code_execution_settings
+        .validate()
+        .map_err(ConfigError::Definition)?;
+    let code_execution_enabled = options
+        .code_execution_enabled
+        .or_else(|| profile.and_then(|p| p.code_execution.as_ref()?.enabled))
+        .or_else(|| code_execution_defaults.and_then(|c| c.enabled))
+        .unwrap_or(false);
+    let code_execution = code_execution_enabled.then_some(code_execution_settings);
     let definition = SessionDefinition {
         provider,
         model,
@@ -389,6 +442,7 @@ pub(super) fn resolve(
         },
         mcp_servers,
         prelude: resolve_prelude(profile, options.prelude, prelude_defaults)?,
+        code_execution,
     };
     definition.validate().map_err(ConfigError::Definition)?;
     Ok(definition)

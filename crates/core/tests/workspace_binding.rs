@@ -45,6 +45,7 @@ fn definition(provider: Provider, endpoint: &str, root: &Path) -> SessionDefinit
         compact_threshold: 70,
         prompt_cache: true,
         prelude: Default::default(),
+        code_execution: None,
     }
 }
 fn submit(session: &ManagedSession, key: &str) -> WorkRef {
