@@ -4,6 +4,31 @@
 
 use super::{Workspace, WorkspaceError};
 
+/// Filesystem identity of a regular file (device identifier and inode number).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FileIdentity {
+    /// Device identifier of the filesystem containing the file.
+    pub dev: u64,
+    /// Inode number of the file.
+    pub ino: u64,
+}
+
+impl FileIdentity {
+    /// Extract device and inode identity from a Unix `Stat` structure.
+    #[cfg(unix)]
+    pub(crate) fn from_stat(stat: &rustix::fs::Stat) -> Self {
+        // `st_dev` is 32-bit on macOS and already 64-bit on Linux.
+        #[cfg(target_os = "macos")]
+        let dev = stat.st_dev as u64;
+        #[cfg(not(target_os = "macos"))]
+        let dev = stat.st_dev;
+        Self {
+            dev,
+            ino: stat.st_ino,
+        }
+    }
+}
+
 /// Monitored file metadata used to verify that a file has not changed since it was observed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileVersion {
@@ -22,19 +47,23 @@ pub struct FileVersion {
 }
 
 impl FileVersion {
+    /// Return the filesystem identity `(dev, ino)` of this observed version.
+    pub const fn identity(&self) -> FileIdentity {
+        FileIdentity {
+            dev: self.dev,
+            ino: self.ino,
+        }
+    }
+
     #[cfg(unix)]
     pub(crate) fn from_stat_and_content(stat: &rustix::fs::Stat, content: &[u8]) -> Self {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hasher::write(&mut hasher, content);
         let hash = std::hash::Hasher::finish(&hasher);
-        // `st_dev` is 32-bit on macOS and already 64-bit on Linux.
-        #[cfg(target_os = "macos")]
-        let dev = stat.st_dev as u64;
-        #[cfg(not(target_os = "macos"))]
-        let dev = stat.st_dev;
+        let identity = FileIdentity::from_stat(stat);
         Self {
-            dev,
-            ino: stat.st_ino,
+            dev: identity.dev,
+            ino: identity.ino,
             size: stat.st_size as u64,
             mtime_secs: stat.st_mtime,
             mtime_nanos: stat.st_mtime_nsec as u32,
@@ -48,6 +77,8 @@ impl FileVersion {
 pub(crate) enum AtomicWriteError<E> {
     /// Target file already exists when attempting to create a new file without replacement.
     AlreadyExists,
+    /// Existing target file changed, disappeared, or stopped being a regular file before rename.
+    TargetChanged,
     /// Operation was cancelled or timed out.
     CancelledOrTimedOut(E),
     /// A filesystem error occurred.
@@ -120,22 +151,27 @@ impl Workspace {
     ///
     /// The content goes to a randomly named temp file that is synced before the
     /// cancellation check and then renamed over the target, preserving
-    /// `existing_mode` when given. Creating a new file uses `RenameFlags::NOREPLACE`
-    /// (or a `linkat` fallback) so an existing target reports `AlreadyExists`.
+    /// `existing_mode` when given. When overwriting (`expected_version` is
+    /// `Some`), target metadata is re-checked with `statat` after `check_cancel`
+    /// and immediately before `renameat`, returning `TargetChanged` on mismatch,
+    /// deletion, or non-regular replacement. Creating a new file uses
+    /// `RenameFlags::NOREPLACE` (or a `linkat` fallback) so an existing target
+    /// reports `AlreadyExists`.
     pub(crate) fn atomic_write<E, F>(
         &self,
         parent_dir: &rustix::fd::OwnedFd,
         file_name: &str,
         content: &[u8],
         existing_mode: Option<u32>,
+        expected_version: Option<FileVersion>,
         check_cancel: F,
     ) -> Result<FileVersion, AtomicWriteError<E>>
     where
         F: FnOnce() -> Result<(), E>,
     {
         use rustix::fs::{
-            AtFlags, Mode, OFlags, RenameFlags, fchmod, fstat, linkat, openat, renameat,
-            renameat_with, unlinkat,
+            AtFlags, FileType, Mode, OFlags, RenameFlags, fchmod, fstat, linkat, openat, renameat,
+            renameat_with, statat, unlinkat,
         };
         use std::io::Write;
 
@@ -172,6 +208,25 @@ impl Workspace {
         let version = FileVersion::from_stat_and_content(&stat, content);
 
         check_cancel().map_err(AtomicWriteError::CancelledOrTimedOut)?;
+
+        if let Some(expected) = expected_version {
+            let target_stat = match statat(parent_dir, file_name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(rustix::io::Errno::NOENT) => return Err(AtomicWriteError::TargetChanged),
+                Err(err) => return Err(AtomicWriteError::Workspace(super::map_errno(err))),
+            };
+            if FileType::from_raw_mode(target_stat.st_mode) != FileType::RegularFile {
+                return Err(AtomicWriteError::TargetChanged);
+            }
+            let current_id = FileIdentity::from_stat(&target_stat);
+            if current_id != expected.identity()
+                || (target_stat.st_size as u64) != expected.size
+                || target_stat.st_mtime != expected.mtime_secs
+                || (target_stat.st_mtime_nsec as u32) != expected.mtime_nanos
+            {
+                return Err(AtomicWriteError::TargetChanged);
+            }
+        }
 
         if existing_mode.is_some() {
             renameat(parent_dir, &cleanup.name, parent_dir, file_name)

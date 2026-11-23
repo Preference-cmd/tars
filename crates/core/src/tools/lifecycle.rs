@@ -2,13 +2,13 @@
 
 use crate::definition::CommandNetwork;
 use crate::policy::{ToolPermissionClass, WriteAction};
+use crate::workspace::FileIdentity;
 use async_trait::async_trait;
 use causa::kernel::{
     CallAttachments, CallControl, ToolCallContext, ToolMetadata, ToolOutput, ToolResultStatus,
 };
 use std::any::Any;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Zero-I/O intent reported by a tool for global permission evaluation and rule matching.
@@ -130,10 +130,24 @@ impl PrepareRejection {
     }
 }
 
+/// Canonical target key used to deduplicate write and edit calls within one batch.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum WriteTargetKey {
+    /// Existing regular file identified by device and inode pair.
+    Existing(FileIdentity),
+    /// New file not yet present on disk, identified by normalized parent path and file name.
+    New {
+        /// Normalized workspace-relative parent directory components.
+        parent_components: Vec<String>,
+        /// Target file name.
+        file_name: String,
+    },
+}
+
 /// Per-batch shared preflight state (e.g. duplicate write target detection).
 #[derive(Default)]
 pub(crate) struct BatchPrepareState {
-    seen_write_paths: HashSet<PathBuf>,
+    seen_write_targets: HashSet<WriteTargetKey>,
 }
 
 impl BatchPrepareState {
@@ -142,11 +156,16 @@ impl BatchPrepareState {
         Self::default()
     }
 
-    /// Record a normalized workspace-relative write path for this batch.
+    /// Snapshot the set of write targets already prepared in this batch.
+    pub(crate) fn seen_write_targets(&self) -> HashSet<WriteTargetKey> {
+        self.seen_write_targets.clone()
+    }
+
+    /// Record a write target key for this batch.
     ///
-    /// Returns `false` if this path was already prepared earlier in the same batch.
-    pub(crate) fn record_write_path(&mut self, path: impl Into<PathBuf>) -> bool {
-        self.seen_write_paths.insert(path.into())
+    /// Returns `false` if this target was already prepared earlier in the same batch.
+    pub(crate) fn record_write_target(&mut self, target: WriteTargetKey) -> bool {
+        self.seen_write_targets.insert(target)
     }
 }
 

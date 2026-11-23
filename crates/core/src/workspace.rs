@@ -11,7 +11,7 @@ pub(crate) use access::map_errno;
 pub use access::{Workspace, WorkspaceError};
 #[cfg_attr(not(unix), allow(unused_imports))]
 pub(crate) use write::AtomicWriteError;
-pub use write::FileVersion;
+pub use write::{FileIdentity, FileVersion};
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;

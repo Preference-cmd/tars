@@ -2,14 +2,15 @@
 #![cfg_attr(not(unix), allow(dead_code, unused_imports, unused_variables))]
 use super::compute_diff;
 use super::execute::PreparedWrite;
+use super::lifecycle::WriteTargetKey;
 use super::parameters::{EditParams, EditSegment, ListParams, Params, ReadParams, WriteParams};
 use super::resources::Counters;
 use crate::definition::{WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 use crate::policy::WriteAction;
-use crate::workspace::{FileVersion, Workspace, WorkspaceError};
+use crate::workspace::{FileIdentity, FileVersion, Workspace, WorkspaceError};
 use causa::kernel::{CallControl, ControlError, ToolResultStatus};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::{Arc, Mutex, atomic::Ordering};
 use tokio_util::sync::CancellationToken;
@@ -65,7 +66,7 @@ pub(crate) fn run(
     params: &Params,
     limits: &WorkspaceToolLimits,
     write_limits: &WriteToolLimits,
-    observations: &Mutex<HashMap<String, FileVersion>>,
+    observations: &Mutex<HashMap<FileIdentity, FileVersion>>,
     control: &OperationControl,
     #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
 ) -> Result<Value, OperationError> {
@@ -263,7 +264,7 @@ fn read(
     workspace: &Workspace,
     p: &ReadParams,
     limits: &WorkspaceToolLimits,
-    observations: &Mutex<HashMap<String, FileVersion>>,
+    observations: &Mutex<HashMap<FileIdentity, FileVersion>>,
     control: &OperationControl,
 ) -> Result<Value, OperationError> {
     let file = workspace.file(&p.path)?;
@@ -314,8 +315,10 @@ fn read(
     }
     output["text"] = json!(content);
     if !scan_limited {
-        let normalized = Workspace::components(&p.path)?.join("/");
-        observations.lock().unwrap().insert(normalized, version);
+        observations
+            .lock()
+            .unwrap()
+            .insert(version.identity(), version);
     }
     Ok(output)
 }
@@ -361,12 +364,14 @@ fn reject_protected_workspace_paths(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn precheck_write(
     workspace: &Workspace,
     p: &WriteParams,
     limits: &WorkspaceToolLimits,
     write_limits: &WriteToolLimits,
-    observations: &Mutex<HashMap<String, FileVersion>>,
+    observations: &Mutex<HashMap<FileIdentity, FileVersion>>,
+    seen_write_targets: &HashSet<WriteTargetKey>,
     protected_storage: Option<&super::execute::ProtectedStorage>,
     control: &OperationControl,
 ) -> Result<PreparedWrite, OperationError> {
@@ -380,7 +385,6 @@ pub(super) fn precheck_write(
     }
     reject_vcs_metadata(tool_name, &components)?;
     reject_protected_workspace_paths(tool_name, &components, protected_storage)?;
-    let normalized = components.join("/");
     let parent_components: Vec<String> = components[..components.len() - 1]
         .iter()
         .map(|s| s.to_string())
@@ -410,89 +414,104 @@ pub(super) fn precheck_write(
         None => None,
     };
 
-    let (original_text, final_content, action, existing_mode, expected_version) = if let Some((
-        _parent_dir,
-        mut target_file,
-    )) =
-        existing_target
-    {
-        let stat = rustix::fs::fstat(&target_file).map_err(crate::workspace::map_errno)?;
-        let recorded_version = {
-            let obs = observations.lock().unwrap();
-            obs.get(&normalized).copied()
-        };
-        let Some(recorded_version) = recorded_version else {
-            return Err(OperationError::Rejected(format!(
-                "file '{}' already exists and must be read with read_file before overwriting",
-                p.path
-            )));
-        };
+    let (target_key, original_text, final_content, action, existing_mode, expected_version) =
+        if let Some((_parent_dir, mut target_file)) = existing_target {
+            let stat = rustix::fs::fstat(&target_file).map_err(crate::workspace::map_errno)?;
+            let identity = FileIdentity::from_stat(&stat);
+            let target_key = WriteTargetKey::Existing(identity);
+            if seen_write_targets.contains(&target_key) {
+                return Err(OperationError::Rejected(
+                    "the same file can only be modified once in a single batch".into(),
+                ));
+            }
+            let recorded_version = {
+                let obs = observations.lock().unwrap();
+                obs.get(&identity).copied()
+            };
+            let Some(recorded_version) = recorded_version else {
+                return Err(OperationError::Rejected(format!(
+                    "file '{}' already exists and must be read with read_file before overwriting",
+                    p.path
+                )));
+            };
 
-        if (stat.st_size as usize) > limits.max_file_scan_bytes {
-            return Err(OperationError::Rejected(format!(
-                "file '{}' size ({} bytes) exceeds maximum readable size of {} bytes and cannot be edited",
-                p.path, stat.st_size, limits.max_file_scan_bytes
-            )));
-        }
-        if (stat.st_size as usize) > write_limits.max_edit_file_bytes {
-            return Err(OperationError::Rejected(format!(
-                "file '{}' size ({} bytes) exceeds maximum editable size of {} bytes",
-                p.path, stat.st_size, write_limits.max_edit_file_bytes
-            )));
-        }
+            if (stat.st_size as usize) > limits.max_file_scan_bytes {
+                return Err(OperationError::Rejected(format!(
+                    "file '{}' size ({} bytes) exceeds maximum readable size of {} bytes and cannot be edited",
+                    p.path, stat.st_size, limits.max_file_scan_bytes
+                )));
+            }
+            if (stat.st_size as usize) > write_limits.max_edit_file_bytes {
+                return Err(OperationError::Rejected(format!(
+                    "file '{}' size ({} bytes) exceeds maximum editable size of {} bytes",
+                    p.path, stat.st_size, write_limits.max_edit_file_bytes
+                )));
+            }
 
-        let mut original_bytes = Vec::new();
-        target_file
-            .read_to_end(&mut original_bytes)
-            .map_err(WorkspaceError::Io)?;
-        let original_text = String::from_utf8(original_bytes).map_err(|_| {
-            OperationError::Rejected("file content is binary or invalid UTF-8".into())
-        })?;
-        let current_version = FileVersion::from_stat_and_content(&stat, original_text.as_bytes());
-        if current_version != recorded_version {
-            return Err(OperationError::Rejected(format!(
-                "file '{}' has changed since it was read; read it again before overwriting",
-                p.path
-            )));
-        }
+            let mut original_bytes = Vec::new();
+            target_file
+                .read_to_end(&mut original_bytes)
+                .map_err(WorkspaceError::Io)?;
+            let original_text = String::from_utf8(original_bytes).map_err(|_| {
+                OperationError::Rejected("file content is binary or invalid UTF-8".into())
+            })?;
+            let current_version =
+                FileVersion::from_stat_and_content(&stat, original_text.as_bytes());
+            if current_version != recorded_version {
+                return Err(OperationError::Rejected(format!(
+                    "file '{}' has changed since it was read; read it again before overwriting",
+                    p.path
+                )));
+            }
 
-        let final_content = if is_crlf(&original_text) {
-            normalize_lone_lf_to_crlf(&p.content)
+            let final_content = if is_crlf(&original_text) {
+                normalize_lone_lf_to_crlf(&p.content)
+            } else {
+                p.content.clone()
+            };
+
+            if final_content.len() > write_limits.max_write_bytes {
+                return Err(OperationError::Rejected(format!(
+                    "content size ({} bytes) exceeds maximum write size of {} bytes",
+                    final_content.len(),
+                    write_limits.max_write_bytes
+                )));
+            }
+
+            (
+                target_key,
+                original_text,
+                final_content,
+                WriteAction::Updated,
+                Some((stat.st_mode & 0o7777) as u32),
+                Some(current_version),
+            )
         } else {
-            p.content.clone()
+            let target_key = WriteTargetKey::New {
+                parent_components: parent_components.clone(),
+                file_name: file_name.clone(),
+            };
+            if seen_write_targets.contains(&target_key) {
+                return Err(OperationError::Rejected(
+                    "the same file can only be modified once in a single batch".into(),
+                ));
+            }
+            (
+                target_key,
+                String::new(),
+                p.content.clone(),
+                WriteAction::Created,
+                None,
+                None,
+            )
         };
-
-        if final_content.len() > write_limits.max_write_bytes {
-            return Err(OperationError::Rejected(format!(
-                "content size ({} bytes) exceeds maximum write size of {} bytes",
-                final_content.len(),
-                write_limits.max_write_bytes
-            )));
-        }
-
-        (
-            original_text,
-            final_content,
-            WriteAction::Updated,
-            Some((stat.st_mode & 0o7777) as u32),
-            Some(current_version),
-        )
-    } else {
-        (
-            String::new(),
-            p.content.clone(),
-            WriteAction::Created,
-            None,
-            None,
-        )
-    };
 
     let diff_summary = compute_diff(&p.path, &original_text, &final_content);
     let bytes_written = final_content.len();
 
     Ok(PreparedWrite {
         path: p.path.clone(),
-        normalized_path: normalized,
+        target_key,
         expected_version,
         existing_mode,
         final_content,
@@ -506,12 +525,14 @@ pub(super) fn precheck_write(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn precheck_edit(
     workspace: &Workspace,
     p: &EditParams,
     limits: &WorkspaceToolLimits,
     write_limits: &WriteToolLimits,
-    observations: &Mutex<HashMap<String, FileVersion>>,
+    observations: &Mutex<HashMap<FileIdentity, FileVersion>>,
+    seen_write_targets: &HashSet<WriteTargetKey>,
     protected_storage: Option<&super::execute::ProtectedStorage>,
     control: &OperationControl,
 ) -> Result<PreparedWrite, OperationError> {
@@ -525,7 +546,6 @@ pub(super) fn precheck_edit(
     }
     reject_vcs_metadata(tool_name, &components)?;
     reject_protected_workspace_paths(tool_name, &components, protected_storage)?;
-    let normalized = components.join("/");
     let parent_components: Vec<String> = components[..components.len() - 1]
         .iter()
         .map(|s| s.to_string())
@@ -545,22 +565,11 @@ pub(super) fn precheck_edit(
         )));
     }
 
-    let recorded_version = {
-        let obs = observations.lock().unwrap();
-        obs.get(&normalized).copied()
-    };
-    let Some(recorded_version) = recorded_version else {
-        return Err(OperationError::Rejected(format!(
-            "file '{}' must be read with read_file before editing",
-            p.path
-        )));
-    };
-
     let parent_dir = match workspace.parent_directory(&parent_components) {
         Ok(dir) => dir,
         Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
             return Err(OperationError::Rejected(format!(
-                "file '{}' has changed since it was read; read it again before editing",
+                "file '{}' does not exist or has changed since it was read; read it with read_file before editing",
                 p.path
             )));
         }
@@ -571,7 +580,7 @@ pub(super) fn precheck_edit(
         Ok(file) => file,
         Err(WorkspaceError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
             return Err(OperationError::Rejected(format!(
-                "file '{}' has changed since it was read; read it again before editing",
+                "file '{}' does not exist or has changed since it was read; read it with read_file before editing",
                 p.path
             )));
         }
@@ -579,6 +588,24 @@ pub(super) fn precheck_edit(
     };
 
     let stat = rustix::fs::fstat(&target_file).map_err(crate::workspace::map_errno)?;
+    let identity = FileIdentity::from_stat(&stat);
+    let target_key = WriteTargetKey::Existing(identity);
+    if seen_write_targets.contains(&target_key) {
+        return Err(OperationError::Rejected(
+            "the same file can only be modified once in a single batch".into(),
+        ));
+    }
+
+    let recorded_version = {
+        let obs = observations.lock().unwrap();
+        obs.get(&identity).copied()
+    };
+    let Some(recorded_version) = recorded_version else {
+        return Err(OperationError::Rejected(format!(
+            "file '{}' must be read with read_file before editing",
+            p.path
+        )));
+    };
 
     if (stat.st_size as usize) > limits.max_file_scan_bytes {
         return Err(OperationError::Rejected(format!(
@@ -709,7 +736,7 @@ pub(super) fn precheck_edit(
 
     Ok(PreparedWrite {
         path: p.path.clone(),
-        normalized_path: normalized,
+        target_key,
         expected_version: Some(current_version),
         existing_mode: Some((stat.st_mode & 0o7777) as u32),
         final_content: new_content,
@@ -727,7 +754,7 @@ pub(super) fn execute_prepared_write(
     workspace: &Workspace,
     prepared: &PreparedWrite,
     write_limits: &WriteToolLimits,
-    observations: &Mutex<HashMap<String, FileVersion>>,
+    observations: &Mutex<HashMap<FileIdentity, FileVersion>>,
     control: &OperationControl,
     #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
 ) -> Result<Value, OperationError> {
@@ -781,6 +808,7 @@ pub(super) fn execute_prepared_write(
         &prepared.file_name,
         prepared.final_content.as_bytes(),
         prepared.existing_mode,
+        prepared.expected_version,
         || {
             #[cfg(test)]
             if let Some(gate) = write_gate.lock().expect("write gate lock").clone() {
@@ -798,6 +826,11 @@ pub(super) fn execute_prepared_write(
                 prepared.path
             )));
         }
+        Err(crate::workspace::AtomicWriteError::TargetChanged) => {
+            return Err(OperationError::Failed(
+                "file changed after confirmation".into(),
+            ));
+        }
         Err(crate::workspace::AtomicWriteError::CancelledOrTimedOut(err)) => return Err(err),
         Err(crate::workspace::AtomicWriteError::Workspace(err)) => {
             return Err(OperationError::Access(err));
@@ -813,10 +846,17 @@ pub(super) fn execute_prepared_write(
         .bytes
         .fetch_add(prepared.bytes_written, Ordering::Relaxed);
 
-    observations
-        .lock()
-        .unwrap()
-        .insert(prepared.normalized_path.clone(), new_version);
+    {
+        let mut obs = observations.lock().unwrap();
+        let new_id = new_version.identity();
+        if let Some(expected) = prepared.expected_version {
+            let old_id = expected.identity();
+            if old_id != new_id {
+                obs.remove(&old_id);
+            }
+        }
+        obs.insert(new_id, new_version);
+    }
 
     #[cfg(test)]
     if let Some(gate) = write_gate.lock().expect("write gate lock").clone() {
@@ -833,12 +873,14 @@ pub(super) fn execute_prepared_write(
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn precheck_write(
     _workspace: &Workspace,
     _p: &WriteParams,
     _limits: &WorkspaceToolLimits,
     _write_limits: &WriteToolLimits,
-    _observations: &Mutex<HashMap<String, FileVersion>>,
+    _observations: &Mutex<HashMap<FileIdentity, FileVersion>>,
+    _seen_write_targets: &HashSet<WriteTargetKey>,
     _protected_storage: Option<&super::execute::ProtectedStorage>,
     _control: &OperationControl,
 ) -> Result<PreparedWrite, OperationError> {
@@ -846,12 +888,14 @@ pub(super) fn precheck_write(
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn precheck_edit(
     _workspace: &Workspace,
     _p: &EditParams,
     _limits: &WorkspaceToolLimits,
     _write_limits: &WriteToolLimits,
-    _observations: &Mutex<HashMap<String, FileVersion>>,
+    _observations: &Mutex<HashMap<FileIdentity, FileVersion>>,
+    _seen_write_targets: &HashSet<WriteTargetKey>,
     _protected_storage: Option<&super::execute::ProtectedStorage>,
     _control: &OperationControl,
 ) -> Result<PreparedWrite, OperationError> {
@@ -863,7 +907,7 @@ pub(super) fn execute_prepared_write(
     _workspace: &Workspace,
     _prepared: &PreparedWrite,
     _write_limits: &WriteToolLimits,
-    _observations: &Mutex<HashMap<String, FileVersion>>,
+    _observations: &Mutex<HashMap<FileIdentity, FileVersion>>,
     _control: &OperationControl,
     #[cfg(test)] _write_gate: &Mutex<Option<Arc<TestGate>>>,
 ) -> Result<Value, OperationError> {
@@ -876,16 +920,18 @@ fn write_operation(
     p: &WriteParams,
     limits: &WorkspaceToolLimits,
     write_limits: &WriteToolLimits,
-    observations: &Mutex<HashMap<String, FileVersion>>,
+    observations: &Mutex<HashMap<FileIdentity, FileVersion>>,
     control: &OperationControl,
     #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
 ) -> Result<Value, OperationError> {
+    let seen = HashSet::new();
     let prepared = precheck_write(
         workspace,
         p,
         limits,
         write_limits,
         observations,
+        &seen,
         None,
         control,
     )?;
@@ -906,16 +952,18 @@ fn edit_operation(
     p: &EditParams,
     limits: &WorkspaceToolLimits,
     write_limits: &WriteToolLimits,
-    observations: &Mutex<HashMap<String, FileVersion>>,
+    observations: &Mutex<HashMap<FileIdentity, FileVersion>>,
     control: &OperationControl,
     #[cfg(test)] write_gate: &Mutex<Option<Arc<TestGate>>>,
 ) -> Result<Value, OperationError> {
+    let seen = HashSet::new();
     let prepared = precheck_edit(
         workspace,
         p,
         limits,
         write_limits,
         observations,
+        &seen,
         None,
         control,
     )?;

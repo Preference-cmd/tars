@@ -1332,3 +1332,476 @@ async fn write_tools_refuse_dot_tars_and_in_workspace_store() {
     assert_eq!(outside_res.status, ToolResultStatus::Succeeded);
     assert!(!has_temporary_files(dir.path()));
 }
+
+async fn invoke_batch(
+    shared: &Arc<WorkspaceTools>,
+    calls_spec: Vec<(WorkspaceTool, Value)>,
+) -> Vec<ToolResultPayload> {
+    let calls: Vec<ToolCallContext> = calls_spec
+        .iter()
+        .map(|(kind, args)| call(kind.name(), args.clone()))
+        .collect();
+    let reporter = reporter(&calls);
+    let kinds: Vec<WorkspaceTool> = calls_spec.iter().map(|(kind, _)| *kind).collect();
+    let bound = shared.bind_managed_for_test(&kinds, reporter.clone());
+    let mut batch = causa::kernel::ToolBatch::new(calls.clone()).unwrap();
+    let control = control();
+    let mut batch_state = BatchPrepareState::new();
+    let mut outcomes: Vec<Option<ToolResultPayload>> = vec![None; calls.len()];
+    let mut to_execute = Vec::new();
+
+    for (idx, ((call, (tool, managed)), entry)) in calls
+        .iter()
+        .zip(bound)
+        .zip(batch.calls_mut().iter_mut())
+        .enumerate()
+    {
+        match managed.prepare(call, &mut batch_state, &control).await {
+            Ok(prepared) => {
+                managed.attach_prepared(
+                    entry.attachments_mut().unwrap(),
+                    prepared,
+                    ExecutionGrant::default(),
+                );
+                to_execute.push((idx, tool));
+            }
+            Err(rejection) => {
+                outcomes[idx] = Some(ToolResultPayload::new(
+                    call.call_block_id,
+                    rejection.status,
+                    rejection.output,
+                ));
+            }
+        }
+    }
+
+    for (idx, tool) in to_execute {
+        let res = tool
+            .execute(batch.calls()[idx].call(), &control, None)
+            .await;
+        outcomes[idx] = Some(res);
+    }
+
+    reporter.drain().await;
+    outcomes.into_iter().map(Option::unwrap).collect()
+}
+
+#[tokio::test]
+async fn wh01_pre_rename_stat_detects_content_replacement_and_deletion_without_temp_residue() {
+    // 1. External content modification between sync_all() and renameat().
+    {
+        let (dir, shared) = tools(WorkspaceToolLimits::default(), WriteToolLimits::default());
+        let file_path = dir.path().join("race_modify.txt");
+        std::fs::write(&file_path, "original\n").unwrap();
+
+        let read_res = invoke(
+            &shared,
+            WorkspaceTool::ReadFile,
+            json!({"path": "race_modify.txt"}),
+        )
+        .await;
+        assert_eq!(read_res.status, ToolResultStatus::Succeeded);
+
+        let gate = TestGate::new(false);
+        shared.set_write_gate(Some(gate.clone()));
+        let shared_task = shared.clone();
+        let task = tokio::spawn(async move {
+            invoke(
+                &shared_task,
+                WorkspaceTool::WriteFile,
+                json!({"path": "race_modify.txt", "content": "from tool\n"}),
+            )
+            .await
+        });
+
+        gate.reached.notified().await;
+        assert!(has_temporary_files(dir.path()));
+        // Use a different byte length so size differs even on coarse mtime ticks.
+        std::fs::write(&file_path, "externally modified content\n").unwrap();
+        gate.release();
+
+        let res = task.await.unwrap();
+        assert_eq!(res.status, ToolResultStatus::Failed);
+        assert_eq!(
+            res.output.content["error"],
+            "file changed after confirmation"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "externally modified content\n"
+        );
+        assert!(!has_temporary_files(dir.path()));
+    }
+
+    // 2. External file replacement (new inode via rename) between sync_all() and renameat().
+    {
+        let (dir, shared) = tools(WorkspaceToolLimits::default(), WriteToolLimits::default());
+        let file_path = dir.path().join("race_replace.txt");
+        std::fs::write(&file_path, "initial line\n").unwrap();
+
+        let read_res = invoke(
+            &shared,
+            WorkspaceTool::ReadFile,
+            json!({"path": "race_replace.txt"}),
+        )
+        .await;
+        assert_eq!(read_res.status, ToolResultStatus::Succeeded);
+
+        let gate = TestGate::new(false);
+        shared.set_write_gate(Some(gate.clone()));
+        let shared_task = shared.clone();
+        let task = tokio::spawn(async move {
+            invoke(
+                &shared_task,
+                WorkspaceTool::EditFile,
+                json!({
+                    "path": "race_replace.txt",
+                    "edits": [{"old_text": "initial line", "new_text": "edited line"}]
+                }),
+            )
+            .await
+        });
+
+        gate.reached.notified().await;
+        assert!(has_temporary_files(dir.path()));
+        let temp_ext = dir.path().join("external_replacement.tmp");
+        std::fs::write(&temp_ext, "replaced externally\n").unwrap();
+        std::fs::rename(&temp_ext, &file_path).unwrap();
+        gate.release();
+
+        let res = task.await.unwrap();
+        assert_eq!(res.status, ToolResultStatus::Failed);
+        assert_eq!(
+            res.output.content["error"],
+            "file changed after confirmation"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "replaced externally\n"
+        );
+        assert!(!has_temporary_files(dir.path()));
+    }
+
+    // 3. External replacement with a symlink between sync_all() and renameat().
+    {
+        let (dir, shared) = tools(WorkspaceToolLimits::default(), WriteToolLimits::default());
+        let file_path = dir.path().join("race_symlink.txt");
+        let outside_target = dir.path().join("other.txt");
+        std::fs::write(&file_path, "regular file\n").unwrap();
+        std::fs::write(&outside_target, "do not overwrite\n").unwrap();
+
+        let read_res = invoke(
+            &shared,
+            WorkspaceTool::ReadFile,
+            json!({"path": "race_symlink.txt"}),
+        )
+        .await;
+        assert_eq!(read_res.status, ToolResultStatus::Succeeded);
+
+        let gate = TestGate::new(false);
+        shared.set_write_gate(Some(gate.clone()));
+        let shared_task = shared.clone();
+        let task = tokio::spawn(async move {
+            invoke(
+                &shared_task,
+                WorkspaceTool::WriteFile,
+                json!({"path": "race_symlink.txt", "content": "overwritten\n"}),
+            )
+            .await
+        });
+
+        gate.reached.notified().await;
+        assert!(has_temporary_files(dir.path()));
+        std::fs::remove_file(&file_path).unwrap();
+        symlink(&outside_target, &file_path).unwrap();
+        gate.release();
+
+        let res = task.await.unwrap();
+        assert_eq!(res.status, ToolResultStatus::Failed);
+        assert_eq!(
+            res.output.content["error"],
+            "file changed after confirmation"
+        );
+        assert!(
+            std::fs::symlink_metadata(&file_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_target).unwrap(),
+            "do not overwrite\n"
+        );
+        assert!(!has_temporary_files(dir.path()));
+    }
+
+    // 4. External target deletion between sync_all() and renameat().
+    {
+        let (dir, shared) = tools(WorkspaceToolLimits::default(), WriteToolLimits::default());
+        let file_path = dir.path().join("race_delete.txt");
+        std::fs::write(&file_path, "about to vanish\n").unwrap();
+
+        let read_res = invoke(
+            &shared,
+            WorkspaceTool::ReadFile,
+            json!({"path": "race_delete.txt"}),
+        )
+        .await;
+        assert_eq!(read_res.status, ToolResultStatus::Succeeded);
+
+        let gate = TestGate::new(false);
+        shared.set_write_gate(Some(gate.clone()));
+        let shared_task = shared.clone();
+        let task = tokio::spawn(async move {
+            invoke(
+                &shared_task,
+                WorkspaceTool::WriteFile,
+                json!({"path": "race_delete.txt", "content": "recreated?\n"}),
+            )
+            .await
+        });
+
+        gate.reached.notified().await;
+        assert!(has_temporary_files(dir.path()));
+        std::fs::remove_file(&file_path).unwrap();
+        gate.release();
+
+        let res = task.await.unwrap();
+        assert_eq!(res.status, ToolResultStatus::Failed);
+        assert_eq!(
+            res.output.content["error"],
+            "file changed after confirmation"
+        );
+        assert!(!file_path.exists());
+        assert!(!has_temporary_files(dir.path()));
+    }
+}
+
+#[tokio::test]
+async fn wh03_same_batch_case_variant_dedup_on_case_insensitive_or_same_identity() {
+    let (dir, shared) = tools(WorkspaceToolLimits::default(), WriteToolLimits::default());
+    let foo_upper = dir.path().join("Foo.txt");
+    let foo_lower = dir.path().join("foo.txt");
+    std::fs::write(&foo_upper, "alpha\nbeta\n").unwrap();
+
+    // On case-insensitive volumes (such as default macOS APFS), `foo.txt`
+    // already resolves to the same `(dev, ino)` as `Foo.txt`. On case-sensitive
+    // volumes (such as Linux CI), link `foo.txt` to `Foo.txt` so both platforms
+    // exercise same-identity deduplication across `Foo.txt` and `foo.txt`.
+    let same_identity = std::fs::metadata(&foo_lower)
+        .ok()
+        .zip(std::fs::metadata(&foo_upper).ok())
+        .is_some_and(|(lower, upper)| lower.dev() == upper.dev() && lower.ino() == upper.ino());
+    if !same_identity {
+        std::fs::hard_link(&foo_upper, &foo_lower).unwrap();
+    }
+
+    let read_res = invoke(&shared, WorkspaceTool::ReadFile, json!({"path": "Foo.txt"})).await;
+    assert_eq!(read_res.status, ToolResultStatus::Succeeded);
+
+    let results = invoke_batch(
+        &shared,
+        vec![
+            (
+                WorkspaceTool::EditFile,
+                json!({
+                    "path": "Foo.txt",
+                    "edits": [{"old_text": "alpha", "new_text": "ALPHA"}]
+                }),
+            ),
+            (
+                WorkspaceTool::EditFile,
+                json!({
+                    "path": "foo.txt",
+                    "edits": [{"old_text": "beta", "new_text": "BETA"}]
+                }),
+            ),
+        ],
+    )
+    .await;
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].status, ToolResultStatus::Succeeded);
+    assert_eq!(results[1].status, ToolResultStatus::Rejected);
+    let err = results[1].output.content["error"].as_str().unwrap();
+    assert!(err.contains("same file can only be modified once"), "{err}");
+
+    assert_eq!(
+        std::fs::read_to_string(&foo_upper).unwrap(),
+        "ALPHA\nbeta\n"
+    );
+    assert!(!has_temporary_files(dir.path()));
+}
+
+#[tokio::test]
+async fn wh04_hardlink_cross_name_read_before_write_and_batch_dedup() {
+    let (dir, shared) = tools(WorkspaceToolLimits::default(), WriteToolLimits::default());
+    let a_path = dir.path().join("a.txt");
+    let b_path = dir.path().join("b.txt");
+    std::fs::write(&a_path, "line 1\nline 2\n").unwrap();
+    std::fs::hard_link(&a_path, &b_path).unwrap();
+
+    // Reading `a.txt` alone satisfies read-before-write for hard link `b.txt`.
+    let read_res = invoke(&shared, WorkspaceTool::ReadFile, json!({"path": "a.txt"})).await;
+    assert_eq!(read_res.status, ToolResultStatus::Succeeded);
+
+    let edit_b = invoke(
+        &shared,
+        WorkspaceTool::EditFile,
+        json!({
+            "path": "b.txt",
+            "edits": [{"old_text": "line 1", "new_text": "LINE 1"}]
+        }),
+    )
+    .await;
+    assert_eq!(edit_b.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        std::fs::read_to_string(&b_path).unwrap(),
+        "LINE 1\nline 2\n"
+    );
+    // Atomic renameat assigns a new inode to `b.txt`, leaving `a.txt` untouched.
+    assert_eq!(
+        std::fs::read_to_string(&a_path).unwrap(),
+        "line 1\nline 2\n"
+    );
+
+    // Same-batch edits targeting two hard links to the same file deduplicate.
+    let link1 = dir.path().join("link1.txt");
+    let link2 = dir.path().join("link2.txt");
+    std::fs::write(&link1, "one\ntwo\n").unwrap();
+    std::fs::hard_link(&link1, &link2).unwrap();
+
+    let read_link1 = invoke(
+        &shared,
+        WorkspaceTool::ReadFile,
+        json!({"path": "link1.txt"}),
+    )
+    .await;
+    assert_eq!(read_link1.status, ToolResultStatus::Succeeded);
+
+    let results = invoke_batch(
+        &shared,
+        vec![
+            (
+                WorkspaceTool::EditFile,
+                json!({
+                    "path": "link1.txt",
+                    "edits": [{"old_text": "one", "new_text": "ONE"}]
+                }),
+            ),
+            (
+                WorkspaceTool::EditFile,
+                json!({
+                    "path": "link2.txt",
+                    "edits": [{"old_text": "two", "new_text": "TWO"}]
+                }),
+            ),
+        ],
+    )
+    .await;
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].status, ToolResultStatus::Succeeded);
+    assert_eq!(results[1].status, ToolResultStatus::Rejected);
+    let err = results[1].output.content["error"].as_str().unwrap();
+    assert!(err.contains("same file can only be modified once"), "{err}");
+    assert_eq!(std::fs::read_to_string(&link1).unwrap(), "ONE\ntwo\n");
+    assert_eq!(std::fs::read_to_string(&link2).unwrap(), "one\ntwo\n");
+    assert!(!has_temporary_files(dir.path()));
+}
+
+#[tokio::test]
+async fn wh05_consecutive_edits_reuse_new_identity_and_external_replace_requires_reread() {
+    let (dir, shared) = tools(WorkspaceToolLimits::default(), WriteToolLimits::default());
+    let file_path = dir.path().join("seq.txt");
+    std::fs::write(&file_path, "step 0\nstep 1\n").unwrap();
+
+    let read_res = invoke(&shared, WorkspaceTool::ReadFile, json!({"path": "seq.txt"})).await;
+    assert_eq!(read_res.status, ToolResultStatus::Succeeded);
+
+    let edit1 = invoke(
+        &shared,
+        WorkspaceTool::EditFile,
+        json!({
+            "path": "seq.txt",
+            "edits": [{"old_text": "step 0", "new_text": "step 0 done"}]
+        }),
+    )
+    .await;
+    assert_eq!(edit1.status, ToolResultStatus::Succeeded);
+
+    // Consecutive edit across a second batch uses the updated FileIdentity without re-reading.
+    let edit2 = invoke(
+        &shared,
+        WorkspaceTool::EditFile,
+        json!({
+            "path": "seq.txt",
+            "edits": [{"old_text": "step 1", "new_text": "step 1 done"}]
+        }),
+    )
+    .await;
+    assert_eq!(edit2.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        std::fs::read_to_string(&file_path).unwrap(),
+        "step 0 done\nstep 1 done\n"
+    );
+
+    // Replace the file externally with a new inode via rename.
+    let replacement = dir.path().join("seq_replacement.tmp");
+    std::fs::write(&replacement, "replaced externally\n").unwrap();
+    std::fs::rename(&replacement, &file_path).unwrap();
+
+    let edit_after_replace = invoke(
+        &shared,
+        WorkspaceTool::EditFile,
+        json!({
+            "path": "seq.txt",
+            "edits": [{"old_text": "replaced", "new_text": "edited"}]
+        }),
+    )
+    .await;
+    assert_eq!(edit_after_replace.status, ToolResultStatus::Rejected);
+    let edit_err = edit_after_replace.output.content["error"].as_str().unwrap();
+    assert!(
+        edit_err.contains("must be read with read_file before editing"),
+        "{edit_err}"
+    );
+
+    let write_after_replace = invoke(
+        &shared,
+        WorkspaceTool::WriteFile,
+        json!({"path": "seq.txt", "content": "overwritten\n"}),
+    )
+    .await;
+    assert_eq!(write_after_replace.status, ToolResultStatus::Rejected);
+    let write_err = write_after_replace.output.content["error"]
+        .as_str()
+        .unwrap();
+    assert!(
+        write_err.contains("must be read with read_file before overwriting"),
+        "{write_err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file_path).unwrap(),
+        "replaced externally\n"
+    );
+
+    // Re-reading the new inode allows editing again.
+    let reread = invoke(&shared, WorkspaceTool::ReadFile, json!({"path": "seq.txt"})).await;
+    assert_eq!(reread.status, ToolResultStatus::Succeeded);
+    let edit_after_reread = invoke(
+        &shared,
+        WorkspaceTool::EditFile,
+        json!({
+            "path": "seq.txt",
+            "edits": [{"old_text": "replaced", "new_text": "edited"}]
+        }),
+    )
+    .await;
+    assert_eq!(edit_after_reread.status, ToolResultStatus::Succeeded);
+    assert_eq!(
+        std::fs::read_to_string(&file_path).unwrap(),
+        "edited externally\n"
+    );
+    assert!(!has_temporary_files(dir.path()));
+}

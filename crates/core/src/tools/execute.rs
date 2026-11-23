@@ -6,7 +6,7 @@ use super::command::PreparedCommand;
 use super::diff::DiffSummary;
 use super::lifecycle::{
     ApprovalPreview, BatchPrepareState, CommandPreviewTarget, ExecutionGrant, ManagedTool,
-    PrepareRejection, PreparedCall, ToolCallIntent, managed_tool_metadata,
+    PrepareRejection, PreparedCall, ToolCallIntent, WriteTargetKey, managed_tool_metadata,
 };
 use super::operations::{OperationControl, precheck_edit, precheck_write, run};
 use super::parameters::{Params, requests_outside_sandbox};
@@ -17,7 +17,7 @@ use crate::definition::{
 };
 use crate::policy::{ToolPermissionClass, WriteAction};
 use crate::session::ToolReporter;
-use crate::workspace::{FileVersion, Workspace};
+use crate::workspace::{FileIdentity, FileVersion, Workspace};
 use async_trait::async_trait;
 use causa::kernel::{
     CallAttachments, CallControl, Tool, ToolCallContext, ToolDefinition, ToolMetadata, ToolOutput,
@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug)]
 pub(super) struct PreparedWrite {
     pub(super) path: String,
-    pub(super) normalized_path: String,
+    pub(super) target_key: WriteTargetKey,
     pub(super) expected_version: Option<FileVersion>,
     pub(super) existing_mode: Option<u32>,
     pub(super) final_content: String,
@@ -178,7 +178,7 @@ pub struct WorkspaceTools {
     pub(super) local: Arc<Semaphore>,
     host: Arc<ToolResources>,
     counters: Arc<Counters>,
-    pub(super) observations: Mutex<HashMap<String, FileVersion>>,
+    pub(super) observations: Mutex<HashMap<FileIdentity, FileVersion>>,
     #[cfg(test)]
     command_decode_count: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
@@ -222,7 +222,7 @@ impl WorkspaceTools {
             .protected_storage = protected;
         self
     }
-    pub(crate) fn observations(&self) -> &Mutex<HashMap<String, FileVersion>> {
+    pub(crate) fn observations(&self) -> &Mutex<HashMap<FileIdentity, FileVersion>> {
         &self.observations
     }
 
@@ -759,22 +759,17 @@ impl WorkspaceToolImpl {
             _ => return Err(PrepareRejection::rejected("invalid write tool parameters")),
         };
 
-        let components = match Workspace::components(raw_path) {
-            Ok(components) if !components.is_empty() => components,
+        match Workspace::components(raw_path) {
+            Ok(components) if !components.is_empty() => {}
             Ok(_) => {
                 return Err(PrepareRejection::rejected(format!(
                     "{tool_label} requires a file path"
                 )));
             }
             Err(err) => return Err(PrepareRejection::rejected(err.to_string())),
-        };
-
-        let normalized = components.join("/");
-        if !batch_state.record_write_path(&normalized) {
-            return Err(PrepareRejection::rejected(
-                "the same file can only be modified once in a single batch",
-            ));
         }
+
+        let seen_write_targets = batch_state.seen_write_targets();
 
         // Inspect under the same operation permits that execution uses.
         let acquire = async {
@@ -851,6 +846,7 @@ impl WorkspaceToolImpl {
                     shared.limits(),
                     shared.write_limits(),
                     shared.observations(),
+                    &seen_write_targets,
                     shared.protected_storage(),
                     &worker_control,
                 ),
@@ -860,6 +856,7 @@ impl WorkspaceToolImpl {
                     shared.limits(),
                     shared.write_limits(),
                     shared.observations(),
+                    &seen_write_targets,
                     shared.protected_storage(),
                     &worker_control,
                 ),
@@ -868,7 +865,10 @@ impl WorkspaceToolImpl {
         });
 
         match worker.await {
-            Ok(Ok(prepared)) => Ok(PreparedCall::new(prepared)),
+            Ok(Ok(prepared)) => {
+                let _ = batch_state.record_write_target(prepared.target_key.clone());
+                Ok(PreparedCall::new(prepared))
+            }
             Ok(Err(err)) => {
                 let mut payload = result(
                     call,
