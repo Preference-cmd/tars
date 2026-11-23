@@ -374,6 +374,25 @@ pub(crate) fn assemble(
     let skills_enabled = definition.prelude.skills_enabled;
     let selected = definition.tools.clone();
     let has_persistent_compaction = compaction.is_some();
+    let readonly_workspace_tools: Vec<crate::definition::WorkspaceTool> = selected
+        .iter()
+        .copied()
+        .filter(|tool| {
+            matches!(
+                tool,
+                crate::definition::WorkspaceTool::ListDirectory
+                    | crate::definition::WorkspaceTool::ReadFile
+                    | crate::definition::WorkspaceTool::SearchText
+            )
+        })
+        .collect();
+    let code_execution_bindings = crate::tools::code_execution::BuiltinBindings::from_session(
+        &readonly_workspace_tools,
+        has_persistent_compaction,
+    );
+    let code_execution = definition
+        .code_execution
+        .filter(|_| code_execution_bindings.any());
     let call_timeout_secs = definition.tool_limits.call_timeout_secs;
     let builtin_timeout = (!selected.is_empty() || has_persistent_compaction || skills_enabled)
         .then(|| std::time::Duration::from_secs(call_timeout_secs));
@@ -384,6 +403,13 @@ pub(crate) fn assemble(
     ) {
         (Some(builtin), Some(command)) => Some(builtin.max(command)),
         (builtin, command) => builtin.or(command),
+    };
+    let builtin_timeout = match (
+        builtin_timeout,
+        code_execution.map(|settings| std::time::Duration::from_secs(settings.timeout_secs + 5)),
+    ) {
+        (Some(builtin), Some(ce)) => Some(builtin.max(ce)),
+        (builtin, ce) => builtin.or(ce),
     };
     // The executor deadline applies to every call, built-in and MCP alike.
     // Each tool narrows it to its own frozen deadline (built-in limits or the
@@ -446,14 +472,30 @@ pub(crate) fn assemble(
                     tools.push(tool);
                 }
             }
-            if let Some(runtime) = &compact_for_work {
+            let recall_tool = compact_for_work.as_ref().map(|runtime| {
                 let recall = Arc::new(crate::compact::RecallTool::new(
                     runtime.clone(),
                     reporter.clone(),
                     call_timeout_secs,
                 ));
                 catalog.register(recall.definition().name, recall.clone());
-                tools.push(recall);
+                tools.push(recall.clone());
+                recall
+            });
+            if let Some(ce_settings) = code_execution {
+                let host = crate::tools::code_execution::SubcallHost::new(
+                    ce_settings,
+                    code_execution_bindings,
+                    workspace_tools.clone(),
+                    recall_tool,
+                );
+                let run_code = Arc::new(crate::tools::code_execution::RunCodeTool::new(
+                    host,
+                    ce_settings,
+                    reporter.clone(),
+                ));
+                catalog.register(run_code.definition().name, run_code.clone());
+                tools.push(run_code);
             }
             let bind_load_skill = skills_enabled
                 && !skill_registry_for_work

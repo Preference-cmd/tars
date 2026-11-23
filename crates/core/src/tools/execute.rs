@@ -428,6 +428,260 @@ impl WorkspaceTools {
     pub(crate) fn set_write_gate(&self, gate: Option<Arc<TestGate>>) {
         *self.write_gate.lock().expect("write gate lock") = gate;
     }
+
+    /// Execute a read-only workspace tool (`list_directory`, `read_file`, or
+    /// `search_text`) as an internal subcall without emitting `ToolReporter`
+    /// progress entries or passing through `ToolBatchProcessor`.
+    pub(crate) async fn execute_readonly_subcall(
+        self: &Arc<Self>,
+        kind: WorkspaceTool,
+        arguments: serde_json::Value,
+        control: &CallControl,
+    ) -> (ToolResultStatus, serde_json::Value) {
+        if !matches!(
+            kind,
+            WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText
+        ) {
+            return (
+                ToolResultStatus::Rejected,
+                serde_json::json!({
+                    "error": "only read-only workspace tools may run as subcalls"
+                }),
+            );
+        }
+        let params = match Params::decode(
+            kind,
+            &arguments,
+            &self.limits,
+            &self.write_limits,
+            self.command_settings(),
+        ) {
+            Ok(params) => params,
+            Err(error) => {
+                return (
+                    ToolResultStatus::Rejected,
+                    serde_json::json!({ "error": error }),
+                );
+            }
+        };
+        match params {
+            Params::Search(search_params) => {
+                self.execute_search_inner(search_params, control, None)
+                    .await
+            }
+            Params::List(_) | Params::Read(_) => {
+                self.execute_fs_readonly_inner(params, control, None).await
+            }
+            _ => (
+                ToolResultStatus::Rejected,
+                serde_json::json!({
+                    "error": "only read-only workspace tools may run as subcalls"
+                }),
+            ),
+        }
+    }
+
+    async fn execute_search_inner(
+        &self,
+        params: super::parameters::SearchParams,
+        control: &CallControl,
+        reporter: Option<(&ToolReporter, &ToolCallContext)>,
+    ) -> (ToolResultStatus, serde_json::Value) {
+        let Some(runtime) = self.search.as_ref() else {
+            let content = serde_json::json!({ "error": "search runtime is not available" });
+            if let Some((reporter, call)) = reporter {
+                reporter.returned(call, ToolResultStatus::Rejected);
+            }
+            return (ToolResultStatus::Rejected, content);
+        };
+        let prepared = match runtime.check(&params, self.limits()) {
+            Ok(prepared) => prepared,
+            Err(SearchCheckError::Rejected(error)) => {
+                let content = serde_json::json!({ "error": error });
+                if let Some((reporter, call)) = reporter {
+                    reporter.returned(call, ToolResultStatus::Rejected);
+                }
+                return (ToolResultStatus::Rejected, content);
+            }
+            Err(SearchCheckError::Failed(error)) => {
+                let content = serde_json::json!({ "error": error });
+                if let Some((reporter, call)) = reporter {
+                    reporter.returned(call, ToolResultStatus::Failed);
+                }
+                return (ToolResultStatus::Failed, content);
+            }
+        };
+        let search_control = control.with_timeout(super::command::bounded_timeout(
+            control.deadline(),
+            Duration::from_secs(self.limits.call_timeout_secs),
+        ));
+        if let Some((reporter, call)) = reporter {
+            reporter.waiting(call);
+        }
+        let Some(permit) = runtime.acquire(&search_control).await else {
+            let (status, content) = search_not_started_content(&search_control);
+            if let Some((reporter, call)) = reporter {
+                reporter.returned(call, status.clone());
+            }
+            return (status, content);
+        };
+        if let Some((reporter, call)) = reporter {
+            reporter.running(call);
+        }
+        let execution = runtime
+            .run(prepared, permit, &search_control, self.limits())
+            .await;
+        let status = execution.status;
+        let mut content = execution.content;
+        if let Some((reporter, call)) = reporter {
+            let mut probe = result(call, status.clone(), content);
+            if serde_json::to_vec(&probe)
+                .map_or(true, |bytes| bytes.len() > self.limits.max_output_bytes)
+            {
+                probe.output.content = serde_json::json!({
+                    "truncated": true,
+                    "complete": false,
+                    "limit_reason": "output_bytes"
+                });
+            }
+            content = probe.output.content;
+            reporter.returned(call, status.clone());
+        } else if serde_json::to_vec(&content)
+            .map_or(true, |bytes| bytes.len() > self.limits.max_output_bytes)
+        {
+            content = serde_json::json!({
+                "truncated": true,
+                "complete": false,
+                "limit_reason": "output_bytes"
+            });
+        }
+        (status, content)
+    }
+
+    async fn execute_fs_readonly_inner(
+        self: &Arc<Self>,
+        params: Params,
+        control: &CallControl,
+        reporter: Option<(&ToolReporter, &ToolCallContext)>,
+    ) -> (ToolResultStatus, serde_json::Value) {
+        let control = control.with_timeout(Duration::from_secs(self.limits.call_timeout_secs));
+        if let Some((reporter, call)) = reporter {
+            reporter.waiting(call);
+            #[cfg(test)]
+            self.host
+                .counters
+                .test_wrappers_entered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let acquire = async {
+            let local = self.local.clone().acquire_owned().await.ok()?;
+            let host = self.host.slots.clone().acquire_owned().await.ok()?;
+            Some((host, local))
+        };
+        let deadline = async {
+            if let Some(deadline) = control.deadline() {
+                tokio::time::sleep_until(deadline.into()).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        let permits = tokio::select! {
+            biased;
+            _ = control.cancellation_token().cancelled() => None,
+            _ = deadline => None,
+            permits = acquire => permits,
+        };
+        let Some((host, local)) = permits else {
+            return stopped_content(&control);
+        };
+        if control.check().is_err() {
+            return stopped_content(&control);
+        }
+        let dropstop = CancellationToken::new();
+        let _cancel = CancelOnDrop(dropstop.clone());
+        let worker_control = OperationControl {
+            call: control.clone(),
+            dropstop,
+            counters: self.counters.clone(),
+            host_counters: self.host.counters.clone(),
+        };
+        let shared = self.clone();
+        let reporter_owned = reporter.map(|(r, c)| (r.clone(), c.clone()));
+        let max_output_bytes = self.limits.max_output_bytes;
+        let run_blocking = move || {
+            if worker_control.check().is_err() {
+                return stopped_content(&worker_control.call);
+            }
+            let guard = OperationGuard {
+                counters: shared.counters.clone(),
+                host_counters: shared.host.counters.clone(),
+                _local: local,
+                _host: host,
+            };
+            guard.start();
+            if let Some((ref r, ref c)) = reporter_owned {
+                r.running(c);
+            }
+            #[cfg(test)]
+            if let Some(gate) = shared.gate.lock().expect("gate lock").clone() {
+                gate.pause(false);
+            }
+            let output = run(
+                &shared.workspace,
+                &params,
+                &shared.limits,
+                &shared.write_limits,
+                &shared.observations,
+                &worker_control,
+                #[cfg(test)]
+                &shared.write_gate,
+            );
+            let (status, mut content) = match output {
+                Ok(content) => (ToolResultStatus::Succeeded, content),
+                Err(error) => (
+                    error.status(),
+                    serde_json::json!({ "error": error.to_string() }),
+                ),
+            };
+            if let Some((_, ref c)) = reporter_owned {
+                let probe = result(c, status.clone(), content.clone());
+                if serde_json::to_vec(&probe).map_or(true, |bytes| bytes.len() > max_output_bytes) {
+                    content = serde_json::json!({
+                        "truncated": true,
+                        "complete": false,
+                        "limit_reason": "output_bytes"
+                    });
+                }
+            } else if serde_json::to_vec(&content)
+                .map_or(true, |bytes| bytes.len() > max_output_bytes)
+            {
+                content = serde_json::json!({
+                    "truncated": true,
+                    "complete": false,
+                    "limit_reason": "output_bytes"
+                });
+            }
+            #[cfg(test)]
+            if let Some(gate) = shared.gate.lock().expect("gate lock").clone() {
+                gate.pause(true);
+            }
+            if let Some((ref r, ref c)) = reporter_owned {
+                r.returned(c, status.clone());
+            }
+            (status, content)
+        };
+        let worker = match reporter {
+            Some((r, _)) => r.spawn_blocking(run_blocking),
+            None => tokio::task::spawn_blocking(run_blocking),
+        };
+        match worker.await {
+            Ok(outcome) => outcome,
+            Err(_) => (
+                ToolResultStatus::Failed,
+                serde_json::json!({ "error": "filesystem worker failed" }),
+            ),
+        }
+    }
 }
 
 struct WorkspaceToolImpl {
@@ -452,17 +706,21 @@ pub(crate) fn result(
     ToolResultPayload::new(call.call_block_id, status, ToolOutput::new(content))
 }
 
-fn stopped(call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
+fn stopped_content(control: &CallControl) -> (ToolResultStatus, serde_json::Value) {
     let status = if control.is_cancelled() {
         ToolResultStatus::Cancelled
     } else {
         ToolResultStatus::TimedOut
     };
-    result(
-        call,
+    (
         status,
         serde_json::json!({"error":"operation stopped before obtaining a result"}),
     )
+}
+
+fn stopped(call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
+    let (status, content) = stopped_content(control);
+    result(call, status, content)
 }
 
 /// A command stopped while queued never started a process, so it is rejected
@@ -842,73 +1100,21 @@ impl WorkspaceToolImpl {
                 serde_json::json!({ "error": "invalid search parameters" }),
             );
         };
-        let Some(runtime) = self.shared.search.as_ref() else {
-            let output = result(
-                call,
-                ToolResultStatus::Rejected,
-                serde_json::json!({ "error": "search runtime is not available" }),
-            );
-            self.reporter.returned(call, output.status.clone());
-            return output;
-        };
-        let prepared = match runtime.check(&params, self.shared.limits()) {
-            Ok(prepared) => prepared,
-            Err(SearchCheckError::Rejected(error)) => {
-                let output = result(
-                    call,
-                    ToolResultStatus::Rejected,
-                    serde_json::json!({ "error": error }),
-                );
-                self.reporter.returned(call, output.status.clone());
-                return output;
-            }
-            Err(SearchCheckError::Failed(error)) => {
-                let output = result(
-                    call,
-                    ToolResultStatus::Failed,
-                    serde_json::json!({ "error": error }),
-                );
-                self.reporter.returned(call, output.status.clone());
-                return output;
-            }
-        };
-        let search_control = control.with_timeout(super::command::bounded_timeout(
-            control.deadline(),
-            Duration::from_secs(self.shared.limits.call_timeout_secs),
-        ));
-        self.reporter.waiting(call);
-        let Some(permit) = runtime.acquire(&search_control).await else {
-            let output = search_not_started(call, &search_control);
-            self.reporter.returned(call, output.status.clone());
-            return output;
-        };
-        self.reporter.running(call);
-        let execution = runtime
-            .run(prepared, permit, &search_control, self.shared.limits())
+        let (status, content) = self
+            .shared
+            .execute_search_inner(params, control, Some((&self.reporter, call)))
             .await;
-        let mut output = result(call, execution.status, execution.content);
-        if serde_json::to_vec(&output).map_or(true, |bytes| {
-            bytes.len() > self.shared.limits.max_output_bytes
-        }) {
-            output.output.content = serde_json::json!({
-                "truncated": true,
-                "complete": false,
-                "limit_reason": "output_bytes"
-            });
-        }
-        self.reporter.returned(call, output.status.clone());
-        output
+        result(call, status, content)
     }
 }
 
-fn search_not_started(call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
+fn search_not_started_content(control: &CallControl) -> (ToolResultStatus, serde_json::Value) {
     let cause = if control.is_cancelled() {
         "the work was stopped while this search was waiting for the previous search"
     } else {
         "the deadline expired while this search was waiting for the previous search"
     };
-    result(
-        call,
+    (
         ToolResultStatus::Rejected,
         serde_json::json!({
             "error": "the search was not started",
@@ -1205,7 +1411,11 @@ impl Tool for WorkspaceToolImpl {
                 if self.kind == WorkspaceTool::SearchText {
                     return self.execute_search(call, control, params).await;
                 }
-                (None, Some(params))
+                let (status, content) = self
+                    .shared
+                    .execute_fs_readonly_inner(params, control, Some((&self.reporter, call)))
+                    .await;
+                return result(call, status, content);
             }
         };
 

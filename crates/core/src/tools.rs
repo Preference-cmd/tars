@@ -1,5 +1,6 @@
 //! Workspace filesystem tools with bounded operations and work-owned cleanup.
 
+pub(crate) mod code_execution;
 mod command;
 mod diff;
 mod execute;

@@ -253,13 +253,6 @@ fn stopped(call: &ToolCallContext, control: &CallControl) -> ToolResultPayload {
     )
 }
 
-fn success(call: &ToolCallContext, text: String) -> ToolResultPayload {
-    let (capped_text, truncation) = cap_output(text);
-    let mut output = ToolOutput::new(serde_json::Value::String(capped_text));
-    output.truncation = truncation;
-    ToolResultPayload::new(call.call_block_id, ToolResultStatus::Succeeded, output)
-}
-
 fn sanitize_store_error(err: &crate::store::StoreError, kind: &str) -> String {
     match err {
         crate::store::StoreError::Io(io) => {
@@ -785,6 +778,125 @@ impl RecallTool {
         self.reporter.returned(call, output.status.clone());
         output
     }
+
+    /// Execute `recall` as an internal read-only subcall without emitting
+    /// `ToolReporter` progress entries or passing through `ToolBatchProcessor`.
+    pub(crate) async fn execute_subcall(
+        &self,
+        arguments: serde_json::Value,
+        control: &CallControl,
+    ) -> Result<String, (ToolResultStatus, String)> {
+        self.execute_inner(&arguments, control, None)
+            .await
+            .map(|(text, _)| text)
+    }
+
+    async fn execute_inner(
+        &self,
+        arguments: &serde_json::Value,
+        control: &CallControl,
+        reporter_ctx: Option<(&ToolReporter, &ToolCallContext)>,
+    ) -> Result<(String, Truncation), (ToolResultStatus, String)> {
+        if control.check().is_err() {
+            let status = if control.is_cancelled() {
+                ToolResultStatus::Cancelled
+            } else {
+                ToolResultStatus::TimedOut
+            };
+            return Err((
+                status,
+                "operation stopped before obtaining a result".to_owned(),
+            ));
+        }
+        let params: RecallParams = serde_json::from_value(arguments.clone()).map_err(|error| {
+            (
+                ToolResultStatus::Failed,
+                format!("invalid recall parameters: {error}"),
+            )
+        })?;
+        let Some(store) = self.runtime.history() else {
+            return Err((
+                ToolResultStatus::Failed,
+                "history store is not available for this session".to_owned(),
+            ));
+        };
+        let request =
+            Request::parse(params, &store).map_err(|error| (ToolResultStatus::Failed, error))?;
+
+        // Next-layer pointers come from the live index; no record file is read.
+        let entries = self.runtime.entries();
+        let mut inserted = HashMap::new();
+        for entry in &entries {
+            for &block_id in &entry.inserted_block_ids {
+                inserted.insert(block_id, entry.record_id.clone());
+            }
+        }
+
+        let control = control.with_timeout(Duration::from_secs(self.timeout_secs));
+        if let Some((reporter, call)) = reporter_ctx {
+            reporter.waiting(call);
+        }
+        let dropped = CancellationToken::new();
+        let _cancel = CancelOnDrop(dropped.clone());
+        let worker = Worker {
+            store,
+            entries,
+            inserted,
+            stop: WorkerStop {
+                call: control.clone(),
+                dropped,
+            },
+        };
+        let reporter_owned = reporter_ctx.map(|(r, c)| (r.clone(), c.clone()));
+        #[cfg(test)]
+        let gate = self.gate.lock().expect("recall gate lock").clone();
+        let run_blocking = move || {
+            if worker.stop.stopped() {
+                return Outcome::Stopped;
+            }
+            if let Some((ref reporter, ref call_owned)) = reporter_owned {
+                reporter.running(call_owned);
+            }
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                gate.pause(false);
+            }
+            worker.run(request)
+        };
+        let task = match reporter_ctx {
+            Some((reporter, _)) => reporter.spawn_blocking(run_blocking),
+            None => tokio::task::spawn_blocking(run_blocking),
+        };
+
+        let deadline = async {
+            match control.deadline() {
+                Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let stop_err = || {
+            let status = if control.is_cancelled() {
+                ToolResultStatus::Cancelled
+            } else {
+                ToolResultStatus::TimedOut
+            };
+            Err((
+                status,
+                "operation stopped before obtaining a result".to_owned(),
+            ))
+        };
+        tokio::select! {
+            biased;
+            _ = control.cancellation_token().cancelled() => stop_err(),
+            _ = deadline => stop_err(),
+            result = task => match result {
+                Ok(Outcome::Text(text)) => Ok(cap_output(text)),
+                Ok(Outcome::Failed(error)) => Err((ToolResultStatus::Failed, error)),
+                Ok(Outcome::Stopped) => stop_err(),
+                Err(_) => Err((ToolResultStatus::Failed, "recall worker thread panicked".to_owned())),
+            },
+        }
+    }
 }
 
 pub(crate) fn recall_tool_definition() -> ToolDefinition {
@@ -831,84 +943,20 @@ impl Tool for RecallTool {
         control: &CallControl,
         _store: Option<&dyn causa::kernel::ArtifactStore>,
     ) -> ToolResultPayload {
-        if control.check().is_err() {
-            return self.finish(call, stopped(call, control));
-        }
-        let params: RecallParams = match serde_json::from_value(call.input.arguments.clone()) {
-            Ok(params) => params,
-            Err(error) => {
-                return self.finish(
-                    call,
-                    failed(call, format!("invalid recall parameters: {error}")),
-                );
+        let payload = match self
+            .execute_inner(&call.input.arguments, control, Some((&self.reporter, call)))
+            .await
+        {
+            Ok((text, truncation)) => {
+                let mut output = ToolOutput::new(serde_json::Value::String(text));
+                output.truncation = truncation;
+                ToolResultPayload::new(call.call_block_id, ToolResultStatus::Succeeded, output)
             }
-        };
-        let Some(store) = self.runtime.history() else {
-            return self.finish(
-                call,
-                failed(call, "history store is not available for this session"),
-            );
-        };
-        let request = match Request::parse(params, &store) {
-            Ok(request) => request,
-            Err(error) => return self.finish(call, failed(call, error)),
-        };
-
-        // Next-layer pointers come from the live index; no record file is read.
-        let entries = self.runtime.entries();
-        let mut inserted = HashMap::new();
-        for entry in &entries {
-            for &block_id in &entry.inserted_block_ids {
-                inserted.insert(block_id, entry.record_id.clone());
+            Err((ToolResultStatus::Cancelled | ToolResultStatus::TimedOut, _)) => {
+                stopped(call, control)
             }
-        }
-
-        let control = control.with_timeout(Duration::from_secs(self.timeout_secs));
-        self.reporter.waiting(call);
-        let dropped = CancellationToken::new();
-        let _cancel = CancelOnDrop(dropped.clone());
-        let worker = Worker {
-            store,
-            entries,
-            inserted,
-            stop: WorkerStop {
-                call: control.clone(),
-                dropped,
-            },
+            Err((_, error)) => failed(call, error),
         };
-        let reporter = self.reporter.clone();
-        let call_owned = call.clone();
-        #[cfg(test)]
-        let gate = self.gate.lock().expect("recall gate lock").clone();
-        let task = self.reporter.spawn_blocking(move || {
-            if worker.stop.stopped() {
-                return Outcome::Stopped;
-            }
-            reporter.running(&call_owned);
-            #[cfg(test)]
-            if let Some(gate) = gate {
-                gate.pause(false);
-            }
-            worker.run(request)
-        });
-
-        let deadline = async {
-            match control.deadline() {
-                Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
-                None => std::future::pending::<()>().await,
-            }
-        };
-        let output = tokio::select! {
-            biased;
-            _ = control.cancellation_token().cancelled() => stopped(call, &control),
-            _ = deadline => stopped(call, &control),
-            result = task => match result {
-                Ok(Outcome::Text(text)) => success(call, text),
-                Ok(Outcome::Failed(error)) => failed(call, error),
-                Ok(Outcome::Stopped) => stopped(call, &control),
-                Err(_) => failed(call, "recall worker thread panicked"),
-            },
-        };
-        self.finish(call, output)
+        self.finish(call, payload)
     }
 }
