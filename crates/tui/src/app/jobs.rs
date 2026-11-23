@@ -3,9 +3,10 @@ use crate::transcript::{Rows, Transcript};
 use std::sync::Arc;
 use tars_core::application::{
     ApplicationError, CloseOutcome, ManagedSession, MaterialVersion, SaveStatus, SessionListing,
+    WorkOutcome,
 };
 use tars_core::compact::{CompactionOutcome, HistoryRecord, HistoryRecordEntry};
-use tars_core::session::{ModelFailure, WorkRef, WorkResult};
+use tars_core::session::{WorkRef, WorkResult};
 
 /// One material read: the current Context's rows and its record index.
 pub(super) struct MaterialView {
@@ -124,56 +125,6 @@ pub(super) fn save_label(save: &SaveStatus) -> String {
         }
     }
 }
-fn result_label(result: &WorkResult) -> &'static str {
-    use causa::{
-        kernel::ControlError,
-        runtime::{TurnInterruption, TurnResult},
-    };
-    match result {
-        WorkResult::Run(TurnResult::Completed { .. }) => "Completed",
-        WorkResult::StoppedBeforeRun(ControlError::Cancelled)
-        | WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::Cancelled { .. },
-        }) => "Cancelled",
-        WorkResult::StoppedBeforeRun(ControlError::TimedOut)
-        | WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::DeadlineExceeded { .. },
-        }) => "Timed out",
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::ModelMaxTokens { .. },
-        }) => "Output reached max_tokens; raise the limit and submit new work",
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::ModelContextWindowExceeded { .. },
-        }) => "Conversation no longer fits the model's context window",
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::ModelRefusal { .. },
-        }) => "The model refused the request",
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::ModelStopUnrecognized { .. },
-        }) => "Provider stopped for an unrecognized reason",
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::MaxModelRounds { .. },
-        }) => "Model round limit reached; submit new work to continue",
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::MaxToolCalls { .. },
-        }) => "Tool call limit reached; submit new work to continue",
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::ModelCallFailed { error, .. },
-        }) => match ModelFailure::of(error).kind {
-            "invalid_request" => {
-                "Request rejected as invalid; check model and max_tokens (required by anthropic)"
-            }
-            "transient" => "Temporary provider failure; retry later or set max_model_attempts",
-            "unknown_outcome" => "Response stream ended early; outcome unknown",
-            "credential_rejected" => "Credential rejected; check the API key",
-            "not_found" => "Model or endpoint not found; check the model name and endpoint URL",
-            "undecodable" => "Response could not be read; check the endpoint's protocol",
-            _ => "Failed; check model, endpoint and credential configuration",
-        },
-        WorkResult::Faulted(_) => "Worker fault; materials may be unavailable",
-        _ => "Failed",
-    }
-}
 /// Longest notice shown after opening, in bytes.
 const MAX_OPENED_NOTICE_BYTES: usize = 256;
 
@@ -233,17 +184,34 @@ pub(super) fn opened_notice(
     notice
 }
 
-/// The gateway's description of a failed model call, for the session notice.
-fn failure_notice(result: &WorkResult) -> Option<String> {
-    use causa::runtime::{TurnInterruption, TurnResult};
-    match result {
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::ModelCallFailed { error, .. },
-        }) => Some(format!("Model error: {}", ModelFailure::of(error).detail)),
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::ModelStopUnrecognized { output, .. },
-        }) => Some(ModelFailure::unrecognized_stop(output).detail),
-        _ => None,
+/// The core-supplied notice for a non-completed work outcome, with `/compact`
+/// guidance added for context-window exhaustion.
+fn outcome_notice(outcome: &WorkOutcome) -> Option<String> {
+    if outcome.kind == "completed" {
+        return None;
+    }
+    if outcome.kind == "context_window_exceeded" {
+        let base = outcome
+            .hint
+            .as_deref()
+            .unwrap_or("compact the session before submitting new work");
+        return Some(format!("{base}; run /compact"));
+    }
+    if let Some(failure) = &outcome.model_failure {
+        let detail = tars_core::permission::escape_untrusted_text(&failure.detail);
+        return Some(match &outcome.hint {
+            Some(hint) => format!("Model error: {detail} ({hint})"),
+            None => format!("Model error: {detail}"),
+        });
+    }
+    match (&outcome.hint, &outcome.detail) {
+        (Some(hint), Some(detail)) => {
+            let detail = tars_core::permission::escape_untrusted_text(detail);
+            Some(format!("{hint}: {detail}"))
+        }
+        (Some(hint), None) => Some(hint.clone()),
+        (None, Some(detail)) => Some(tars_core::permission::escape_untrusted_text(detail)),
+        (None, None) => None,
     }
 }
 pub(super) fn close_label(outcome: &CloseOutcome) -> String {
@@ -380,18 +348,14 @@ impl App {
                     entry.approval_reason = None;
                     entry.approval_scroll = 0;
                     entry.scroll = None;
-                    entry.execution = result
+                    let outcome = result.as_ref().map(|(result, _)| WorkOutcome::of(result));
+                    entry.execution = outcome
                         .as_ref()
-                        .map(|(result, _)| result_label(result))
-                        .unwrap_or("Observation failed")
-                        .into();
+                        .map(|outcome| outcome.summary.clone())
+                        .unwrap_or_else(|_| "Observation failed".to_owned());
                     if let Err(error) = result {
                         entry.notice = error;
-                    } else if let Some(notice) = result
-                        .as_ref()
-                        .ok()
-                        .and_then(|(result, _)| failure_notice(result))
-                    {
+                    } else if let Some(notice) = outcome.as_ref().ok().and_then(outcome_notice) {
                         entry.notice = notice;
                     } else if entry.notice.starts_with("Input accepted")
                         || entry.notice.starts_with("Cancellation requested")

@@ -421,3 +421,104 @@ fn blocking_job_panic_keeps_raw_mode_until_normal_exit() {
     assert!(matches!(message, Message::JobPanicked(..)));
     assert!(crossterm::terminal::is_raw_mode_enabled().unwrap());
 }
+
+#[tokio::test]
+async fn work_outcomes_surface_core_summary_and_compact_hint_without_entry_copy() {
+    use causa::kernel::{
+        CallControl, Context, ModelGateway, ModelInvokeError, ModelItem, ModelOutput, ModelRef,
+        ModelRequest, ModelResponse, ModelStopReason, TurnId,
+    };
+    use causa::runtime::{ToolExecutor, TurnRunOptions, TurnRunner, new_block_id};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use tars_core::application::{AssemblyError, WorkOutcome};
+    use tars_core::session::{WorkRef, WorkResult, WorkerFault};
+
+    struct StopGateway(ModelStopReason);
+    impl ModelGateway for StopGateway {
+        fn invoke<'life0, 'life1, 'life2, 'async_trait>(
+            &'life0 self,
+            _: &'life1 ModelRequest,
+            _: &'life2 CallControl,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<ModelOutput, ModelInvokeError>> + Send + 'async_trait>,
+        >
+        where
+            'life0: 'async_trait,
+            'life1: 'async_trait,
+            'life2: 'async_trait,
+            Self: 'async_trait,
+        {
+            let reason = self.0;
+            Box::pin(async move {
+                Ok(ModelOutput::new(
+                    ModelResponse {
+                        items: vec![ModelItem::text("partial")],
+                    },
+                    reason,
+                ))
+            })
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+
+    let runner = TurnRunner::new(
+        Arc::new(StopGateway(ModelStopReason::ContextWindowExceeded)),
+        Arc::new(ToolExecutor::new(vec![], Default::default()).unwrap()),
+    );
+    let turn = runner
+        .run_streaming(
+            TurnId::new(new_block_id().0.to_string()),
+            Context::new(),
+            TurnRunOptions::new(ModelRef::new("fixture")),
+            CallControl::new(Default::default(), None),
+        )
+        .await;
+    let ctx_result = Arc::new(WorkResult::Run(turn.result));
+    let ctx_outcome = WorkOutcome::of(&ctx_result);
+    assert_eq!(ctx_outcome.kind, "context_window_exceeded");
+
+    let mut entry = crate::app::state::Entry::new("s1".into(), "fixture".into());
+    let key = entry.key.clone();
+    let work = WorkRef {
+        conversation_id: "s1".into(),
+        turn_id: TurnId::new(new_block_id().0.to_string()),
+    };
+    entry.work = Some(work.clone());
+    app.entries.push(entry);
+    app.complete(Message::Finished(
+        key.clone(),
+        work.clone(),
+        Ok((ctx_result, Arc::default())),
+    ));
+    assert_eq!(app.entries[0].execution, ctx_outcome.summary);
+    assert!(app.entries[0].notice.contains("/compact"));
+
+    // Assembly failure and worker fault also align with WorkOutcome::summary.
+    let asm_result = Arc::new(WorkResult::AssemblyFailed(Box::new(
+        AssemblyError::CommandUnavailable("sandbox unavailable".into()),
+    )));
+    let asm_outcome = WorkOutcome::of(&asm_result);
+    app.complete(Message::Finished(
+        key.clone(),
+        work.clone(),
+        Ok((asm_result, Arc::default())),
+    ));
+    assert_eq!(app.entries[0].execution, asm_outcome.summary);
+    assert!(app.entries[0].notice.contains("sandbox unavailable"));
+
+    let fault_result = Arc::new(WorkResult::Faulted(WorkerFault::Panicked {
+        message: "boom".into(),
+    }));
+    let fault_outcome = WorkOutcome::of(&fault_result);
+    app.complete(Message::Finished(
+        key,
+        work,
+        Ok((fault_result, Arc::default())),
+    ));
+    assert_eq!(app.entries[0].execution, fault_outcome.summary);
+    assert!(app.entries[0].notice.contains("boom"));
+}

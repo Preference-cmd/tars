@@ -22,11 +22,23 @@ use std::time::Duration;
 /// Bounded wait for the stderr reader to reach end of file after a failure.
 const STDERR_WAIT: Duration = Duration::from_secs(1);
 
-/// Why starting an MCP server prevented the session from opening.
-#[derive(Debug)]
-pub(crate) struct McpStartError {
+/// Why starting a required MCP server prevented the session from opening.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpStartError {
     pub(crate) server_id: String,
     pub(crate) reason: String,
+}
+
+impl McpStartError {
+    /// Configured identifier of the server that failed to start.
+    pub fn server_id(&self) -> &str {
+        &self.server_id
+    }
+
+    /// Bounded, redacted reason the server failed to start.
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
 }
 
 impl std::fmt::Display for McpStartError {

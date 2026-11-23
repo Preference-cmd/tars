@@ -330,6 +330,7 @@ fn create_t1_close_reopen_t2_preserve_definition_identity_and_block_ids() {
     let first_report = report(&first);
     assert_eq!(first_report["conversation_id"], id);
     assert_eq!(first_report["status"], "completed");
+    assert_eq!(first_report["kind"], "completed");
     assert_eq!(first_report["text"], "first answer");
     assert_eq!(first_report["saved"], true);
     assert_eq!(first_report["revision"], 2);
@@ -463,9 +464,15 @@ fn real_running_process_excludes_second_process_and_list_reports_active() {
 
 #[test]
 fn failed_model_and_timeout_keep_input_and_confirm_saved_revision() {
-    for (timeout, reply, code, status) in [
-        ("10", Some((401, json!({"error":KEY}))), 1, "failed"),
-        ("1", None, 124, "timed_out"),
+    for (timeout, reply, code, status, kind) in [
+        (
+            "10",
+            Some((401, json!({"error":KEY}))),
+            1,
+            "failed",
+            "model_failed",
+        ),
+        ("1", None, 124, "timed_out", "timed_out"),
     ] {
         let folder = tempfile::tempdir().unwrap();
         let store = folder.path().join("store");
@@ -480,6 +487,7 @@ fn failed_model_and_timeout_keep_input_and_confirm_saved_revision() {
         assert_eq!(output.status.code(), Some(code), "{output:?}");
         let result = report(&output);
         assert_eq!(result["status"], status);
+        assert_eq!(result["kind"], kind);
         assert_eq!(result["saved"], true);
         assert_eq!(result["revision"], 2);
         assert!(result["save_error"].is_null());
@@ -509,6 +517,7 @@ fn ctrl_c_still_saves_materials_and_closes_before_process_exit() {
     assert_eq!(output.status.code(), Some(130), "{output:?}");
     let result = report(&output);
     assert_eq!(result["status"], "cancelled");
+    assert_eq!(result["kind"], "cancelled");
     assert_eq!(result["saved"], true);
     assert_eq!(result["revision"], 2);
     assert_eq!(
@@ -883,4 +892,60 @@ fn create_initial_save_failure_exports_recovery_to_the_selected_directory() {
     assert_eq!(path.parent().unwrap(), recovery);
     let restored = tars_core::material::load(path).unwrap();
     assert_eq!(restored.blocks().len(), 3);
+}
+
+#[test]
+fn session_run_reports_required_mcp_assembly_failure_with_server_and_hint() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = directory.path().join("store");
+    let config = directory.path().join("config.toml");
+    std::fs::write(&config, "version = 1\nrecovery_dir = '.'\n").unwrap();
+    let mcp = directory.path().join("mcp.json");
+    std::fs::write(
+        &mcp,
+        r#"{"mcpServers": {"needed": {"command": "/nonexistent/tars-mcp-needed", "required": true}}}"#,
+    )
+    .unwrap();
+
+    let created = tars_bin()
+        .env("TARS_HOME", directory.path().join("tars-home"))
+        .current_dir(directory.path())
+        .args(["session", "create", "--store"])
+        .arg(&store)
+        .args(["--config"])
+        .arg(&config)
+        .args([
+            "--provider",
+            "openai-chat",
+            "--model",
+            "fixture-model",
+            "--api-key-env",
+            "TARS_TEST_KEY",
+            "--mcp",
+            "needed",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "{created:?}");
+    let id = report(&created)["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let failed = tars_bin()
+        .env("TARS_HOME", directory.path().join("tars-home"))
+        .current_dir(directory.path())
+        .args(["session", "run", &id, "--store"])
+        .arg(&store)
+        .args(["--config"])
+        .arg(&config)
+        .args(["--input", "run against failing required mcp"])
+        .output()
+        .unwrap();
+    assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(stderr.contains("needed"), "{stderr}");
+    assert!(stderr.contains("mcp.json"), "{stderr}");
+    assert!(!stderr.contains("work failed"), "{stderr}");
 }

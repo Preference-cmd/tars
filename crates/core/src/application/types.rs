@@ -401,7 +401,7 @@ pub enum ApplicationError {
     Definition(#[from] crate::definition::DefinitionError),
     /// Runtime resource resolution failed; no model call was made.
     #[error("session assembly failed: {0}")]
-    Assembly(String),
+    Assembly(#[source] crate::assembly::AssemblyError),
     /// No root was configured for persistent operations.
     #[error("persistent session store is not configured")]
     StoreUnavailable,

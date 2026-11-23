@@ -26,4 +26,5 @@ mod tests;
 )]
 pub(crate) use permissions::{McpToolAdapter, McpToolInfo, classify_mcp_tool};
 pub(crate) use runtime::McpRuntime;
+pub use runtime::McpStartError;
 pub use status::{McpServerStatus, McpSkippedTool};

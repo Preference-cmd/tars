@@ -439,7 +439,7 @@ async fn start_mcp(
 ) -> Result<Option<Arc<crate::mcp::McpRuntime>>, ApplicationError> {
     crate::mcp::McpRuntime::start(definition)
         .await
-        .map_err(|error| ApplicationError::Assembly(error.to_string()))
+        .map_err(|error| ApplicationError::Assembly(error.into()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -525,7 +525,7 @@ async fn assembled(
             if let Some(mcp) = mcp {
                 mcp.close().await;
             }
-            Err(ApplicationError::Assembly(error.to_string()))
+            Err(ApplicationError::Assembly(error))
         }
     }
 }

@@ -420,7 +420,9 @@ async fn failed_assembly_releases_slot_and_writer_before_same_prepared_retry() {
     *host.inner.assemble.lock().unwrap() = Some(Arc::new(move |_, _, _| {
         count.fetch_add(1, Ordering::SeqCst);
         Err(ApplicationError::Assembly(
-            "fixture resource unavailable".into(),
+            crate::application::AssemblyError::CommandUnavailable(
+                "fixture resource unavailable".into(),
+            ),
         ))
     }));
     let prepared = PreparedCreate::persistent(definition(), Context::new());
@@ -490,4 +492,50 @@ async fn corrupt_open_releases_slot_without_overwrite_and_retries_after_explicit
     host.close(&reopened.target(), ClosePolicy::Save)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn required_mcp_start_failure_preserves_typed_assembly_and_mcp_source() {
+    use crate::application::{AssemblyError, McpStartError};
+    use crate::definition::McpServerConfig;
+    use std::error::Error as _;
+
+    let mut def = definition();
+    def.mcp_servers = vec![McpServerConfig {
+        id: "required-srv".into(),
+        required: true,
+        command: Some("/nonexistent/tars-mcp-missing-binary".into()),
+        args: Vec::new(),
+        env: Default::default(),
+        url: None,
+        headers: Default::default(),
+        startup_timeout_sec: 5,
+        tool_timeout_sec: 5,
+        approval: Default::default(),
+        enabled_tools: None,
+        disabled_tools: None,
+        tools: Default::default(),
+    }];
+    let host = SessionHost::new(None);
+    let prepared = PreparedCreate::transient(def, Context::new());
+    let err = match host.create(prepared).await {
+        Ok(_) => panic!("expected required MCP failure"),
+        Err(err) => err,
+    };
+    assert!(matches!(
+        err,
+        ApplicationError::Assembly(AssemblyError::McpStart(_))
+    ));
+    let assembly_err = err
+        .source()
+        .expect("ApplicationError::Assembly must expose AssemblyError as source")
+        .downcast_ref::<AssemblyError>()
+        .expect("source must downcast to AssemblyError");
+    let mcp_err = assembly_err
+        .source()
+        .expect("AssemblyError::McpStart must expose McpStartError as source")
+        .downcast_ref::<std::sync::Arc<McpStartError>>()
+        .expect("source must downcast to Arc<McpStartError>");
+    assert_eq!(mcp_err.server_id(), "required-srv");
+    assert!(!mcp_err.reason().is_empty());
 }

@@ -3,6 +3,7 @@ use crate::compact::preparer::{CompactionPreparer, TransientTrimPreparer};
 use crate::compact::{CompactionRuntime, ProtectedInputs};
 use crate::definition::{CredentialRef, DefinitionError, RenderOptions, SessionDefinition};
 use crate::external_tools::ExternalTools;
+use crate::mcp::McpStartError;
 use crate::session::{ConversationId, Session};
 use crate::tools::{ToolResources, WorkspaceTools};
 use crate::workspace::{Workspace, WorkspaceError};
@@ -14,18 +15,33 @@ use causa::providers::{
 use causa::runtime::{RetryPolicy, RetryingGateway, ToolExecutor, ToolExecutorOptions, TurnRunner};
 use std::sync::Arc;
 
+/// Typed session assembly failure before any model call is made.
 #[derive(Clone, Debug, thiserror::Error)]
-pub(crate) enum AssemblyError {
+pub enum AssemblyError {
+    /// Session definition failed validation.
     #[error("invalid session definition: {0}")]
     Definition(#[from] DefinitionError),
+    /// Configured credential environment variable is missing, non-Unicode or blank.
     #[error("credential environment variable is missing, non-Unicode or blank")]
     CredentialUnavailable,
+    /// Workspace root could not be opened or validated.
     #[error("workspace resource unavailable: {0}")]
-    Workspace(Arc<WorkspaceError>),
+    Workspace(#[source] Arc<WorkspaceError>),
+    /// Command tool or its platform sandbox is unavailable.
     #[error("command tool unavailable: {0}")]
     CommandUnavailable(String),
+    /// Search tool could not be bound.
     #[error("search tool unavailable: {0}")]
     SearchUnavailable(String),
+    /// Required MCP server failed to start.
+    #[error("{0}")]
+    McpStart(#[source] Arc<McpStartError>),
+}
+
+impl From<McpStartError> for AssemblyError {
+    fn from(error: McpStartError) -> Self {
+        Self::McpStart(Arc::new(error))
+    }
 }
 
 /// Host resources an assembly uses, plus the store path a command must not read.

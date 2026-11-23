@@ -1,11 +1,12 @@
 use super::command::{failure, output};
 use super::managed_execution;
 use super::options::RunOptions;
-use causa::kernel::ControlError;
-use causa::runtime::{TurnInterruption, TurnResult};
+use causa::runtime::TurnResult;
 use std::io::{self, Write};
 use std::process::ExitCode;
-use tars_core::application::{ClosePolicy, PreparedCreate, SessionHost};
+use tars_core::application::{
+    ApplicationError, ClosePolicy, PreparedCreate, SessionHost, WorkOutcome,
+};
 use tars_core::session::{ModelFailure, WorkResult};
 
 pub(super) fn run(options: RunOptions) -> ExitCode {
@@ -54,7 +55,12 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
         .with_user_rules_path(options.user_rules_path);
     let session = match host.create(prepared).await {
         Ok(session) => session,
-        Err(error) => return (early_failure(options.json, &error.to_string()), false),
+        Err(error) => {
+            return (
+                early_failure(options.json, &application_error_message(&error)),
+                false,
+            );
+        }
     };
     managed_execution::report_workspace_rules_notice(&session);
     managed_execution::report_mcp_status(&session);
@@ -75,11 +81,17 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
         .filter(|diag| !initial_diagnostics.contains(diag))
         .collect();
     managed_execution::report_prelude_diagnostics(&extra_diagnostics);
-    let (status, text, mut error, mut code) = classify(&report.result);
-    let model_error = model_failure(&report.result);
+    let presented = present_outcome(&report.result);
+    let status = presented.status;
+    let kind = presented.kind;
+    let text = presented.text;
+    let mut error = presented.error;
+    let mut code = presented.code;
+    let model_error = presented.model_failure;
+    let detail = presented.detail;
     let save_wait_abandoned = matches!(report.save, managed_execution::SaveWait::Abandoned);
     if save_wait_abandoned {
-        error = Some("stopped waiting for saving after a second interrupt");
+        error = Some("stopped waiting for saving after a second interrupt".to_owned());
         code = 1;
     }
     let mut saved = false;
@@ -90,13 +102,13 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
                 match tars_core::material::save(&path, &context) {
                     Ok(()) => saved = true,
                     Err(_) => {
-                        error = Some("material save failed");
+                        error = Some("material save failed".to_owned());
                         code = 1;
                     }
                 }
             }
             Err(_) => {
-                error = Some("materials unavailable after worker failure");
+                error = Some("materials unavailable after worker failure".to_owned());
                 code = 1;
             }
         }
@@ -106,11 +118,11 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
         .await
         .is_err()
     {
-        error = Some("session close failed");
+        error = Some("session close failed".to_owned());
         code = 1;
     }
     if report.signal_failed {
-        error = Some("signal listener failed");
+        error = Some("signal listener failed".to_owned());
         code = 1;
     }
     let usage = report
@@ -121,7 +133,7 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
         format!(
             "{}\n",
             serde_json::json!({
-                "status": status, "text": text, "conversation_id": report.work.conversation_id.as_str(),
+                "status": status, "kind": kind, "text": text, "conversation_id": report.work.conversation_id.as_str(),
                 "work_id": report.work.turn_id.0, "saved": saved, "error": error,
                 "error_kind": model_error.as_ref().map(|failure| failure.kind),
                 "error_detail": model_error.as_ref().map(|failure| failure.detail.as_str()),
@@ -136,87 +148,84 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
     if let Some(error) = error {
         let _ = writeln!(io::stderr().lock(), "TARS: {error}");
     }
-    report_detail(model_error.as_ref());
+    report_detail(detail.as_deref());
     if output(&rendered) != ExitCode::SUCCESS {
         return (ExitCode::FAILURE, save_wait_abandoned);
     }
     (ExitCode::from(code), save_wait_abandoned)
 }
 
-pub(super) fn classify(result: &WorkResult) -> (&'static str, String, Option<&'static str>, u8) {
-    match result {
-        WorkResult::Run(TurnResult::Completed { final_output }) => {
-            ("completed", final_output.response.text(), None, 0)
-        }
-        WorkResult::StoppedBeforeRun(ControlError::Cancelled)
-        | WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::Cancelled { .. },
-        }) => ("cancelled", String::new(), Some("work cancelled"), 130),
-        WorkResult::StoppedBeforeRun(ControlError::TimedOut)
-        | WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::DeadlineExceeded { .. },
-        }) => (
-            "timed_out",
-            String::new(),
-            Some("work deadline exceeded"),
-            124,
-        ),
-        WorkResult::Run(TurnResult::Interrupted { cause }) if stop_reason(cause).is_some() => {
-            ("failed", String::new(), stop_reason(cause), 1)
-        }
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::ModelCallFailed { error, .. },
-        }) => (
-            "failed",
-            String::new(),
-            Some(ModelFailure::of(error).hint),
-            1,
-        ),
-        _ => ("failed", String::new(), Some("work failed"), 1),
+pub(super) struct CliOutcome {
+    pub(super) status: &'static str,
+    pub(super) kind: &'static str,
+    pub(super) text: String,
+    pub(super) error: Option<String>,
+    pub(super) detail: Option<String>,
+    pub(super) model_failure: Option<ModelFailure>,
+    pub(super) code: u8,
+}
+
+pub(super) fn present_outcome(result: &WorkResult) -> CliOutcome {
+    let outcome = WorkOutcome::of(result);
+    let text = match result {
+        WorkResult::Run(TurnResult::Completed { final_output }) => final_output.response.text(),
+        _ => String::new(),
+    };
+    let (status, code) = match outcome.kind {
+        "completed" => ("completed", 0),
+        "cancelled" => ("cancelled", 130),
+        "timed_out" => ("timed_out", 124),
+        _ => ("failed", 1),
+    };
+    let error = if outcome.kind == "completed" {
+        None
+    } else {
+        Some(format_cli_error(&outcome))
+    };
+    CliOutcome {
+        status,
+        kind: outcome.kind,
+        text,
+        error,
+        detail: outcome.detail,
+        model_failure: outcome.model_failure,
+        code,
     }
 }
 
-/// The failed model call or unrecognized stop behind a result, if any.
-pub(super) fn model_failure(result: &WorkResult) -> Option<ModelFailure> {
-    match result {
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::ModelCallFailed { error, .. },
-        }) => Some(ModelFailure::of(error)),
-        WorkResult::Run(TurnResult::Interrupted {
-            cause: TurnInterruption::ModelStopUnrecognized { output, .. },
-        }) => Some(ModelFailure::unrecognized_stop(output)),
-        _ => None,
+pub(super) fn format_cli_error(outcome: &WorkOutcome) -> String {
+    let mut line = outcome.summary.clone();
+    if let Some(hint) = &outcome.hint {
+        line.push_str("; ");
+        line.push_str(hint);
+    }
+    if outcome.kind == "context_window_exceeded" {
+        line.push_str(" (run `tars session compact`)");
+    }
+    line
+}
+
+pub(super) fn application_error_message(error: &ApplicationError) -> String {
+    match error {
+        ApplicationError::Assembly(asm_error) => {
+            let outcome = WorkOutcome::from_assembly_error(asm_error);
+            let mut message = format_cli_error(&outcome);
+            if let Some(detail) = &outcome.detail {
+                let escaped = tars_core::permission::escape_untrusted_text(detail);
+                message.push_str(&format!(" ({escaped})"));
+            }
+            message
+        }
+        other => other.to_string(),
     }
 }
 
-/// Prints the gateway's own description of a failed model call.
-pub(super) fn report_detail(failure: Option<&ModelFailure>) {
-    if let Some(failure) = failure {
-        let _ = writeln!(io::stderr().lock(), "TARS: detail: {}", failure.detail);
+/// Prints the raw error detail associated with a failed work outcome.
+pub(super) fn report_detail(detail: Option<&str>) {
+    if let Some(detail) = detail {
+        let escaped = tars_core::permission::escape_untrusted_text(detail);
+        let _ = writeln!(io::stderr().lock(), "TARS: detail: {escaped}");
     }
-}
-
-/// A stop the user can act on by changing a limit or submitting new work.
-fn stop_reason(cause: &TurnInterruption) -> Option<&'static str> {
-    Some(match cause {
-        TurnInterruption::ModelMaxTokens { .. } => {
-            "model output reached max_tokens; raise the limit and submit new work"
-        }
-        TurnInterruption::ModelContextWindowExceeded { .. } => {
-            "the conversation no longer fits the model's context window"
-        }
-        TurnInterruption::ModelRefusal { .. } => "the model refused the request",
-        TurnInterruption::ModelStopUnrecognized { .. } => {
-            "the provider stopped for a reason this version does not recognize"
-        }
-        TurnInterruption::MaxModelRounds { .. } => {
-            "model round limit reached; submit new work to continue"
-        }
-        TurnInterruption::MaxToolCalls { .. } => {
-            "tool call limit reached; submit new work to continue"
-        }
-        _ => return None,
-    })
 }
 
 pub(super) fn early_failure(json: bool, error: &str) -> ExitCode {

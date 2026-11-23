@@ -298,20 +298,69 @@ async fn visible_partial_text_is_cleared_after_error_eof_or_cancellation_and_nev
         })
         .await;
         if mode == "cancel" {
-            assert_eq!(app.entries[0].execution, "Cancelled");
+            let expected = tars_core::application::WorkOutcome::of(
+                &tars_core::session::WorkResult::StoppedBeforeRun(
+                    causa::kernel::ControlError::Cancelled,
+                ),
+            );
+            assert_eq!(app.entries[0].execution, expected.summary);
         } else {
-            let (label, notice) = if mode == "error" {
+            struct ErrGateway(causa::kernel::ModelInvokeErrorKind);
+            impl causa::kernel::ModelGateway for ErrGateway {
+                fn invoke<'life0, 'life1, 'life2, 'async_trait>(
+                    &'life0 self,
+                    _: &'life1 causa::kernel::ModelRequest,
+                    _: &'life2 causa::kernel::CallControl,
+                ) -> std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<
+                                    causa::kernel::ModelOutput,
+                                    causa::kernel::ModelInvokeError,
+                                >,
+                            > + Send
+                            + 'async_trait,
+                    >,
+                >
+                where
+                    'life0: 'async_trait,
+                    'life1: 'async_trait,
+                    'life2: 'async_trait,
+                    Self: 'async_trait,
+                {
+                    let kind = self.0.clone();
+                    Box::pin(
+                        async move { Err(causa::kernel::ModelInvokeError::new(kind, "fixture")) },
+                    )
+                }
+            }
+            let (kind, notice) = if mode == "error" {
                 (
-                    "Temporary provider failure",
+                    causa::kernel::ModelInvokeErrorKind::Transient,
                     "provider error (server_error)",
                 )
             } else {
                 (
-                    "Response stream ended early",
+                    causa::kernel::ModelInvokeErrorKind::UnknownOutcome,
                     "stream ended without a provider terminal",
                 )
             };
-            assert!(app.entries[0].execution.starts_with(label));
+            let runner = causa::runtime::TurnRunner::new(
+                Arc::new(ErrGateway(kind)),
+                Arc::new(causa::runtime::ToolExecutor::new(vec![], Default::default()).unwrap()),
+            );
+            let turn = runner
+                .run_streaming(
+                    causa::kernel::TurnId::new(causa::runtime::new_block_id().0.to_string()),
+                    causa::kernel::Context::new(),
+                    causa::runtime::TurnRunOptions::new(causa::kernel::ModelRef::new("fixture")),
+                    causa::kernel::CallControl::new(Default::default(), None),
+                )
+                .await;
+            let expected = tars_core::application::WorkOutcome::of(
+                &tars_core::session::WorkResult::Run(turn.result),
+            );
+            assert_eq!(app.entries[0].execution, expected.summary);
             assert!(
                 app.entries[0].notice.starts_with("Model error: ")
                     && app.entries[0].notice.contains(notice),

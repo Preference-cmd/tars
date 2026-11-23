@@ -113,6 +113,7 @@ fn actual_provider_protocols_receive_selected_model_input_and_credentials() {
         assert!(output.status.success(), "{output:?}");
         let report = report(&output);
         assert_eq!(report["status"], "completed");
+        assert_eq!(report["kind"], "completed");
         assert_eq!(report["text"], "fixture answer");
         assert_eq!(report["saved"], false);
         assert!(!String::from_utf8_lossy(&output.stdout).contains("fixture-secret"));
@@ -185,15 +186,23 @@ fn stdin_save_reload_preserves_materials_and_creates_fresh_work() {
 
 #[test]
 fn provider_failure_and_deadline_save_actual_input_with_distinct_exit_codes() {
-    for (status, body, delay, exit, state) in [
+    for (status, body, delay, exit, state, kind) in [
         (
             401,
             json!({"error":"fixture-secret"}),
             Duration::ZERO,
             1,
             "failed",
+            "model_failed",
         ),
-        (200, chat(), Duration::from_secs(2), 124, "timed_out"),
+        (
+            200,
+            chat(),
+            Duration::from_secs(2),
+            124,
+            "timed_out",
+            "timed_out",
+        ),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("material.json");
@@ -213,6 +222,7 @@ fn provider_failure_and_deadline_save_actual_input_with_distinct_exit_codes() {
         assert_eq!(output.status.code(), Some(exit), "{output:?}");
         let report = report(&output);
         assert_eq!(report["status"], state);
+        assert_eq!(report["kind"], kind);
         assert_eq!(report["saved"], true);
         assert_eq!(tars_core::material::load(&path).unwrap().blocks().len(), 3);
         assert!(!String::from_utf8_lossy(&output.stderr).contains("fixture-secret"));
@@ -314,6 +324,7 @@ fn ctrl_c_cancels_http_work_and_saves_returned_materials() {
     let output = child.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(130), "{output:?}");
     assert_eq!(report(&output)["status"], "cancelled");
+    assert_eq!(report(&output)["kind"], "cancelled");
     assert_eq!(report(&output)["saved"], true);
     assert_eq!(tars_core::material::load(&path).unwrap().blocks().len(), 3);
 }
@@ -528,4 +539,87 @@ fn mcp_servers_that_fail_to_start_are_reported_on_stderr_but_not_in_json() {
     assert!(created.status.success(), "{created:?}");
     assert!(created.stderr.is_empty(), "{created:?}");
     assert_eq!(report(&created)["status"], "created");
+}
+
+#[test]
+fn assembly_failure_and_context_window_exceeded_report_specific_reasons_and_hints() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(
+        &config,
+        "version = 1\nstore = 'store'\nrecovery_dir = '.'\n",
+    )
+    .unwrap();
+    let mcp = directory.path().join("mcp.json");
+    std::fs::write(
+        &mcp,
+        r#"{"mcpServers": {"needed": {"command": "/nonexistent/tars-mcp-needed", "required": true}}}"#,
+    )
+    .unwrap();
+
+    // Required MCP failure in text mode prints server id, reason and troubleshooting hint.
+    let mcp_failed = Command::new(env!("CARGO_BIN_EXE_tars"))
+        .env_remove("TARS_CONFIG")
+        .env("TARS_HOME", directory.path().join("tars-home"))
+        .env("TARS_TEST_KEY", "fixture-secret")
+        .args([
+            "run",
+            "--provider",
+            "openai-chat",
+            "--model",
+            "fixture-model",
+            "--api-key-env",
+            "TARS_TEST_KEY",
+            "--endpoint",
+            "http://127.0.0.1:1/unused",
+            "--config",
+        ])
+        .arg(&config)
+        .args(["--mcp", "needed", "--input", "user question"])
+        .output()
+        .unwrap();
+    assert_eq!(mcp_failed.status.code(), Some(1), "{mcp_failed:?}");
+    let stderr = String::from_utf8_lossy(&mcp_failed.stderr);
+    assert!(stderr.contains("needed"), "{stderr}");
+    assert!(stderr.contains("mcp.json"), "{stderr}");
+    assert!(!stderr.contains("work failed"), "{stderr}");
+
+    // Missing credential prints specific credential hint.
+    let missing_key = command("openai-chat", "http://127.0.0.1:1")
+        .env_remove("TARS_TEST_KEY")
+        .args(["--input", "a"])
+        .output()
+        .unwrap();
+    assert_eq!(missing_key.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&missing_key.stderr);
+    assert!(stderr.contains("API key"), "{stderr}");
+    assert!(!stderr.contains("work failed"), "{stderr}");
+
+    // Context window exceeded reports kind="context_window_exceeded" and `tars session compact`.
+    let (endpoint, requests) = server(
+        200,
+        json!({"content":[{"type":"text","text":"cut"}],"stop_reason":"model_context_window_exceeded"}),
+        Duration::ZERO,
+    );
+    let ctx_output = command("anthropic", &endpoint)
+        .args(["--input", "too long", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(ctx_output.status.code(), Some(1), "{ctx_output:?}");
+    requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    let ctx_report = report(&ctx_output);
+    assert_eq!(ctx_report["status"], "failed");
+    assert_eq!(ctx_report["kind"], "context_window_exceeded");
+    assert!(
+        ctx_report["error"]
+            .as_str()
+            .unwrap()
+            .contains("tars session compact"),
+        "{ctx_report}"
+    );
+    assert!(
+        String::from_utf8_lossy(&ctx_output.stderr).contains("tars session compact"),
+        "{}",
+        String::from_utf8_lossy(&ctx_output.stderr)
+    );
 }

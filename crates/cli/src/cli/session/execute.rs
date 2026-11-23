@@ -1,6 +1,8 @@
 use super::options::SessionCommand;
 use crate::cli::command::{failure, output};
-use crate::cli::execute::{classify, early_failure, model_failure, report_detail};
+use crate::cli::execute::{
+    application_error_message, early_failure, present_outcome, report_detail,
+};
 use crate::cli::managed_execution::{self, RecoveryFile, SaveWait};
 use causa::kernel::Context;
 use causa::runtime::new_block_id;
@@ -284,7 +286,12 @@ async fn run_saved(
         .with_user_rules_path(user_rules_path);
     let session = match host.open(id.into()).await {
         Ok(session) => session,
-        Err(error) => return (early_failure(json_output, &error.to_string()), false),
+        Err(error) => {
+            return (
+                early_failure(json_output, &application_error_message(&error)),
+                false,
+            );
+        }
     };
     if trust_workspace_rules {
         if !session.workspace_rules_trusted()
@@ -328,8 +335,14 @@ async fn run_saved(
         }
     };
     managed_execution::report_prelude_diagnostics(&session.prelude_diagnostics());
-    let (status, text, execution_error, mut code) = classify(&report.result);
-    let model_error = model_failure(&report.result);
+    let presented = present_outcome(&report.result);
+    let status = presented.status;
+    let kind = presented.kind;
+    let text = presented.text;
+    let execution_error = presented.error;
+    let mut code = presented.code;
+    let model_error = presented.model_failure;
+    let detail = presented.detail;
     let abandoned = matches!(report.save, SaveWait::Abandoned);
     let save_result = match &report.save {
         SaveWait::Finished(result) => Some(result),
@@ -385,15 +398,15 @@ async fn run_saved(
         code = 1;
     }
     let error = if abandoned {
-        Some("stopped waiting for saving after a second interrupt")
+        Some("stopped waiting for saving after a second interrupt".to_owned())
     } else if save_error.is_some() {
-        Some("session save failed")
+        Some("session save failed".to_owned())
     } else if close_error.is_some() {
-        Some("session close failed")
+        Some("session close failed".to_owned())
     } else if report.signal_failed {
-        Some("signal listener failed")
+        Some("signal listener failed".to_owned())
     } else {
-        execution_error
+        execution_error.clone()
     };
     if let Some(path) = &recovery_file {
         let _ = writeln!(
@@ -409,15 +422,15 @@ async fn run_saved(
             "TARS: {error}; no recovery file was created"
         );
     }
-    if let Some(error) = error {
+    if let Some(error) = &error {
         let _ = writeln!(io::stderr().lock(), "TARS: {error}");
     }
-    report_detail(model_error.as_ref());
+    report_detail(detail.as_deref());
     let rendered = if json_output {
         format!(
             "{}\n",
             json!({
-                "status":status,"text":text,"conversation_id":report.work.conversation_id.as_str(),
+                "status":status,"kind":kind,"text":text,"conversation_id":report.work.conversation_id.as_str(),
                 "work_id":report.work.turn_id.0,"saved":saved_revision.is_some(),"revision":saved_revision,
                 "error":error,"execution_error":execution_error,"save_error":save_error,
                 "save_wait_abandoned":abandoned,

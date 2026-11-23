@@ -9,11 +9,14 @@ mod entry;
 mod host;
 mod managed;
 mod opening;
+mod outcome;
 mod repair;
 mod saving;
 mod supervisor;
 mod types;
 
+pub use crate::assembly::AssemblyError;
+pub use crate::mcp::McpStartError;
 pub use crate::store::{CommitStage, StoreError};
 pub use crate::usage::{
     CallCounts, CallUsage, LastCall, PurposeUsage, SessionUsage, UsageFigures, UsagePurpose,
@@ -21,6 +24,7 @@ pub use crate::usage::{
 };
 pub use host::SessionHost;
 pub use managed::ManagedSession;
+pub use outcome::WorkOutcome;
 pub use repair::{
     OriginalBatchPreview, OriginalResultPreview, RepairDiagnosis, RepairError, RepairInspection,
     RepairIssue, RepairIssueKind, RepairMode, RepairPlan, RepairSummary, RepairWarningKind,
