@@ -18,6 +18,21 @@ pub(super) struct PreludeCliOptions {
     pub no_skills: bool,
 }
 
+/// Resolve mutually exclusive `--code-execution` / `--no-code-execution` boolean flags.
+pub(super) fn resolve_code_execution(
+    enable: bool,
+    disable: bool,
+) -> Result<Option<bool>, CliError> {
+    match (enable, disable) {
+        (true, true) => Err(CliError::argument(
+            "--code-execution and --no-code-execution are mutually exclusive",
+        )),
+        (true, false) => Ok(Some(true)),
+        (false, true) => Ok(Some(false)),
+        (false, false) => Ok(None),
+    }
+}
+
 /// An invocation failure carrying the exit class promised by `--help`.
 #[derive(Debug)]
 pub(super) struct CliError {
@@ -108,6 +123,7 @@ pub(super) fn definition(
     config: &Config,
     values: &Values<'_>,
     prelude_cli: PreludeCliOptions,
+    code_execution_enabled: Option<bool>,
 ) -> Result<SessionDefinition, CliError> {
     let provider = string(values, "--provider")?
         .map(|value| match value.as_str() {
@@ -270,7 +286,7 @@ pub(super) fn definition(
             })
             .transpose()?,
         prelude,
-        code_execution_enabled: None,
+        code_execution_enabled,
         code_execution: None,
     };
     config

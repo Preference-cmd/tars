@@ -21,6 +21,7 @@ pub(super) fn app(dir: &std::path::Path) -> App {
         profile: None,
         preset: None,
         config_path: None,
+        code_execution_enabled: None,
     });
     app.clock = Clock::manual(std::time::Instant::now());
     app
@@ -79,6 +80,7 @@ pub(super) async fn create_provider(app: &mut App, provider: &str, endpoint: &st
             "ask",
             "",
             "on",
+            "off",
         ]
         .into_iter()
         .map(|v| TextArea::from([v]))

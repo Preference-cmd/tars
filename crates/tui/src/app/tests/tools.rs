@@ -181,6 +181,7 @@ async fn three_real_protocols_read_actual_workspace_and_tool_details_are_on_dema
                 "ask".into(),
                 "".into(),
                 "on".into(),
+                "off".into(),
             ]
             .into_iter()
             .map(|value| TextArea::from([value]))
@@ -290,6 +291,7 @@ async fn save_blocked_after_real_tools_exports_and_retries_original_material_wit
             "ask".into(),
             "".into(),
             "on".into(),
+            "off".into(),
         ]
         .into_iter()
         .map(|value| TextArea::from([value]))
@@ -406,6 +408,7 @@ async fn test_be17_tui_opens_with_zero_artifact_reads_and_tools_expands_on_deman
             "ask".into(),
             "".into(),
             "on".into(),
+            "off".into(),
         ]
         .into_iter()
         .map(|value| TextArea::from([value]))

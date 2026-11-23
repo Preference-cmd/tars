@@ -54,6 +54,7 @@ impl App {
         };
         let model = definition.model.clone();
         let prompt_cache = definition.prompt_cache;
+        let code_execution = definition.code_execution;
         let prepared = match PreparedCreate::prepare_persistent(definition, None) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -63,6 +64,7 @@ impl App {
         };
         let mut entry = Entry::new(prepared.conversation_id().as_str().to_owned(), model);
         entry.prompt_cache = prompt_cache;
+        entry.code_execution = code_execution;
         entry.prepared = Some(prepared);
         self.entries.push(entry);
         self.selected = self.entries.len() - 1;

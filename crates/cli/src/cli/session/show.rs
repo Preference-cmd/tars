@@ -32,6 +32,7 @@ pub(super) async fn show(store: PathBuf, id: String, json_output: bool) -> ExitC
         "created_at_ms": inspection.created_at_ms,
         "updated_at_ms": inspection.updated_at_ms,
         "prompt_cache": definition.prompt_cache,
+        "code_execution": definition.code_execution.is_some(),
         "revision": inspection.revision,
         "saved": true,
         "definition": definition,
@@ -110,6 +111,16 @@ pub(super) async fn show(store: PathBuf, id: String, json_output: bool) -> ExitC
         text.push_str(&format!(
             "Prompt cache: {}\n",
             if definition.prompt_cache { "on" } else { "off" }
+        ));
+        text.push_str(&format!(
+            "Code execution: {}\n",
+            match &definition.code_execution {
+                Some(ce) => format!(
+                    "on (timeout {}s, max_subcalls {}, max_concurrency {})",
+                    ce.timeout_secs, ce.max_subcalls, ce.max_concurrency
+                ),
+                None => "off".to_owned(),
+            }
         ));
         let static_label = if prelude.static_custom.is_some() {
             "configured"

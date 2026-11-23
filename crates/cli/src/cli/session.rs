@@ -39,6 +39,8 @@ Create options:
   --auto-compact      on | off | PERCENT: automatic compaction switch, or a trigger
                       percentage in 10–95 that also enables it (default on, 70)
   --prompt-cache      on | off: prompt caching switch (default on)
+  --code-execution    Enable sandboxed read-only run_code (conflicts with --no-code-execution)
+  --no-code-execution Disable run_code even when enabled in configuration
   --workspace         Root directory for selected workspace tools
   --tools             Comma-separated list_directory,read_file,search_text,write_file,edit_file,run_command (default empty)
   --command-network   Command network: none or open (default none)

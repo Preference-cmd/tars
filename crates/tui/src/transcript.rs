@@ -288,8 +288,7 @@ impl Transcript {
                     tool_artifacts.push(None);
                 }
                 BlockContent::ToolResult(result) => {
-                    let body =
-                        serde_json::to_string_pretty(&result.output.content).unwrap_or_default();
+                    let preview_summary = tool_result_summary(&result.output.content);
                     let preview_json =
                         display(&serde_json::to_string_pretty(result).unwrap_or_default());
                     let spilled = result
@@ -303,7 +302,7 @@ impl Transcript {
                             result.status,
                             result.call_block_id.0,
                             display(&artifact.id),
-                            summary(&body)
+                            preview_summary
                         ));
                         tool_details.push(format!(
                             "Result for {} · {:?} · {}\n{}",
@@ -322,9 +321,7 @@ impl Transcript {
                     } else {
                         text.push_str(&format!(
                             "Tool result · {:?} · {}\n{}\n/tools expands actual material",
-                            result.status,
-                            result.call_block_id.0,
-                            summary(&body)
+                            result.status, result.call_block_id.0, preview_summary
                         ));
                         tool_details.push(format!(
                             "Result for {} · {:?}\n{}",
@@ -350,6 +347,29 @@ impl Transcript {
             history_range: 0..0,
         }
     }
+}
+
+fn tool_result_summary(content: &serde_json::Value) -> String {
+    if let Some(stats) = content.get("stats").and_then(|s| s.as_object())
+        && let (Some(subcalls), Some(max_in_flight), Some(duration_ms)) = (
+            stats.get("subcalls").and_then(|v| v.as_u64()),
+            stats.get("max_in_flight").and_then(|v| v.as_u64()),
+            stats.get("duration_ms").and_then(|v| v.as_u64()),
+        )
+    {
+        let body = if let Some(err) = content.get("error").and_then(|v| v.as_str()) {
+            format!("error: {err}")
+        } else if let Some(out) = content.get("output").and_then(|v| v.as_str()) {
+            out.to_owned()
+        } else {
+            serde_json::to_string_pretty(content).unwrap_or_default()
+        };
+        return summary(&format!(
+            "subcalls={subcalls} · max_in_flight={max_in_flight} · {duration_ms}ms · {body}"
+        ));
+    }
+    let body = serde_json::to_string_pretty(content).unwrap_or_default();
+    summary(&body)
 }
 
 pub(crate) fn display(value: &str) -> String {

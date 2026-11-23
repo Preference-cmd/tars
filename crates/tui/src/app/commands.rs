@@ -136,11 +136,14 @@ impl App {
     fn command(&mut self, index: usize, query: &str) {
         match COMMANDS[index].0 {
             "new" => {
-                self.form = Some(input::Form::new(
-                    self.options.config.clone(),
-                    self.options.profile.clone(),
-                    self.options.preset.as_ref(),
-                ))
+                self.form = Some(
+                    input::Form::new(
+                        self.options.config.clone(),
+                        self.options.profile.clone(),
+                        self.options.preset.as_ref(),
+                    )
+                    .with_code_execution(self.options.code_execution_enabled),
+                )
             }
             "sessions" => {
                 self.list();
@@ -244,6 +247,16 @@ impl App {
                                 "on"
                             } else {
                                 "off"
+                            }
+                        ),
+                        format!(
+                            "Code execution: {}",
+                            match entry.code_execution() {
+                                Some(ce) => format!(
+                                    "on (timeout {}s, max_subcalls {}, max_concurrency {})",
+                                    ce.timeout_secs, ce.max_subcalls, ce.max_concurrency
+                                ),
+                                None => "off".into(),
                             }
                         ),
                         entry.execution.clone(),

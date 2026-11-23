@@ -287,21 +287,24 @@ impl App {
                             if self.entries.iter().any(|e| e.id() == id) {
                                 continue;
                             }
-                            let (model, title, updated_at_ms, prompt_cache) = match &item.record {
-                                Ok(summary) => (
-                                    summary.definition.model.clone(),
-                                    summary.title.clone(),
-                                    summary.updated_at_ms,
-                                    summary.definition.prompt_cache,
-                                ),
-                                Err(_) => ("invalid record".into(), None, 0, true),
-                            };
+                            let (model, title, updated_at_ms, prompt_cache, code_execution) =
+                                match &item.record {
+                                    Ok(summary) => (
+                                        summary.definition.model.clone(),
+                                        summary.title.clone(),
+                                        summary.updated_at_ms,
+                                        summary.definition.prompt_cache,
+                                        summary.definition.code_execution,
+                                    ),
+                                    Err(_) => ("invalid record".into(), None, 0, true, None),
+                                };
                             let mut entry = Entry::new(id, model);
                             entry.title = title;
                             if updated_at_ms > 0 {
                                 entry.updated_at_ms = updated_at_ms;
                             }
                             entry.prompt_cache = prompt_cache;
+                            entry.code_execution = code_execution;
                             entry.notice = match (item.record, item.active) {
                                 (Err(error), _) => format!("Invalid record: {error}"),
                                 (_, Err(error)) => format!("Lock status unavailable: {error}"),
@@ -326,6 +329,7 @@ impl App {
                             entry.title = session.title();
                             entry.updated_at_ms = session.updated_at_ms();
                             entry.prompt_cache = session.definition().prompt_cache;
+                            entry.code_execution = session.definition().code_execution;
                             let report = session.open_report();
                             entry.workspace_rules_trust =
                                 super::state::WorkspaceRulesTrustPrompt::from_report(

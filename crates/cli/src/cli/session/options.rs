@@ -110,6 +110,8 @@ impl SessionCommand {
         let mut values = HashMap::new();
         let mut skill_dirs = Vec::new();
         let mut no_skills = false;
+        let mut code_execution = false;
+        let mut no_code_execution = false;
         let mut stdin = false;
         let mut json = false;
         let mut no_config = false;
@@ -128,6 +130,12 @@ impl SessionCommand {
                     trust_workspace_rules = true;
                 }
                 "--no-skills" if command == "create" && !no_skills => no_skills = true,
+                "--code-execution" if command == "create" && !code_execution => {
+                    code_execution = true;
+                }
+                "--no-code-execution" if command == "create" && !no_code_execution => {
+                    no_code_execution = true;
+                }
                 "--stdin" if command == "run" && !stdin => stdin = true,
                 "--apply" if command == "repair" && !apply => apply = true,
                 "--dry-run" if command == "repair" && !dry_run => dry_run = true,
@@ -243,6 +251,8 @@ impl SessionCommand {
                 })
             }
             "create" => {
+                let code_execution_enabled =
+                    configuration::resolve_code_execution(code_execution, no_code_execution)?;
                 let definition = configuration::definition(
                     &config,
                     &values,
@@ -250,6 +260,7 @@ impl SessionCommand {
                         skill_dirs,
                         no_skills,
                     },
+                    code_execution_enabled,
                 )?;
                 Ok(Self::Create {
                     store,

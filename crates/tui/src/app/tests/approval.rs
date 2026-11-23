@@ -82,6 +82,7 @@ async fn create_test_session(
             mode,
             "",
             "on",
+            "off",
         ]
         .into_iter()
         .map(|v| TextArea::from([v]))
@@ -1057,7 +1058,7 @@ fn wm17_new_session_form_permission_mode_and_write_limits() {
         None,
         Some(&preset),
     );
-    assert_eq!(form.fields.len(), 10);
+    assert_eq!(form.fields.len(), 11);
     assert_eq!(form.fields[7].lines().join(""), "accept-edits");
     assert_eq!(form.write_limits.as_ref().unwrap().max_write_bytes, 4096);
 

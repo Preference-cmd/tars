@@ -57,6 +57,26 @@ max_tool_calls = 64
 
 `prompt_cache` is a boolean setting that controls whether the session requests prefix prompt caching from supported providers (e.g., Anthropic ephemeral cache control breakpoints). It defaults to `true`. The command-line counterpart is `--prompt-cache on|off` on `run` and `session create` (explicit command-line option overrides profile setting, which overrides the default `true`). The TUI new-session form also provides a visible "Prompt cache (on | off)" field. `prompt_cache` is frozen in the `SessionDefinition` at session creation and cannot be changed at runtime; reopening a session always restores the saved value. When `prompt_cache` is enabled, turn runs and compaction brief requests ask for `CacheDirective::StablePrefix`: Anthropic requests gain `cache_control` breakpoints, while OpenAI Chat and Responses requests stay byte-for-byte the same, since those servers cache on their own. When disabled, no cache directive is set and every request is as it was without the switch.
 
+## Code execution
+
+`run_code` (read-only ES2020 QuickJS programmatic tool calling) is opt-in and disabled by default (`enabled = false`). Top-level `[code_execution]` sets global defaults, and `[profiles.<name>.code_execution]` overrides fields per profile; CLI `tars run`, `tars session create`, and `tars-tui` accept `--code-execution` and `--no-code-execution` (mutually exclusive), and the TUI `/new` form includes a "Code execution (on | off)" field (`tars session show` and TUI `/status` report the frozen state). Reopening a saved session always keeps the saved `SessionDefinition.code_execution` (existing records without the field deserialize as `None`).
+
+```toml
+[code_execution]
+# enabled = false
+# timeout_secs = 30              # 1..=120
+# memory_limit_bytes = 33554432  # 4 MiB..=64 MiB (default 32 MiB)
+# stack_limit_bytes = 524288     # 64 KiB..=1 MiB (default 512 KiB)
+# max_subcalls = 256             # 1..=512
+# max_concurrency = 8            # 1..=16
+# max_output_bytes = 32768       # 1024..=64 KiB (default 32 KiB)
+
+[profiles.work.code_execution]
+# enabled = true
+```
+
+All fields are validated against their safety floors and hard ceilings at config load time even when `enabled = false`, and unknown keys are rejected. Detailed sandbox boundaries, MCP progressive discovery (`tools.list()`, `tools.describe()`, `tools.call()`), and processor layering are in [Workspace tools](workspace-tools.md#code-execution-run_code).
+
 `write_limits` may only be lowered within the supported limits (defaults are in [Workspace tools](workspace-tools.md#limits)); the fields are `max_edit_file_bytes`, `max_write_bytes` and `max_edit_segments`. There are no command-line arguments for them, and omitted fields use the defaults. Neither `tool_limits` nor `write_limits` can raise a hard limit.
 
 `render_options` is a table that sets the selected protocol's rendering options in Causa. For example, `openai-chat` writes the output limit as `max_completion_tokens` by default; when a service only accepts `max_tokens`, write `max_tokens_field = "max_tokens"` and the request then contains only `max_tokens`. The available keys and values follow the rendering option type of that protocol in the Causa version in use (`ChatRenderOptions`, `ResponsesRenderOptions`, `AnthropicRenderOptions`); TARS lists no separate catalog and does not choose per service. Omitted keys use Causa's defaults. Unknown keys, invalid values and keys that do not belong to the selected protocol fail when the configuration is loaded or the session is created, without sending a request, and the error message does not show the table contents. So when switching protocols with `--provider`, the preset's table must also be valid for the new protocol. The command-line argument is `--render-options`, whose value is a JSON object that wholly replaces the preset's table when given. A session record saves the keys and values that were written, and reads this as an empty table when absent.

@@ -126,6 +126,7 @@ async fn create_command_session(
             mode,
             "",
             "on",
+            "off",
         ]
         .into_iter()
         .map(|value| TextArea::from([value]))

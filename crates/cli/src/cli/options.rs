@@ -21,6 +21,8 @@ impl RunOptions {
         let mut values = HashMap::new();
         let mut skill_dirs = Vec::new();
         let mut no_skills = false;
+        let mut code_execution = false;
+        let mut no_code_execution = false;
         let mut stdin = false;
         let mut json = false;
         let mut no_config = false;
@@ -32,6 +34,8 @@ impl RunOptions {
                 "--json" if !json => json = true,
                 "--no-config" if !no_config => no_config = true,
                 "--no-skills" if !no_skills => no_skills = true,
+                "--code-execution" if !code_execution => code_execution = true,
+                "--no-code-execution" if !no_code_execution => no_code_execution = true,
                 "--skill-dir" => {
                     let value = args.next().ok_or("option needs a value")?;
                     if value.is_empty() {
@@ -88,6 +92,8 @@ impl RunOptions {
                 })
                 .transpose()
         };
+        let code_execution_enabled =
+            configuration::resolve_code_execution(code_execution, no_code_execution)?;
         let config = configuration::load(&values, no_config)?;
         let external_tools = ExternalTools::resolve(&config);
         let user_rules_path = config.config_dir().map(|dir| dir.join("permissions.toml"));
@@ -98,6 +104,7 @@ impl RunOptions {
                 skill_dirs,
                 no_skills,
             },
+            code_execution_enabled,
         )?;
         // This entry performs exactly one transient work; it does not retain an
         // interactive work history even when the preset has a larger capacity.

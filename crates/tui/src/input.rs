@@ -64,7 +64,7 @@ pub(crate) struct Form {
     /// never edits them, and creation resolves them through the preset.
     pub command: Option<CommandSettings>,
 }
-pub(crate) const FIELD_NAMES: [&str; 10] = [
+pub(crate) const FIELD_NAMES: [&str; 11] = [
     "Provider",
     "Model",
     "Endpoint (optional, full URL)",
@@ -75,6 +75,7 @@ pub(crate) const FIELD_NAMES: [&str; 10] = [
     "Permission mode (read-only | ask | accept-edits | full-access)",
     "MCP servers (comma-separated ids from mcp.json)",
     "Prompt cache (on | off)",
+    "Code execution (on | off)",
 ];
 
 impl Default for Form {
@@ -91,6 +92,7 @@ impl Default for Form {
                 "ask",
                 "",
                 "on",
+                "off",
             ]
             .into_iter()
             .map(|s| TextArea::from([s]))
@@ -177,6 +179,12 @@ impl Form {
                 .collect::<Vec<_>>()
                 .join(","),
             if preset.prompt_cache { "on" } else { "off" }.to_owned(),
+            if preset.code_execution.is_some() {
+                "on"
+            } else {
+                "off"
+            }
+            .to_owned(),
         ];
         form.fields = values
             .into_iter()
@@ -198,6 +206,14 @@ impl Form {
         );
         form
     }
+
+    pub(crate) fn with_code_execution(mut self, enabled: Option<bool>) -> Self {
+        if let Some(enabled) = enabled {
+            self.fields[10] = TextArea::from([if enabled { "on" } else { "off" }]);
+        }
+        self
+    }
+
     pub fn definition(&self) -> Result<SessionDefinition, String> {
         let values: Vec<_> = self.fields.iter().map(|f| f.lines().join("")).collect();
         let provider = match values[0].as_str() {
@@ -219,6 +235,11 @@ impl Form {
             "on" => true,
             "off" => false,
             _ => return Err("Prompt cache: on | off".into()),
+        };
+        let code_execution_enabled = match values[10].trim() {
+            "on" => true,
+            "off" => false,
+            _ => return Err("Code execution: on | off".into()),
         };
         // Resolve explicit form values through the same core path as CLI input.
         // Profile limits were frozen when the selected startup preset was loaded.
@@ -252,7 +273,7 @@ impl Form {
                     permission_mode: Some(permission_mode),
                     mcp: Some(parse_mcp(&values[8]).map_err(|e| e.to_string())?),
                     prelude: Default::default(),
-                    code_execution_enabled: None,
+                    code_execution_enabled: Some(code_execution_enabled),
                     code_execution: None,
                 },
             )

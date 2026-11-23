@@ -11,6 +11,7 @@ pub(crate) struct Options {
     pub profile: Option<String>,
     pub preset: Option<SessionDefinition>,
     pub config_path: Option<PathBuf>,
+    pub code_execution_enabled: Option<bool>,
 }
 
 pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options>, String> {
@@ -20,11 +21,13 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
     let mut config_path = None;
     let mut profile = None;
     let mut no_config = false;
+    let mut code_execution = false;
+    let mut no_code_execution = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "TARS TUI prototype\n\nUsage: tars-tui [--config FILE | --no-config] [--profile NAME]\n                [--store DIR] [--recovery-dir DIR]\n\nStore is required via a flag or shared TOML configuration. Explicit directories override configuration.\n/ or F1 commands  /mode change mode  Shift-Tab cycle mode\nEnter / Ctrl-S submit  Ctrl-J newline  PageUp/Down scroll\nF2 new  F3 open  F4 next session  F5 refresh  F6 tool materials\nEsc / Ctrl-C cancel  Ctrl-W close  Ctrl-Q quit  Ctrl-R retry save\nCtrl-E export  Ctrl-D discard (confirmation)\nConfirmation panel: Enter / y allow  n deny (optional reason)  Esc cancel turn\n\nNew-session forms start from the selected model preset. Credentials use environment variable references. Workspace/tool selection and MCP server ids use the same core configuration resolver.\nForm changes affect only the new session; they do not rewrite global configuration.\nRecovery exports never overwrite an existing file. GUI and installation are not included."
+                    "TARS TUI prototype\n\nUsage: tars-tui [--config FILE | --no-config] [--profile NAME]\n                [--store DIR] [--recovery-dir DIR]\n                [--code-execution | --no-code-execution]\n\nStore is required via a flag or shared TOML configuration. Explicit directories override configuration.\n/ or F1 commands  /mode change mode  Shift-Tab cycle mode\nEnter / Ctrl-S submit  Ctrl-J newline  PageUp/Down scroll\nF2 new  F3 open  F4 next session  F5 refresh  F6 tool materials\nEsc / Ctrl-C cancel  Ctrl-W close  Ctrl-Q quit  Ctrl-R retry save\nCtrl-E export  Ctrl-D discard (confirmation)\nConfirmation panel: Enter / y allow  n deny (optional reason)  Esc cancel turn\n\nNew-session forms start from the selected model preset. Credentials use environment variable references. Workspace/tool selection and MCP server ids use the same core configuration resolver.\nForm changes affect only the new session; they do not rewrite global configuration.\nRecovery exports never overwrite an existing file. GUI and installation are not included."
                 );
                 return Ok(None);
             }
@@ -33,6 +36,10 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
                 return Ok(None);
             }
             "--no-config" if !no_config => no_config = true,
+            "--code-execution" if !code_execution => code_execution = true,
+            "--no-code-execution" if !no_code_execution => no_code_execution = true,
+            "--code-execution" => return Err("--code-execution specified twice".into()),
+            "--no-code-execution" => return Err("--no-code-execution specified twice".into()),
             "--store" | "--recovery-dir" | "--config" | "--profile" => {
                 let value = args
                     .next()
@@ -59,6 +66,14 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
             _ => return Err(format!("unknown argument: {arg}; use --help")),
         }
     }
+    let code_execution_enabled = match (code_execution, no_code_execution) {
+        (true, true) => {
+            return Err("--code-execution and --no-code-execution are mutually exclusive".into());
+        }
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        (false, false) => None,
+    };
     let source = match (config_path, no_config) {
         (Some(_), true) => return Err("--config and --no-config are mutually exclusive".into()),
         (Some(path), false) => ConfigSource::File(path),
@@ -66,9 +81,25 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         (None, false) => ConfigSource::Discover,
     };
     let config = Arc::new(Config::load(source).map_err(|e| e.to_string())?);
-    let preset = config
-        .preset(profile.as_deref())
-        .map_err(|e| e.to_string())?;
+    let preset = match (
+        config
+            .preset(profile.as_deref())
+            .map_err(|e| e.to_string())?,
+        code_execution_enabled,
+    ) {
+        (Some(_), Some(_)) => Some(
+            config
+                .definition(
+                    profile.as_deref(),
+                    tars_core::config::DefinitionOverrides {
+                        code_execution_enabled,
+                        ..Default::default()
+                    },
+                )
+                .map_err(|e| e.to_string())?,
+        ),
+        (preset, _) => preset,
+    };
     let config_path = config.source().map(PathBuf::from);
     Ok(Some(Options {
         store: store
@@ -81,5 +112,6 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         profile,
         preset,
         config_path,
+        code_execution_enabled,
     }))
 }

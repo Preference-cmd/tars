@@ -36,6 +36,7 @@ fn create_form(endpoint: &str, workspace: &std::path::Path, tools: &str) -> Form
             "ask",
             "",
             "on",
+            "off",
         ]
         .into_iter()
         .map(|v| TextArea::from([v]))

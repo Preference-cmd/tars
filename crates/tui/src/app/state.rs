@@ -223,6 +223,7 @@ pub(crate) struct Entry {
     pub model: String,
     pub updated_at_ms: u64,
     pub prompt_cache: bool,
+    pub code_execution: Option<tars_core::definition::CodeExecutionSettings>,
     pub session: Option<ManagedSession>,
     pub(super) prepared: Option<PreparedCreate>,
     pub busy: Option<&'static str>,
@@ -271,6 +272,7 @@ impl Entry {
             model,
             updated_at_ms,
             prompt_cache: true,
+            code_execution: None,
             session: None,
             prepared: None,
             busy: None,
@@ -331,6 +333,12 @@ impl Entry {
             .as_ref()
             .map(|s| s.definition().prompt_cache)
             .unwrap_or(self.prompt_cache)
+    }
+    pub fn code_execution(&self) -> Option<tars_core::definition::CodeExecutionSettings> {
+        self.session
+            .as_ref()
+            .and_then(|s| s.definition().code_execution)
+            .or(self.code_execution)
     }
     pub fn has_draft(&self) -> bool {
         self.editor.lines().iter().any(|line| !line.is_empty())

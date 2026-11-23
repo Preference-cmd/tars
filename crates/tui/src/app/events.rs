@@ -435,11 +435,14 @@ impl App {
         } else {
             match key.code {
                 KeyCode::F(2) if key.kind == KeyEventKind::Press => {
-                    self.form = Some(input::Form::new(
-                        self.options.config.clone(),
-                        self.options.profile.clone(),
-                        self.options.preset.as_ref(),
-                    ))
+                    self.form = Some(
+                        input::Form::new(
+                            self.options.config.clone(),
+                            self.options.profile.clone(),
+                            self.options.preset.as_ref(),
+                        )
+                        .with_code_execution(self.options.code_execution_enabled),
+                    )
                 }
                 KeyCode::F(3) if key.kind == KeyEventKind::Press => self.open(),
                 KeyCode::F(4) if key.kind == KeyEventKind::Press => {
