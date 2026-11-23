@@ -3,9 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use causa::extension::McpToolAnnotations;
 use causa::kernel::{
     BlockContent, Context, ProcessorContext, ProcessorError, ToolBatch, ToolBatchProcessor,
-    ToolHints, ToolResultStatus,
+    ToolResultStatus,
 };
 use causa::runtime::{TurnInterruption, TurnResult};
 use serde_json::json;
@@ -1063,7 +1064,7 @@ async fn runtime_mode_switch_wm17() {
 struct VerifyingProcessor {
     seen_mode: Mutex<Option<PermissionMode>>,
     seen_revision: Mutex<Option<u64>>,
-    seen_hints: Mutex<Vec<(String, ToolHints)>>,
+    seen_metadata: Mutex<Vec<(String, bool, bool, bool)>>,
 }
 
 #[async_trait]
@@ -1077,13 +1078,19 @@ impl ToolBatchProcessor for VerifyingProcessor {
             *self.seen_mode.lock().unwrap() = Some(view.mode());
             *self.seen_revision.lock().unwrap() = Some(view.revision());
         }
-        let mut hints = Vec::new();
+        let mut records = Vec::new();
         for entry in batch.calls() {
             let tool_name = entry.call().input.tool_name.clone();
-            let hint = ctx.hints(&tool_name).cloned().unwrap_or_default();
-            hints.push((tool_name, hint));
+            let has_managed = ctx
+                .tool_metadata::<Arc<dyn crate::tools::ManagedTool>>(&tool_name)
+                .is_some();
+            let has_mcp_annotations = ctx
+                .tool_metadata::<McpToolAnnotations>(&tool_name)
+                .is_some();
+            let has_attachments = !entry.call().attachments().is_empty();
+            records.push((tool_name, has_managed, has_mcp_annotations, has_attachments));
         }
-        *self.seen_hints.lock().unwrap() = hints;
+        *self.seen_metadata.lock().unwrap() = records;
         Ok(())
     }
 }
@@ -1145,7 +1152,7 @@ async fn processor_chain_order_and_hints_wm17() {
     let verifier = Arc::new(VerifyingProcessor {
         seen_mode: Mutex::new(None),
         seen_revision: Mutex::new(None),
-        seen_hints: Mutex::new(Vec::new()),
+        seen_metadata: Mutex::new(Vec::new()),
     });
 
     session.add_test_before_processor(verifier.clone());
@@ -1174,21 +1181,26 @@ async fn processor_chain_order_and_hints_wm17() {
         assert_eq!(decision.revision, 2); // equal to switch count
     }
 
-    let hints = verifier.seen_hints.lock().unwrap().clone();
-    assert_eq!(hints.len(), 5);
+    let metadata = verifier.seen_metadata.lock().unwrap().clone();
+    assert_eq!(metadata.len(), 5);
 
-    for (expected_name, hint) in [
-        ("read_file", &hints[0]),
-        ("list_directory", &hints[1]),
-        ("search_text", &hints[2]),
-        ("write_file", &hints[3]),
-        ("edit_file", &hints[4]),
+    for (expected_name, expected_attachments, record) in [
+        ("read_file", false, &metadata[0]),
+        ("list_directory", false, &metadata[1]),
+        ("search_text", false, &metadata[2]),
+        ("write_file", true, &metadata[3]),
+        ("edit_file", true, &metadata[4]),
     ] {
-        assert_eq!(hint.0, expected_name);
-        assert_eq!(hint.1.read_only, None);
-        assert_eq!(hint.1.destructive, None);
-        assert_eq!(hint.1.idempotent, None);
-        assert_eq!(hint.1.open_world, None);
+        assert_eq!(record.0, expected_name);
+        assert!(record.1, "{expected_name} must expose ManagedTool metadata");
+        assert!(
+            !record.2,
+            "{expected_name} must not carry MCP tool annotations"
+        );
+        assert_eq!(
+            record.3, expected_attachments,
+            "{expected_name} call attachment presence mismatch"
+        );
     }
 
     host.close(&session.target(), ClosePolicy::DiscardLocal)
@@ -1316,7 +1328,7 @@ async fn turn_isolation_prepared_write_cannot_be_executed_in_subsequent_turn() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unprepared_preview_in_ask_mode_records_unprepared_decision() {
-    use crate::tools::{ManagedTool, ToolCallIntent, ToolCatalog};
+    use crate::tools::{ManagedTool, ToolCallIntent};
     use causa::kernel::{
         CallControl, InvocationId, RoundId, ToolCallContext, ToolCallPayload, ToolDefinition,
         ToolDescription, TurnId,
@@ -1364,23 +1376,19 @@ async fn unprepared_preview_in_ask_mode_records_unprepared_decision() {
 
         let perm_hub = Arc::new(crate::permission::PermissionHub::new(PermissionMode::Ask));
         let _rx = perm_hub.connect_approvals();
-        let mut catalog = ToolCatalog::new();
-        catalog.register("mock_tool", Arc::new(NoPreviewTool(class)));
-        let processor = crate::permission::ToolPolicyProcessor::new(
-            work,
-            reporter.clone(),
-            perm_hub,
-            Arc::new(catalog),
-        );
+        let processor =
+            crate::permission::ToolPolicyProcessor::new(work, reporter.clone(), perm_hub);
 
         let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
         let declaration_order = [call.call_block_id];
         let control = CallControl::new(CancellationToken::new(), None);
+        let managed: Arc<dyn ManagedTool> = Arc::new(NoPreviewTool(class));
         let bound_tools = [ToolDescription::new(ToolDefinition::new(
             "mock_tool",
             "mock",
             json!({"type": "object"}),
-        ))];
+        ))
+        .with_meta(managed)];
         let ctx = ProcessorContext::new(&turn_id, RoundId(0), &declaration_order, &control)
             .with_tools(&bound_tools);
 
@@ -2243,11 +2251,6 @@ async fn wm17_mode_switch_between_gate_and_confirmation() {
         "the current permission mode 'read-only' does not allow this write"
     );
     assert!(!root.path().join("between.txt").exists());
-    assert_eq!(
-        session.workspace_tools().unwrap().staged_counts(),
-        (0, 0),
-        "mode switch to read-only after prepare must not leak staged writes"
-    );
 }
 
 fn command_definition(endpoint: &str, root: &Path) -> SessionDefinition {
@@ -3540,7 +3543,7 @@ async fn rc03_orchestrator_evaluates_modes_rules_and_routes_consistently() {
         CommandRule, CommandRuleSet, RuleDecision, RuleScope, RuleSource,
     };
     use crate::permission::{PermissionHub, ToolPolicyProcessor};
-    use crate::tools::{CommandRuntime, ToolCatalog, ToolResources, WorkspaceTools};
+    use crate::tools::{CommandRuntime, ToolResources, WorkspaceTools};
     use crate::workspace::Workspace;
     use causa::kernel::{
         CallControl, InvocationId, ProcessorContext, RoundId, ToolBatch, ToolCallContext,
@@ -3624,14 +3627,6 @@ async fn rc03_orchestrator_evaluates_modes_rules_and_routes_consistently() {
         CommandSettings::default(),
         Some(cmd_runtime),
     );
-    let bound_desc = [ToolDescription::new(
-        crate::tools::workspace_tool_definition(
-            WorkspaceTool::RunCommand,
-            ws_tools.limits(),
-            ws_tools.write_limits(),
-            ws_tools.command_settings(),
-        ),
-    )];
 
     for mode in [
         PermissionMode::ReadOnly,
@@ -3738,23 +3733,21 @@ async fn rc03_orchestrator_evaluates_modes_rules_and_routes_consistently() {
             let call = make_call(outside, command);
             let decl = [call.call_block_id];
             let control = CallControl::new(CancellationToken::new(), None);
-            let ctx = ProcessorContext::new(&turn_id, RoundId(0), &decl, &control)
-                .with_tools(&bound_desc);
-
             let reporter = crate::session::ToolReporter::new(
                 work.clone(),
                 tokio::sync::broadcast::channel(16).0,
             );
             let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
             reporter.batch_ready(&inv, &batch);
-            let mut catalog = ToolCatalog::new();
-            let (tool, managed) = ws_tools
-                .bind_managed_for_test(&[WorkspaceTool::RunCommand], reporter.clone())
+            let tool = ws_tools
+                .bind_for_test(&[WorkspaceTool::RunCommand], reporter.clone())
                 .pop()
                 .unwrap();
-            catalog.register("run_command", managed);
-            let processor =
-                ToolPolicyProcessor::new(work, reporter.clone(), perm_hub, Arc::new(catalog));
+            let bound_desc =
+                [ToolDescription::new(tool.definition()).with_metadata(tool.metadata())];
+            let ctx = ProcessorContext::new(&turn_id, RoundId(0), &decl, &control)
+                .with_tools(&bound_desc);
+            let processor = ToolPolicyProcessor::new(work, reporter.clone(), perm_hub);
             processor.process(&mut batch, &ctx).await.unwrap();
 
             let proc_decision = reporter.snapshot().calls[0]
@@ -3776,7 +3769,9 @@ async fn rc03_orchestrator_evaluates_modes_rules_and_routes_consistently() {
                     | PermissionDecisionKind::ModeRefused
                     | PermissionDecisionKind::NoConfirmationRoute
             ) {
-                let (_, proc_res) = batch.results()[0].result().unwrap();
+                let resolved_entry = &batch.results()[0];
+                assert!(resolved_entry.call().attachments().is_empty());
+                let (_, proc_res) = resolved_entry.result().unwrap();
                 assert_eq!(proc_res.status, ToolResultStatus::Rejected);
                 if expected_kind == PermissionDecisionKind::RuleDenied {
                     let err = proc_res.output.content["error"].as_str().unwrap();
@@ -3784,12 +3779,11 @@ async fn rc03_orchestrator_evaluates_modes_rules_and_routes_consistently() {
                     assert!(!err.contains("cargo"));
                     assert!(!err.contains("git"));
                 }
-                assert_eq!(ws_tools.staged_counts(), (0, 0));
             } else {
                 assert!(batch.results().is_empty());
-                assert_eq!(ws_tools.staged_counts(), (0, 1));
-                let out = tool.execute(&call, &control, None).await;
-                assert_eq!(ws_tools.staged_counts(), (0, 0));
+                let pending_call = batch.calls()[0].call();
+                assert!(!pending_call.attachments().is_empty());
+                let out = tool.execute(pending_call, &control, None).await;
                 assert_ne!(
                     out.output.content["error"],
                     "outside-sandbox execution was not granted"
@@ -3827,20 +3821,18 @@ async fn rc03_orchestrator_evaluates_modes_rules_and_routes_consistently() {
         let call = make_call(false, "curl https://example.com");
         let decl = [call.call_block_id];
         let control = CallControl::new(CancellationToken::new(), None);
-        let ctx =
-            ProcessorContext::new(&turn_id, RoundId(0), &decl, &control).with_tools(&bound_desc);
-
         let reporter =
             crate::session::ToolReporter::new(work.clone(), tokio::sync::broadcast::channel(16).0);
         let mut batch = ToolBatch::new(vec![call.clone()]).unwrap();
         reporter.batch_ready(&inv, &batch);
-        let mut catalog = ToolCatalog::new();
-        let (tool, managed) = ws_tools
-            .bind_managed_for_test(&[WorkspaceTool::RunCommand], reporter.clone())
+        let tool = ws_tools
+            .bind_for_test(&[WorkspaceTool::RunCommand], reporter.clone())
             .pop()
             .unwrap();
-        catalog.register("run_command", managed);
-        ToolPolicyProcessor::new(work, reporter.clone(), perm_hub.clone(), Arc::new(catalog))
+        let bound_desc = [ToolDescription::new(tool.definition()).with_metadata(tool.metadata())];
+        let ctx =
+            ProcessorContext::new(&turn_id, RoundId(0), &decl, &control).with_tools(&bound_desc);
+        ToolPolicyProcessor::new(work, reporter.clone(), perm_hub.clone())
             .process(&mut batch, &ctx)
             .await
             .unwrap();
@@ -3866,11 +3858,11 @@ async fn rc03_orchestrator_evaluates_modes_rules_and_routes_consistently() {
             })
         );
         if approved {
-            assert_eq!(ws_tools.staged_counts(), (0, 1));
-            let _ = tool.execute(&call, &control, None).await;
-            assert_eq!(ws_tools.staged_counts(), (0, 0));
+            let pending_call = batch.calls()[0].call();
+            assert!(!pending_call.attachments().is_empty());
+            let _ = tool.execute(pending_call, &control, None).await;
         } else {
-            assert_eq!(ws_tools.staged_counts(), (0, 0));
+            assert!(batch.results()[0].call().attachments().is_empty());
         }
     }
 }
@@ -4149,37 +4141,41 @@ fn tl05_mcp_trust_boundary_enforces_frozen_approval_over_hints() {
     use crate::permission::ToolPermissionClass;
     use crate::tools::{ApprovalPreview, ManagedTool, PreparedCall};
 
-    let mut read_only_hint = ToolHints::default();
-    read_only_hint.read_only = Some(true);
-    read_only_hint.destructive = Some(false);
+    let mut read_only_ann = McpToolAnnotations::default();
+    read_only_ann.read_only = Some(true);
+    read_only_ann.destructive = Some(false);
     // Frozen `Prompt` (`ask`) must still require confirmation even when server claims readOnlyHint: true.
     assert_eq!(
-        classify_mcp_tool(McpApproval::Prompt, &read_only_hint),
+        classify_mcp_tool(McpApproval::Prompt, Some(&read_only_ann)),
         ToolPermissionClass::McpPrompt
     );
-    // Unannotated tool under `Writes` defaults to `McpPrompt` (effectful).
+    // Unannotated tool (absent annotations or empty annotations) under `Writes` defaults to `McpPrompt` (effectful).
     assert_eq!(
-        classify_mcp_tool(McpApproval::Writes, &ToolHints::default()),
+        classify_mcp_tool(McpApproval::Writes, None),
+        ToolPermissionClass::McpPrompt
+    );
+    assert_eq!(
+        classify_mcp_tool(McpApproval::Writes, Some(&McpToolAnnotations::default())),
         ToolPermissionClass::McpPrompt
     );
     // `Writes` + `readOnlyHint: true` + `destructiveHint: true` remains `McpPrompt`.
-    let mut destructive_hint = ToolHints::default();
-    destructive_hint.read_only = Some(true);
-    destructive_hint.destructive = Some(true);
+    let mut destructive_ann = McpToolAnnotations::default();
+    destructive_ann.read_only = Some(true);
+    destructive_ann.destructive = Some(true);
     assert_eq!(
-        classify_mcp_tool(McpApproval::Writes, &destructive_hint),
+        classify_mcp_tool(McpApproval::Writes, Some(&destructive_ann)),
         ToolPermissionClass::McpPrompt
     );
     // Only `Writes` + `readOnlyHint: true` without `destructiveHint: true` relaxes to `KnownReadOnly`.
     assert_eq!(
-        classify_mcp_tool(McpApproval::Writes, &read_only_hint),
+        classify_mcp_tool(McpApproval::Writes, Some(&read_only_ann)),
         ToolPermissionClass::KnownReadOnly
     );
 
     let adapter = McpToolAdapter::new(McpToolInfo {
         server_id: "srv".into(),
         raw_tool_name: "lookup".into(),
-        category: classify_mcp_tool(McpApproval::Prompt, &read_only_hint),
+        category: classify_mcp_tool(McpApproval::Prompt, Some(&read_only_ann)),
     });
     assert_eq!(
         adapter.classify(&json!({"q": "x"})).class,
@@ -4237,7 +4233,6 @@ async fn tl06_run_command_decodes_and_checks_exactly_once_per_execution() {
     let ws_tools = session.workspace_tools().unwrap();
     assert_eq!(ws_tools.command_decode_count(), 1);
     assert_eq!(ws_tools.command().unwrap().check_count(), 1);
-    assert_eq!(ws_tools.staged_counts(), (0, 0));
 
     host.close(&session.target(), ClosePolicy::DiscardLocal)
         .await
@@ -4311,7 +4306,6 @@ async fn tl07_t5_staging_clears_across_rejections_cancels_and_execution() {
         }
 
         let ws_tools = session.workspace_tools().unwrap();
-        assert_eq!(ws_tools.staged_counts(), (0, 0), "case={case}");
         if case == "allowed" {
             assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
             assert!(root.path().join("t5.txt").exists());
@@ -4399,7 +4393,6 @@ async fn tl07_t5_staging_clears_across_rejections_cancels_and_execution() {
         session.wait_saved().await.unwrap();
 
         let ws_tools = session.workspace_tools().unwrap();
-        assert_eq!(ws_tools.staged_counts(), (0, 0));
         assert!(!root.path().join("first.txt").exists());
         assert!(!root.path().join("second.txt").exists());
         if cancel_on_first {
@@ -4455,7 +4448,6 @@ async fn tl07_t5_rule_denied_command_leaves_staging_empty_and_skips_prepare() {
         PermissionDecisionKind::RuleDenied
     );
     let ws_tools = session.workspace_tools().unwrap();
-    assert_eq!(ws_tools.staged_counts(), (0, 0));
     assert_eq!(ws_tools.command_decode_count(), 0);
     assert_eq!(ws_tools.command().unwrap().check_count(), 0);
 
@@ -4522,9 +4514,88 @@ async fn tl08_allow_for_session_applies_to_subsequent_calls_in_same_batch() {
             .kind,
         PermissionDecisionKind::RuleAllowed
     );
-    assert_eq!(session.workspace_tools().unwrap().staged_counts(), (0, 0));
 
     host.close(&session.target(), ClosePolicy::DiscardLocal)
         .await
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tl10_call_attachments_clear_on_cancel_and_reject_in_batch() {
+    use crate::definition::WriteToolLimits;
+    use crate::permission::{PermissionHub, ToolPolicyProcessor};
+    use crate::tools::{ToolResources, WorkspaceTools};
+    use crate::workspace::Workspace;
+    use causa::kernel::{
+        BlockId, CallControl, InvocationId, ProcessorContext, RoundId, ToolBatch, ToolCallContext,
+        ToolCallPayload, ToolDescription, TurnId,
+    };
+    use tokio_util::sync::CancellationToken;
+
+    let root = tempfile::tempdir().unwrap();
+    let workspace = Workspace::open(&root.path().canonicalize().unwrap()).unwrap();
+    let ws_tools = WorkspaceTools::with_write_limits(
+        workspace,
+        WorkspaceToolLimits::default(),
+        WriteToolLimits::default(),
+        ToolResources::new(4),
+    );
+
+    let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
+    let work = WorkRef {
+        conversation_id: "tl10".into(),
+        turn_id: turn_id.clone(),
+    };
+    let inv = InvocationId {
+        turn_id: turn_id.clone(),
+        round_id: RoundId(0),
+    };
+    let call1 = ToolCallContext::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        ToolCallPayload::new("write_file", json!({"path": "one.txt", "content": "1"})),
+    );
+    let call2 = ToolCallContext::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        ToolCallPayload::new("write_file", json!({"path": "two.txt", "content": "2"})),
+    );
+    let decl = [call1.call_block_id, call2.call_block_id];
+    let reporter =
+        crate::session::ToolReporter::new(work.clone(), tokio::sync::broadcast::channel(16).0);
+    let mut batch = ToolBatch::new(vec![call1.clone(), call2.clone()]).unwrap();
+    reporter.batch_ready(&inv, &batch);
+
+    let tool = ws_tools
+        .bind_for_test(&[WorkspaceTool::WriteFile], reporter.clone())
+        .pop()
+        .unwrap();
+    let bound_desc = [ToolDescription::new(tool.definition()).with_metadata(tool.metadata())];
+
+    let perm_hub = Arc::new(PermissionHub::new(PermissionMode::Ask));
+    let mut rx = perm_hub.connect_approvals();
+    let cancel_token = CancellationToken::new();
+    let cancel_for_task = cancel_token.clone();
+    let approver = tokio::spawn(async move {
+        let req1 = rx.recv().await.expect("first approval");
+        req1.reply.send(ApprovalDecision::Allow).unwrap();
+        let _req2 = rx.recv().await.expect("second approval");
+        cancel_for_task.cancel();
+    });
+
+    let control = CallControl::new(cancel_token, None);
+    let ctx = ProcessorContext::new(&turn_id, RoundId(0), &decl, &control).with_tools(&bound_desc);
+    ToolPolicyProcessor::new(work, reporter, perm_hub)
+        .process(&mut batch, &ctx)
+        .await
+        .unwrap();
+    approver.await.unwrap();
+
+    // Approving call 1 attached PreparedWrite, then cancelling while waiting on call 2
+    // must clear attachments on every pending entry so nothing leaks in the batch.
+    assert_eq!(batch.calls().len(), 2);
+    for entry in batch.calls() {
+        assert!(
+            entry.call().attachments().is_empty(),
+            "cancelled batch must leave zero pending call attachments"
+        );
+    }
 }

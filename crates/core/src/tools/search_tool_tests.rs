@@ -206,11 +206,9 @@ fn search_definition_declares_the_sandbox_and_the_new_parameters() {
     assert_eq!(properties["context_lines"]["minimum"], 0);
     assert_eq!(properties["context_lines"]["maximum"], 3);
     assert_eq!(definition.parameters["required"], json!(["path", "query"]));
-    let hints = tool.hints();
-    assert_eq!(hints.read_only, None);
-    assert_eq!(hints.destructive, None);
-    assert_eq!(hints.idempotent, None);
-    assert_eq!(hints.open_world, None);
+    let metadata = tool.metadata();
+    assert!(metadata.contains::<Arc<dyn super::ManagedTool>>());
+    assert!(!metadata.contains::<causa::extension::McpToolAnnotations>());
 }
 
 #[tokio::test]

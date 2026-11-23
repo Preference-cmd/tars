@@ -262,7 +262,7 @@ impl CommandRuntime {
 
     pub(crate) async fn run(
         &self,
-        prepared: PreparedCommand,
+        prepared: &PreparedCommand,
         grant: super::lifecycle::ExecutionGrant,
         _permit: OwnedSemaphorePermit,
         control: &CallControl,
@@ -548,7 +548,7 @@ mod tests {
         let permit = runtime.acquire(&command_control).await.unwrap();
         runtime
             .run(
-                prepared,
+                &prepared,
                 super::super::lifecycle::ExecutionGrant::default(),
                 permit,
                 &command_control,

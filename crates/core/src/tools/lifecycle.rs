@@ -3,9 +3,11 @@
 use crate::definition::CommandNetwork;
 use crate::policy::{ToolPermissionClass, WriteAction};
 use async_trait::async_trait;
-use causa::kernel::{BlockId, CallControl, ToolCallContext, ToolOutput, ToolResultStatus};
+use causa::kernel::{
+    CallAttachments, CallControl, ToolCallContext, ToolMetadata, ToolOutput, ToolResultStatus,
+};
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -75,7 +77,7 @@ pub(crate) enum ApprovalPreview {
 }
 
 /// Opaque preflight artifact produced by [`ManagedTool::prepare`] and consumed by
-/// [`ManagedTool::approval_preview`] / [`ManagedTool::commit_prepared`].
+/// [`ManagedTool::approval_preview`] / [`ManagedTool::attach_prepared`].
 ///
 /// The inner payload stays completely private to the owning tool implementation.
 pub(crate) struct PreparedCall(Option<Box<dyn Any + Send + Sync>>);
@@ -180,57 +182,31 @@ pub(crate) trait ManagedTool: Send + Sync {
         None
     }
 
-    /// Commit an approved prepared call into the tool's private execution slot.
-    fn commit_prepared(
+    /// Attach an approved prepared call and execution grant onto the call's
+    /// non-persisted [`CallAttachments`] for consumption in `Tool::execute`.
+    fn attach_prepared(
         &self,
-        _call_block_id: BlockId,
+        _attachments: &mut CallAttachments,
         _prepared: PreparedCall,
         _grant: ExecutionGrant,
     ) {
     }
-
-    /// Discard a previously committed prepared call if the batch is cancelled before dispatch.
-    fn discard_prepared(&self, _call_block_id: BlockId) {}
 }
 
-/// Dynamic lookup provider for runtime-registered managed tools (such as MCP servers).
-pub(crate) trait DynamicToolCatalog: Send + Sync {
-    /// Look up a dynamic managed tool by its model-facing name.
-    fn get(&self, name: &str) -> Option<Arc<dyn ManagedTool>>;
-}
+/// Stateless [`ManagedTool`] for read-only built-in tools without preflight work.
+pub(crate) struct ReadOnlyManagedTool;
 
-/// Per-work registry mapping bound model-facing tool names to their [`ManagedTool`] adapters.
-#[derive(Default)]
-pub(crate) struct ToolCatalog {
-    static_tools: HashMap<String, Arc<dyn ManagedTool>>,
-    dynamic_catalog: Option<Arc<dyn DynamicToolCatalog>>,
-}
-
-impl ToolCatalog {
-    /// Create an empty static tool catalog.
-    #[cfg(test)]
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create a catalog backed by a dynamic tool catalog (e.g. MCP).
-    pub(crate) fn with_dynamic(dynamic: Arc<dyn DynamicToolCatalog>) -> Self {
-        Self {
-            static_tools: HashMap::new(),
-            dynamic_catalog: Some(dynamic),
+#[async_trait]
+impl ManagedTool for ReadOnlyManagedTool {
+    fn classify(&self, _arguments: &serde_json::Value) -> ToolCallIntent {
+        ToolCallIntent {
+            class: ToolPermissionClass::KnownReadOnly,
+            command_subject: None,
         }
     }
+}
 
-    /// Register a statically bound managed tool by model-facing name.
-    pub(crate) fn register(&mut self, name: impl Into<String>, tool: Arc<dyn ManagedTool>) {
-        self.static_tools.insert(name.into(), tool);
-    }
-
-    /// Look up a managed tool by model-facing name.
-    pub(crate) fn get(&self, name: &str) -> Option<Arc<dyn ManagedTool>> {
-        if let Some(tool) = self.static_tools.get(name) {
-            return Some(tool.clone());
-        }
-        self.dynamic_catalog.as_ref()?.get(name)
-    }
+/// Build [`ToolMetadata`] carrying a [`ManagedTool`] handle for `ToolPolicyProcessor`.
+pub(crate) fn managed_tool_metadata(tool: Arc<dyn ManagedTool>) -> ToolMetadata {
+    ToolMetadata::new().with(tool)
 }

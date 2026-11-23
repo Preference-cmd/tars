@@ -6,7 +6,7 @@ use super::command::PreparedCommand;
 use super::diff::DiffSummary;
 use super::lifecycle::{
     ApprovalPreview, BatchPrepareState, CommandPreviewTarget, ExecutionGrant, ManagedTool,
-    PrepareRejection, PreparedCall, ToolCallIntent,
+    PrepareRejection, PreparedCall, ToolCallIntent, managed_tool_metadata,
 };
 use super::operations::{OperationControl, precheck_edit, precheck_write, run};
 use super::parameters::{Params, requests_outside_sandbox};
@@ -20,8 +20,8 @@ use crate::session::ToolReporter;
 use crate::workspace::{FileVersion, Workspace};
 use async_trait::async_trait;
 use causa::kernel::{
-    BlockId, CallControl, Tool, ToolCallContext, ToolDefinition, ToolOutput, ToolResultPayload,
-    ToolResultStatus,
+    CallAttachments, CallControl, Tool, ToolCallContext, ToolDefinition, ToolMetadata, ToolOutput,
+    ToolResultPayload, ToolResultStatus,
 };
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -53,10 +53,13 @@ struct StagedCommand {
     justification: Option<String>,
 }
 
-#[derive(Default)]
-struct WorkStaging {
-    writes: Mutex<HashMap<BlockId, PreparedWrite>>,
-    commands: Mutex<HashMap<BlockId, (PreparedCommand, ExecutionGrant)>>,
+/// Non-persisted call attachment carrying a prechecked write into `Tool::execute`.
+struct AttachedWrite(Arc<PreparedWrite>);
+
+/// Non-persisted call attachment carrying a prechecked command and grant into `Tool::execute`.
+struct AttachedCommand {
+    prepared: PreparedCommand,
+    grant: ExecutionGrant,
 }
 
 /// Restriction derived when the session store overlaps the workspace.
@@ -178,8 +181,6 @@ pub struct WorkspaceTools {
     pub(super) observations: Mutex<HashMap<String, FileVersion>>,
     #[cfg(test)]
     command_decode_count: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
-    last_staging: Mutex<Option<std::sync::Weak<WorkStaging>>>,
     #[cfg(test)]
     pub(super) gate: Mutex<Option<Arc<TestGate>>>,
     #[cfg(test)]
@@ -335,8 +336,6 @@ impl WorkspaceTools {
             #[cfg(test)]
             command_decode_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
-            last_staging: Mutex::new(None),
-            #[cfg(test)]
             gate: Mutex::new(None),
             #[cfg(test)]
             write_gate: Mutex::new(None),
@@ -347,25 +346,15 @@ impl WorkspaceTools {
         self: &Arc<Self>,
         selected: &[WorkspaceTool],
         reporter: ToolReporter,
-    ) -> Vec<(Arc<dyn Tool>, Arc<dyn ManagedTool>)> {
-        let staging = Arc::new(WorkStaging::default());
-        #[cfg(test)]
-        {
-            *self.last_staging.lock().expect("last staging lock") = Some(Arc::downgrade(&staging));
-        }
+    ) -> Vec<Arc<dyn Tool>> {
         selected
             .iter()
             .map(|kind| {
-                let bound = Arc::new(WorkspaceToolImpl {
+                Arc::new(WorkspaceToolImpl {
                     shared: self.clone(),
                     kind: *kind,
                     reporter: reporter.clone(),
-                    staging: staging.clone(),
-                });
-                (
-                    bound.clone() as Arc<dyn Tool>,
-                    bound as Arc<dyn ManagedTool>,
-                )
+                }) as Arc<dyn Tool>
             })
             .collect()
     }
@@ -377,9 +366,6 @@ impl WorkspaceTools {
         reporter: ToolReporter,
     ) -> Vec<Arc<dyn Tool>> {
         self.bind_work(selected, reporter)
-            .into_iter()
-            .map(|(tool, _)| tool)
-            .collect()
     }
 
     #[cfg(test)]
@@ -390,24 +376,16 @@ impl WorkspaceTools {
         reporter: ToolReporter,
     ) -> Vec<(Arc<dyn Tool>, Arc<dyn ManagedTool>)> {
         self.bind_work(selected, reporter)
-    }
-
-    /// Number of staged `(writes, commands)` currently held for the latest work.
-    #[cfg(test)]
-    #[cfg_attr(not(unix), allow(dead_code))]
-    pub(crate) fn staged_counts(&self) -> (usize, usize) {
-        let Some(staging) = self
-            .last_staging
-            .lock()
-            .expect("last staging lock")
-            .as_ref()
-            .and_then(std::sync::Weak::upgrade)
-        else {
-            return (0, 0);
-        };
-        let writes = staging.writes.lock().expect("staged writes lock").len();
-        let commands = staging.commands.lock().expect("staged commands lock").len();
-        (writes, commands)
+            .into_iter()
+            .map(|tool| {
+                let managed = tool
+                    .metadata()
+                    .get::<Arc<dyn ManagedTool>>()
+                    .cloned()
+                    .expect("workspace tool must declare ManagedTool metadata");
+                (tool, managed)
+            })
+            .collect()
     }
 
     /// Number of times `run_command` JSON parameters were decoded on this tool set.
@@ -684,11 +662,11 @@ impl WorkspaceTools {
     }
 }
 
+#[derive(Clone)]
 struct WorkspaceToolImpl {
     shared: Arc<WorkspaceTools>,
     kind: WorkspaceTool,
     reporter: ToolReporter,
-    staging: Arc<WorkStaging>,
 }
 
 struct CancelOnDrop(CancellationToken);
@@ -944,7 +922,7 @@ impl WorkspaceToolImpl {
     async fn execute_prepared_command(
         &self,
         runtime: &super::CommandRuntime,
-        prepared: PreparedCommand,
+        prepared: &PreparedCommand,
         grant: ExecutionGrant,
         call: &ToolCallContext,
         control: &CallControl,
@@ -1008,13 +986,7 @@ impl WorkspaceToolImpl {
             self.reporter.returned(call, output.status.clone());
             return output;
         }
-        let staged = self
-            .staging
-            .commands
-            .lock()
-            .expect("staged commands lock")
-            .remove(&call.call_block_id);
-        if let Some((prepared, grant)) = staged {
+        if let Some(attached) = call.attachment::<AttachedCommand>() {
             let Some(runtime) = self.shared.command.as_ref() else {
                 let output = result(
                     call,
@@ -1025,11 +997,17 @@ impl WorkspaceToolImpl {
                 return output;
             };
             return self
-                .execute_prepared_command(runtime, prepared, grant, call, control)
+                .execute_prepared_command(
+                    runtime,
+                    &attached.prepared,
+                    attached.grant,
+                    call,
+                    control,
+                )
                 .await;
         }
 
-        // Direct unit-test fallback when execute() is invoked without prepare/commit_prepared.
+        // Direct unit-test fallback when execute() is invoked without prepare/attach_prepared.
         let params = match self.decode_params(call) {
             Ok(Params::Command(params)) => params,
             Ok(_) => {
@@ -1083,7 +1061,7 @@ impl WorkspaceToolImpl {
                 return output;
             }
         };
-        self.execute_prepared_command(runtime, prepared, ExecutionGrant::default(), call, control)
+        self.execute_prepared_command(runtime, &prepared, ExecutionGrant::default(), call, control)
             .await
     }
 
@@ -1297,50 +1275,25 @@ impl ManagedTool for WorkspaceToolImpl {
         }
     }
 
-    fn commit_prepared(
+    fn attach_prepared(
         &self,
-        call_block_id: BlockId,
+        attachments: &mut CallAttachments,
         prepared: PreparedCall,
         grant: ExecutionGrant,
     ) {
         match self.kind {
             WorkspaceTool::WriteFile | WorkspaceTool::EditFile => {
                 if let Some(prepared) = prepared.downcast::<PreparedWrite>() {
-                    self.staging
-                        .writes
-                        .lock()
-                        .expect("staged writes lock")
-                        .insert(call_block_id, prepared);
+                    attachments.insert(AttachedWrite(Arc::new(prepared)));
                 }
             }
             WorkspaceTool::RunCommand => {
                 if let Some(staged) = prepared.downcast::<StagedCommand>() {
-                    self.staging
-                        .commands
-                        .lock()
-                        .expect("staged commands lock")
-                        .insert(call_block_id, (staged.prepared, grant));
+                    attachments.insert(AttachedCommand {
+                        prepared: staged.prepared,
+                        grant,
+                    });
                 }
-            }
-            WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText => {}
-        }
-    }
-
-    fn discard_prepared(&self, call_block_id: BlockId) {
-        match self.kind {
-            WorkspaceTool::WriteFile | WorkspaceTool::EditFile => {
-                self.staging
-                    .writes
-                    .lock()
-                    .expect("staged writes lock")
-                    .remove(&call_block_id);
-            }
-            WorkspaceTool::RunCommand => {
-                self.staging
-                    .commands
-                    .lock()
-                    .expect("staged commands lock")
-                    .remove(&call_block_id);
             }
             WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText => {}
         }
@@ -1356,6 +1309,10 @@ impl Tool for WorkspaceToolImpl {
             &self.shared.write_limits,
             self.shared.command_settings(),
         )
+    }
+
+    fn metadata(&self) -> ToolMetadata {
+        managed_tool_metadata(Arc::new(self.clone()))
     }
 
     async fn execute(
@@ -1378,12 +1335,9 @@ impl Tool for WorkspaceToolImpl {
                     self.reporter.returned(call, output.status.clone());
                     return output;
                 }
-                let prepared = self
-                    .staging
-                    .writes
-                    .lock()
-                    .expect("staged writes lock")
-                    .remove(&call.call_block_id);
+                let prepared = call
+                    .attachment::<AttachedWrite>()
+                    .map(|attached| Arc::clone(&attached.0));
                 let Some(prepared) = prepared else {
                     let output = result(
                         call,

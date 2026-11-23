@@ -1817,31 +1817,40 @@ async fn wm17_four_modes_six_categories_session_integration() {
 
 #[test]
 fn wm13_no_mcp_prefix_in_permission_logic() {
-    use crate::tools::{DynamicToolCatalog, ToolCatalog};
+    use crate::tools::ManagedTool;
+    use causa::kernel::{
+        CallControl, ProcessorContext, RoundId, ToolDefinition, ToolDescription, TurnId,
+    };
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
 
-    let table = std::sync::Arc::new(super::McpPermissionTable::default());
-    let catalog = ToolCatalog::with_dynamic(table.clone());
-    assert!(catalog.get("mcp_server_fake").is_none());
+    let adapter: Arc<dyn ManagedTool> = Arc::new(super::McpToolAdapter::new(super::McpToolInfo {
+        server_id: "custom".into(),
+        raw_tool_name: "special".into(),
+        category: ToolPermissionClass::McpPrompt,
+    }));
+    let bound = [ToolDescription::new(ToolDefinition::new(
+        "my_special_tool",
+        "non-prefixed MCP tool",
+        json!({"type": "object"}),
+    ))
+    .with_meta(adapter)];
 
-    table.update_server_tools(
-        "custom",
-        vec![(
-            "my_special_tool".into(),
-            super::McpToolInfo {
-                server_id: "custom".into(),
-                raw_tool_name: "special".into(),
-                category: ToolPermissionClass::McpPrompt,
-            },
-        )],
+    let turn_id = TurnId::new("wm13");
+    let control = CallControl::new(CancellationToken::new(), None);
+    let ctx = ProcessorContext::new(&turn_id, RoundId(0), &[], &control).with_tools(&bound);
+
+    assert!(
+        ctx.tool_metadata::<Arc<dyn ManagedTool>>("mcp_server_fake")
+            .is_none()
     );
-    let adapter = catalog
-        .get("my_special_tool")
-        .expect("non-prefixed MCP tool name must resolve through catalog");
+    let resolved = ctx
+        .tool_metadata::<Arc<dyn ManagedTool>>("my_special_tool")
+        .expect("non-prefixed MCP tool name must resolve through ToolMetadata");
     assert_eq!(
-        adapter.classify(&json!({})).class,
+        resolved.classify(&json!({})).class,
         ToolPermissionClass::McpPrompt
     );
-    assert!(DynamicToolCatalog::get(&*table, "my_special_tool").is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

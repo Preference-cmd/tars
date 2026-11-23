@@ -321,10 +321,9 @@ async fn test_si06_load_skill_reads_external_dir_dedups_reloads_and_lists_availa
 
     let discovery = SkillDiscovery::discover(std::slice::from_ref(&external_dir), None, false);
     let (tool, _loaded, _reg) = make_load_skill_tool(discovery.registry);
-    assert_eq!(tool.hints().read_only, None);
-    assert_eq!(tool.hints().destructive, None);
-    assert_eq!(tool.hints().idempotent, None);
-    assert_eq!(tool.hints().open_world, None);
+    let metadata = tool.metadata();
+    assert!(metadata.contains::<Arc<dyn crate::tools::ManagedTool>>());
+    assert!(!metadata.contains::<causa::extension::McpToolAnnotations>());
 
     let control = CallControl::new(CancellationToken::new(), None);
     let make_call = |name: &str| {

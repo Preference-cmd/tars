@@ -2,11 +2,10 @@
 
 use crate::definition::McpApproval;
 use crate::policy::ToolPermissionClass;
-use crate::tools::{
-    ApprovalPreview, DynamicToolCatalog, ManagedTool, PreparedCall, ToolCallIntent,
-};
+use crate::tools::{ApprovalPreview, ManagedTool, PreparedCall, ToolCallIntent};
 use async_trait::async_trait;
-use causa::kernel::{ToolCallContext, ToolHints};
+use causa::extension::McpToolAnnotations;
+use causa::kernel::ToolCallContext;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -34,17 +33,21 @@ pub(crate) struct McpReadOnlyToolDescriptor {
     pub(crate) parameters: serde_json::Value,
 }
 
-/// Derive the TARS permission class for an MCP tool from frozen server config and server hints.
+/// Derive the TARS permission class for an MCP tool from frozen server config and server annotations.
 ///
-/// Server hints can only relax confirmation when frozen configuration selects `writes`
+/// Server annotations can only relax confirmation when frozen configuration selects `writes`
 /// and the tool explicitly declares `read_only = true` without `destructive = true`.
-/// When frozen configuration selects `prompt` (`ask`) or `approve`, server hints cannot override it.
-pub(crate) fn classify_mcp_tool(approval: McpApproval, hints: &ToolHints) -> ToolPermissionClass {
+/// When frozen configuration selects `prompt` (`ask`) or `approve`, server annotations cannot override it.
+pub(crate) fn classify_mcp_tool(
+    approval: McpApproval,
+    annotations: Option<&McpToolAnnotations>,
+) -> ToolPermissionClass {
     match approval {
         McpApproval::Approve => ToolPermissionClass::McpApprove,
         McpApproval::Prompt => ToolPermissionClass::McpPrompt,
         McpApproval::Writes => {
-            if hints.read_only == Some(true) && hints.destructive != Some(true) {
+            if annotations.is_some_and(|a| a.read_only == Some(true) && a.destructive != Some(true))
+            {
                 ToolPermissionClass::KnownReadOnly
             } else {
                 ToolPermissionClass::McpPrompt
@@ -192,16 +195,6 @@ impl McpPermissionTable {
             description: entry.description.clone(),
             parameters: entry.parameters.clone(),
         })
-    }
-}
-
-impl DynamicToolCatalog for McpPermissionTable {
-    fn get(&self, name: &str) -> Option<Arc<dyn ManagedTool>> {
-        self.tools
-            .read()
-            .expect("mcp permission table lock")
-            .get(name)
-            .map(|entry| entry.adapter.clone() as Arc<dyn ManagedTool>)
     }
 }
 

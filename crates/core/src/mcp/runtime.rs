@@ -173,6 +173,8 @@ impl McpRuntime {
     }
 
     /// Read-only handle to the shared MCP permission table.
+    #[cfg(test)]
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub(crate) fn permission_table(&self) -> Arc<McpPermissionTable> {
         self.permission_table.clone()
     }

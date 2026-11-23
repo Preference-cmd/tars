@@ -546,6 +546,10 @@ impl Tool for LoadSkillTool {
         load_skill_tool_definition()
     }
 
+    fn metadata(&self) -> causa::kernel::ToolMetadata {
+        crate::tools::managed_tool_metadata(Arc::new(crate::tools::ReadOnlyManagedTool))
+    }
+
     async fn execute(
         &self,
         call: &ToolCallContext,

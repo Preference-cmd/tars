@@ -38,7 +38,7 @@ rustix = { workspace = true, features = ["process"] }
 tars-sandbox = { path = "../sandbox", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util", "io-std", "io-util", "net"] }
 # Test-only MCP server fixture; normal code uses Causa's client adapter.
-rmcp = { version = "3.6", features = ["server", "transport-async-rw"] }
+rmcp = { version = "3.11", features = ["server", "transport-async-rw"] }
 # Test-only local HTTPS fixture for the external-tool download: a certificate
 # authority generated at test time and a TLS server. Both are already in the
 # dependency graph (ring provider), and neither is used by normal builds.

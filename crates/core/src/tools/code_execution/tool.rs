@@ -5,16 +5,16 @@ use crate::policy::ToolPermissionClass;
 use crate::session::ToolReporter;
 use crate::tools::lifecycle::{
     BatchPrepareState, ManagedTool, PrepareRejection, PreparedCall, ToolCallIntent,
+    managed_tool_metadata,
 };
 use async_trait::async_trait;
 use causa::kernel::{
-    BlockId, CallControl, Tool, ToolCallContext, ToolDefinition, ToolHints, ToolOutput,
+    CallAttachments, CallControl, Tool, ToolCallContext, ToolDefinition, ToolMetadata, ToolOutput,
     ToolResultPayload, ToolResultStatus,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -52,12 +52,15 @@ impl Drop for CancelOnDrop {
     }
 }
 
+/// Non-persisted call attachment carrying validated JavaScript source into `Tool::execute`.
+struct AttachedCode(String);
+
 /// Built-in read-only `run_code` tool executing ES2020 scripts inside QuickJS-NG.
+#[derive(Clone)]
 pub(crate) struct RunCodeTool {
     host: Arc<SubcallHost>,
     settings: CodeExecutionSettings,
     reporter: ToolReporter,
-    staged: Mutex<HashMap<BlockId, String>>,
 }
 
 impl RunCodeTool {
@@ -71,7 +74,6 @@ impl RunCodeTool {
             host,
             settings,
             reporter,
-            staged: Mutex::new(HashMap::new()),
         }
     }
 
@@ -161,25 +163,15 @@ impl ManagedTool for RunCodeTool {
         Ok(PreparedCall::new(params))
     }
 
-    fn commit_prepared(
+    fn attach_prepared(
         &self,
-        call_block_id: BlockId,
+        attachments: &mut CallAttachments,
         prepared: PreparedCall,
         _grant: crate::tools::ExecutionGrant,
     ) {
         if let Some(params) = prepared.downcast::<RunCodeParams>() {
-            self.staged
-                .lock()
-                .expect("staged run_code lock")
-                .insert(call_block_id, params.code);
+            attachments.insert(AttachedCode(params.code));
         }
-    }
-
-    fn discard_prepared(&self, call_block_id: BlockId) {
-        self.staged
-            .lock()
-            .expect("staged run_code lock")
-            .remove(&call_block_id);
     }
 }
 
@@ -270,11 +262,8 @@ impl Tool for RunCodeTool {
         run_code_tool_definition(self.host.bindings())
     }
 
-    fn hints(&self) -> ToolHints {
-        ToolHints::default()
-            .with_read_only(true)
-            .with_idempotent(true)
-            .with_open_world(false)
+    fn metadata(&self) -> ToolMetadata {
+        managed_tool_metadata(Arc::new(self.clone()))
     }
 
     async fn execute(
@@ -293,13 +282,8 @@ impl Tool for RunCodeTool {
             );
         }
 
-        let staged_code = self
-            .staged
-            .lock()
-            .expect("staged run_code lock")
-            .remove(&call.call_block_id);
-        let code = match staged_code {
-            Some(code) => code,
+        let code = match call.attachment::<AttachedCode>() {
+            Some(attached) => attached.0.clone(),
             None => match RunCodeParams::parse(&call.input.arguments) {
                 Ok(params) => params.code,
                 Err(error) => return self.finish(call, rejected_payload(call, error)),

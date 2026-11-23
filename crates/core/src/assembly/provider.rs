@@ -7,7 +7,7 @@ use crate::session::{ConversationId, Session};
 use crate::tools::{ToolResources, WorkspaceTools};
 use crate::workspace::{Workspace, WorkspaceError};
 use causa::kernel::ToolBatchProcessor;
-use causa::kernel::{Context, ModelGateway, Tool};
+use causa::kernel::{Context, ModelGateway};
 use causa::providers::{
     AnthropicMessagesGateway, OpenAiChatCompletionsGateway, OpenAiResponsesGateway,
 };
@@ -419,10 +419,6 @@ pub(crate) fn assemble(
         (Some(builtin), Some(mcp)) => Some(builtin.max(mcp)),
         (builtin, mcp) => builtin.or(mcp),
     };
-    let mcp_table = mcp
-        .as_ref()
-        .map(|m| m.permission_table())
-        .unwrap_or_else(|| Arc::new(crate::mcp::McpPermissionTable::new()));
     let permissions = Arc::new(crate::permission::PermissionHub::with_rules_and_backend(
         current_mode,
         command_rules,
@@ -464,13 +460,9 @@ pub(crate) fn assemble(
             let options = options
                 .clone()
                 .with_processor_data(causa::kernel::ProcessorData::new(view.clone()));
-            let mut catalog = crate::tools::ToolCatalog::with_dynamic(mcp_table.clone());
             let mut tools: Vec<Arc<dyn causa::kernel::Tool>> = Vec::new();
             if let Some(wt) = &workspace_tools {
-                for (tool, managed) in wt.bind_work(&selected, reporter.clone()) {
-                    catalog.register(tool.definition().name, managed);
-                    tools.push(tool);
-                }
+                tools.extend(wt.bind_work(&selected, reporter.clone()));
             }
             let recall_tool = compact_for_work.as_ref().map(|runtime| {
                 let recall = Arc::new(crate::compact::RecallTool::new(
@@ -478,7 +470,6 @@ pub(crate) fn assemble(
                     reporter.clone(),
                     call_timeout_secs,
                 ));
-                catalog.register(recall.definition().name, recall.clone());
                 tools.push(recall.clone());
                 recall
             });
@@ -497,7 +488,6 @@ pub(crate) fn assemble(
                     ce_settings,
                     reporter.clone(),
                 ));
-                catalog.register(run_code.definition().name, run_code.clone());
                 tools.push(run_code);
             }
             let bind_load_skill = skills_enabled
@@ -512,7 +502,6 @@ pub(crate) fn assemble(
                     reporter.clone(),
                     call_timeout_secs,
                 ));
-                catalog.register(load_skill.definition().name, load_skill.clone());
                 tools.push(load_skill);
             }
             let mut before: Vec<Arc<dyn ToolBatchProcessor>> = Vec::new();
@@ -520,7 +509,6 @@ pub(crate) fn assemble(
                 work,
                 reporter,
                 permissions_for_work.clone(),
-                Arc::new(catalog),
             );
             #[cfg(test)]
             let orchestrator = match test_after_prepare_hook_capture

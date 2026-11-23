@@ -1,12 +1,13 @@
 //! One MCP server connection exposed as a dynamic tool source.
 
-use super::permissions::{McpPermissionTable, McpToolInfo, classify_mcp_tool};
+use super::permissions::{McpPermissionTable, McpToolAdapter, McpToolInfo, classify_mcp_tool};
 use super::status::{
     MAX_SKIPPED_TOOLS, McpServerStatus, McpSkippedTool, bounded_name, bounded_reason,
 };
 use super::stderr::StderrCapture;
 use crate::definition::{BuiltinTool, McpServerConfig, redact_substitutions};
-use causa::extension::McpToolSource;
+use crate::tools::ManagedTool;
+use causa::extension::{McpToolAnnotations, McpToolSource};
 use causa::kernel::{
     ArtifactStore, CallControl, DynamicToolSource, SourceError, ToolCallContext, ToolDefinition,
     ToolDescription, ToolExecutionError, ToolResultPayload, Truncation,
@@ -130,10 +131,10 @@ impl McpServerSource {
                 return Err(reason);
             }
         };
-        let (filtered, allowed, skipped) = self.filter(descriptions);
+        let (mut filtered, allowed, skipped) = self.filter(descriptions);
         let mut server_tools = Vec::new();
-        for description in &filtered {
-            let name = &description.definition.name;
+        for description in &mut filtered {
+            let name = description.definition.name.clone();
             let Some(raw) = name.strip_prefix(&self.prefix) else {
                 continue;
             };
@@ -143,14 +144,18 @@ impl McpServerSource {
                 .get(raw)
                 .map(|t| t.approval)
                 .unwrap_or(self.config.approval);
-            let category = classify_mcp_tool(approval, &description.hints);
+            let annotations = description.metadata.get::<McpToolAnnotations>();
+            let category = classify_mcp_tool(approval, annotations);
+            let info = McpToolInfo {
+                server_id: self.id.clone(),
+                raw_tool_name: raw.to_string(),
+                category,
+            };
+            let adapter: Arc<dyn ManagedTool> = Arc::new(McpToolAdapter::new(info.clone()));
+            description.metadata.insert(adapter);
             server_tools.push((
-                name.clone(),
-                McpToolInfo {
-                    server_id: self.id.clone(),
-                    raw_tool_name: raw.to_string(),
-                    category,
-                },
+                name,
+                info,
                 description.definition.description.clone(),
                 description.definition.parameters.clone(),
             ));

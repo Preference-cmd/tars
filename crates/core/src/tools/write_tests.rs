@@ -78,11 +78,16 @@ async fn invoke_with_control(
         .pop()
         .unwrap();
 
+    let mut batch = causa::kernel::ToolBatch::new(vec![call.clone()]).unwrap();
     if matches!(kind, WorkspaceTool::WriteFile | WorkspaceTool::EditFile) {
         let mut batch_state = BatchPrepareState::new();
         match managed.prepare(&call, &mut batch_state, &control).await {
             Ok(prepared) => {
-                managed.commit_prepared(call.call_block_id, prepared, ExecutionGrant::default());
+                managed.attach_prepared(
+                    batch.calls_mut()[0].attachments_mut().unwrap(),
+                    prepared,
+                    ExecutionGrant::default(),
+                );
             }
             Err(rejection) => {
                 reporter.drain().await;
@@ -95,7 +100,7 @@ async fn invoke_with_control(
         }
     }
 
-    let result = tool.execute(&call, &control, None).await;
+    let result = tool.execute(batch.calls()[0].call(), &control, None).await;
     reporter.drain().await;
     result
 }
@@ -744,11 +749,9 @@ async fn hints_for_all_five_tools_match_specification() {
     );
 
     for tool in &bound {
-        let hints = tool.hints();
-        assert_eq!(hints.read_only, None);
-        assert_eq!(hints.destructive, None);
-        assert_eq!(hints.idempotent, None);
-        assert_eq!(hints.open_world, None);
+        let metadata = tool.metadata();
+        assert!(metadata.contains::<Arc<dyn crate::tools::ManagedTool>>());
+        assert!(!metadata.contains::<causa::extension::McpToolAnnotations>());
     }
 }
 
@@ -1083,17 +1086,22 @@ async fn confirmation_reread_stops_at_the_edit_limit_after_external_growth() {
         .unwrap();
     let control = control();
     let mut batch_state = BatchPrepareState::new();
+    let mut batch = causa::kernel::ToolBatch::new(vec![call.clone()]).unwrap();
     let prepared = managed
         .prepare(&call, &mut batch_state, &control)
         .await
         .expect("precheck accepted the write");
-    managed.commit_prepared(call.call_block_id, prepared, ExecutionGrant::default());
+    managed.attach_prepared(
+        batch.calls_mut()[0].attachments_mut().unwrap(),
+        prepared,
+        ExecutionGrant::default(),
+    );
 
     // Grow the file after the successful precheck. The confirmation reread may
     // consume one byte past the configured limit, never the grown file.
     let grown = "x".repeat(1024);
     std::fs::write(&path, &grown).unwrap();
-    let result = tool.execute(&call, &control, None).await;
+    let result = tool.execute(batch.calls()[0].call(), &control, None).await;
     assert_eq!(result.status, ToolResultStatus::Failed);
     let error = result.output.content["error"].as_str().unwrap();
     assert!(error.contains("file changed after confirmation"), "{error}");

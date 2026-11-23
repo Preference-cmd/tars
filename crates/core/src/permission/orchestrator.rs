@@ -18,7 +18,7 @@ use crate::policy::{
 use crate::session::{ToolReporter, WorkRef};
 use crate::tools::{
     ApprovalPreview, BatchPrepareState, CommandPreviewTarget, ExecutionGrant, ManagedTool,
-    ToolCallIntent, ToolCatalog,
+    PreparedCall, ToolCallIntent,
 };
 use async_trait::async_trait;
 use causa::kernel::{
@@ -153,12 +153,11 @@ fn build_approval_subject(
 }
 
 /// Single `before` orchestrator handling binding checks, fast gating, preflight
-/// preparation, live mode/rule re-evaluation, approval flows, and staging commits.
+/// preparation, live mode/rule re-evaluation, approval flows, and attachment commits.
 pub(crate) struct ToolPolicyProcessor {
     work: WorkRef,
     reporter: ToolReporter,
     permissions: Arc<PermissionHub>,
-    catalog: Arc<ToolCatalog>,
     #[cfg(test)]
     after_prepare_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -168,13 +167,11 @@ impl ToolPolicyProcessor {
         work: WorkRef,
         reporter: ToolReporter,
         permissions: Arc<PermissionHub>,
-        catalog: Arc<ToolCatalog>,
     ) -> Self {
         Self {
             work,
             reporter,
             permissions,
-            catalog,
             #[cfg(test)]
             after_prepare_hook: None,
         }
@@ -224,11 +221,7 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
         for entry in batch.results_mut() {
             let call = entry.call().clone();
             let tool_name = &call.input.tool_name;
-            let is_bound = ctx
-                .tools
-                .iter()
-                .any(|tool| tool.definition.name == *tool_name);
-            if !is_bound {
+            if ctx.tool(tool_name).is_none() {
                 self.reporter.record_permission_decision(
                     &call,
                     &invocation_id,
@@ -265,11 +258,9 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
             let tool_name = call.input.tool_name.clone();
 
             let (mode, revision) = self.permissions.get();
-            let is_bound = ctx
-                .tools
-                .iter()
-                .any(|tool| tool.definition.name == tool_name);
-            let managed = is_bound.then(|| self.catalog.get(&tool_name)).flatten();
+            let managed = ctx
+                .tool_metadata::<Arc<dyn ManagedTool>>(&tool_name)
+                .cloned();
 
             let Some(managed) = managed else {
                 self.resolve_rejection(
@@ -343,13 +334,12 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
             }
         }
 
-        // Step 2: Serial per-call prepare -> re-decide -> approve -> commit_prepared.
+        // Step 2: Serial per-call prepare -> re-decide -> approve -> attach_prepared.
         let mut batch_state = BatchPrepareState::new();
-        let mut committed: Vec<(BlockId, Arc<dyn ManagedTool>)> = Vec::new();
 
         for (call_block_id, managed, intent) in step2_calls {
             if ctx.control.check().is_err() {
-                rollback_committed(&mut committed);
+                clear_pending_attachments(batch);
                 return Ok(());
             }
 
@@ -367,7 +357,7 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
                 Ok(prepared) => prepared,
                 Err(rejection) => {
                     if ctx.control.check().is_err() {
-                        rollback_committed(&mut committed);
+                        clear_pending_attachments(batch);
                         return Ok(());
                     }
                     resolve_call_payload(
@@ -406,8 +396,13 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
                             rule: rule_source,
                         },
                     );
-                    managed.commit_prepared(call_block_id, prepared, outside_grant);
-                    committed.push((call_block_id, managed));
+                    attach_to_pending_call(
+                        batch,
+                        call_block_id,
+                        managed.as_ref(),
+                        prepared,
+                        outside_grant,
+                    );
                 }
                 PermissionVerdict::Reject => {
                     drop(prepared);
@@ -495,7 +490,7 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
                         biased;
                         _ = wait_for_control_stop(ctx.control) => {
                             drop(prepared);
-                            rollback_committed(&mut committed);
+                            clear_pending_attachments(batch);
                             return Ok(());
                         }
                         res = sender.send(request) => res,
@@ -522,7 +517,7 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
                         biased;
                         _ = wait_for_control_stop(ctx.control) => {
                             drop(prepared);
-                            rollback_committed(&mut committed);
+                            clear_pending_attachments(batch);
                             return Ok(());
                         }
                         res = reply_rx => res,
@@ -540,8 +535,13 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
                                     rule: rule_source,
                                 },
                             );
-                            managed.commit_prepared(call_block_id, prepared, outside_grant);
-                            committed.push((call_block_id, managed));
+                            attach_to_pending_call(
+                                batch,
+                                call_block_id,
+                                managed.as_ref(),
+                                prepared,
+                                outside_grant,
+                            );
                         }
                         Ok(ApprovalDecision::AllowForSession) => {
                             if let Some((prefixes, _, outside)) = command_rule_info
@@ -559,8 +559,13 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
                                     rule: rule_source,
                                 },
                             );
-                            managed.commit_prepared(call_block_id, prepared, outside_grant);
-                            committed.push((call_block_id, managed));
+                            attach_to_pending_call(
+                                batch,
+                                call_block_id,
+                                managed.as_ref(),
+                                prepared,
+                                outside_grant,
+                            );
                         }
                         Ok(ApprovalDecision::AllowInWorkspace) => {
                             if let Some((prefixes, can_save, outside)) = command_rule_info
@@ -585,8 +590,13 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
                                     rule: rule_source,
                                 },
                             );
-                            managed.commit_prepared(call_block_id, prepared, outside_grant);
-                            committed.push((call_block_id, managed));
+                            attach_to_pending_call(
+                                batch,
+                                call_block_id,
+                                managed.as_ref(),
+                                prepared,
+                                outside_grant,
+                            );
                         }
                         Ok(ApprovalDecision::Deny { reason }) => {
                             drop(prepared);
@@ -627,9 +637,28 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
     }
 }
 
-fn rollback_committed(committed: &mut Vec<(BlockId, Arc<dyn ManagedTool>)>) {
-    for (call_block_id, tool) in committed.drain(..) {
-        tool.discard_prepared(call_block_id);
+fn attach_to_pending_call(
+    batch: &mut ToolBatch,
+    call_block_id: BlockId,
+    managed: &dyn ManagedTool,
+    prepared: PreparedCall,
+    grant: ExecutionGrant,
+) {
+    if let Some(entry) = batch
+        .calls_mut()
+        .iter_mut()
+        .find(|entry| entry.call().call_block_id == call_block_id)
+        && let Some(attachments) = entry.attachments_mut()
+    {
+        managed.attach_prepared(attachments, prepared, grant);
+    }
+}
+
+fn clear_pending_attachments(batch: &mut ToolBatch) {
+    for entry in batch.calls_mut() {
+        if let Some(attachments) = entry.attachments_mut() {
+            attachments.clear();
+        }
     }
 }
 

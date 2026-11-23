@@ -19,7 +19,6 @@ mod stderr;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;
 
-pub(crate) use permissions::McpPermissionTable;
 #[cfg(test)]
 #[cfg_attr(
     not(any(target_os = "linux", target_os = "macos")),

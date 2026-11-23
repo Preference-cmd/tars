@@ -23,8 +23,8 @@ pub(crate) use execute::TestGate;
 pub use execute::WorkspaceTools;
 pub(crate) use execute::workspace_tool_definition;
 pub(crate) use lifecycle::{
-    ApprovalPreview, BatchPrepareState, CommandPreviewTarget, DynamicToolCatalog, ExecutionGrant,
-    ManagedTool, PreparedCall, ToolCallIntent, ToolCatalog,
+    ApprovalPreview, BatchPrepareState, CommandPreviewTarget, ExecutionGrant, ManagedTool,
+    PreparedCall, ReadOnlyManagedTool, ToolCallIntent, managed_tool_metadata,
 };
 #[cfg(test)]
 pub use resources::ToolMetrics;

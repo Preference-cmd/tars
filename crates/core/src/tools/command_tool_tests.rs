@@ -216,11 +216,9 @@ fn run_command_definition_declares_the_sandbox_and_the_default_network() {
         1024
     );
     assert!(definition.description.contains("outside_sandbox"));
-    let hints = tool.hints();
-    assert_eq!(hints.read_only, None);
-    assert_eq!(hints.destructive, None);
-    assert_eq!(hints.idempotent, None);
-    assert_eq!(hints.open_world, None);
+    let metadata = tool.metadata();
+    assert!(metadata.contains::<Arc<dyn super::ManagedTool>>());
+    assert!(!metadata.contains::<causa::extension::McpToolAnnotations>());
 }
 
 #[tokio::test]
@@ -279,19 +277,22 @@ async fn granted_outside_command_uses_the_unconfined_launch() {
         )
         .pop()
         .unwrap();
+    let mut batch = causa::kernel::ToolBatch::new(vec![invocation.clone()]).unwrap();
     let mut batch_state = super::BatchPrepareState::new();
     let prepared = managed
         .prepare(&invocation, &mut batch_state, &control())
         .await
         .expect("outside command prepares");
-    managed.commit_prepared(
-        invocation.call_block_id,
+    managed.attach_prepared(
+        batch.calls_mut()[0].attachments_mut().unwrap(),
         prepared,
         super::ExecutionGrant {
             allow_outside_sandbox: true,
         },
     );
-    let output = tool.execute(&invocation, &control(), None).await;
+    let output = tool
+        .execute(batch.calls()[0].call(), &control(), None)
+        .await;
     assert_eq!(output.status, ToolResultStatus::Succeeded);
     assert_eq!(output.output.content["exit_code"], 0);
     assert_eq!(output.output.content["outside_sandbox"], true);
