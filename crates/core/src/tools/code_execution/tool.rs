@@ -104,6 +104,9 @@ pub(crate) fn run_code_tool_definition(bindings: BuiltinBindings) -> ToolDefinit
             "- `await recall({ id, query, regex, case_sensitive, offset, limit, context, role, kind })` -> string",
         );
     }
+    helpers.push(
+        "- `await tools.list()` -> `[{ name, description, source }]`, `await tools.describe(name)` -> `{ name, description, parameters, source }`, `await tools.call(name, args)` -> result (discover and call bound built-in or read-only MCP tools)",
+    );
 
     let description = format!(
         "Execute sandboxed JavaScript (ES2020) inside an async IIFE with read-only session helpers. \

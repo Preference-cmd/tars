@@ -392,7 +392,7 @@ pub(crate) fn assemble(
     );
     let code_execution = definition
         .code_execution
-        .filter(|_| code_execution_bindings.any());
+        .filter(|_| code_execution_bindings.any() || mcp.is_some());
     let call_timeout_secs = definition.tool_limits.call_timeout_secs;
     let builtin_timeout = (!selected.is_empty() || has_persistent_compaction || skills_enabled)
         .then(|| std::time::Duration::from_secs(call_timeout_secs));
@@ -483,12 +483,15 @@ pub(crate) fn assemble(
                 recall
             });
             if let Some(ce_settings) = code_execution {
-                let host = crate::tools::code_execution::SubcallHost::new(
+                let mut host = crate::tools::code_execution::SubcallHost::new(
                     ce_settings,
                     code_execution_bindings,
                     workspace_tools.clone(),
                     recall_tool,
                 );
+                if let Some(mcp_runtime) = &mcp_for_work {
+                    host = host.with_extra_provider(mcp_runtime.clone());
+                }
                 let run_code = Arc::new(crate::tools::code_execution::RunCodeTool::new(
                     host,
                     ce_settings,

@@ -37,6 +37,7 @@ const HANG: Duration = Duration::from_secs(10);
 const LONG_NAME: &str = "a_tool_name_that_is_far_too_long_to_fit_any_provider_limit_xyz";
 
 static UNLOCKED: AtomicBool = AtomicBool::new(false);
+static DOWNGRADED: AtomicBool = AtomicBool::new(false);
 static LISTINGS: AtomicUsize = AtomicUsize::new(0);
 
 fn main() {
@@ -44,26 +45,28 @@ fn main() {
         std::fs::write(path, std::process::id().to_string()).expect("write pid file");
     }
     match std::env::var(ROLE).as_deref() {
-        Ok("serve") => serve(),
+        Ok("serve") => serve(false),
+        Ok("ptc") => serve(true),
         Ok("fail") => {
             eprintln!("{FAILURE}");
             std::process::exit(2);
         }
         Ok("slow") => std::thread::sleep(Duration::from_secs(60)),
         _ => {
-            eprintln!("set {ROLE} to serve, fail or slow");
+            eprintln!("set {ROLE} to serve, ptc, fail or slow");
             std::process::exit(2);
         }
     }
 }
 
-fn serve() {
+fn serve(ptc_mode: bool) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
     runtime.block_on(async {
-        if let Ok(running) = Fixture
+        let fixture = Fixture { ptc_mode };
+        if let Ok(running) = fixture
             .serve((tokio::io::stdin(), tokio::io::stdout()))
             .await
         {
@@ -75,15 +78,20 @@ fn serve() {
     }
 }
 
-struct Fixture;
+struct Fixture {
+    ptc_mode: bool,
+}
 
-fn tool(name: &str, description: &str) -> Tool {
-    let schema = serde_json::json!({ "type": "object" });
+fn tool_with_schema(name: &str, description: &str, schema: serde_json::Value) -> Tool {
     Tool::new(
         name.to_owned(),
         description.to_owned(),
         Arc::new(schema.as_object().cloned().unwrap_or_default()),
     )
+}
+
+fn tool(name: &str, description: &str) -> Tool {
+    tool_with_schema(name, description, serde_json::json!({ "type": "object" }))
 }
 
 /// Text of about `bytes` bytes with recognizable ends and, in between,
@@ -107,6 +115,40 @@ impl ServerHandler for Fixture {
             && std::env::var(RELIST).as_deref() == Ok("hang")
         {
             std::future::pending::<()>().await;
+        }
+        if self.ptc_mode {
+            let downgraded = DOWNGRADED.load(Ordering::SeqCst);
+            let mut tools = vec![
+                tool_with_schema(
+                    "lookup",
+                    "Looks up read-only items by key.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": { "q": { "type": "string" } },
+                        "required": ["q"]
+                    }),
+                )
+                .with_annotations(if downgraded {
+                    ToolAnnotations::new().read_only(true).destructive(true)
+                } else {
+                    ToolAnnotations::new().read_only(true)
+                }),
+                tool("mutate", "Mutates data without read_only hint."),
+                tool("wipe", "Wipes data despite read_only hint.")
+                    .with_annotations(ToolAnnotations::new().read_only(true).destructive(true)),
+                tool("approved", "Tool configured with approval=approve."),
+                tool(
+                    "downgrade",
+                    "Triggers catalog refresh downgrading lookup and removing vanish.",
+                ),
+            ];
+            if !downgraded {
+                tools.push(
+                    tool("vanish", "Read-only tool removed after downgrade.")
+                        .with_annotations(ToolAnnotations::new().read_only(true)),
+                );
+            }
+            return Ok(ListToolsResult::with_all_items(tools));
         }
         let mut tools = vec![
             tool("echo", "Echoes its arguments."),
@@ -179,7 +221,14 @@ impl ServerHandler for Fixture {
                 tokio::time::sleep(HANG).await;
                 "late".to_owned()
             }
-            "lookup" => "lookup-result".to_owned(),
+            "lookup" => format!("lookup-result:{arguments}"),
+            "vanish" => "vanish-result".to_owned(),
+            "approved" => "approved-result".to_owned(),
+            "downgrade" => {
+                DOWNGRADED.store(true, Ordering::SeqCst);
+                let _ = context.peer.notify_tool_list_changed().await;
+                "downgraded".to_owned()
+            }
             "mutate" => "mutate-result".to_owned(),
             "wipe" => "wipe-result".to_owned(),
             "unlock" => {

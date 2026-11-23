@@ -2660,3 +2660,231 @@ async fn wm09_builtin_read_and_mcp_call_cancelled_cannot_be_partially_adopted() 
         .await
         .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ptc09_readonly_mcp_discovery_and_realtime_downgrade_preserves_tool_definition() {
+    let root = tempfile::tempdir().unwrap();
+    let log_file = root.path().join("ptc_call_log.txt");
+    let mut ptc = server("ptc", "ptc");
+    ptc.approval = McpApproval::Writes;
+    ptc.tools.insert(
+        "approved".into(),
+        McpToolSetting {
+            approval: McpApproval::Approve,
+        },
+    );
+    ptc.env.insert(
+        "TARS_MCP_FIXTURE_CALL_LOG".into(),
+        log_file.display().to_string(),
+    );
+
+    let round1_js = r#"
+const listed = await tools.list();
+const names = listed.map((t) => t.name);
+const desc = await tools.describe("mcp_ptc_lookup");
+const lookupRes = await tools.call("mcp_ptc_lookup", { q: "alpha" });
+const vanishRes = await tools.call("mcp_ptc_vanish");
+
+const rejected = {};
+for (const name of ["mcp_ptc_mutate", "mcp_ptc_wipe", "mcp_ptc_approved", "mcp_ptc_unknown"]) {
+    let descErr = false;
+    try { await tools.describe(name); } catch (e) { descErr = true; }
+    let callErr = false;
+    try { await tools.call(name, {}); } catch (e) { callErr = true; }
+    rejected[name] = { descErr, callErr };
+}
+
+return {
+    names,
+    sources: Object.fromEntries(listed.map((t) => [t.name, t.source])),
+    descName: desc.name,
+    descDescription: desc.description,
+    descParamQ: desc.parameters.properties.q.type,
+    lookupRes,
+    vanishRes,
+    rejected,
+};
+"#;
+
+    let round3_js = r#"
+const listed = await tools.list();
+const names = listed.map((t) => t.name);
+let lookupDescErr = false;
+try { await tools.describe("mcp_ptc_lookup"); } catch (e) { lookupDescErr = true; }
+let lookupCallErr = false;
+try { await tools.call("mcp_ptc_lookup", { q: "after" }); } catch (e) { lookupCallErr = true; }
+let vanishCallErr = false;
+try { await tools.call("mcp_ptc_vanish", {}); } catch (e) { vanishCallErr = true; }
+return { names, lookupDescErr, lookupCallErr, vanishCallErr };
+"#;
+
+    let fixture = Fixture::new(
+        "openai-chat",
+        vec![
+            Reply::Call("run_code".into(), json!({ "code": round1_js })),
+            Reply::Answer,
+            Reply::Call("mcp_ptc_downgrade".into(), json!({})),
+            Reply::Answer,
+            Reply::Call("run_code".into(), json!({ "code": round3_js })),
+            Reply::Answer,
+        ],
+        None,
+    );
+    let mut def = definition(&fixture.endpoint, root.path(), vec![ptc]);
+    def.tools = Vec::new();
+    def.permission_mode = Some(PermissionMode::Ask);
+    def.code_execution = Some(crate::definition::CodeExecutionSettings::default());
+    let (host, session) = open(def).await;
+
+    let mut approvals = session.connect_approvals();
+
+    // Round 1: run_code executes KnownReadOnly MCP tools without any approval prompt.
+    let obs1 = run(&session, "round 1 discovery and call").await;
+    assert!(
+        approvals.try_recv().is_err(),
+        "run_code with KnownReadOnly MCP must not ask approval"
+    );
+    assert_eq!(obs1.tools.calls.len(), 1);
+    assert_eq!(obs1.tools.calls[0].tool_name, "run_code");
+    assert_eq!(
+        obs1.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    let res1 = tool_result(&session, &obs1);
+    assert_eq!(res1.output.content["stats"]["subcalls"], 2);
+    assert_eq!(res1.output.content["stats"]["by_tool"]["mcp_ptc_lookup"], 1);
+    assert_eq!(res1.output.content["stats"]["by_tool"]["mcp_ptc_vanish"], 1);
+
+    let out1: Value =
+        serde_json::from_str(res1.output.content["output"].as_str().unwrap()).unwrap();
+    assert_eq!(out1["names"], json!(["mcp_ptc_lookup", "mcp_ptc_vanish"]));
+    assert_eq!(out1["sources"]["mcp_ptc_lookup"], "mcp");
+    assert_eq!(out1["sources"]["mcp_ptc_vanish"], "mcp");
+    assert_eq!(out1["descName"], "mcp_ptc_lookup");
+    assert_eq!(out1["descDescription"], "Looks up read-only items by key.");
+    assert_eq!(out1["descParamQ"], "string");
+    assert_eq!(out1["lookupRes"], r#"lookup-result:{"q":"alpha"}"#);
+    assert_eq!(out1["vanishRes"], "vanish-result");
+    for forbidden in [
+        "mcp_ptc_mutate",
+        "mcp_ptc_wipe",
+        "mcp_ptc_approved",
+        "mcp_ptc_unknown",
+    ] {
+        assert_eq!(
+            out1["rejected"][forbidden]["descErr"], true,
+            "{forbidden} describe must fail"
+        );
+        assert_eq!(
+            out1["rejected"][forbidden]["callErr"], true,
+            "{forbidden} call must fail"
+        );
+    }
+
+    // Round 2: downgrade tool runs (prompts in Ask mode), downgrading lookup -> McpPrompt and removing vanish.
+    let approve_task = tokio::spawn(async move {
+        let req = approvals.recv().await.expect("downgrade approval");
+        let ApprovalSubject::McpCall { tool, .. } = &req.subject else {
+            panic!("expected McpCall");
+        };
+        assert_eq!(tool, "downgrade");
+        req.reply.send(ApprovalDecision::Allow).unwrap();
+    });
+    let obs2 = run(&session, "round 2 downgrade").await;
+    approve_task.await.unwrap();
+    assert_eq!(
+        obs2.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+
+    // Round 3: run_code tries to call previously known mcp_ptc_lookup and mcp_ptc_vanish -> immediately rejected!
+    let obs3 = run(&session, "round 3 post-downgrade").await;
+    assert_eq!(
+        obs3.tools.calls[0].status,
+        Some(ToolResultStatus::Succeeded)
+    );
+    let res3 = tool_result(&session, &obs3);
+    assert_eq!(res3.output.content["stats"]["subcalls"], 0);
+    let out3: Value =
+        serde_json::from_str(res3.output.content["output"].as_str().unwrap()).unwrap();
+    assert_eq!(out3["names"], json!([]));
+    assert_eq!(out3["lookupDescErr"], true);
+    assert_eq!(out3["lookupCallErr"], true);
+    assert_eq!(out3["vanishCallErr"], true);
+
+    // Verify call log: lookup & vanish called once each (round 1 only), forbidden tools never called.
+    let log = std::fs::read_to_string(&log_file).unwrap();
+    let logged: Vec<&str> = log.lines().collect();
+    assert_eq!(logged, ["lookup", "vanish", "downgrade"]);
+
+    // Verify Prompt Cache stability: run_code's ToolDefinition in requests[0], requests[2], requests[4] is byte-for-byte identical!
+    let requests = fixture.requests.lock().unwrap().clone();
+    let find_run_code = |req: &Value| -> Vec<u8> {
+        let tool = req["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["function"]["name"] == "run_code")
+            .expect("run_code offered");
+        serde_json::to_vec(tool).unwrap()
+    };
+    let rc0 = find_run_code(&requests[0]);
+    let rc2 = find_run_code(&requests[2]);
+    let rc4 = find_run_code(&requests[4]);
+    assert_eq!(
+        rc0, rc2,
+        "run_code ToolDefinition changed across MCP catalog"
+    );
+    assert_eq!(
+        rc0, rc4,
+        "run_code ToolDefinition changed after MCP dynamic refresh"
+    );
+
+    host.close(&session.target(), ClosePolicy::DiscardLocal)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ptc09_direct_permission_table_downgrade_rejects_live_subcall() {
+    use crate::tools::code_execution::{ReadOnlySubcallProvider, SubcallError};
+
+    let root = tempfile::tempdir().unwrap();
+    let mut ptc = server("ptc", "ptc");
+    ptc.approval = McpApproval::Writes;
+    let runtime = start(&definition(
+        "http://127.0.0.1:9/v1/chat/completions",
+        root.path(),
+        vec![ptc],
+    ))
+    .await;
+
+    let ok = runtime
+        .call_tool("mcp_ptc_lookup", json!({"q": "before"}), &control())
+        .await
+        .expect("KnownReadOnly tool succeeds before downgrade");
+    assert_eq!(ok, json!(r#"lookup-result:{"q":"before"}"#));
+
+    runtime.permission_table().update_server_tools(
+        "ptc",
+        vec![(
+            "mcp_ptc_lookup".into(),
+            super::McpToolInfo {
+                server_id: "ptc".into(),
+                raw_tool_name: "lookup".into(),
+                category: ToolPermissionClass::McpPrompt,
+            },
+        )],
+    );
+
+    assert!(runtime.describe_tool("mcp_ptc_lookup").await.is_none());
+    let denied = runtime
+        .call_tool("mcp_ptc_lookup", json!({"q": "after"}), &control())
+        .await;
+    assert!(
+        matches!(denied, Err(SubcallError::Rejected(_))),
+        "downgraded tool must be rejected immediately: {denied:?}"
+    );
+
+    runtime.close().await;
+}

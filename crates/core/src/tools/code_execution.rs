@@ -12,7 +12,9 @@ mod host;
 mod sandbox;
 mod tool;
 
-pub(crate) use host::{BuiltinBindings, SubcallHost};
+pub(crate) use host::{
+    BuiltinBindings, ReadOnlySubcallProvider, SandboxToolDescriptor, SubcallError, SubcallHost,
+};
 pub(crate) use tool::RunCodeTool;
 
 #[cfg(test)]

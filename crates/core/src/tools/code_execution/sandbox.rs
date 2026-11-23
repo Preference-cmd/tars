@@ -47,6 +47,31 @@ fn json_to_js<'js>(ctx: &Ctx<'js>, val: &Value) -> rquickjs::Result<JsValue<'js>
     ctx.json_parse(s)
 }
 
+fn decode_tools_call_args<'js>(
+    ctx: &Ctx<'js>,
+    rest: Rest<JsValue<'js>>,
+) -> Result<(String, Value), String> {
+    let args: Vec<JsValue<'js>> = rest.0;
+    if args.is_empty() || args.len() > 2 {
+        return Err("tools.call expects (name, args?)".to_owned());
+    }
+    let Some(name_js) = args[0].as_string() else {
+        return Err("tools.call requires a tool name string as first argument".to_owned());
+    };
+    let name = name_js.to_string().map_err(|e| e.to_string())?;
+    if name.trim().is_empty() {
+        return Err("tools.call requires a nonempty tool name".to_owned());
+    }
+    let arguments = if args.len() == 1 || args[1].is_undefined() || args[1].is_null() {
+        Value::Object(Map::new())
+    } else if args[1].is_object() && !args[1].is_array() {
+        js_val_to_json(ctx, &args[1])?
+    } else {
+        return Err("tools.call arguments must be an object".to_owned());
+    };
+    Ok((name, arguments))
+}
+
 fn decode_js_args<'js>(
     ctx: &Ctx<'js>,
     tool_name: &str,
@@ -263,6 +288,128 @@ fn register_sandbox_globals<'js>(
             .map_err(|e| e.to_string())?;
         tools_obj.set(tool_name, js_fn).map_err(|e| e.to_string())?;
     }
+
+    let list_fn = {
+        let sess = Arc::clone(session);
+        let ctrl = control.clone();
+        let handle = outer_handle.clone();
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>| {
+                let sess = Arc::clone(&sess);
+                let ctrl = ctrl.clone();
+                let handle = handle.clone();
+                async move {
+                    let joined = handle
+                        .spawn(async move { sess.list_tools(&ctrl).await })
+                        .await;
+                    match joined {
+                        Ok(Ok(items)) => {
+                            let val = serde_json::to_value(&items).map_err(|e| {
+                                Exception::throw_message(&ctx, &format!("json encode error: {e}"))
+                            })?;
+                            json_to_js(&ctx, &val)
+                        }
+                        Ok(Err(err)) => Err(Exception::throw_message(&ctx, &err.to_string())),
+                        Err(join_err) => Err(Exception::throw_message(
+                            &ctx,
+                            &format!("tools.list task failed: {join_err}"),
+                        )),
+                    }
+                }
+            }),
+        )
+        .map_err(|e| e.to_string())?
+    };
+    tools_obj.set("list", list_fn).map_err(|e| e.to_string())?;
+
+    let describe_fn = {
+        let sess = Arc::clone(session);
+        let ctrl = control.clone();
+        let handle = outer_handle.clone();
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, rest: Rest<JsValue<'js>>| {
+                let sess = Arc::clone(&sess);
+                let ctrl = ctrl.clone();
+                let handle = handle.clone();
+                let parsed_name = if rest.0.len() != 1 {
+                    Err("tools.describe requires a single tool name string".to_owned())
+                } else if let Some(s) = rest.0[0].as_string() {
+                    s.to_string().map_err(|e| e.to_string()).and_then(|name| {
+                        if name.trim().is_empty() {
+                            Err("tools.describe requires a nonempty tool name".to_owned())
+                        } else {
+                            Ok(name)
+                        }
+                    })
+                } else {
+                    Err("tools.describe requires a tool name string".to_owned())
+                };
+                async move {
+                    let name = match parsed_name {
+                        Ok(name) => name,
+                        Err(msg) => return Err(Exception::throw_message(&ctx, &msg)),
+                    };
+                    let joined = handle
+                        .spawn(async move { sess.describe_tool(&name, &ctrl).await })
+                        .await;
+                    match joined {
+                        Ok(Ok(desc)) => {
+                            let val = serde_json::to_value(&desc).map_err(|e| {
+                                Exception::throw_message(&ctx, &format!("json encode error: {e}"))
+                            })?;
+                            json_to_js(&ctx, &val)
+                        }
+                        Ok(Err(err)) => Err(Exception::throw_message(&ctx, &err.to_string())),
+                        Err(join_err) => Err(Exception::throw_message(
+                            &ctx,
+                            &format!("tools.describe task failed: {join_err}"),
+                        )),
+                    }
+                }
+            }),
+        )
+        .map_err(|e| e.to_string())?
+    };
+    tools_obj
+        .set("describe", describe_fn)
+        .map_err(|e| e.to_string())?;
+
+    let call_fn = {
+        let sess = Arc::clone(session);
+        let ctrl = control.clone();
+        let handle = outer_handle.clone();
+        Function::new(
+            ctx.clone(),
+            Async(move |ctx: Ctx<'js>, rest: Rest<JsValue<'js>>| {
+                let sess = Arc::clone(&sess);
+                let ctrl = ctrl.clone();
+                let handle = handle.clone();
+                let parsed = decode_tools_call_args(&ctx, rest);
+                async move {
+                    let (name, args_json) = match parsed {
+                        Ok(pair) => pair,
+                        Err(msg) => return Err(Exception::throw_message(&ctx, &msg)),
+                    };
+                    let joined = handle
+                        .spawn(async move { sess.call_tool(&name, args_json, &ctrl).await })
+                        .await;
+                    match joined {
+                        Ok(Ok(val)) => json_to_js(&ctx, &val),
+                        Ok(Err(err)) => Err(Exception::throw_message(&ctx, &err.to_string())),
+                        Err(join_err) => Err(Exception::throw_message(
+                            &ctx,
+                            &format!("subcall task failed: {join_err}"),
+                        )),
+                    }
+                }
+            }),
+        )
+        .map_err(|e| e.to_string())?
+    };
+    tools_obj.set("call", call_fn).map_err(|e| e.to_string())?;
+
     globals.set("tools", tools_obj).map_err(|e| e.to_string())?;
     Ok(())
 }

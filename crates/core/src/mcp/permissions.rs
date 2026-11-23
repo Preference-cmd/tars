@@ -21,6 +21,19 @@ pub(crate) struct McpToolInfo {
     pub(crate) category: ToolPermissionClass,
 }
 
+/// Metadata for a currently discoverable `KnownReadOnly` MCP tool.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct McpReadOnlyToolDescriptor {
+    /// Model-facing prefixed tool name (`mcp_<server>_<tool>`).
+    pub(crate) name: String,
+    /// Owning MCP server identifier.
+    pub(crate) server_id: String,
+    /// Tool description advertised by the MCP server.
+    pub(crate) description: String,
+    /// JSON Schema for tool arguments.
+    pub(crate) parameters: serde_json::Value,
+}
+
 /// Derive the TARS permission class for an MCP tool from frozen server config and server hints.
 ///
 /// Server hints can only relax confirmation when frozen configuration selects `writes`
@@ -89,10 +102,17 @@ impl ManagedTool for McpToolAdapter {
     }
 }
 
+#[derive(Clone)]
+struct McpToolEntry {
+    adapter: Arc<McpToolAdapter>,
+    description: String,
+    parameters: serde_json::Value,
+}
+
 /// Shared thread-safe registry of allowed MCP tools and their lifecycle adapters.
 #[derive(Default)]
 pub(crate) struct McpPermissionTable {
-    tools: RwLock<HashMap<String, Arc<McpToolAdapter>>>,
+    tools: RwLock<HashMap<String, McpToolEntry>>,
 }
 
 impl McpPermissionTable {
@@ -100,23 +120,78 @@ impl McpPermissionTable {
         Self::default()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn update_server_tools(
         &self,
         server_id: &str,
         new_tools: impl IntoIterator<Item = (String, McpToolInfo)>,
     ) {
+        self.update_server_catalog(
+            server_id,
+            new_tools
+                .into_iter()
+                .map(|(name, info)| (name, info, String::new(), serde_json::json!({}))),
+        );
+    }
+
+    pub(crate) fn update_server_catalog(
+        &self,
+        server_id: &str,
+        new_tools: impl IntoIterator<Item = (String, McpToolInfo, String, serde_json::Value)>,
+    ) {
         let mut guard = self.tools.write().expect("mcp permission table lock");
-        guard.retain(|_, adapter| adapter.info.server_id != server_id);
+        guard.retain(|_, entry| entry.adapter.info.server_id != server_id);
         guard.extend(
             new_tools
                 .into_iter()
-                .map(|(name, info)| (name, Arc::new(McpToolAdapter::new(info)))),
+                .map(|(name, info, description, parameters)| {
+                    (
+                        name,
+                        McpToolEntry {
+                            adapter: Arc::new(McpToolAdapter::new(info)),
+                            description,
+                            parameters,
+                        },
+                    )
+                }),
         );
     }
 
     pub(crate) fn remove_server(&self, server_id: &str) {
         let mut guard = self.tools.write().expect("mcp permission table lock");
-        guard.retain(|_, adapter| adapter.info.server_id != server_id);
+        guard.retain(|_, entry| entry.adapter.info.server_id != server_id);
+    }
+
+    /// Return all currently registered MCP tools classified as `KnownReadOnly`, sorted by name.
+    pub(crate) fn readonly_tools(&self) -> Vec<McpReadOnlyToolDescriptor> {
+        let guard = self.tools.read().expect("mcp permission table lock");
+        let mut tools: Vec<McpReadOnlyToolDescriptor> = guard
+            .iter()
+            .filter(|(_, entry)| entry.adapter.info.category == ToolPermissionClass::KnownReadOnly)
+            .map(|(name, entry)| McpReadOnlyToolDescriptor {
+                name: name.clone(),
+                server_id: entry.adapter.info.server_id.clone(),
+                description: entry.description.clone(),
+                parameters: entry.parameters.clone(),
+            })
+            .collect();
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        tools
+    }
+
+    /// Look up one MCP tool only if it is currently classified as `KnownReadOnly`.
+    pub(crate) fn readonly_tool(&self, name: &str) -> Option<McpReadOnlyToolDescriptor> {
+        let guard = self.tools.read().expect("mcp permission table lock");
+        let entry = guard.get(name)?;
+        if entry.adapter.info.category != ToolPermissionClass::KnownReadOnly {
+            return None;
+        }
+        Some(McpReadOnlyToolDescriptor {
+            name: name.to_owned(),
+            server_id: entry.adapter.info.server_id.clone(),
+            description: entry.description.clone(),
+            parameters: entry.parameters.clone(),
+        })
     }
 }
 
@@ -126,7 +201,7 @@ impl DynamicToolCatalog for McpPermissionTable {
             .read()
             .expect("mcp permission table lock")
             .get(name)
-            .map(|adapter| adapter.clone() as Arc<dyn ManagedTool>)
+            .map(|entry| entry.adapter.clone() as Arc<dyn ManagedTool>)
     }
 }
 

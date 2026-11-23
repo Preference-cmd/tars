@@ -1,8 +1,12 @@
 use crate::compact::RecallTool;
-use crate::definition::{BuiltinTool, CodeExecutionSettings, WorkspaceTool};
-use crate::tools::WorkspaceTools;
+use crate::compact::recall::recall_tool_definition;
+use crate::definition::{
+    BuiltinTool, CodeExecutionSettings, CommandSettings, WorkspaceTool, WorkspaceToolLimits,
+    WriteToolLimits,
+};
+use crate::tools::{WorkspaceTools, workspace_tool_definition};
 use async_trait::async_trait;
-use causa::kernel::{CallControl, ToolResultStatus};
+use causa::kernel::{CallControl, ToolDefinition, ToolResultStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -68,23 +72,30 @@ pub(crate) struct SubcallStats {
     pub(crate) duration_ms: u64,
 }
 
-/// Descriptor for a read-only tool exposed inside the sandbox (Phase 1b extension point).
+/// Summary of a read-only tool returned by `tools.list()`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[allow(dead_code)]
+pub(crate) struct SandboxToolSummary {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) source: String,
+}
+
+/// Full descriptor for a read-only tool exposed inside the sandbox (`tools.describe()`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SandboxToolDescriptor {
     pub(crate) name: String,
     pub(crate) description: String,
-    pub(crate) input_schema: Value,
+    pub(crate) parameters: Value,
+    pub(crate) source: String,
 }
 
 /// Extension point for dynamic read-only tool discovery and invocation (e.g. Phase 1b MCP).
 #[async_trait]
-#[allow(dead_code)]
 pub(crate) trait ReadOnlySubcallProvider: Send + Sync {
     /// List currently discoverable read-only tools.
-    fn list_tools(&self) -> Vec<SandboxToolDescriptor>;
+    async fn list_tools(&self) -> Vec<SandboxToolDescriptor>;
     /// Describe one tool by name if currently discoverable and read-only.
-    fn describe_tool(&self, name: &str) -> Option<SandboxToolDescriptor>;
+    async fn describe_tool(&self, name: &str) -> Option<SandboxToolDescriptor>;
     /// Execute one read-only subcall.
     async fn call_tool(
         &self,
@@ -140,7 +151,6 @@ impl SubcallHost {
     }
 
     /// Attach an optional dynamic read-only subcall provider (extension point for Phase 1b).
-    #[allow(dead_code)]
     pub(crate) fn with_extra_provider(
         mut self: Arc<Self>,
         provider: Arc<dyn ReadOnlySubcallProvider>,
@@ -153,6 +163,37 @@ impl SubcallHost {
 
     pub(crate) fn bindings(&self) -> BuiltinBindings {
         self.bindings
+    }
+
+    fn builtin_descriptor(&self, name: &str) -> Option<SandboxToolDescriptor> {
+        let is_bound = match name {
+            "list_directory" => self.bindings.list_directory,
+            "read_file" => self.bindings.read_file,
+            "search_text" => self.bindings.search_text,
+            "recall" => self.bindings.recall,
+            _ => false,
+        };
+        if !is_bound {
+            return None;
+        }
+        let def: ToolDefinition = if name == BuiltinTool::Recall.name() {
+            recall_tool_definition()
+        } else {
+            let kind = WorkspaceTool::from_name(name)?;
+            let default_limits = WorkspaceToolLimits::default();
+            let default_write = WriteToolLimits::default();
+            let (limits, write_limits, command_settings) = match &self.workspace_tools {
+                Some(wt) => (wt.limits(), wt.write_limits(), wt.command_settings()),
+                None => (&default_limits, &default_write, CommandSettings::default()),
+            };
+            workspace_tool_definition(kind, limits, write_limits, command_settings)
+        };
+        Some(SandboxToolDescriptor {
+            name: def.name,
+            description: def.description,
+            parameters: def.parameters,
+            source: "builtin".to_owned(),
+        })
     }
 
     pub(crate) fn new_run_session(self: &Arc<Self>) -> Arc<SubcallSession> {
@@ -269,6 +310,58 @@ impl SubcallSession {
         Ok(())
     }
 
+    pub(crate) async fn list_tools(
+        &self,
+        control: &CallControl,
+    ) -> Result<Vec<SandboxToolSummary>, SubcallError> {
+        self.check_active(control)?;
+        let mut out: Vec<SandboxToolSummary> = self
+            .host
+            .bindings
+            .bound_names()
+            .into_iter()
+            .filter_map(|name| self.host.builtin_descriptor(name))
+            .map(|desc| SandboxToolSummary {
+                name: desc.name,
+                description: desc.description,
+                source: desc.source,
+            })
+            .collect();
+        if let Some(provider) = &self.host.extra_provider {
+            let dynamic = provider.list_tools().await;
+            self.check_active(control)?;
+            for desc in dynamic {
+                out.push(SandboxToolSummary {
+                    name: desc.name,
+                    description: desc.description,
+                    source: desc.source,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    pub(crate) async fn describe_tool(
+        &self,
+        name: &str,
+        control: &CallControl,
+    ) -> Result<SandboxToolDescriptor, SubcallError> {
+        self.check_active(control)?;
+        if let Some(desc) = self.host.builtin_descriptor(name) {
+            return Ok(desc);
+        }
+        if let Some(provider) = &self.host.extra_provider {
+            let maybe_desc = provider.describe_tool(name).await;
+            self.check_active(control)?;
+            if let Some(desc) = maybe_desc {
+                return Ok(desc);
+            }
+        }
+        Err(SubcallError::Rejected(format!(
+            "tool '{name}' is not a read-only tool available inside run_code"
+        )))
+    }
+
     pub(crate) async fn call_tool(
         &self,
         name: &str,
@@ -292,7 +385,7 @@ impl SubcallSession {
 
         if !bound
             && let Some(provider) = &self.host.extra_provider
-            && provider.describe_tool(name).is_none()
+            && provider.describe_tool(name).await.is_none()
         {
             return Err(SubcallError::Rejected(format!(
                 "tool '{name}' is not available inside run_code"
@@ -377,7 +470,14 @@ impl SubcallSession {
                         "tool '{name}' is not available inside run_code"
                     )));
                 };
-                provider.call_tool(name, arguments, control).await
+                match provider.call_tool(name, arguments, control).await {
+                    Ok(val) => Ok(val),
+                    Err(SubcallError::Fatal(msg)) => {
+                        self.record_fatal(msg.clone());
+                        Err(SubcallError::Fatal(msg))
+                    }
+                    Err(err) => Err(err),
+                }
             }
         };
 

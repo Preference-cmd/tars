@@ -8,8 +8,12 @@ use crate::definition::{
     McpServerConfig, SessionDefinition, expand_template_recording, redact_substitutions,
     valid_http_endpoint,
 };
+use crate::tools::code_execution::{ReadOnlySubcallProvider, SandboxToolDescriptor, SubcallError};
 use causa::extension::McpToolSource;
-use causa::kernel::DynamicToolSource;
+use causa::kernel::{
+    BlockId, CallControl, DynamicToolSource, ToolCallContext, ToolCallPayload, ToolExecutionError,
+    ToolResultPayload, ToolResultStatus,
+};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -196,6 +200,141 @@ impl McpRuntime {
             return;
         }
         shutdown_all(&self.servers).await;
+    }
+
+    async fn refresh_if_stale(&self) {
+        for slot in &self.servers {
+            if let ServerSlot::Ready(source) = slot {
+                source.refresh_if_stale().await;
+            }
+        }
+    }
+
+    fn ready_source(&self, server_id: &str) -> Option<Arc<McpServerSource>> {
+        self.servers.iter().find_map(|slot| match slot {
+            ServerSlot::Ready(source) if source.id() == server_id => Some(source.clone()),
+            _ => None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl ReadOnlySubcallProvider for McpRuntime {
+    async fn list_tools(&self) -> Vec<SandboxToolDescriptor> {
+        self.refresh_if_stale().await;
+        self.permission_table
+            .readonly_tools()
+            .into_iter()
+            .map(|entry| SandboxToolDescriptor {
+                name: entry.name,
+                description: entry.description,
+                parameters: entry.parameters,
+                source: "mcp".to_owned(),
+            })
+            .collect()
+    }
+
+    async fn describe_tool(&self, name: &str) -> Option<SandboxToolDescriptor> {
+        self.refresh_if_stale().await;
+        self.permission_table
+            .readonly_tool(name)
+            .map(|entry| SandboxToolDescriptor {
+                name: entry.name,
+                description: entry.description,
+                parameters: entry.parameters,
+                source: "mcp".to_owned(),
+            })
+    }
+
+    async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+        control: &CallControl,
+    ) -> Result<serde_json::Value, SubcallError> {
+        self.refresh_if_stale().await;
+        if let Err(err) = control.check() {
+            return Err(SubcallError::Fatal(err.to_string()));
+        }
+        // Re-verify live classification in McpPermissionTable right before dispatching.
+        let Some(entry) = self.permission_table.readonly_tool(name) else {
+            return Err(SubcallError::Rejected(format!(
+                "tool '{name}' is not a read-only tool available inside run_code"
+            )));
+        };
+        let Some(source) = self.ready_source(&entry.server_id) else {
+            return Err(SubcallError::Rejected(format!(
+                "MCP server '{}' is not available",
+                entry.server_id
+            )));
+        };
+        if self.permission_table.readonly_tool(name).is_none() {
+            return Err(SubcallError::Rejected(format!(
+                "tool '{name}' is no longer read-only inside run_code"
+            )));
+        }
+        let call = ToolCallContext::new(
+            BlockId::new(uuid::Uuid::now_v7()),
+            ToolCallPayload::new(name, arguments),
+        );
+        match source.invoke(&call, control, None).await {
+            Ok(payload) => map_mcp_payload(payload, control),
+            Err(err) => Err(map_mcp_execution_error(name, err, control)),
+        }
+    }
+}
+
+fn extract_mcp_error(content: &serde_json::Value) -> String {
+    content
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| content.to_string())
+}
+
+fn map_mcp_payload(
+    payload: ToolResultPayload,
+    control: &CallControl,
+) -> Result<serde_json::Value, SubcallError> {
+    match payload.status {
+        ToolResultStatus::Succeeded => Ok(payload.output.content),
+        ToolResultStatus::Cancelled | ToolResultStatus::TimedOut => {
+            if let Err(err) = control.check() {
+                Err(SubcallError::Fatal(err.to_string()))
+            } else {
+                Err(SubcallError::Failed(extract_mcp_error(
+                    &payload.output.content,
+                )))
+            }
+        }
+        ToolResultStatus::Rejected => Err(SubcallError::Rejected(extract_mcp_error(
+            &payload.output.content,
+        ))),
+        ToolResultStatus::Failed | ToolResultStatus::UnknownOutcome => Err(SubcallError::Failed(
+            extract_mcp_error(&payload.output.content),
+        )),
+    }
+}
+
+fn map_mcp_execution_error(
+    name: &str,
+    err: ToolExecutionError,
+    control: &CallControl,
+) -> SubcallError {
+    match err {
+        ToolExecutionError::Cancelled | ToolExecutionError::TimedOut => {
+            if let Err(ctrl_err) = control.check() {
+                SubcallError::Fatal(ctrl_err.to_string())
+            } else {
+                SubcallError::Failed(err.to_string())
+            }
+        }
+        ToolExecutionError::UnknownTool(msg) => {
+            SubcallError::Rejected(format!("tool '{name}' is not available: {msg}"))
+        }
+        ToolExecutionError::Unavailable(msg) | ToolExecutionError::Protocol(msg) => {
+            SubcallError::Failed(msg)
+        }
     }
 }
 

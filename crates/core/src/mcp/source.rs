@@ -52,6 +52,8 @@ pub(crate) struct McpServerSource {
     inner: RwLock<Option<McpToolSource>>,
     state: Mutex<SourceState>,
     version: AtomicU64,
+    refreshed_version: AtomicU64,
+    refresh_lock: tokio::sync::Mutex<()>,
     /// The stderr pipe of a stdio server; it ends when the child exits.
     stderr: Option<Arc<StderrCapture>>,
     substitutions: Vec<(String, String)>,
@@ -70,6 +72,8 @@ impl McpServerSource {
             prefix: format!("mcp_{}_", config.id),
             id: config.id.clone(),
             version: AtomicU64::new(inner.version()),
+            refreshed_version: AtomicU64::new(u64::MAX),
+            refresh_lock: tokio::sync::Mutex::new(()),
             config,
             inner: RwLock::new(Some(inner)),
             state: Mutex::new(SourceState {
@@ -97,10 +101,12 @@ impl McpServerSource {
     /// List and filter the current catalog, updating the allowed names and
     /// the reported skipped tools.
     pub(crate) async fn refresh(&self) -> Result<Vec<ToolDescription>, String> {
+        let _refresh_guard = self.refresh_lock.lock().await;
         let guard = self.inner.read().await;
         let Some(source) = guard.as_ref() else {
             return Err("MCP server connection is closed".to_owned());
         };
+        let observed_version = source.version();
         // Binding waits for every source's listing, so a server that stops
         // answering must not hold up the model or the other tools.
         let listing = Duration::from_secs(self.config.startup_timeout_sec);
@@ -145,17 +151,35 @@ impl McpServerSource {
                     raw_tool_name: raw.to_string(),
                     category,
                 },
+                description.definition.description.clone(),
+                description.definition.parameters.clone(),
             ));
         }
         self.permission_table
-            .update_server_tools(&self.id, server_tools);
-        self.version.store(source.version(), Ordering::SeqCst);
+            .update_server_catalog(&self.id, server_tools);
+        self.version.store(observed_version, Ordering::SeqCst);
+        self.refreshed_version
+            .store(observed_version, Ordering::SeqCst);
         let mut state = self.state.lock().expect("MCP source state lock");
         state.ready = true;
         state.reason = None;
         state.allowed = allowed;
         state.skipped = skipped;
         Ok(filtered)
+    }
+
+    /// Re-list tools if the server notified `tools/list_changed` since the last refresh.
+    pub(crate) async fn refresh_if_stale(&self) {
+        let stale = {
+            let guard = self.inner.read().await;
+            let Some(source) = guard.as_ref() else {
+                return;
+            };
+            source.version() != self.refreshed_version.load(Ordering::SeqCst)
+        };
+        if stale {
+            let _ = self.refresh().await;
+        }
     }
 
     /// Close the connection and wait, within [`SHUTDOWN_TIMEOUT`], for a stdio
