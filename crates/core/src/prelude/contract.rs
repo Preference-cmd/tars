@@ -19,6 +19,9 @@ pub const PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE: &str = "tars:prelude:workspace-
 /// `BlockMeta.source` for the `<available_skills>` catalog (`Role::User`).
 pub const PRELUDE_SKILLS_SOURCE: &str = "tars:prelude:skills";
 
+/// `BlockMeta.source` for the `<available_agents>` catalog (`Role::User`).
+pub const PRELUDE_AGENTS_SOURCE: &str = "tars:prelude:agents";
+
 /// `BlockMeta.source` for dynamic session environment facts (`Role::User`).
 pub const PRELUDE_ENV_SOURCE: &str = "tars:prelude:env";
 
@@ -49,8 +52,12 @@ You are running inside the TARS agent host. Follow these host invariants through
 - When `<available_skills>` lists relevant skills, load a skill on demand via `load_skill(name)` using its exact `<name>`. Never attempt to read skill files outside the workspace via workspace tools.
 - Bundled skill resource paths (`scripts/`, `references/`, `assets/`) are informational listings; do not execute scripts without permission or read files outside workspace boundaries.
 
-5. Dynamic prelude updates:
-- Dynamic `<env>`, instruction, skill, and custom context sections may be updated mid-session via appended blocks carrying `updated=\"true\"` or `removed=\"true\"`. Always treat the latest block for a given section as authoritative.";
+5. Subagents (`<available_agents>`):
+- Delegate focused work via `spawn_agent`, continue reusable agents via `message_agent`, paginate archived output via `read_agent`, and cancel active runs via `cancel_agent`.
+- Background completions arrive as `<task-notification>` messages.
+
+6. Dynamic prelude updates:
+- Dynamic `<env>`, instruction, skill, agent, and custom context sections may be updated mid-session via appended blocks carrying `updated=\"true\"` or `removed=\"true\"`. Always treat the latest block for a given section as authoritative.";
 
 /// Ordered sections of the dynamic `Role::User` prelude region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -61,6 +68,8 @@ pub enum DynamicSection {
     WorkspaceInstructions,
     /// Merged and deduplicated `<available_skills>` catalog.
     Skills,
+    /// Merged and deduplicated `<available_agents>` catalog.
+    Agents,
     /// Session environment facts (`platform`, `workspace_root`, `permission_mode`, `capabilities`).
     Env,
     /// Dynamic custom context slot (inline text or watched file).
@@ -68,11 +77,12 @@ pub enum DynamicSection {
 }
 
 impl DynamicSection {
-    /// Canonical order of all five dynamic prelude sections.
-    pub const ALL: [Self; 5] = [
+    /// Canonical order of all six dynamic prelude sections.
+    pub const ALL: [Self; 6] = [
         Self::UserInstructions,
         Self::WorkspaceInstructions,
         Self::Skills,
+        Self::Agents,
         Self::Env,
         Self::DynamicCustom,
     ];
@@ -83,6 +93,7 @@ impl DynamicSection {
             Self::UserInstructions => PRELUDE_USER_INSTRUCTIONS_SOURCE,
             Self::WorkspaceInstructions => PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE,
             Self::Skills => PRELUDE_SKILLS_SOURCE,
+            Self::Agents => PRELUDE_AGENTS_SOURCE,
             Self::Env => PRELUDE_ENV_SOURCE,
             Self::DynamicCustom => PRELUDE_DYNAMIC_CUSTOM_SOURCE,
         }
@@ -94,6 +105,7 @@ impl DynamicSection {
             Self::UserInstructions => "tars:prelude:update:user-instructions",
             Self::WorkspaceInstructions => "tars:prelude:update:workspace-instructions",
             Self::Skills => "tars:prelude:update:skills",
+            Self::Agents => "tars:prelude:update:agents",
             Self::Env => "tars:prelude:update:env",
             Self::DynamicCustom => "tars:prelude:update:dynamic-custom",
         }
@@ -105,6 +117,7 @@ impl DynamicSection {
             Self::UserInstructions => "user_instructions",
             Self::WorkspaceInstructions => "workspace_instructions",
             Self::Skills => "available_skills",
+            Self::Agents => "available_agents",
             Self::Env => "env",
             Self::DynamicCustom => "dynamic_context",
         }
@@ -117,6 +130,7 @@ pub fn dynamic_section_from_prefix_source(source: &str) -> Option<DynamicSection
         PRELUDE_USER_INSTRUCTIONS_SOURCE => Some(DynamicSection::UserInstructions),
         PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE => Some(DynamicSection::WorkspaceInstructions),
         PRELUDE_SKILLS_SOURCE => Some(DynamicSection::Skills),
+        PRELUDE_AGENTS_SOURCE => Some(DynamicSection::Agents),
         PRELUDE_ENV_SOURCE => Some(DynamicSection::Env),
         PRELUDE_DYNAMIC_CUSTOM_SOURCE => Some(DynamicSection::DynamicCustom),
         _ => None,
@@ -129,19 +143,20 @@ pub fn dynamic_section_from_update_source(source: &str) -> Option<DynamicSection
         "tars:prelude:update:user-instructions" => Some(DynamicSection::UserInstructions),
         "tars:prelude:update:workspace-instructions" => Some(DynamicSection::WorkspaceInstructions),
         "tars:prelude:update:skills" => Some(DynamicSection::Skills),
+        "tars:prelude:update:agents" => Some(DynamicSection::Agents),
         "tars:prelude:update:env" => Some(DynamicSection::Env),
         "tars:prelude:update:dynamic-custom" => Some(DynamicSection::DynamicCustom),
         _ => None,
     }
 }
 
-/// Returns `true` if `source` is one of the 7 initial prefix `BlockMeta.source` values.
+/// Returns `true` if `source` is one of the 8 initial prefix `BlockMeta.source` values.
 pub fn is_prelude_prefix_source(source: &str) -> bool {
     matches!(source, PRELUDE_BASE_SOURCE | PRELUDE_STATIC_CUSTOM_SOURCE)
         || dynamic_section_from_prefix_source(source).is_some()
 }
 
-/// Returns `true` if `source` is one of the 5 `tars:prelude:update:*` values.
+/// Returns `true` if `source` is one of the 6 `tars:prelude:update:*` values.
 pub fn is_prelude_update_source(source: &str) -> bool {
     dynamic_section_from_update_source(source).is_some()
 }

@@ -10,6 +10,7 @@ use super::types::{
     CapabilityCategory, DynamicCustomSlot, DynamicUpdate, InitialPrelude, PreludeBudgetConfig,
     PreludeDefinition, PreludeDiagnostic, PreludeDiagnosticKind, PreludeError, PreludeRuntimeState,
 };
+use crate::agents::{AgentDiscovery, AgentPreset, AgentRegistry, ModelProfile};
 use crate::policy::escape_untrusted_text;
 use crate::skills::{SkillDiscovery, SkillEntry, SkillRegistry};
 use causa::kernel::{BlockContent, BlockId, BlockMeta, ContentPart, ContextBlock, Role};
@@ -32,15 +33,27 @@ pub fn build_initial_prelude(
     state: &PreludeRuntimeState,
     budget: &PreludeBudgetConfig,
 ) -> Result<InitialPrelude, PreludeError> {
-    let (registry, diagnostics) = discover_skills_for_prelude(definition, state);
-    build_initial_prelude_with_skills(definition, state, budget, registry, diagnostics)
+    let (registry, mut diagnostics) = discover_skills_for_prelude(definition, state);
+    let (agent_registry, agent_diags) = discover_agents_non_workspace_for_prelude(definition);
+    diagnostics.extend(agent_diags);
+    build_initial_prelude_with_registries(
+        definition,
+        state,
+        budget,
+        registry,
+        agent_registry,
+        &BTreeMap::new(),
+        diagnostics,
+    )
 }
 
-pub(crate) fn build_initial_prelude_with_skills(
+pub(crate) fn build_initial_prelude_with_registries(
     definition: &PreludeDefinition,
     state: &PreludeRuntimeState,
     budget: &PreludeBudgetConfig,
     registry: SkillRegistry,
+    agent_registry: AgentRegistry,
+    model_profiles: &BTreeMap<String, ModelProfile>,
     diagnostics: Vec<PreludeDiagnostic>,
 ) -> Result<InitialPrelude, PreludeError> {
     let static_blocks = build_static_blocks(definition);
@@ -48,6 +61,16 @@ pub(crate) fn build_initial_prelude_with_skills(
     let effective_budget = effective_budget_bytes(budget);
 
     let skills: Vec<SkillEntry> = registry.iter().cloned().collect();
+    let agents: Vec<AgentPreset> = if definition.agents_enabled {
+        agent_registry.iter().cloned().collect()
+    } else {
+        Vec::new()
+    };
+    let profiles: Vec<ModelProfile> = if definition.agents_enabled {
+        model_profiles.values().cloned().collect()
+    } else {
+        Vec::new()
+    };
 
     let user_instructions = read_optional_agents_md_strict(
         definition.config_dir.as_deref(),
@@ -71,6 +94,8 @@ pub(crate) fn build_initial_prelude_with_skills(
         user_instructions,
         workspace_instructions,
         skills,
+        agents,
+        model_profiles: profiles,
         env: Some(env_body),
         dynamic_custom,
     };
@@ -93,6 +118,7 @@ pub(crate) fn build_initial_prelude_with_skills(
     Ok(InitialPrelude {
         blocks,
         registry,
+        agent_registry,
         diagnostics,
         effective_budget_bytes: final_budget,
     })
@@ -137,23 +163,30 @@ pub fn evaluate_dynamic_updates(
     state: &PreludeRuntimeState,
     budget: &PreludeBudgetConfig,
 ) -> DynamicUpdate {
-    let (registry, diagnostics) = discover_skills_for_prelude(definition, state);
-    evaluate_dynamic_updates_with_skills(
+    let (registry, mut diagnostics) = discover_skills_for_prelude(definition, state);
+    let (agent_registry, agent_diags) = discover_agents_non_workspace_for_prelude(definition);
+    diagnostics.extend(agent_diags);
+    evaluate_dynamic_updates_with_registries(
         existing_blocks,
         definition,
         state,
         budget,
         registry,
+        agent_registry,
+        &BTreeMap::new(),
         diagnostics,
     )
 }
 
-pub(crate) fn evaluate_dynamic_updates_with_skills(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_dynamic_updates_with_registries(
     existing_blocks: &[ContextBlock],
     definition: &PreludeDefinition,
     state: &PreludeRuntimeState,
     budget: &PreludeBudgetConfig,
     registry: SkillRegistry,
+    agent_registry: AgentRegistry,
+    model_profiles: &BTreeMap<String, ModelProfile>,
     mut diagnostics: Vec<PreludeDiagnostic>,
 ) -> DynamicUpdate {
     let previous = effective_section_contents(existing_blocks);
@@ -161,8 +194,18 @@ pub(crate) fn evaluate_dynamic_updates_with_skills(
     let effective_budget = effective_budget_bytes(budget);
 
     let skills: Vec<SkillEntry> = registry.iter().cloned().collect();
+    let agents: Vec<AgentPreset> = if definition.agents_enabled {
+        agent_registry.iter().cloned().collect()
+    } else {
+        Vec::new()
+    };
+    let profiles: Vec<ModelProfile> = if definition.agents_enabled {
+        model_profiles.values().cloned().collect()
+    } else {
+        Vec::new()
+    };
 
-    let mut keep_previous = [false; 5];
+    let mut keep_previous = [false; 6];
 
     let user_instructions = match read_optional_agents_md_tolerant(
         definition.config_dir.as_deref(),
@@ -221,6 +264,8 @@ pub(crate) fn evaluate_dynamic_updates_with_skills(
         user_instructions,
         workspace_instructions,
         skills,
+        agents,
+        model_profiles: profiles,
         env: Some(env_body),
         dynamic_custom,
     };
@@ -235,6 +280,7 @@ pub(crate) fn evaluate_dynamic_updates_with_skills(
 
     let mut update_blocks = Vec::new();
     let mut skills_changed = false;
+    let mut agents_changed = false;
 
     for sec in DynamicSection::ALL {
         if keep_previous[section_index(sec)] {
@@ -248,6 +294,8 @@ pub(crate) fn evaluate_dynamic_updates_with_skills(
             (Some(_), None) => {
                 if sec == DynamicSection::Skills {
                     skills_changed = true;
+                } else if sec == DynamicSection::Agents {
+                    agents_changed = true;
                 }
                 update_blocks.push(make_block(
                     Role::User,
@@ -258,6 +306,8 @@ pub(crate) fn evaluate_dynamic_updates_with_skills(
             (_, Some(c)) => {
                 if sec == DynamicSection::Skills {
                     skills_changed = true;
+                } else if sec == DynamicSection::Agents {
+                    agents_changed = true;
                 }
                 update_blocks.push(make_block(
                     Role::User,
@@ -271,8 +321,10 @@ pub(crate) fn evaluate_dynamic_updates_with_skills(
     DynamicUpdate {
         blocks: update_blocks,
         registry,
+        agent_registry,
         diagnostics,
         skills_changed,
+        agents_changed,
     }
 }
 
@@ -322,6 +374,9 @@ pub(crate) fn fold_dynamic_prefix(
     let skills_xml = effective
         .get(&DynamicSection::Skills)
         .and_then(|v| v.as_deref());
+    let agents_xml = effective
+        .get(&DynamicSection::Agents)
+        .and_then(|v| v.as_deref());
 
     let make_rendered = || RenderedSections {
         user_instructions: effective
@@ -333,6 +388,7 @@ pub(crate) fn fold_dynamic_prefix(
             .cloned()
             .flatten(),
         skills: effective.get(&DynamicSection::Skills).cloned().flatten(),
+        agents: effective.get(&DynamicSection::Agents).cloned().flatten(),
         env: effective.get(&DynamicSection::Env).cloned().flatten(),
         dynamic_custom: effective
             .get(&DynamicSection::DynamicCustom)
@@ -346,6 +402,7 @@ pub(crate) fn fold_dynamic_prefix(
         dynamic_custom: raw_dyn.as_deref(),
         env: raw_env.as_deref(),
         skills_xml,
+        agents_xml,
     };
     let (rendered, _) = tighten_loop(&static_blocks, initial_budget, budget, |target_budget| {
         apply_budget_folded(make_rendered(), &raw, static_bytes, target_budget)
@@ -365,8 +422,9 @@ fn section_index(sec: DynamicSection) -> usize {
         DynamicSection::UserInstructions => 0,
         DynamicSection::WorkspaceInstructions => 1,
         DynamicSection::Skills => 2,
-        DynamicSection::Env => 3,
-        DynamicSection::DynamicCustom => 4,
+        DynamicSection::Agents => 3,
+        DynamicSection::Env => 4,
+        DynamicSection::DynamicCustom => 5,
     }
 }
 
@@ -501,6 +559,24 @@ pub(crate) fn discover_skills_for_prelude(
         &definition.skill_dirs,
         state.workspace_root.as_deref(),
         definition.include_workspace_skills,
+    );
+    let diagnostics = discovery
+        .diagnostics
+        .into_iter()
+        .map(PreludeDiagnostic::from)
+        .collect();
+    (discovery.registry, diagnostics)
+}
+
+pub(crate) fn discover_agents_non_workspace_for_prelude(
+    definition: &PreludeDefinition,
+) -> (AgentRegistry, Vec<PreludeDiagnostic>) {
+    if !definition.agents_enabled {
+        return (AgentRegistry::new(), Vec::new());
+    }
+    let discovery = AgentDiscovery::discover_non_workspace(
+        definition.config_dir.as_deref(),
+        &definition.agent_dirs,
     );
     let diagnostics = discovery
         .diagnostics
@@ -739,6 +815,7 @@ fn rendered_section_text(rendered: &RenderedSections, sec: DynamicSection) -> Op
         DynamicSection::UserInstructions => rendered.user_instructions.clone(),
         DynamicSection::WorkspaceInstructions => rendered.workspace_instructions.clone(),
         DynamicSection::Skills => rendered.skills.clone(),
+        DynamicSection::Agents => rendered.agents.clone(),
         DynamicSection::Env => rendered.env.clone(),
         DynamicSection::DynamicCustom => rendered.dynamic_custom.clone(),
     }

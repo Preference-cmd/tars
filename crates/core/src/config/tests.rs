@@ -1634,3 +1634,101 @@ enabled = false
         .await
         .unwrap();
 }
+
+#[test]
+fn agents_table_temperature_and_model_profiles_resolve_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_dir = dir.path().join("cfg");
+    let global_agents = cfg_dir.join("global-agents");
+    let profile_agents = cfg_dir.join("profile-agents");
+    std::fs::create_dir_all(&global_agents).unwrap();
+    std::fs::create_dir_all(&profile_agents).unwrap();
+
+    let toml_path = cfg_dir.join("config.toml");
+    std::fs::write(
+        &toml_path,
+        r#"
+version = 1
+default_profile = "main"
+
+[agents]
+dirs = ["global-agents"]
+include_workspace = false
+
+[profiles.main]
+provider = "openai-chat"
+model = "gpt-4o"
+api_key_env = "TARS_MAIN_KEY"
+temperature = 0.35
+reasoning_effort = "medium"
+
+[profiles.fast]
+provider = "anthropic"
+model = "claude-haiku"
+api_key_env = "TARS_ANTHROPIC_KEY"
+max_tokens = 1024
+temperature = 0.8
+agent_dirs = ["profile-agents"]
+include_workspace_agents = true
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(ConfigSource::File(toml_path)).unwrap();
+    let main_def = config.definition(None, Default::default()).unwrap();
+    assert_eq!(main_def.temperature.map(|t| t.as_f32()), Some(0.35));
+    assert_eq!(
+        main_def.prelude.agent_dirs,
+        vec![global_agents.canonicalize().unwrap()]
+    );
+    assert!(!main_def.prelude.include_workspace_agents);
+    assert!(main_def.prelude.agents_enabled);
+
+    let fast_def = config
+        .definition(
+            Some("fast"),
+            DefinitionOverrides {
+                temperature: Some(0.25),
+                prelude: super::PreludeOverrides {
+                    agents_enabled: Some(false),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(fast_def.temperature.map(|t| t.as_f32()), Some(0.25));
+    assert_eq!(
+        fast_def.prelude.agent_dirs,
+        vec![profile_agents.canonicalize().unwrap()]
+    );
+    assert!(fast_def.prelude.include_workspace_agents);
+    assert!(!fast_def.prelude.agents_enabled);
+
+    let profiles = config.model_profiles();
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(profiles["main"].model, "gpt-4o");
+    assert_eq!(profiles["main"].temperature.map(|t| t.as_f32()), Some(0.35));
+    assert_eq!(
+        profiles["main"].credential,
+        CredentialRef::Environment("TARS_MAIN_KEY".into())
+    );
+    assert_eq!(profiles["fast"].provider, Provider::Anthropic);
+    assert_eq!(profiles["fast"].max_tokens, Some(1024));
+
+    // Reject Anthropic profile temperature > 1.0
+    let bad_toml = cfg_dir.join("bad.toml");
+    std::fs::write(
+        &bad_toml,
+        r#"
+version = 1
+default_profile = "bad"
+[profiles.bad]
+provider = "anthropic"
+model = "claude-haiku"
+temperature = 1.5
+"#,
+    )
+    .unwrap();
+    assert!(Config::load(ConfigSource::File(bad_toml)).is_err());
+}

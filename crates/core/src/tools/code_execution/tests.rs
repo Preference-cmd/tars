@@ -99,6 +99,7 @@ fn base_definition(root: Option<&Path>, tools: Vec<WorkspaceTool>) -> SessionDef
         max_tool_calls: 16,
         max_tokens: None,
         reasoning_effort: None,
+        temperature: None,
         extra_body: Default::default(),
         max_model_attempts: None,
         render_options: Default::default(),

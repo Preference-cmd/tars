@@ -9,6 +9,7 @@ mod file;
 mod mcp;
 mod model;
 
+pub use crate::agents::ModelProfile;
 pub use file::{Config, ConfigError, ConfigSource, user_tars_dir};
 pub(crate) use file::{process_home_dir, resolve_user_tars_dir};
 pub use model::{

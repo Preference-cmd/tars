@@ -1,6 +1,7 @@
 use super::model::{
     self, DefinitionOverrides, Profile, ProfileCodeExecution, ResolvedPreludeDefaults,
-    read_explicit_prelude_file, resolve_and_validate_dynamic_file, resolve_explicit_skill_dir,
+    read_explicit_prelude_file, resolve_and_validate_dynamic_file, resolve_explicit_agent_dir,
+    resolve_explicit_skill_dir,
 };
 use crate::definition::{
     CodeExecutionSettings, DefinitionError, McpServerConfig, SessionDefinition,
@@ -38,6 +39,7 @@ struct FileConfig {
     external_tools: Option<FileExternalTools>,
     prelude: Option<FilePrelude>,
     skills: Option<FileSkills>,
+    agents: Option<FileAgents>,
     code_execution: Option<ProfileCodeExecution>,
 }
 
@@ -55,6 +57,14 @@ struct FilePrelude {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileSkills {
+    dirs: Option<Vec<PathBuf>>,
+    include_workspace: Option<bool>,
+}
+
+/// The `[agents]` table of the shared configuration.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileAgents {
     dirs: Option<Vec<PathBuf>>,
     include_workspace: Option<bool>,
 }
@@ -299,6 +309,16 @@ impl Config {
             }
             prelude_defaults.include_workspace_skills = skills.include_workspace;
         }
+        if let Some(agents) = raw.agents {
+            if let Some(dirs) = agents.dirs {
+                let mut resolved = Vec::with_capacity(dirs.len());
+                for dir in dirs {
+                    resolved.push(resolve_explicit_agent_dir(dir, Some(base))?);
+                }
+                prelude_defaults.agent_dirs = Some(resolved);
+            }
+            prelude_defaults.include_workspace_agents = agents.include_workspace;
+        }
         if let Some(code_execution) = &raw.code_execution {
             code_execution
                 .effective_over(CodeExecutionSettings::default())
@@ -344,6 +364,13 @@ impl Config {
                     resolved.push(resolve_explicit_skill_dir(dir, Some(base))?);
                 }
                 profile.resolved_skill_dirs = Some(resolved);
+            }
+            if let Some(dirs) = profile.agent_dirs.take() {
+                let mut resolved = Vec::with_capacity(dirs.len());
+                for dir in dirs {
+                    resolved.push(resolve_explicit_agent_dir(dir, Some(base))?);
+                }
+                profile.resolved_agent_dirs = Some(resolved);
             }
         }
         Ok(Self {
@@ -442,6 +469,14 @@ impl Config {
     /// Configured source of the `rg` executable; defaults to the managed copy.
     pub fn ripgrep_source(&self) -> &ToolSource {
         &self.ripgrep
+    }
+
+    /// Credential-free view of all configured named model profiles for child agent delegation.
+    pub fn model_profiles(&self) -> BTreeMap<String, crate::agents::ModelProfile> {
+        self.profiles
+            .iter()
+            .map(|(name, profile)| (name.clone(), profile.to_model_profile(name)))
+            .collect()
     }
 }
 
@@ -574,6 +609,14 @@ pub enum ConfigError {
     /// An explicit skill directory is unavailable or is not a directory.
     #[error("skill directory {path:?} is unavailable or is not a directory: {kind:?}")]
     SkillDirectory {
+        /// Configured directory path.
+        path: PathBuf,
+        /// Original filesystem error category.
+        kind: io::ErrorKind,
+    },
+    /// An explicit agent directory is unavailable or is not a directory.
+    #[error("agent directory {path:?} is unavailable or is not a directory: {kind:?}")]
+    AgentDirectory {
         /// Configured directory path.
         path: PathBuf,
         /// Original filesystem error category.

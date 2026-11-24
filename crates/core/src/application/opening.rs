@@ -171,7 +171,7 @@ pub(super) async fn initialize(
                 mode,
                 OpenReport {
                     permission_downgraded,
-                    workspace_rules: WorkspaceRulesReport::default(),
+                    ..OpenReport::default()
                 },
                 record.history,
                 record.auto_compact,
@@ -187,6 +187,29 @@ pub(super) async fn initialize(
     let workspace_rules_snapshot = loaded_rules.snapshot;
     let command_rules = loaded_rules.rule_set;
     let workspace_rules_backend = loaded_rules.backend;
+    let loaded_agents = load_workspace_agents(host, &definition).await?;
+    open_report.workspace_agents = loaded_agents.report;
+    let workspace_agents_snapshot = loaded_agents.snapshot;
+    let trusted_workspace_agents = loaded_agents.trusted_presets;
+    let initial_agent_registry = if definition.prelude.agents_enabled {
+        let cfg_dir = definition.prelude.config_dir.clone();
+        let agent_dirs = definition.prelude.agent_dirs.clone();
+        let ws_presets = trusted_workspace_agents.clone();
+        saving::io_semaphore(&host.io, move || {
+            Ok::<_, ApplicationError>(
+                crate::agents::AgentDiscovery::discover(
+                    cfg_dir.as_deref(),
+                    &agent_dirs,
+                    &ws_presets,
+                )
+                .registry,
+            )
+        })
+        .await?
+    } else {
+        crate::agents::AgentRegistry::new()
+    };
+    *entry.agent_registry.write().expect("agent registry lock") = initial_agent_registry;
     let pending = if persistent && let Some(prepared) = &prepared {
         entry.cloned_snapshot();
         let (title, updated_at_ms) = saved.next(&context, 0);
@@ -231,6 +254,16 @@ pub(super) async fn initialize(
     let entry_usage_snapshot = usage.unwrap_or_default();
     let coord_command_rules = command_rules.clone();
     let coord_workspace_rules_backend = workspace_rules_backend.clone();
+    let extra_tools = if definition.prelude.agents_enabled {
+        crate::collaboration::collaboration_tools(
+            crate::collaboration::CollaborationContext::for_entry(
+                Arc::downgrade(entry),
+                entry_id.clone(),
+            ),
+        )
+    } else {
+        Vec::new()
+    };
 
     #[cfg(test)]
     let (owner, permissions) = if let Some(assemble) = fixture {
@@ -259,6 +292,7 @@ pub(super) async fn initialize(
             workspace_rules_backend.clone(),
             Some(entry_inbox.clone()),
             Some(shared_approvals.clone()),
+            extra_tools.clone(),
         )
         .await?;
         (
@@ -286,6 +320,7 @@ pub(super) async fn initialize(
             workspace_rules_backend,
             Some(entry_inbox.clone()),
             Some(shared_approvals.clone()),
+            extra_tools,
         )
         .await?;
         (
@@ -351,6 +386,8 @@ pub(super) async fn initialize(
     state.pending = pending;
     state.open_report = open_report;
     state.workspace_rules_snapshot = workspace_rules_snapshot;
+    state.workspace_agents_snapshot = workspace_agents_snapshot;
+    state.trusted_workspace_agents = trusted_workspace_agents;
     state.saved = saved;
     if state.closing.is_some() {
         state
@@ -575,6 +612,105 @@ async fn load_command_rules(
     })
 }
 
+struct LoadedWorkspaceAgents {
+    report: crate::agents::WorkspaceAgentsReport,
+    snapshot: Option<crate::agents::WorkspaceAgentsSnapshot>,
+    trusted_presets: Vec<crate::agents::AgentPreset>,
+}
+
+async fn load_workspace_agents(
+    host: &Arc<HostInner>,
+    definition: &crate::definition::SessionDefinition,
+) -> Result<LoadedWorkspaceAgents, ApplicationError> {
+    let Some(root) = definition.workspace_root.clone() else {
+        return Ok(LoadedWorkspaceAgents {
+            report: crate::agents::WorkspaceAgentsReport {
+                can_trust: host.store.is_some(),
+                trusted: true,
+                ..Default::default()
+            },
+            snapshot: None,
+            trusted_presets: Vec::new(),
+        });
+    };
+
+    if !definition.prelude.agents_enabled || !definition.prelude.include_workspace_agents {
+        let agents_dir = std::fs::canonicalize(&root)
+            .unwrap_or(root)
+            .join(".tars")
+            .join("agents");
+        return Ok(LoadedWorkspaceAgents {
+            report: crate::agents::WorkspaceAgentsReport {
+                agents_dir: Some(agents_dir),
+                can_trust: host.store.is_some(),
+                trusted: true,
+                ..Default::default()
+            },
+            snapshot: None,
+            trusted_presets: Vec::new(),
+        });
+    }
+
+    let store = host.store.clone();
+    let can_trust = store.is_some();
+    let loaded = saving::io_semaphore(&host.io, move || {
+        let snapshot = crate::agents::scan_workspace_agents(&root);
+        let trusted_copy = match (&store, snapshot.manifest_text.is_empty()) {
+            (Some(store), false) => store.read_workspace_agents_trust(&snapshot.workspace_root)?,
+            _ => None,
+        };
+        Ok::<_, ApplicationError>((snapshot, trusted_copy))
+    })
+    .await?;
+
+    let (snapshot, trusted_copy) = loaded;
+    if snapshot.manifest_text.is_empty() {
+        return Ok(LoadedWorkspaceAgents {
+            report: crate::agents::WorkspaceAgentsReport {
+                agents_dir: Some(snapshot.agents_dir),
+                untrusted_agents: Vec::new(),
+                trusted: true,
+                can_trust,
+                diagnostics: snapshot.diagnostics,
+            },
+            snapshot: None,
+            trusted_presets: Vec::new(),
+        });
+    }
+
+    let is_trusted = trusted_copy
+        .as_deref()
+        .is_some_and(|prev| prev == snapshot.manifest_text);
+    if is_trusted {
+        Ok(LoadedWorkspaceAgents {
+            report: crate::agents::WorkspaceAgentsReport {
+                agents_dir: Some(snapshot.agents_dir),
+                untrusted_agents: Vec::new(),
+                trusted: true,
+                can_trust,
+                diagnostics: snapshot.diagnostics,
+            },
+            snapshot: None,
+            trusted_presets: snapshot.presets,
+        })
+    } else {
+        let mut untrusted_agents: Vec<String> =
+            snapshot.presets.iter().map(|p| p.name.clone()).collect();
+        untrusted_agents.sort();
+        Ok(LoadedWorkspaceAgents {
+            report: crate::agents::WorkspaceAgentsReport {
+                agents_dir: Some(snapshot.agents_dir.clone()),
+                untrusted_agents,
+                trusted: false,
+                can_trust,
+                diagnostics: snapshot.diagnostics.clone(),
+            },
+            snapshot: Some(snapshot),
+            trusted_presets: Vec::new(),
+        })
+    }
+}
+
 async fn start_mcp(
     definition: &crate::definition::SessionDefinition,
 ) -> Result<Option<Arc<crate::mcp::McpRuntime>>, ApplicationError> {
@@ -602,6 +738,7 @@ async fn assembled(
     workspace_rules_backend: Option<crate::permission::WorkspaceRulesBackend>,
     inbox: Option<Arc<InboxDrainHandle>>,
     shared_approvals: Option<Arc<ApprovalsHub>>,
+    extra_tools: Vec<Arc<dyn causa::kernel::Tool>>,
 ) -> Result<crate::assembly::AssembledSession, ApplicationError> {
     let registry = match initial_skills {
         Some(registry) => registry,
@@ -628,6 +765,9 @@ async fn assembled(
     }
     if let Some(approvals) = shared_approvals {
         base = base.with_shared_approvals(approvals);
+    }
+    if !extra_tools.is_empty() {
+        base = base.with_extra_tools(extra_tools);
     }
     let base = match host.external_tools.clone() {
         Some(tools) => base.with_external_tools(tools),

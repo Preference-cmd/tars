@@ -262,6 +262,7 @@ impl Form {
                     prompt_cache: Some(prompt_cache),
                     max_tokens: self.generation.0,
                     reasoning_effort: self.generation.1.clone(),
+                    temperature: None,
                     extra_body: Some(self.generation.2.clone()),
                     max_model_attempts: self.max_model_attempts,
                     render_options: Some(self.render_options.clone()),

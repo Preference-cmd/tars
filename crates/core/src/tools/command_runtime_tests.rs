@@ -285,6 +285,7 @@ fn command_definition_exposes_the_sandbox_and_timeout() {
         max_tool_calls: 1,
         max_tokens: None,
         reasoning_effort: None,
+        temperature: None,
         extra_body: Default::default(),
         max_model_attempts: None,
         render_options: Default::default(),

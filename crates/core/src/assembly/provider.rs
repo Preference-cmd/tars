@@ -478,6 +478,20 @@ pub(crate) fn assemble(
             .then(|| std::time::Duration::from_secs(call_timeout_secs));
     let builtin_timeout = match (
         builtin_timeout,
+        has_extra_tools.then(|| {
+            std::time::Duration::from_secs(
+                definition
+                    .work_timeout_secs
+                    .unwrap_or(86_400)
+                    .saturating_add(5),
+            )
+        }),
+    ) {
+        (Some(builtin), Some(extra)) => Some(builtin.max(extra)),
+        (builtin, extra) => builtin.or(extra),
+    };
+    let builtin_timeout = match (
+        builtin_timeout,
         command_settings
             .map(|settings| std::time::Duration::from_secs(settings.max_timeout_secs + 5)),
     ) {

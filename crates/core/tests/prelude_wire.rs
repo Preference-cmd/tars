@@ -18,8 +18,8 @@ use tars_core::application::{PreparedCreate, SessionHost, text_input};
 use tars_core::definition::{CredentialRef, Provider, SessionDefinition, WorkspaceTool};
 use tars_core::permission::PermissionMode;
 use tars_core::prelude::{
-    BASE_HOST_CONTRACT, DynamicCustomSlot, DynamicSection, PRELUDE_BASE_SOURCE,
-    PRELUDE_DYNAMIC_CUSTOM_SOURCE, PRELUDE_ENV_SOURCE, PRELUDE_SKILLS_SOURCE,
+    BASE_HOST_CONTRACT, DynamicCustomSlot, DynamicSection, PRELUDE_AGENTS_SOURCE,
+    PRELUDE_BASE_SOURCE, PRELUDE_DYNAMIC_CUSTOM_SOURCE, PRELUDE_ENV_SOURCE, PRELUDE_SKILLS_SOURCE,
     PRELUDE_STATIC_CUSTOM_SOURCE, PRELUDE_USER_INSTRUCTIONS_SOURCE,
     PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE, PreludeDefinition, PreludeDiagnosticKind,
     StaticCustomSlot, has_prelude,
@@ -61,6 +61,7 @@ fn prelude_definition(
         max_tool_calls: 3,
         max_tokens: (provider == Provider::Anthropic).then_some(1024),
         reasoning_effort: None,
+        temperature: None,
         extra_body: Default::default(),
         max_model_attempts: None,
         render_options: Default::default(),
@@ -82,6 +83,7 @@ fn prelude_definition(
             skill_dirs: Vec::new(),
             include_workspace_skills: true,
             skills_enabled: true,
+            ..Default::default()
         },
         code_execution: None,
     }
@@ -140,6 +142,7 @@ async fn test_si01_three_protocol_wire_rendering_and_anthropic_cache_anchor() {
                 PRELUDE_USER_INSTRUCTIONS_SOURCE,
                 PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE,
                 PRELUDE_SKILLS_SOURCE,
+                PRELUDE_AGENTS_SOURCE,
                 PRELUDE_ENV_SOURCE,
                 PRELUDE_DYNAMIC_CUSTOM_SOURCE,
             ],
@@ -154,8 +157,8 @@ async fn test_si01_three_protocol_wire_rendering_and_anthropic_cache_anchor() {
 
         // Verify prepare_transient emits identical prelude except capabilities omit `recall`.
         let transient_prepared = PreparedCreate::prepare_transient(def, None).unwrap();
-        assert_eq!(transient_prepared.context().blocks().len(), 7);
-        let env_transient = text_of(&transient_prepared.context().blocks()[5]);
+        assert_eq!(transient_prepared.context().blocks().len(), 8);
+        let env_transient = text_of(&transient_prepared.context().blocks()[6]);
         assert!(!env_transient.contains("recall"));
 
         let session = host.create(prepared).await.unwrap();
@@ -196,21 +199,23 @@ async fn test_si01_three_protocol_wire_rendering_and_anthropic_cache_anchor() {
                 let p_user = joined.find("<user_instructions>").unwrap();
                 let p_ws = joined.find("<workspace_instructions>").unwrap();
                 let p_skills = joined.find("<available_skills>").unwrap();
+                let p_agents = joined.find("<available_agents>").unwrap();
                 let p_env = joined.find("<env>").unwrap();
                 let p_dyn = joined.find("<dynamic_context>").unwrap();
                 let p_turn = joined.find("Hello prelude wire").unwrap();
                 assert!(
                     p_user < p_ws
                         && p_ws < p_skills
-                        && p_skills < p_env
+                        && p_skills < p_agents
+                        && p_agents < p_env
                         && p_env < p_dyn
                         && p_dyn < p_turn
                 );
-                // None of the 5 dynamic prelude parts may carry system cache_control;
+                // None of the 6 dynamic prelude parts may carry system cache_control;
                 // (Anthropic StablePrefix places anchor #2 at system[last], not in dynamic Role::User,
                 // and may place a conversation tail breakpoint only on the final message part.)
-                assert_eq!(content.len(), 6);
-                for part in &content[..5] {
+                assert_eq!(content.len(), 7);
+                for part in &content[..6] {
                     assert!(
                         part.get("cache_control").is_none(),
                         "dynamic prelude part must not hold cache_control: {part}"
@@ -223,7 +228,7 @@ async fn test_si01_three_protocol_wire_rendering_and_anthropic_cache_anchor() {
                 assert_eq!(messages[0]["content"], BASE_HOST_CONTRACT);
                 assert_eq!(messages[1]["role"], "system");
                 assert_eq!(messages[1]["content"], "Custom static system rule.");
-                for idx in 2..=7 {
+                for idx in 2..=8 {
                     assert_eq!(messages[idx]["role"], "user", "idx {idx}: {messages:?}");
                 }
                 assert!(
@@ -244,15 +249,21 @@ async fn test_si01_three_protocol_wire_rendering_and_anthropic_cache_anchor() {
                         .unwrap()
                         .contains("<available_skills>")
                 );
-                assert!(messages[5]["content"].as_str().unwrap().contains("<env>"));
                 assert!(
-                    messages[6]["content"]
+                    messages[5]["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains("<available_agents>")
+                );
+                assert!(messages[6]["content"].as_str().unwrap().contains("<env>"));
+                assert!(
+                    messages[7]["content"]
                         .as_str()
                         .unwrap()
                         .contains("<dynamic_context>")
                 );
                 assert!(
-                    messages[7]["content"]
+                    messages[8]["content"]
                         .as_str()
                         .unwrap()
                         .contains("Hello prelude wire")
@@ -266,13 +277,14 @@ async fn test_si01_three_protocol_wire_rendering_and_anthropic_cache_anchor() {
                 let custom_at = instructions.find("Custom static system rule.").unwrap();
                 assert!(base_at < custom_at);
                 let input = body["input"].as_array().unwrap();
-                assert_eq!(input.len(), 6, "{input:?}");
+                assert_eq!(input.len(), 7, "{input:?}");
                 assert!(input[0].to_string().contains("<user_instructions>"));
                 assert!(input[1].to_string().contains("<workspace_instructions>"));
                 assert!(input[2].to_string().contains("<available_skills>"));
-                assert!(input[3].to_string().contains("<env>"));
-                assert!(input[4].to_string().contains("<dynamic_context>"));
-                assert!(input[5].to_string().contains("Hello prelude wire"));
+                assert!(input[3].to_string().contains("<available_agents>"));
+                assert!(input[4].to_string().contains("<env>"));
+                assert!(input[5].to_string().contains("<dynamic_context>"));
+                assert!(input[6].to_string().contains("Hello prelude wire"));
             }
         }
     }
@@ -317,7 +329,7 @@ async fn test_si03_dynamic_tail_append_reopen_readonly_open_and_request_key_idem
     let prepared = PreparedCreate::prepare_persistent(def, None).unwrap();
     let session = host.create(prepared).await.unwrap();
     let conv_id = session.target().conversation_id().clone();
-    let initial_prefix = session.read_materials().unwrap().context.blocks()[..5].to_vec();
+    let initial_prefix = session.read_materials().unwrap().context.blocks()[..6].to_vec();
 
     async fn run_turn(session: &tars_core::application::ManagedSession, key: &str, msg: &str) {
         let work = session
@@ -335,8 +347,8 @@ async fn test_si03_dynamic_tail_append_reopen_readonly_open_and_request_key_idem
     // Turn 1: baseline
     run_turn(&session, "t1", "turn 1").await;
     let blocks_t1 = session.read_materials().unwrap().context.blocks().to_vec();
-    assert_eq!(&blocks_t1[..5], &initial_prefix[..]);
-    assert_eq!(blocks_t1.len(), 8); // 5 prelude + user + tool_change + assistant
+    assert_eq!(&blocks_t1[..6], &initial_prefix[..]);
+    assert_eq!(blocks_t1.len(), 9); // 6 prelude + user + tool_change + assistant
 
     // Turn 2: nothing changed -> 0 update blocks
     run_turn(&session, "t2", "turn 2").await;
@@ -355,7 +367,7 @@ async fn test_si03_dynamic_tail_append_reopen_readonly_open_and_request_key_idem
     run_turn(&session, "t3", "turn 3").await;
     let blocks_t3 = session.read_materials().unwrap().context.blocks().to_vec();
     assert_eq!(
-        &blocks_t3[..5],
+        &blocks_t3[..6],
         &initial_prefix[..],
         "initial prefix never modified"
     );

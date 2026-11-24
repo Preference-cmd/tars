@@ -9,7 +9,6 @@ use std::path::Path;
 /// Trust kind for `.tars/permissions.toml`.
 pub(crate) const TRUST_KIND_PERMISSIONS_TOML: &str = "permissions_toml";
 /// Trust kind for `.tars/agents/*.md`.
-#[allow(dead_code)]
 pub(crate) const TRUST_KIND_WORKSPACE_AGENTS: &str = "workspace_agents";
 
 impl SessionStore {
@@ -120,6 +119,23 @@ impl SessionStore {
         content: &str,
     ) -> Result<(), StoreError> {
         self.write_workspace_trust(workspace_root, TRUST_KIND_PERMISSIONS_TOML, content)
+    }
+
+    /// Read the trusted `.tars/agents/*.md` manifest snapshot for `workspace_root`, if present.
+    pub(crate) fn read_workspace_agents_trust(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<Option<String>, StoreError> {
+        self.read_workspace_trust(workspace_root, TRUST_KIND_WORKSPACE_AGENTS)
+    }
+
+    /// Atomically persist the trusted `.tars/agents/*.md` manifest snapshot for `workspace_root`.
+    pub(crate) fn write_workspace_agents_trust(
+        &self,
+        workspace_root: &Path,
+        manifest_text: &str,
+    ) -> Result<(), StoreError> {
+        self.write_workspace_trust(workspace_root, TRUST_KIND_WORKSPACE_AGENTS, manifest_text)
     }
 }
 

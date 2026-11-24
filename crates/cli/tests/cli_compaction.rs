@@ -357,10 +357,11 @@ fn history_blocks(output: &Output) -> Vec<tars_core::compact::ExpandedBlock> {
         .collect()
 }
 
-/// Flags for sessions that compact: a 6,000-token window with a 3,000-token
-/// trigger line, well above twice the initial prelude (~780 tokens) plus
-/// `recall` declaration (~440 tokens) that every persistent session carries.
-const COMPACTING: [&str; 4] = ["--context-window", "6000", "--auto-compact", "50"];
+/// Flags for sessions that compact: a 10,000-token window with a 5,000-token
+/// trigger line, safely above twice the initial prelude (~780 tokens including
+/// `<available_agents>`) plus `recall` and collaboration tool declarations
+/// (~1,140 tokens) that every persistent session carries.
+const COMPACTING: [&str; 4] = ["--context-window", "10000", "--auto-compact", "50"];
 
 /// Run one work that stays under the trigger line and answer it.
 ///
@@ -375,9 +376,9 @@ fn seed(fixture: &Fixture, store: &Path, id: &str, input: &str) {
     assert!(output.status.success(), "{output:?}");
 }
 
-/// Input that brings a seeded session over its trigger line, about 800 tokens.
+/// Input that brings a seeded session over its trigger line, about 1,200 tokens.
 fn crossing_input() -> String {
-    "y".repeat(2_400)
+    "y".repeat(3_600)
 }
 
 #[test]
@@ -549,7 +550,7 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_record() {
     let store = folder.path().join("store");
     let fixture = Fixture::new(3);
     let id = create(&store, &fixture.endpoint, &COMPACTING);
-    seed(&fixture, &store, &id, &"x".repeat(3_000));
+    seed(&fixture, &store, &id, &"x".repeat(7_500));
     let crossing = crossing_input();
     let child = spawn(run(&store, &id, &crossing));
     let summary_request = fixture.request();
@@ -614,8 +615,8 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_record() {
         .unwrap();
     assert!(history_output.status.success(), "{history_output:?}");
     let blocks = history_blocks(&history_output);
-    // Initial prelude (2 original), then seeded request, declaration and answer
-    // summarized; the current request and its answer as they are.
+    // Initial prelude (2 original; `<available_agents>` trimmed by tight window budget),
+    // then seeded request, declaration and answer summarized; the current request and its answer as they are.
     assert_eq!(blocks.len(), 7);
     let record_id = history[0]["id"]
         .as_str()
@@ -687,7 +688,7 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_record() {
     let shown = report(&show);
     assert_eq!(shown["history_records"], 1);
     assert_eq!(shown["block_count"], 6);
-    assert_eq!(shown["context_window"], 6000);
+    assert_eq!(shown["context_window"], 10000);
     assert_eq!(shown["auto_compact"], true);
     assert_eq!(shown["compact_threshold"], 50);
     assert!(shown["context_estimate_tokens"].as_u64().unwrap() > 0);
@@ -711,7 +712,7 @@ fn export_and_import_carry_only_the_current_context_after_compaction() {
     let store = folder.path().join("store");
     let fixture = Fixture::new(3);
     let id = create(&store, &fixture.endpoint, &COMPACTING);
-    seed(&fixture, &store, &id, &"x".repeat(3_000));
+    seed(&fixture, &store, &id, &"x".repeat(7_500));
     let child = spawn(run(&store, &id, &crossing_input()));
     fixture.request();
     fixture.summary("Goal: finish the export fixture.");
@@ -732,7 +733,7 @@ fn export_and_import_carry_only_the_current_context_after_compaction() {
         .unwrap();
     assert!(export.status.success(), "{export:?}");
     let material = tars_core::material::load(&exported).unwrap();
-    // Prelude (2), declaration, brief, the kept request and its answer.
+    // Prelude (2: base, env), declaration, brief, the kept request and its answer.
     assert_eq!(material.blocks().len(), 6);
     let serialized = serde_json::to_string(&material).unwrap();
     assert!(serialized.contains("Goal: finish the export fixture"));
@@ -796,8 +797,8 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
     let first_summary = first["summary_block_id"].as_str().unwrap().to_owned();
     assert_eq!(first["merge_record_id"], json!(null));
     let saved = record(&store, &id);
-    assert_eq!(saved["context"]["blocks"].as_array().unwrap().len(), 4);
-    assert_eq!(saved["context"]["blocks"][3]["id"], json!(first_summary));
+    assert_eq!(saved["context"]["blocks"].as_array().unwrap().len(), 5);
+    assert_eq!(saved["context"]["blocks"][4]["id"], json!(first_summary));
     assert_eq!(saved["history"][0]["trigger"], "manual");
 
     // Material added after one compaction keeps the next replacement smaller.
@@ -831,9 +832,9 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
     let second_record = history[1]["record_id"].as_str().unwrap().to_owned();
     assert!(text.contains(&second_record), "{text}");
     let blocks = saved["context"]["blocks"].as_array().unwrap();
-    assert_eq!(blocks.len(), 5, "prelude, declaration and the two briefs");
-    assert_eq!(blocks[3]["id"], json!(first_summary));
-    let second_summary = blocks[4]["id"].as_str().unwrap();
+    assert_eq!(blocks.len(), 6, "prelude, declaration and the two briefs");
+    assert_eq!(blocks[4]["id"], json!(first_summary));
+    let second_summary = blocks[5]["id"].as_str().unwrap();
     assert!(
         text.contains(&format!("summary block {second_summary}")),
         "the newest brief is reported: {text}"
@@ -854,13 +855,10 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
         .unwrap();
     assert!(full.status.success(), "{full:?}");
     let blocks = history_blocks(&full);
-    assert_eq!(blocks.len(), 7);
+    assert_eq!(blocks.len(), 8);
     assert_eq!(blocks[0].status, tars_core::compact::BlockStatus::Original);
     assert_eq!(blocks[1].status, tars_core::compact::BlockStatus::Original);
-    assert_eq!(
-        blocks[2].status,
-        tars_core::compact::BlockStatus::Summarized(first_record.clone())
-    );
+    assert_eq!(blocks[2].status, tars_core::compact::BlockStatus::Original);
     assert_eq!(
         blocks[3].status,
         tars_core::compact::BlockStatus::Summarized(first_record.clone())
@@ -871,10 +869,14 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
     );
     assert_eq!(
         blocks[5].status,
-        tars_core::compact::BlockStatus::Summarized(second_record.clone())
+        tars_core::compact::BlockStatus::Summarized(first_record.clone())
     );
     assert_eq!(
         blocks[6].status,
+        tars_core::compact::BlockStatus::Summarized(second_record.clone())
+    );
+    assert_eq!(
+        blocks[7].status,
         tars_core::compact::BlockStatus::Summarized(second_record.clone())
     );
 
@@ -925,7 +927,7 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
     assert_eq!(shown["auto_compact"], false);
     assert_eq!(shown["compact_threshold"], 70);
     assert!(shown["context_window"].is_null());
-    assert_eq!(shown["block_count"], 5);
+    assert_eq!(shown["block_count"], 6);
 
     // An unreadable record is reported in both output modes and fails the
     // command, while the readable record is still expanded.
@@ -1095,7 +1097,7 @@ fn show_reports_retained_work_capacity() {
         shown["work_capacity"]["used"].as_u64().unwrap() <= 2,
         "{shown}"
     );
-    assert_eq!(shown["block_count"], 13);
+    assert_eq!(shown["block_count"], 14);
     assert_eq!(shown["history_records"], 0);
 
     let human = cli()
@@ -1115,7 +1117,7 @@ fn test_be05_cli_history_prints_expanded_conversation_and_deleting_record_exits_
     let store = folder.path().join("store");
     let fixture = Fixture::new(3);
     let id = create(&store, &fixture.endpoint, &COMPACTING);
-    seed(&fixture, &store, &id, &"first long user input ".repeat(150));
+    seed(&fixture, &store, &id, &"first long user input ".repeat(340));
     let child = spawn(run(&store, &id, &crossing_input()));
     let summary_request = fixture.request();
     assert!(
@@ -1228,7 +1230,7 @@ fn test_be09_cli_export_materials_drops_own_reference_and_create_accepts() {
     let store = folder.path().join("store");
     let fixture = Fixture::new(3);
     let id = create(&store, &fixture.endpoint, &COMPACTING);
-    seed(&fixture, &store, &id, &"x".repeat(3_000));
+    seed(&fixture, &store, &id, &"x".repeat(7_500));
     let child = spawn(run(&store, &id, &crossing_input()));
     fixture.request();
     fixture.summary("Goal: test export drops own reference.");
@@ -1341,7 +1343,7 @@ fn test_be09_cli_recovery_export_drops_own_reference_and_is_importable() {
     let store = folder.path().join("store");
     let fixture = Fixture::new(4);
     let id = create(&store, &fixture.endpoint, &COMPACTING);
-    seed(&fixture, &store, &id, &"x".repeat(3_000));
+    seed(&fixture, &store, &id, &"x".repeat(7_500));
     let child = spawn(run(&store, &id, &crossing_input()));
     fixture.request();
     fixture.summary("Goal: test recovery drops own reference.");

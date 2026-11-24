@@ -1,4 +1,5 @@
 use super::contract::DynamicSection;
+use crate::agents::{AgentDiagnostic, AgentDiagnosticKind, AgentRegistry};
 use crate::definition::{DefinitionError, SessionDefinition, WorkspaceTool};
 use crate::policy::PermissionMode;
 use crate::skills::{SkillDiagnostic, SkillDiagnosticKind, SkillRegistry};
@@ -81,6 +82,15 @@ pub struct PreludeDefinition {
     /// Whether skills discovery, `<available_skills>`, and `load_skill` are enabled.
     #[serde(default = "default_true")]
     pub skills_enabled: bool,
+    /// Ordered, canonicalized agent preset directories (later entries override earlier ones).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_dirs: Vec<PathBuf>,
+    /// Whether trusted `<workspace_root>/.tars/agents` is included with highest precedence.
+    #[serde(default = "default_true")]
+    pub include_workspace_agents: bool,
+    /// Whether agent discovery, `<available_agents>`, and the 4 collaboration tools are enabled.
+    #[serde(default = "default_true")]
+    pub agents_enabled: bool,
 }
 
 impl Default for PreludeDefinition {
@@ -92,6 +102,9 @@ impl Default for PreludeDefinition {
             skill_dirs: Vec::new(),
             include_workspace_skills: true,
             skills_enabled: true,
+            agent_dirs: Vec::new(),
+            include_workspace_agents: true,
+            agents_enabled: true,
         }
     }
 }
@@ -110,6 +123,11 @@ impl PreludeDefinition {
             return Err(DefinitionError::InvalidPreludeConfig);
         }
         for dir in &self.skill_dirs {
+            if dir.as_os_str().is_empty() || !dir.is_absolute() {
+                return Err(DefinitionError::InvalidPreludeConfig);
+            }
+        }
+        for dir in &self.agent_dirs {
             if dir.as_os_str().is_empty() || !dir.is_absolute() {
                 return Err(DefinitionError::InvalidPreludeConfig);
             }
@@ -234,6 +252,8 @@ pub enum PreludeDiagnosticKind {
     NotAFile,
     /// A non-fatal skill discovery warning.
     Skill(SkillDiagnosticKind),
+    /// A non-fatal agent discovery warning.
+    Agent(AgentDiagnosticKind),
 }
 
 /// Structured warning emitted during prelude assembly or runtime refresh.
@@ -255,6 +275,17 @@ impl From<SkillDiagnostic> for PreludeDiagnostic {
             section: Some(DynamicSection::Skills),
             path: diag.path,
             kind: PreludeDiagnosticKind::Skill(diag.kind),
+            message: diag.message,
+        }
+    }
+}
+
+impl From<AgentDiagnostic> for PreludeDiagnostic {
+    fn from(diag: AgentDiagnostic) -> Self {
+        Self {
+            section: Some(DynamicSection::Agents),
+            path: diag.path,
+            kind: PreludeDiagnosticKind::Agent(diag.kind),
             message: diag.message,
         }
     }
@@ -300,7 +331,9 @@ pub struct InitialPrelude {
     pub blocks: Vec<ContextBlock>,
     /// Validated skill registry discovered during initial assembly.
     pub registry: SkillRegistry,
-    /// Non-fatal diagnostics (e.g. skipped malformed `SKILL.md` files).
+    /// Validated agent registry discovered during initial assembly.
+    pub agent_registry: AgentRegistry,
+    /// Non-fatal diagnostics (e.g. skipped malformed `SKILL.md` or agent `.md` files).
     pub diagnostics: Vec<PreludeDiagnostic>,
     /// Effective byte budget applied to the prelude.
     pub effective_budget_bytes: usize,
@@ -313,8 +346,12 @@ pub struct DynamicUpdate {
     pub blocks: Vec<ContextBlock>,
     /// Freshly discovered skill registry for the current turn.
     pub registry: SkillRegistry,
+    /// Freshly discovered agent registry for the current turn.
+    pub agent_registry: AgentRegistry,
     /// Non-fatal warnings recorded during tolerant refresh.
     pub diagnostics: Vec<PreludeDiagnostic>,
     /// Whether the `<available_skills>` prelude section changed on this turn.
     pub skills_changed: bool,
+    /// Whether the `<available_agents>` prelude section changed on this turn.
+    pub agents_changed: bool,
 }

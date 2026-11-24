@@ -211,6 +211,7 @@ pub(super) fn definition(
         extra_skill_dirs: prelude_cli.skill_dirs,
         include_workspace_skills: None,
         skills_enabled: prelude_cli.no_skills.then_some(false),
+        ..Default::default()
     };
     let overrides = DefinitionOverrides {
         provider,
@@ -273,6 +274,7 @@ pub(super) fn definition(
             .map_err(|_| CliError::argument("model attempt limit too large"))?,
         // Sent as written: accepted values differ by model and server.
         reasoning_effort: string(values, "--reasoning-effort")?,
+        temperature: None,
         extra_body: string(values, "--extra-body")?
             .map(|value| {
                 serde_json::from_str(&value)

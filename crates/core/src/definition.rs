@@ -25,7 +25,7 @@ pub(crate) use mcp::{
 pub(crate) use types::RenderOptions;
 pub use types::{
     CredentialRef, DefinitionError, MAX_COMPACT_THRESHOLD, MIN_COMPACT_THRESHOLD, Provider,
-    SessionDefinition,
+    SessionDefinition, Temperature,
 };
 pub(crate) use types::{valid_environment_name, valid_http_endpoint};
 

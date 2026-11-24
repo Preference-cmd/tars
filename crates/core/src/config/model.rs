@@ -1,7 +1,7 @@
 use super::file::ConfigError;
 use crate::definition::{
     CodeExecutionSettings, CommandNetwork, CommandSettings, CredentialRef, McpServerConfig,
-    Provider, SessionDefinition, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
+    Provider, SessionDefinition, Temperature, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
 };
 use crate::policy::PermissionMode;
 use crate::prelude::{DynamicCustomSlot, PreludeDefinition, StaticCustomSlot};
@@ -48,6 +48,14 @@ pub struct PreludeOverrides {
     pub include_workspace_skills: Option<bool>,
     /// Override for whether skills discovery and `load_skill` are enabled.
     pub skills_enabled: Option<bool>,
+    /// Optional replacement list of agent directories (resolved relative to CWD).
+    pub agent_dirs: Option<Vec<PathBuf>>,
+    /// Additional agent directories appended after configured dirs and before workspace agents.
+    pub extra_agent_dirs: Vec<PathBuf>,
+    /// Override for whether `<workspace_root>/.tars/agents` is scanned.
+    pub include_workspace_agents: Option<bool>,
+    /// Override for whether agent discovery, `<available_agents>`, and collaboration tools are enabled.
+    pub agents_enabled: Option<bool>,
 }
 
 /// Explicit entry-point choices layered over a selected model preset.
@@ -81,6 +89,8 @@ pub struct DefinitionOverrides {
     pub prompt_cache: Option<bool>,
     /// Explicit reasoning effort, sent to the provider as written.
     pub reasoning_effort: Option<String>,
+    /// Explicit sampling temperature in `0.0..=2.0` (`0.0..=1.0` for Anthropic).
+    pub temperature: Option<f32>,
     /// Explicit extra request fields; replaces the preset's as a whole.
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
     /// Explicit total model calls per invocation on transient failure.
@@ -116,6 +126,8 @@ pub(super) struct ResolvedPreludeDefaults {
     pub(super) dynamic_custom: Option<DynamicCustomSlot>,
     pub(super) skill_dirs: Option<Vec<PathBuf>>,
     pub(super) include_workspace_skills: Option<bool>,
+    pub(super) agent_dirs: Option<Vec<PathBuf>>,
+    pub(super) include_workspace_agents: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -135,6 +147,7 @@ pub(super) struct Profile {
     compact_threshold: Option<u8>,
     prompt_cache: Option<bool>,
     reasoning_effort: Option<String>,
+    temperature: Option<f32>,
     extra_body: Option<serde_json::Map<String, serde_json::Value>>,
     max_model_attempts: Option<u32>,
     render_options: Option<serde_json::Map<String, serde_json::Value>>,
@@ -152,12 +165,40 @@ pub(super) struct Profile {
     pub(super) dynamic_context_file: Option<PathBuf>,
     pub(super) skill_dirs: Option<Vec<PathBuf>>,
     pub(super) include_workspace_skills: Option<bool>,
+    pub(super) agent_dirs: Option<Vec<PathBuf>>,
+    pub(super) include_workspace_agents: Option<bool>,
     #[serde(skip)]
     pub(super) resolved_system_prompt: Option<String>,
     #[serde(skip)]
     pub(super) resolved_dynamic_custom: Option<DynamicCustomSlot>,
     #[serde(skip)]
     pub(super) resolved_skill_dirs: Option<Vec<PathBuf>>,
+    #[serde(skip)]
+    pub(super) resolved_agent_dirs: Option<Vec<PathBuf>>,
+}
+
+impl Profile {
+    pub(super) fn to_model_profile(&self, name: &str) -> crate::agents::ModelProfile {
+        crate::agents::ModelProfile {
+            name: name.to_owned(),
+            provider: self.provider,
+            model: self.model.clone(),
+            endpoint: self.endpoint.clone(),
+            credential: CredentialRef::Environment(self.api_key_env.clone().unwrap_or_else(|| {
+                match self.provider {
+                    Provider::Anthropic => "ANTHROPIC_API_KEY".into(),
+                    _ => "OPENAI_API_KEY".into(),
+                }
+            })),
+            max_tokens: self.max_tokens,
+            reasoning_effort: self.reasoning_effort.clone(),
+            temperature: self.temperature.and_then(|t| Temperature::new(t).ok()),
+            extra_body: self.extra_body.clone().unwrap_or_default(),
+            context_window: self.context_window,
+            max_model_attempts: self.max_model_attempts,
+            render_options: self.render_options.clone().unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,6 +400,12 @@ pub(super) fn resolve(
         .or_else(|| code_execution_defaults.and_then(|c| c.enabled))
         .unwrap_or(false);
     let code_execution = code_execution_enabled.then_some(code_execution_settings);
+    let temperature = options
+        .temperature
+        .or(profile.and_then(|p| p.temperature))
+        .map(Temperature::new)
+        .transpose()
+        .map_err(ConfigError::Definition)?;
     let definition = SessionDefinition {
         provider,
         model,
@@ -409,6 +456,7 @@ pub(super) fn resolve(
         reasoning_effort: options
             .reasoning_effort
             .or_else(|| profile.and_then(|p| p.reasoning_effort.clone())),
+        temperature,
         extra_body: options
             .extra_body
             .or_else(|| profile.and_then(|p| p.extra_body.clone()))
@@ -490,7 +538,7 @@ fn resolve_prelude(
             } else if let Some(dirs) = defaults.skill_dirs.as_ref() {
                 dirs.clone()
             } else if let Some(config_dir) = defaults.config_dir.as_deref() {
-                default_config_skills_dir(config_dir)
+                default_config_subdir(config_dir, "skills")
             } else {
                 Vec::new()
             }
@@ -508,6 +556,38 @@ fn resolve_prelude(
         .unwrap_or(true);
     let skills_enabled = overrides.skills_enabled.unwrap_or(true);
 
+    let mut agent_dirs = match overrides.agent_dirs {
+        Some(dirs) => {
+            let mut resolved = Vec::with_capacity(dirs.len());
+            for dir in dirs {
+                resolved.push(resolve_explicit_agent_dir(dir, None)?);
+            }
+            resolved
+        }
+        None => {
+            if let Some(dirs) = profile.and_then(|p| p.resolved_agent_dirs.as_ref()) {
+                dirs.clone()
+            } else if let Some(dirs) = defaults.agent_dirs.as_ref() {
+                dirs.clone()
+            } else if let Some(config_dir) = defaults.config_dir.as_deref() {
+                default_config_subdir(config_dir, "agents")
+            } else {
+                Vec::new()
+            }
+        }
+    };
+
+    for extra in overrides.extra_agent_dirs {
+        agent_dirs.push(resolve_explicit_agent_dir(extra, None)?);
+    }
+
+    let include_workspace_agents = overrides
+        .include_workspace_agents
+        .or_else(|| profile.and_then(|p| p.include_workspace_agents))
+        .or(defaults.include_workspace_agents)
+        .unwrap_or(true);
+    let agents_enabled = overrides.agents_enabled.unwrap_or(true);
+
     Ok(PreludeDefinition {
         static_custom,
         dynamic_custom,
@@ -515,11 +595,14 @@ fn resolve_prelude(
         skill_dirs,
         include_workspace_skills,
         skills_enabled,
+        agent_dirs,
+        include_workspace_agents,
+        agents_enabled,
     })
 }
 
-fn default_config_skills_dir(config_dir: &Path) -> Vec<PathBuf> {
-    let candidate = config_dir.join("skills");
+fn default_config_subdir(config_dir: &Path, subdir: &str) -> Vec<PathBuf> {
+    let candidate = config_dir.join(subdir);
     match fs::canonicalize(&candidate) {
         Ok(canon) if fs::metadata(&canon).is_ok_and(|m| m.is_dir()) => vec![canon],
         _ => Vec::new(),
@@ -637,21 +720,34 @@ pub(super) fn resolve_explicit_skill_dir(
     path: PathBuf,
     base: Option<&Path>,
 ) -> Result<PathBuf, ConfigError> {
+    resolve_explicit_dir(path, base, |path, kind| ConfigError::SkillDirectory {
+        path,
+        kind,
+    })
+}
+
+pub(super) fn resolve_explicit_agent_dir(
+    path: PathBuf,
+    base: Option<&Path>,
+) -> Result<PathBuf, ConfigError> {
+    resolve_explicit_dir(path, base, |path, kind| ConfigError::AgentDirectory {
+        path,
+        kind,
+    })
+}
+
+fn resolve_explicit_dir(
+    path: PathBuf,
+    base: Option<&Path>,
+    make_err: impl Fn(PathBuf, io::ErrorKind) -> ConfigError,
+) -> Result<PathBuf, ConfigError> {
     let resolved = resolve_relative_to_base(path, base)?;
-    let canon = fs::canonicalize(&resolved).map_err(|error| ConfigError::SkillDirectory {
-        path: resolved.clone(),
-        kind: error.kind(),
-    })?;
+    let canon =
+        fs::canonicalize(&resolved).map_err(|error| make_err(resolved.clone(), error.kind()))?;
     match fs::metadata(&canon) {
         Ok(meta) if meta.is_dir() => Ok(canon),
-        Ok(_) => Err(ConfigError::SkillDirectory {
-            path: canon,
-            kind: io::ErrorKind::NotADirectory,
-        }),
-        Err(error) => Err(ConfigError::SkillDirectory {
-            path: canon,
-            kind: error.kind(),
-        }),
+        Ok(_) => Err(make_err(canon, io::ErrorKind::NotADirectory)),
+        Err(error) => Err(make_err(canon, error.kind())),
     }
 }
 

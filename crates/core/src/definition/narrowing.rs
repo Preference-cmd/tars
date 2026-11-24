@@ -2,7 +2,7 @@
 
 use super::{
     CodeExecutionSettings, CommandNetwork, CommandSettings, CredentialRef, DefinitionError,
-    Provider, SessionDefinition, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
+    Provider, SessionDefinition, Temperature, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits,
 };
 use crate::policy::PermissionMode;
 use std::collections::HashSet;
@@ -26,6 +26,8 @@ pub struct ChildModelOverride {
     pub max_tokens: Option<Option<u32>>,
     /// Override reasoning effort (`Some(None)` clears parent setting; `None` inherits parent).
     pub reasoning_effort: Option<Option<String>>,
+    /// Override sampling temperature (`Some(None)` clears parent setting; `None` inherits parent).
+    pub temperature: Option<Option<Temperature>>,
     /// Override extra top-level JSON request fields.
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
     /// Override context window (`Some(None)` clears parent setting; `None` inherits parent).
@@ -217,6 +219,9 @@ pub fn narrow_child_definition(
         }
         if let Some(reasoning_effort) = &model_override.reasoning_effort {
             child.reasoning_effort = reasoning_effort.clone();
+        }
+        if let Some(temperature) = model_override.temperature {
+            child.temperature = temperature;
         }
         if let Some(extra_body) = &model_override.extra_body {
             child.extra_body = extra_body.clone();
@@ -484,6 +489,7 @@ mod tests {
             max_tool_calls: 16,
             max_tokens: Some(4096),
             reasoning_effort: Some("medium".into()),
+            temperature: None,
             extra_body: Default::default(),
             context_window: Some(64_000),
             auto_compact: true,

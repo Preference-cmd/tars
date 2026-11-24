@@ -23,6 +23,7 @@ pub(super) fn definition() -> SessionDefinition {
         max_tool_calls: 0,
         max_tokens: None,
         reasoning_effort: None,
+        temperature: None,
         extra_body: Default::default(),
         max_model_attempts: None,
         render_options: Default::default(),
@@ -284,6 +285,9 @@ pub(super) fn compacting_definition(context_window: Option<u64>) -> SessionDefin
     definition.context_window = context_window;
     definition.auto_compact = true;
     definition.compact_threshold = 70;
+    // Keep single-agent compaction/recall fixtures isolated from default multi-agent
+    // tool declarations so small FIXTURE_WINDOW thresholds stay deterministic.
+    definition.prelude.agents_enabled = false;
     definition
 }
 

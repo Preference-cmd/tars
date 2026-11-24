@@ -6,8 +6,10 @@
 #![deny(missing_docs)]
 
 pub mod agent;
+pub mod agents;
 pub mod application;
 pub(crate) mod assembly;
+pub mod collaboration;
 pub mod compact;
 pub mod config;
 pub mod definition;

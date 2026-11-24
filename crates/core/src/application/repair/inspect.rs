@@ -464,6 +464,7 @@ mod tests {
             max_tool_calls: 0,
             max_tokens: Some(7),
             reasoning_effort: None,
+            temperature: None,
             extra_body: Default::default(),
             max_model_attempts: None,
             render_options: render_options.as_object().cloned().unwrap_or_default(),

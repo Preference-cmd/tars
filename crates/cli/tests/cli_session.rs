@@ -405,9 +405,10 @@ fn create_t1_close_reopen_t2_preserve_definition_identity_and_block_ids() {
     );
     let original = record(&store, &id);
     let original_blocks = original["context"]["blocks"].as_array().unwrap();
-    assert_eq!(original_blocks.len(), 2);
+    assert_eq!(original_blocks.len(), 3);
     assert_eq!(original_blocks[0]["meta"]["source"], "tars:prelude:base");
-    assert_eq!(original_blocks[1]["meta"]["source"], "tars:prelude:env");
+    assert_eq!(original_blocks[1]["meta"]["source"], "tars:prelude:agents");
+    assert_eq!(original_blocks[2]["meta"]["source"], "tars:prelude:env");
     assert_eq!(
         original["definition"]["credential"],
         json!({"environment":"TARS_TEST_KEY"})
@@ -427,8 +428,8 @@ fn create_t1_close_reopen_t2_preserve_definition_identity_and_block_ids() {
     let first_record = record(&store, &id);
     assert_eq!(first_record["definition"], original["definition"]);
     let first_blocks = first_record["context"]["blocks"].as_array().unwrap();
-    assert_eq!(first_blocks.len(), 5);
-    assert_eq!(&first_blocks[..2], original_blocks);
+    assert_eq!(first_blocks.len(), 6);
+    assert_eq!(&first_blocks[..3], original_blocks);
     let invalid = run(&store, &id, "attempt override")
         .args(["--model", "different"])
         .output()
@@ -455,8 +456,8 @@ fn create_t1_close_reopen_t2_preserve_definition_identity_and_block_ids() {
     let second_record = record(&store, &id);
     assert_eq!(second_record["definition"], original["definition"]);
     let second_blocks = second_record["context"]["blocks"].as_array().unwrap();
-    assert_eq!(second_blocks.len(), 7);
-    assert_eq!(&second_blocks[..5], first_blocks);
+    assert_eq!(second_blocks.len(), 8);
+    assert_eq!(&second_blocks[..6], first_blocks);
     assert!(second_record.get("usage").is_some());
     assert_eq!(second_record.as_object().unwrap().len(), 9); // No request keys/results/execution archive.
     let listed = command(&store, "list").output().unwrap();
@@ -547,7 +548,7 @@ fn real_running_process_excludes_second_process_and_list_reports_active() {
             .as_array()
             .unwrap()
             .len(),
-        5
+        6
     );
 }
 
@@ -581,7 +582,7 @@ fn failed_model_and_timeout_keep_input_and_confirm_saved_revision() {
         assert_eq!(result["revision"], 2);
         assert!(result["save_error"].is_null());
         let saved = record(&store, &id);
-        assert_eq!(saved["context"]["blocks"].as_array().unwrap().len(), 4);
+        assert_eq!(saved["context"]["blocks"].as_array().unwrap().len(), 5);
         assert!(saved.to_string().contains("keep actual input"));
     }
 }
@@ -614,7 +615,7 @@ fn ctrl_c_still_saves_materials_and_closes_before_process_exit() {
             .as_array()
             .unwrap()
             .len(),
-        4
+        5
     );
     let listed = command(&store, "list").output().unwrap();
     assert_eq!(report(&listed)["sessions"][0]["active"], false);
@@ -688,7 +689,7 @@ fn completed_work_save_failure_exports_actual_recovery_and_reports_export_failur
             let path = Path::new(result["recovery_file"].as_str().unwrap());
             assert_eq!(path.parent().unwrap(), recovery);
             let material = tars_core::material::load(path).unwrap();
-            assert_eq!(material.blocks().len(), 5);
+            assert_eq!(material.blocks().len(), 6);
             let serialized = serde_json::to_string(&material).unwrap();
             assert!(serialized.contains("unsaved actual input"));
             assert!(serialized.contains("completed but save failed"));
@@ -805,7 +806,7 @@ fn second_sigint_abandons_a_blocked_save_and_exports_importable_recovery() {
     let path = Path::new(result["recovery_file"].as_str().unwrap());
     assert_eq!(path.parent().unwrap(), recovery);
     let materials = tars_core::material::load(path).unwrap();
-    assert_eq!(materials.blocks().len(), 5);
+    assert_eq!(materials.blocks().len(), 6);
 
     let imported_store = folder.path().join("imported");
     let imported = tars_bin()
@@ -968,7 +969,7 @@ fn create_initial_save_failure_exports_recovery_to_the_selected_directory() {
     let path = Path::new(value["recovery_file"].as_str().unwrap());
     assert_eq!(path.parent().unwrap(), recovery);
     let restored = tars_core::material::load(path).unwrap();
-    assert_eq!(restored.blocks().len(), 3);
+    assert_eq!(restored.blocks().len(), 4);
 }
 
 #[test]

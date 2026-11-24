@@ -24,9 +24,10 @@ pub use crate::usage::{
     UsageTotals, WorkUsage, session_usage_lines,
 };
 pub use coordinator::{
-    CoordinatorConfig, CoordinatorError, MessageAgentRequest, OperationOutcome, OperationReceipt,
-    ReadAgentResult, SpawnAgentOutcome, SpawnAgentRequest,
+    CoordinatorConfig, CoordinatorError, DEFAULT_OPERATION_TIMEOUT_SECS, MessageAgentRequest,
+    OperationOutcome, OperationReceipt, ReadAgentResult, SpawnAgentOutcome, SpawnAgentRequest,
 };
+pub(crate) use entry::Entry;
 pub use host::SessionHost;
 pub use managed::ManagedSession;
 pub use outcome::WorkOutcome;

@@ -5,6 +5,6 @@ mod types;
 
 pub(super) use engine::SessionCoordinator;
 pub use types::{
-    CoordinatorConfig, CoordinatorError, MessageAgentRequest, OperationOutcome, OperationReceipt,
-    ReadAgentResult, SpawnAgentOutcome, SpawnAgentRequest,
+    CoordinatorConfig, CoordinatorError, DEFAULT_OPERATION_TIMEOUT_SECS, MessageAgentRequest,
+    OperationOutcome, OperationReceipt, ReadAgentResult, SpawnAgentOutcome, SpawnAgentRequest,
 };

@@ -100,6 +100,7 @@ fn initial_prelude_orders_static_then_dynamic_omits_empty_and_is_deterministic()
         skill_dirs: Vec::new(),
         include_workspace_skills: true,
         skills_enabled: true,
+        ..Default::default()
     };
     let mut caps = BTreeSet::new();
     caps.insert(CapabilityCategory::WorkspaceRead);
@@ -128,6 +129,7 @@ fn initial_prelude_orders_static_then_dynamic_omits_empty_and_is_deterministic()
             (PRELUDE_USER_INSTRUCTIONS_SOURCE, Role::User),
             (PRELUDE_WORKSPACE_INSTRUCTIONS_SOURCE, Role::User),
             (PRELUDE_SKILLS_SOURCE, Role::User),
+            (PRELUDE_AGENTS_SOURCE, Role::User),
             (PRELUDE_ENV_SOURCE, Role::User),
             (PRELUDE_DYNAMIC_CUSTOM_SOURCE, Role::User),
         ]
@@ -145,8 +147,13 @@ fn initial_prelude_orders_static_then_dynamic_omits_empty_and_is_deterministic()
     assert!(alpha_pos < beta_pos);
     assert!(skills_xml.contains("First &lt;alphabetically&gt; &amp; safe"));
 
+    // Agents block includes built-in explore & general
+    let agents_xml = block_text(&first.blocks[5]);
+    assert!(agents_xml.contains("<name>explore</name>"));
+    assert!(agents_xml.contains("<name>general</name>"));
+
     // Env block includes platform, workspace_root, permission_mode, capabilities
-    let env_xml = block_text(&first.blocks[5]);
+    let env_xml = block_text(&first.blocks[6]);
     assert!(env_xml.contains("platform: linux"));
     assert!(env_xml.contains("permission_mode: ask"));
     assert!(env_xml.contains("capabilities: workspace_read, recall, skills"));
@@ -158,7 +165,10 @@ fn zero_skills_and_empty_optional_sections_are_omitted() {
     let ws_dir = temp.path().join("ws");
     fs::create_dir_all(&ws_dir).unwrap();
 
-    let def = PreludeDefinition::default();
+    let def = PreludeDefinition {
+        agents_enabled: false,
+        ..Default::default()
+    };
     let state = PreludeRuntimeState {
         workspace_root: Some(ws_dir),
         permission_mode: PermissionMode::ReadOnly,
@@ -206,6 +216,7 @@ fn budget_degradation_order_utf8_safety_and_small_window_tightening() {
         skill_dirs: Vec::new(),
         include_workspace_skills: true,
         skills_enabled: true,
+        ..Default::default()
     };
     let state = PreludeRuntimeState {
         workspace_root: Some(ws_dir),
@@ -271,6 +282,7 @@ fn dynamic_diff_emits_only_changes_handles_removal_tombstones_and_is_tolerant_at
         skill_dirs: Vec::new(),
         include_workspace_skills: true,
         skills_enabled: true,
+        ..Default::default()
     };
     let mut state = PreludeRuntimeState {
         workspace_root: Some(ws_dir.clone()),

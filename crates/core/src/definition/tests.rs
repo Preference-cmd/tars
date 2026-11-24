@@ -12,6 +12,7 @@ fn definition() -> SessionDefinition {
         max_tool_calls: 0,
         max_tokens: None,
         reasoning_effort: None,
+        temperature: None,
         extra_body: Default::default(),
         max_model_attempts: None,
         render_options: Default::default(),
@@ -874,6 +875,7 @@ fn prelude_definition_roundtrips_and_rejects_relative_or_empty_paths() {
         skill_dirs: vec![std::env::temp_dir().join("skills")],
         include_workspace_skills: false,
         skills_enabled: true,
+        ..Default::default()
     };
     candidate.validate().unwrap();
     let encoded = serde_json::to_value(&candidate).unwrap();
@@ -968,4 +970,54 @@ fn code_execution_settings_validate_and_v22_records_deserialize_without_field() 
         invalid.validate(),
         Err(DefinitionError::InvalidCodeExecutionSettings)
     );
+}
+
+#[test]
+fn temperature_normalizes_negative_zero_validates_bounds_and_wires_run_options() {
+    use super::Temperature;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let neg_zero = Temperature::new(-0.0).unwrap();
+    let pos_zero = Temperature::new(0.0).unwrap();
+    assert_eq!(neg_zero, pos_zero);
+    assert_eq!(neg_zero.as_f32().to_bits(), 0.0f32.to_bits());
+
+    let mut h1 = DefaultHasher::new();
+    let mut h2 = DefaultHasher::new();
+    neg_zero.hash(&mut h1);
+    pos_zero.hash(&mut h2);
+    assert_eq!(h1.finish(), h2.finish());
+
+    assert!(Temperature::new(2.0).is_ok());
+    assert_eq!(
+        Temperature::new(-0.01),
+        Err(DefinitionError::InvalidTemperature)
+    );
+    assert_eq!(
+        Temperature::new(2.01),
+        Err(DefinitionError::InvalidTemperature)
+    );
+    assert_eq!(
+        Temperature::new(f32::NAN),
+        Err(DefinitionError::InvalidTemperature)
+    );
+    assert_eq!(
+        Temperature::new(f32::INFINITY),
+        Err(DefinitionError::InvalidTemperature)
+    );
+    assert!(serde_json::from_str::<Temperature>("-0.1").is_err());
+    assert!(serde_json::from_str::<Temperature>("2.1").is_err());
+    assert!(serde_json::from_str::<Temperature>("null").is_err());
+
+    let mut def = definition();
+    def.temperature = Some(Temperature::new(1.5).unwrap());
+    def.validate().unwrap();
+    assert_eq!(def.run_options().generation.temperature, Some(1.5));
+
+    def.provider = Provider::Anthropic;
+    def.max_tokens = Some(1024);
+    assert_eq!(def.validate(), Err(DefinitionError::InvalidTemperature));
+    def.temperature = Some(Temperature::new(1.0).unwrap());
+    def.validate().unwrap();
 }

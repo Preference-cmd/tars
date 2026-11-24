@@ -30,6 +30,7 @@ fn definition(provider: Provider, endpoint: &str, root: &Path) -> SessionDefinit
         max_tool_calls: 3,
         max_tokens: (provider == Provider::Anthropic).then_some(1024),
         reasoning_effort: None,
+        temperature: None,
         extra_body: Default::default(),
         max_model_attempts: None,
         render_options: Default::default(),
@@ -134,8 +135,8 @@ fn schemas(provider: &str, requests: &[Value], persistent: bool) {
         let tools = request["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            if persistent { 2 } else { 1 },
-            "only selected tools (and recall in persistent sessions) may enter provider request"
+            if persistent { 6 } else { 5 },
+            "only selected tools, collaboration tools, and recall (in persistent sessions) may enter provider request"
         );
         let read_file_entry = tools
             .iter()

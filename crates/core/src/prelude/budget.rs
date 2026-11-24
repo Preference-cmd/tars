@@ -1,4 +1,6 @@
 use super::types::PreludeBudgetConfig;
+use crate::agents::{AgentPreset, ModelProfile};
+use crate::definition::Provider;
 use crate::skills::SkillEntry;
 
 /// Default unified byte budget across static and dynamic prelude sections (`24 KiB`).
@@ -9,6 +11,9 @@ pub const INSTRUCTIONS_SOFT_CAP_BYTES: usize = 16 * 1024;
 
 /// Soft byte cap for `<available_skills>` (`4 KiB`).
 pub const SKILLS_SOFT_CAP_BYTES: usize = 4 * 1024;
+
+/// Soft byte cap for `<available_agents>` (`4 KiB`).
+pub const AGENTS_SOFT_CAP_BYTES: usize = 4 * 1024;
 
 /// Soft byte cap for `dynamic-custom` (`4 KiB`).
 pub const DYNAMIC_CUSTOM_SOFT_CAP_BYTES: usize = 4 * 1024;
@@ -40,6 +45,8 @@ pub(super) struct DynamicDraft {
     pub(super) user_instructions: Option<String>,
     pub(super) workspace_instructions: Option<String>,
     pub(super) skills: Vec<SkillEntry>,
+    pub(super) agents: Vec<AgentPreset>,
+    pub(super) model_profiles: Vec<ModelProfile>,
     pub(super) env: Option<String>,
     pub(super) dynamic_custom: Option<String>,
 }
@@ -49,6 +56,7 @@ pub(super) struct RenderedSections {
     pub(super) user_instructions: Option<String>,
     pub(super) workspace_instructions: Option<String>,
     pub(super) skills: Option<String>,
+    pub(super) agents: Option<String>,
     pub(super) env: Option<String>,
     pub(super) dynamic_custom: Option<String>,
 }
@@ -58,6 +66,7 @@ impl RenderedSections {
         self.user_instructions.as_ref().map_or(0, String::len)
             + self.workspace_instructions.as_ref().map_or(0, String::len)
             + self.skills.as_ref().map_or(0, String::len)
+            + self.agents.as_ref().map_or(0, String::len)
             + self.env.as_ref().map_or(0, String::len)
             + self.dynamic_custom.as_ref().map_or(0, String::len)
     }
@@ -80,6 +89,7 @@ pub(super) fn apply_budget(
             .filter(|s| !s.trim().is_empty())
             .map(|body| wrap_text_section("workspace_instructions", body)),
         skills: render_skills_full(&draft.skills),
+        agents: render_agents_full(&draft.agents, &draft.model_profiles),
         env: draft
             .env
             .as_deref()
@@ -99,6 +109,7 @@ pub(super) fn apply_budget(
         draft.dynamic_custom.as_deref(),
         draft.env.as_deref(),
         |max_bytes| shrink_skills(&draft.skills, max_bytes),
+        |max_bytes| shrink_agents(&draft.agents, &draft.model_profiles, max_bytes),
         static_bytes,
         total_budget_bytes,
     )
@@ -110,6 +121,7 @@ pub(super) struct FoldedRawSections<'a> {
     pub(super) dynamic_custom: Option<&'a str>,
     pub(super) env: Option<&'a str>,
     pub(super) skills_xml: Option<&'a str>,
+    pub(super) agents_xml: Option<&'a str>,
 }
 
 pub(super) fn apply_budget_folded(
@@ -131,6 +143,13 @@ pub(super) fn apply_budget_folded(
             }
             shrink_skills_xml(xml, max_bytes)
         },
+        |max_bytes| {
+            let xml = raw.agents_xml?;
+            if xml.len() <= max_bytes {
+                return Some(xml.to_owned());
+            }
+            shrink_agents_xml(xml, max_bytes)
+        },
         static_bytes,
         total_budget_bytes,
     )
@@ -144,6 +163,7 @@ fn apply_budget_to_rendered(
     raw_dyn: Option<&str>,
     raw_env: Option<&str>,
     shrink_skills_fn: impl Fn(usize) -> Option<String>,
+    shrink_agents_fn: impl Fn(usize) -> Option<String>,
     static_bytes: usize,
     total_budget_bytes: usize,
 ) -> RenderedSections {
@@ -203,9 +223,16 @@ fn apply_budget_to_rendered(
         rendered.skills = shrink_skills_fn(SKILLS_SOFT_CAP_BYTES);
     }
 
+    if let Some(ref text) = rendered.agents
+        && text.len() > AGENTS_SOFT_CAP_BYTES
+    {
+        rendered.agents = shrink_agents_fn(AGENTS_SOFT_CAP_BYTES);
+    }
+
     // 2. Enforce unified total budget in deterministic degradation order:
     //    dynamic-custom -> workspace-instructions -> user-instructions
-    //    -> skills name-only -> skills tail-truncated.
+    //    -> skills name-only -> skills tail-truncated
+    //    -> agents name-only -> agents tail-truncated.
     //    Static base is never truncated.
     let dynamic_budget = total_budget_bytes.saturating_sub(static_bytes);
 
@@ -249,7 +276,57 @@ fn apply_budget_to_rendered(
         rendered.skills = shrink_skills_fn(target);
     }
 
+    if rendered.total_bytes() > dynamic_budget && rendered.agents.is_some() {
+        let others = rendered.total_bytes() - rendered.agents.as_ref().map_or(0, String::len);
+        let target = dynamic_budget.saturating_sub(others);
+        rendered.agents = shrink_agents_fn(target);
+    }
+
     rendered
+}
+
+fn shrink_agents_xml(xml: &str, max_bytes: usize) -> Option<String> {
+    if xml.len() <= max_bytes {
+        return Some(xml.to_owned());
+    }
+    let names = extract_skill_names_from_xml(xml);
+    if names.is_empty() {
+        return None;
+    }
+    let prior_omitted = extract_prior_omitted_count(xml);
+    if let Some(names_only) = render_agent_names_only(&names, prior_omitted)
+        && names_only.len() <= max_bytes
+    {
+        return Some(names_only);
+    }
+    for keep in (1..names.len()).rev() {
+        let omitted = prior_omitted.saturating_add(names.len() - keep);
+        if let Some(candidate) = render_agent_names_only(&names[..keep], omitted)
+            && candidate.len() <= max_bytes
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn render_agent_names_only(names: &[String], omitted_count: usize) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let note = if omitted_count == 0 {
+        "descriptions omitted due to budget".to_owned()
+    } else {
+        format!("descriptions omitted; {omitted_count} more agents omitted due to budget")
+    };
+    let mut out = format!("<available_agents note=\"{note}\">\n");
+    for name in names {
+        out.push_str("  <agent><name>");
+        push_xml_escaped(&mut out, name);
+        out.push_str("</name></agent>\n");
+    }
+    out.push_str("</available_agents>");
+    Some(out)
 }
 
 fn shrink_skills_xml(xml: &str, max_bytes: usize) -> Option<String> {
@@ -427,6 +504,80 @@ fn shrink_skills(skills: &[SkillEntry], max_bytes: usize) -> Option<String> {
     for keep in (1..skills.len()).rev() {
         let omitted = skills.len() - keep;
         if let Some(candidate) = render_skills_names_only(&skills[..keep], omitted)
+            && candidate.len() <= max_bytes
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn provider_wire_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::OpenAiChat => "openai-chat",
+        Provider::OpenAiResponses => "openai-responses",
+        Provider::Anthropic => "anthropic",
+    }
+}
+
+fn render_agents_full(agents: &[AgentPreset], profiles: &[ModelProfile]) -> Option<String> {
+    if agents.is_empty() && profiles.is_empty() {
+        return None;
+    }
+    let mut out = String::from("<available_agents>\n");
+    for agent in agents {
+        out.push_str("  <agent>\n    <name>");
+        push_xml_escaped(&mut out, &agent.name);
+        out.push_str("</name>\n    <description>");
+        push_xml_escaped(&mut out, &agent.description);
+        out.push_str("</description>\n    <default_interaction>");
+        out.push_str(agent.default_interaction.as_str());
+        out.push_str("</default_interaction>\n  </agent>\n");
+    }
+    if !profiles.is_empty() {
+        out.push_str("  <model_profiles>\n");
+        for profile in profiles {
+            out.push_str("    <profile name=\"");
+            push_xml_escaped(&mut out, &profile.name);
+            out.push_str("\" provider=\"");
+            out.push_str(provider_wire_name(profile.provider));
+            out.push_str("\" model=\"");
+            push_xml_escaped(&mut out, &profile.model);
+            out.push_str("\" />\n");
+        }
+        out.push_str("  </model_profiles>\n");
+    }
+    out.push_str("</available_agents>");
+    Some(out)
+}
+
+fn shrink_agents(
+    agents: &[AgentPreset],
+    profiles: &[ModelProfile],
+    max_bytes: usize,
+) -> Option<String> {
+    if agents.is_empty() && profiles.is_empty() {
+        return None;
+    }
+    if let Some(full) = render_agents_full(agents, profiles)
+        && full.len() <= max_bytes
+    {
+        return Some(full);
+    }
+    if let Some(without_profiles) = render_agents_full(agents, &[])
+        && without_profiles.len() <= max_bytes
+    {
+        return Some(without_profiles);
+    }
+    let names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
+    if let Some(names_only) = render_agent_names_only(&names, 0)
+        && names_only.len() <= max_bytes
+    {
+        return Some(names_only);
+    }
+    for keep in (1..names.len()).rev() {
+        let omitted = names.len() - keep;
+        if let Some(candidate) = render_agent_names_only(&names[..keep], omitted)
             && candidate.len() <= max_bytes
         {
             return Some(candidate);

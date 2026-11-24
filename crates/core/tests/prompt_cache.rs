@@ -30,6 +30,7 @@ fn test_definition(
             None
         },
         reasoning_effort: None,
+        temperature: None,
         extra_body: Default::default(),
         max_model_attempts: None,
         render_options: Default::default(),

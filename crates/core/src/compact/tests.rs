@@ -44,6 +44,7 @@ fn definition(context_window: Option<u64>, max_tokens: Option<u32>) -> SessionDe
         max_tool_calls: 8,
         max_tokens,
         reasoning_effort: None,
+        temperature: None,
         extra_body: Default::default(),
         max_model_attempts: None,
         render_options: Default::default(),

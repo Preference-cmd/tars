@@ -1,7 +1,8 @@
+use crate::agents::{AgentDiscovery, AgentRegistry, ModelProfile, WorkspaceAgentsReport};
 use crate::definition::SessionDefinition;
 use crate::prelude::{
     PreludeBudgetConfig, PreludeDiagnostic, PreludeError, PreludeRuntimeState,
-    build_initial_prelude_with_skills, discover_skills_for_prelude, has_prelude,
+    build_initial_prelude_with_registries, discover_skills_for_prelude, has_prelude,
 };
 use crate::session::{ConversationId, SessionError, SubmitRequest, WorkRef};
 use crate::store::StoreError;
@@ -69,8 +70,22 @@ impl PreparedCreate {
             definition.initial_permission_mode(),
             persistent,
         );
-        let (registry, skill_diagnostics) =
-            discover_skills_for_prelude(&definition.prelude, &state);
+        let (registry, mut diagnostics) = discover_skills_for_prelude(&definition.prelude, &state);
+        let (agent_registry, agent_diagnostics) = if definition.prelude.agents_enabled {
+            let discovery = AgentDiscovery::discover_non_workspace(
+                definition.prelude.config_dir.as_deref(),
+                &definition.prelude.agent_dirs,
+            );
+            let diags: Vec<PreludeDiagnostic> = discovery
+                .diagnostics
+                .into_iter()
+                .map(PreludeDiagnostic::from)
+                .collect();
+            (discovery.registry, diags)
+        } else {
+            (AgentRegistry::new(), Vec::new())
+        };
+        diagnostics.extend(agent_diagnostics);
         if has_prelude(base_context.blocks()) {
             return Ok(Self::new(
                 definition,
@@ -82,12 +97,14 @@ impl PreparedCreate {
         }
         let include_load_skill = definition.prelude.skills_enabled && !registry.is_empty();
         let budget = prelude_budget_config(&definition, persistent, include_load_skill);
-        let initial = build_initial_prelude_with_skills(
+        let initial = build_initial_prelude_with_registries(
             &definition.prelude,
             &state,
             &budget,
             registry,
-            skill_diagnostics,
+            agent_registry,
+            &std::collections::BTreeMap::new(),
+            diagnostics,
         )?;
         let mut blocks = initial.blocks;
         blocks.extend(base_context.into_blocks());
@@ -157,6 +174,9 @@ pub(crate) fn prelude_budget_config(
     if include_load_skill {
         tools.push(crate::skills::load_skill_tool_definition());
     }
+    if definition.prelude.agents_enabled {
+        tools.extend(crate::collaboration::collaboration_tool_definitions());
+    }
     let folded_tool_declaration_estimate = if tools.is_empty() {
         0
     } else {
@@ -194,6 +214,8 @@ pub struct HostOptions {
     pub user_rules_path: Option<std::path::PathBuf>,
     /// Multi-agent coordinator limits and event scheduling configuration.
     pub coordinator: super::CoordinatorConfig,
+    /// Authorized named model profiles selectable via `spawn_agent` `model.profile`.
+    pub model_profiles: std::collections::BTreeMap<String, ModelProfile>,
 }
 impl Default for HostOptions {
     fn default() -> Self {
@@ -203,6 +225,7 @@ impl Default for HostOptions {
             connect_mcp_servers: true,
             user_rules_path: None,
             coordinator: super::CoordinatorConfig::default(),
+            model_profiles: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -328,6 +351,8 @@ pub struct OpenReport {
     pub permission_downgraded: bool,
     /// Trust and activation status of workspace command permission rules.
     pub workspace_rules: WorkspaceRulesReport,
+    /// Trust and activation status of workspace `.tars/agents/*.md` presets.
+    pub workspace_agents: WorkspaceAgentsReport,
 }
 
 /// Running compaction settings for one open session.

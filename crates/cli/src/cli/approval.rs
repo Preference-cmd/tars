@@ -890,6 +890,7 @@ mod tests {
             max_tool_calls: 4,
             max_tokens: None,
             reasoning_effort: None,
+            temperature: None,
             extra_body: Default::default(),
             max_model_attempts: None,
             render_options: Default::default(),

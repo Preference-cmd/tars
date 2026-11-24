@@ -225,6 +225,7 @@ struct CanonicalModelOverride<'a> {
     credential: Option<&'a crate::definition::CredentialRef>,
     max_tokens: Option<Option<u32>>,
     reasoning_effort: Option<Option<&'a str>>,
+    temperature: Option<Option<crate::definition::Temperature>>,
     extra_body: Option<&'a serde_json::Map<String, serde_json::Value>>,
     context_window: Option<Option<u64>>,
     max_model_attempts: Option<Option<u32>>,
@@ -246,7 +247,7 @@ struct CanonicalMessageFingerprint<'a> {
 
 impl SessionCoordinator {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub(in crate::application) fn new(
         session_id: String,
         config: CoordinatorConfig,
         persistent: bool,
@@ -773,14 +774,72 @@ impl SessionCoordinator {
         self: &Arc<Self>,
         req: SpawnAgentRequest,
     ) -> Result<SpawnAgentOutcome, CoordinatorError> {
-        self.run_supervised_admission(move |coord| async move {
+        self.run_supervised_admission_with_cancel(None, move |coord| async move {
             coord.spawn_agent_admit_and_launch(req).await
         })
         .await
     }
 
-    async fn run_supervised_admission<F, Fut>(
+    /// Spawn a new child agent with cooperative cancellation bound to `cancel` for sync waits.
+    pub(crate) async fn spawn_agent_with_cancel(
         self: &Arc<Self>,
+        req: SpawnAgentRequest,
+        cancel: CancellationToken,
+    ) -> Result<SpawnAgentOutcome, CoordinatorError> {
+        self.run_supervised_admission_with_cancel(Some(cancel), move |coord| async move {
+            coord.spawn_agent_admit_and_launch(req).await
+        })
+        .await
+    }
+
+    /// Look up the caller agent's frozen definition and current live permission mode.
+    pub(crate) fn caller_definition_and_mode(
+        &self,
+        caller_agent_id: &str,
+    ) -> Result<(SessionDefinition, PermissionMode), CoordinatorError> {
+        let Some(entry) = self.entry.upgrade() else {
+            return Err(ApplicationError::InstanceGone.into());
+        };
+        let entry_state = entry.lock();
+        let entry_live_mode = entry_state
+            .permissions
+            .as_ref()
+            .map(|p| p.get().0)
+            .or_else(|| {
+                entry_state
+                    .definition
+                    .as_ref()
+                    .map(|d| d.initial_permission_mode())
+            })
+            .unwrap_or(PermissionMode::Ask);
+        let state = self.state.lock().expect("coord lock");
+        let caller_unit = state
+            .agents
+            .get(caller_agent_id)
+            .ok_or_else(|| CoordinatorError::UnknownAgent(caller_agent_id.to_owned()))?;
+        let caller_def = if caller_agent_id == self.entry_agent_id {
+            entry_state
+                .definition
+                .clone()
+                .unwrap_or_else(|| caller_unit.descriptor.definition.clone())
+        } else {
+            caller_unit.descriptor.definition.clone()
+        };
+        let caller_live_mode = if caller_agent_id == self.entry_agent_id {
+            entry_live_mode
+        } else {
+            caller_unit
+                .permissions
+                .as_ref()
+                .map(|p| p.get().0)
+                .unwrap_or_else(|| caller_def.initial_permission_mode())
+        };
+        Ok((caller_def, caller_live_mode))
+    }
+
+    async fn run_supervised_admission_with_cancel<F, Fut>(
+        self: &Arc<Self>,
+        cancel: Option<CancellationToken>,
         op: F,
     ) -> Result<SpawnAgentOutcome, CoordinatorError>
     where
@@ -789,7 +848,7 @@ impl SessionCoordinator {
             + Send
             + 'static,
     {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
         {
             let mut state = self.state.lock().expect("coord lock");
             state.admissions_in_flight += 1;
@@ -800,15 +859,46 @@ impl SessionCoordinator {
             let res = op(coord).await;
             let _ = tx.send(res);
         });
-        match rx
-            .await
-            .map_err(|_| CoordinatorError::Application(ApplicationError::Closing))??
-        {
-            AdmittedOutcome::Immediate(outcome) => Ok(outcome),
-            AdmittedOutcome::WaitSync(operation_id) => {
-                let outcome = self.wait_operation_outcome(&operation_id).await?;
-                Ok(SpawnAgentOutcome::Completed(outcome))
+        let admitted = match cancel.as_ref() {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        let coord = self.clone();
+                        tokio::spawn(async move {
+                            if let Ok(Ok(AdmittedOutcome::WaitSync(op_id))) = rx.await {
+                                let _ = coord.cancel_agent(&op_id).await;
+                            }
+                        });
+                        return Err(CoordinatorError::Cancelled);
+                    }
+                    res = &mut rx => res.map_err(|_| CoordinatorError::Application(ApplicationError::Closing))??,
+                }
             }
+            None => rx
+                .await
+                .map_err(|_| CoordinatorError::Application(ApplicationError::Closing))??,
+        };
+        match admitted {
+            AdmittedOutcome::Immediate(outcome) => Ok(outcome),
+            AdmittedOutcome::WaitSync(operation_id) => match cancel {
+                Some(token) => {
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => {
+                            let _ = self.cancel_agent(&operation_id).await;
+                            Err(CoordinatorError::Cancelled)
+                        }
+                        res = self.wait_operation_outcome(&operation_id) => {
+                            Ok(SpawnAgentOutcome::Completed(res?))
+                        }
+                    }
+                }
+                None => {
+                    let outcome = self.wait_operation_outcome(&operation_id).await?;
+                    Ok(SpawnAgentOutcome::Completed(outcome))
+                }
+            },
         }
     }
 
@@ -1187,7 +1277,19 @@ impl SessionCoordinator {
         self: &Arc<Self>,
         req: MessageAgentRequest,
     ) -> Result<SpawnAgentOutcome, CoordinatorError> {
-        self.run_supervised_admission(move |coord| async move {
+        self.run_supervised_admission_with_cancel(None, move |coord| async move {
+            coord.message_agent_admit_and_launch(req).await
+        })
+        .await
+    }
+
+    /// Send follow-up instructions with cooperative cancellation bound to `cancel` for sync waits.
+    pub(crate) async fn message_agent_with_cancel(
+        self: &Arc<Self>,
+        req: MessageAgentRequest,
+        cancel: CancellationToken,
+    ) -> Result<SpawnAgentOutcome, CoordinatorError> {
+        self.run_supervised_admission_with_cancel(Some(cancel), move |coord| async move {
             coord.message_agent_admit_and_launch(req).await
         })
         .await
@@ -2593,7 +2695,15 @@ impl SessionCoordinator {
         }
 
         // Step D: Submit work to the agent's `Session` and bridge progress.
-        let submit_res: Result<(crate::session::SessionHandle, WorkRef, usize), String> = {
+        let submit_res: Result<
+            (
+                crate::session::SessionHandle,
+                WorkRef,
+                usize,
+                ActiveOperationSlotGuard,
+            ),
+            String,
+        > = {
             let mut state = self.state.lock().expect("coord lock");
             let Some(unit) = state.agents.get_mut(&target_agent_id) else {
                 return;
@@ -2630,7 +2740,10 @@ impl SessionCoordinator {
             ) {
                 Ok(receipt) => {
                     unit.active_work = Some(receipt.work.clone());
-                    Ok((handle, receipt.work, start_block_len))
+                    *unit.active_op_slot.lock().expect("active op slot lock") =
+                        Some(operation_id.clone());
+                    let slot_guard = ActiveOperationSlotGuard(unit.active_op_slot.clone());
+                    Ok((handle, receipt.work, start_block_len, slot_guard))
                 }
                 Err(rejection) => {
                     if let Some(drained) = &pre_drained {
@@ -2640,7 +2753,7 @@ impl SessionCoordinator {
                 }
             }
         };
-        let (handle, work_ref, start_block_len) = match submit_res {
+        let (handle, work_ref, start_block_len, _op_slot_guard) = match submit_res {
             Ok(res) => res,
             Err(err_msg) => {
                 self.settle_operation(
@@ -2861,6 +2974,8 @@ impl SessionCoordinator {
             command_rules,
             workspace_rules_backend,
             effective_mode,
+            can_delegate,
+            active_op_slot,
         ) = {
             let entry_state = entry.lock();
             let entry_mode = entry_state
@@ -2881,6 +2996,8 @@ impl SessionCoordinator {
             } else {
                 entry_mode
             };
+            let can_delegate =
+                unit.depth < state.config.max_delegation_depth && def.prelude.agents_enabled;
             (
                 def,
                 unit.descriptor.name.clone(),
@@ -2891,6 +3008,8 @@ impl SessionCoordinator {
                 state.command_rules.clone(),
                 state.workspace_rules_backend.clone(),
                 mode,
+                can_delegate,
+                unit.active_op_slot.clone(),
             )
         };
 
@@ -2924,6 +3043,16 @@ impl SessionCoordinator {
             .persistent(self.persistent);
         if let Some(tools) = self.host.external_tools.clone() {
             resources = resources.with_external_tools(tools);
+        }
+        if can_delegate {
+            let extra = crate::collaboration::collaboration_tools(
+                crate::collaboration::CollaborationContext::for_child(
+                    self.entry.clone(),
+                    agent_id.to_owned(),
+                    active_op_slot,
+                ),
+            );
+            resources = resources.with_extra_tools(extra);
         }
         #[cfg(test)]
         {
@@ -4229,6 +4358,7 @@ fn canonical_narrowing_view(req: &ChildNarrowingRequest) -> CanonicalNarrowing<'
             credential: m.credential.as_ref(),
             max_tokens: m.max_tokens,
             reasoning_effort: m.reasoning_effort.as_ref().map(|r| r.as_deref()),
+            temperature: m.temperature,
             extra_body: m.extra_body.as_ref(),
             context_window: m.context_window,
             max_model_attempts: m.max_model_attempts,
@@ -4248,6 +4378,14 @@ fn canonical_narrowing_view(req: &ChildNarrowingRequest) -> CanonicalNarrowing<'
         max_tool_calls: req.max_tool_calls,
         work_timeout_secs: req.work_timeout_secs,
         permission_mode: req.permission_mode,
+    }
+}
+
+struct ActiveOperationSlotGuard(Arc<Mutex<Option<String>>>);
+
+impl Drop for ActiveOperationSlotGuard {
+    fn drop(&mut self) {
+        *self.0.lock().expect("active op slot lock") = None;
     }
 }
 

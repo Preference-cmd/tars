@@ -35,6 +35,7 @@ fn test_definition(model: &str) -> SessionDefinition {
         max_tool_calls: 1,
         max_tokens: None,
         reasoning_effort: None,
+        temperature: None,
         extra_body: Default::default(),
         max_model_attempts: None,
         render_options: Default::default(),

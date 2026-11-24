@@ -37,6 +37,7 @@ fn definition(provider: Provider, endpoint: &str, root: &std::path::Path) -> Ses
         max_tool_calls: 3,
         max_tokens: (provider == Provider::Anthropic).then_some(1024),
         reasoning_effort: None,
+        temperature: None,
         extra_body: Default::default(),
         max_model_attempts: None,
         render_options: Default::default(),
@@ -54,7 +55,10 @@ fn definition(provider: Provider, endpoint: &str, root: &std::path::Path) -> Ses
         auto_compact: true,
         compact_threshold: 50,
         prompt_cache: true,
-        prelude: Default::default(),
+        prelude: tars_core::prelude::PreludeDefinition {
+            agents_enabled: false,
+            ..Default::default()
+        },
         code_execution: None,
     }
 }

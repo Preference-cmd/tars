@@ -373,7 +373,7 @@ async fn visible_partial_text_is_cleared_after_error_eof_or_cancellation_and_nev
             .unwrap()
             .read_materials()
             .unwrap();
-        assert_eq!(snapshot.context.blocks().len(), 4);
+        assert_eq!(snapshot.context.blocks().len(), 5);
         let saved = saved_context_text(&app, 0);
         assert!(saved.contains("accepted input"));
         assert!(!saved.contains("must not persist"));

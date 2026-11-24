@@ -38,6 +38,60 @@ pub const MIN_COMPACT_THRESHOLD: u8 = 10;
 /// Largest accepted automatic-compaction trigger percentage.
 pub const MAX_COMPACT_THRESHOLD: u8 = 95;
 
+/// Validated sampling temperature in `0.0..=2.0` (`-0.0` normalized to `+0.0`).
+///
+/// Stored with canonical bit representation so `Eq` and `Hash` are sound.
+#[derive(Clone, Copy, Debug)]
+pub struct Temperature(f32);
+
+impl Temperature {
+    /// Construct a validated [`Temperature`] in `0.0..=2.0`, normalizing `-0.0` to `+0.0`.
+    pub fn new(value: f32) -> Result<Self, DefinitionError> {
+        if !value.is_finite() || !(0.0..=2.0).contains(&value) {
+            return Err(DefinitionError::InvalidTemperature);
+        }
+        let normalized = if value == 0.0 { 0.0 } else { value };
+        Ok(Self(normalized))
+    }
+
+    /// Return the validated inner `f32` value.
+    pub const fn as_f32(self) -> f32 {
+        self.0
+    }
+}
+
+impl PartialEq for Temperature {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for Temperature {}
+
+impl std::hash::Hash for Temperature {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.to_bits().hash(state);
+    }
+}
+
+impl Serialize for Temperature {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f32(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Temperature {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = f64::deserialize(deserializer)?;
+        if !value.is_finite() || !(0.0..=2.0).contains(&value) {
+            return Err(serde::de::Error::custom(
+                "temperature must be finite and within 0.0..=2.0",
+            ));
+        }
+        Self::new(value as f32).map_err(serde::de::Error::custom)
+    }
+}
+
 fn default_auto_compact() -> bool {
     true
 }
@@ -83,6 +137,10 @@ pub struct SessionDefinition {
     /// this field existed reads as none.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
+    /// Sampling temperature in `0.0..=2.0` (`0.0..=1.0` for Anthropic), or none for
+    /// the provider default. A record saved before this field existed reads as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<Temperature>,
     /// Further request fields, sent at the top level of every model request
     /// as written, such as an Anthropic `thinking` object. A record saved
     /// before this field existed reads as empty.
@@ -197,6 +255,12 @@ impl SessionDefinition {
         if self.max_tokens == Some(0) {
             return Err(DefinitionError::InvalidMaxTokens);
         }
+        if let Some(temperature) = self.temperature
+            && self.provider == Provider::Anthropic
+            && temperature.as_f32() > 1.0
+        {
+            return Err(DefinitionError::InvalidTemperature);
+        }
         if self.context_window == Some(0) {
             return Err(DefinitionError::InvalidContextWindow);
         }
@@ -292,6 +356,7 @@ impl SessionDefinition {
         options.limits = TurnLimits::new(self.max_model_rounds, self.max_tool_calls);
         options.generation.max_tokens = self.max_tokens;
         options.generation.reasoning_effort = self.reasoning_effort.clone();
+        options.generation.temperature = self.temperature.map(Temperature::as_f32);
         options.generation.extra_body = self.extra_body.clone();
         options
     }
@@ -354,6 +419,9 @@ pub enum DefinitionError {
     /// A zero output limit can never produce a response.
     #[error("max_tokens must be positive when set")]
     InvalidMaxTokens,
+    /// Temperature is outside the provider-accepted finite range.
+    #[error("temperature must be finite and within 0.0..=2.0 (or 0.0..=1.0 for Anthropic)")]
+    InvalidTemperature,
     /// A zero context window can never hold a request.
     #[error("context_window must be positive when set")]
     InvalidContextWindow,

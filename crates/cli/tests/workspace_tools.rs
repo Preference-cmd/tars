@@ -71,7 +71,7 @@ fn actual_cli_process_runs_tools_and_model_continuation_for_three_protocols() {
         assert_eq!(requests.len(), 3);
         for request in &*requests {
             assert_eq!(request["stream"], true);
-            assert_eq!(request["tools"].as_array().unwrap().len(), 3);
+            assert_eq!(request["tools"].as_array().unwrap().len(), 7);
         }
         assert!(requests[1].to_string().contains(&marker));
         assert!(requests[2].to_string().contains(&marker));

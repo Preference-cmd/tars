@@ -1,11 +1,13 @@
 use super::coordinator::SessionCoordinator;
 use super::types::*;
+use crate::agents::{AgentPreset, AgentRegistry, ModelProfile, WorkspaceAgentsSnapshot};
 use crate::definition::SessionDefinition;
 use crate::events::ConsumedInboxEvents;
 use crate::session::{Session, SessionHandle, WorkRef};
 use crate::store::{PreparedCommit, SessionStore, Writer};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use tokio::sync::{Notify, Semaphore};
 
 #[derive(Clone, Debug)]
@@ -24,6 +26,8 @@ pub(crate) struct Entry {
     pub io: Arc<Semaphore>,
     pub writer_gate: Arc<tokio::sync::Mutex<()>>,
     pub coordinator: OnceLock<Arc<SessionCoordinator>>,
+    pub agent_registry: Arc<RwLock<AgentRegistry>>,
+    pub model_profiles: Arc<BTreeMap<String, ModelProfile>>,
     #[cfg(test)]
     pub panic_owner: Notify,
     #[cfg(test)]
@@ -57,6 +61,8 @@ pub(crate) struct State {
     pub close_outcome: Option<CloseOutcome>,
     pub open_report: OpenReport,
     pub workspace_rules_snapshot: Option<WorkspaceRulesSnapshot>,
+    pub workspace_agents_snapshot: Option<WorkspaceAgentsSnapshot>,
+    pub trusted_workspace_agents: Vec<AgentPreset>,
     /// Title and last-activity time of the last stored record.
     pub saved: crate::store::RecordMetadata,
     /// Non-fatal prelude diagnostics recorded during creation or last submit.
@@ -69,6 +75,7 @@ impl Entry {
         snapshot_clones: Arc<std::sync::atomic::AtomicU64>,
         store: Option<SessionStore>,
         io: Arc<Semaphore>,
+        model_profiles: BTreeMap<String, ModelProfile>,
     ) -> Self {
         let persistent = prepared.as_ref().is_none_or(|p| p.persistent);
         let version = MaterialVersion {
@@ -86,6 +93,8 @@ impl Entry {
             io,
             writer_gate: Arc::new(tokio::sync::Mutex::new(())),
             coordinator: OnceLock::new(),
+            agent_registry: Arc::new(RwLock::new(AgentRegistry::new())),
+            model_profiles: Arc::new(model_profiles),
             snapshot_clones,
             state: Mutex::new(State {
                 definition: prepared.as_ref().map(|p| p.definition.clone()),
@@ -120,6 +129,8 @@ impl Entry {
                 close_outcome: None,
                 open_report: OpenReport::default(),
                 workspace_rules_snapshot: None,
+                workspace_agents_snapshot: None,
+                trusted_workspace_agents: Vec::new(),
                 saved,
                 prelude_diagnostics,
             }),

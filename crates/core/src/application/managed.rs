@@ -216,6 +216,21 @@ impl ManagedSession {
         self.entry.lock().open_report.workspace_rules.trusted
     }
 
+    /// Whether workspace `.tars/agents/*.md` presets are trusted (also `true`
+    /// when no workspace or no workspace agent files are present).
+    pub fn workspace_agents_trusted(&self) -> bool {
+        self.entry.lock().open_report.workspace_agents.trusted
+    }
+
+    /// Point-in-time snapshot of the currently active trusted [`crate::agents::AgentRegistry`].
+    pub fn agent_registry_snapshot(&self) -> crate::agents::AgentRegistry {
+        self.entry
+            .agent_registry
+            .read()
+            .expect("agent registry lock")
+            .clone()
+    }
+
     /// Snapshot of the currently active three-layer command permission rules.
     pub fn command_rules_snapshot(&self) -> crate::permission::CommandRuleSet {
         let state = self.entry.lock();
@@ -358,6 +373,79 @@ impl ManagedSession {
         state.open_report.workspace_rules.trusted = true;
         Ok(activated)
     }
+
+    /// Trust the workspace `.tars/agents/*.md` snapshot captured when this session opened,
+    /// write its manifest to the Store trust copy, and activate its presets in the live
+    /// [`crate::agents::AgentRegistry`].
+    ///
+    /// Never re-reads `.tars/agents/*.md` from disk, avoiding TOCTOU races.
+    /// Returns the number of newly activated workspace agent presets, or
+    /// `Err(ApplicationError::StoreUnavailable)` when the host has no Store.
+    pub async fn trust_workspace_agents(&self) -> Result<usize, ApplicationError> {
+        let (store, io, snapshot) = {
+            let state = self.entry.lock();
+            if state.lifecycle == Lifecycle::Closed {
+                return Err(ApplicationError::Closed);
+            }
+            if state.lifecycle == Lifecycle::Closing {
+                return Err(ApplicationError::Closing);
+            }
+            let store = self
+                .entry
+                .store
+                .clone()
+                .ok_or(ApplicationError::StoreUnavailable)?;
+            if state.open_report.workspace_agents.trusted {
+                return Ok(0);
+            }
+            let snapshot = state.workspace_agents_snapshot.clone();
+            (store, self.entry.io.clone(), snapshot)
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok(0);
+        };
+        let workspace_root = snapshot.workspace_root.clone();
+        let manifest_text = snapshot.manifest_text.clone();
+        saving::io_semaphore(&io, move || {
+            store.write_workspace_agents_trust(&workspace_root, &manifest_text)
+        })
+        .await?;
+        let mut state = self.entry.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return Err(ApplicationError::Closed);
+        }
+        if state.lifecycle == Lifecycle::Closing {
+            return Err(ApplicationError::Closing);
+        }
+        if state.open_report.workspace_agents.trusted {
+            return Ok(0);
+        }
+        if state.owner.is_none() {
+            return Err(ApplicationError::InstanceGone);
+        }
+        let activated = snapshot.presets.len();
+        let def = state.definition.clone().expect("published definition");
+        state.trusted_workspace_agents = snapshot.presets;
+        let next_registry = if def.prelude.agents_enabled {
+            crate::agents::AgentDiscovery::discover(
+                def.prelude.config_dir.as_deref(),
+                &def.prelude.agent_dirs,
+                &state.trusted_workspace_agents,
+            )
+            .registry
+        } else {
+            crate::agents::AgentRegistry::new()
+        };
+        *self
+            .entry
+            .agent_registry
+            .write()
+            .expect("agent registry lock") = next_registry;
+        state.open_report.workspace_agents.untrusted_agents.clear();
+        state.open_report.workspace_agents.trusted = true;
+        state.workspace_agents_snapshot = None;
+        Ok(activated)
+    }
     /// Non-fatal prelude diagnostics recorded during preparation or the most recent submit.
     pub fn prelude_diagnostics(&self) -> Vec<crate::prelude::PreludeDiagnostic> {
         self.entry.lock().prelude_diagnostics.clone()
@@ -426,6 +514,8 @@ impl ManagedSession {
             .as_ref()
             .map(|p| p.get().0)
             .unwrap_or_else(|| definition.initial_permission_mode());
+        let trusted_workspace_agents = state.trusted_workspace_agents.clone();
+        let model_profiles = self.entry.model_profiles.clone();
         let owner = state.owner.as_mut().expect("published owner");
         let skill_registry = owner.skill_registry();
         let loaded_skills = owner.loaded_skills();
@@ -440,32 +530,63 @@ impl ManagedSession {
                 current_mode,
                 persistent,
             );
-            let (discovered_registry, skill_diagnostics) =
+            let (discovered_registry, mut diagnostics) =
                 crate::prelude::discover_skills_for_prelude(&definition.prelude, &runtime_state);
+            let agent_registry = if definition.prelude.agents_enabled {
+                let discovery = crate::agents::AgentDiscovery::discover(
+                    definition.prelude.config_dir.as_deref(),
+                    &definition.prelude.agent_dirs,
+                    &trusted_workspace_agents,
+                );
+                diagnostics.extend(
+                    discovery
+                        .diagnostics
+                        .into_iter()
+                        .map(crate::prelude::PreludeDiagnostic::from),
+                );
+                discovery.registry
+            } else {
+                crate::agents::AgentRegistry::new()
+            };
             let include_load_skill =
                 definition.prelude.skills_enabled && !discovered_registry.is_empty();
             let budget = prelude_budget_config(&definition, persistent, include_load_skill);
-            Some(crate::prelude::evaluate_dynamic_updates_with_skills(
+            Some(crate::prelude::evaluate_dynamic_updates_with_registries(
                 blocks,
                 &definition.prelude,
                 &runtime_state,
                 &budget,
                 discovered_registry,
-                skill_diagnostics,
+                agent_registry,
+                &model_profiles,
+                diagnostics,
             ))
         });
-        let (prelude_updates, update_diagnostics, next_registry) = match prelude_evaluation {
-            Ok(Some(update)) => (update.blocks, update.diagnostics, Some(update.registry)),
-            Ok(None) => (Vec::new(), Vec::new(), None),
-            Err(error) => {
-                return Err(ManagedSubmitRejection {
-                    reason: error.into(),
-                    request,
-                });
-            }
-        };
+        let (prelude_updates, update_diagnostics, next_registry, next_agent_registry) =
+            match prelude_evaluation {
+                Ok(Some(update)) => (
+                    update.blocks,
+                    update.diagnostics,
+                    Some(update.registry),
+                    Some(update.agent_registry),
+                ),
+                Ok(None) => (Vec::new(), Vec::new(), None, None),
+                Err(error) => {
+                    return Err(ManagedSubmitRejection {
+                        reason: error.into(),
+                        request,
+                    });
+                }
+            };
         if let Some(next_registry) = next_registry {
             *skill_registry.write().expect("skill registry lock") = next_registry;
+        }
+        if let Some(next_agent_registry) = next_agent_registry {
+            *self
+                .entry
+                .agent_registry
+                .write()
+                .expect("agent registry lock") = next_agent_registry;
         }
         let receipt = handle
             .submit_with_prelude_updates(request, prelude_updates)

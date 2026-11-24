@@ -289,6 +289,7 @@ pub(super) fn history_definition(
         max_tool_calls: 1,
         max_tokens: None,
         reasoning_effort: None,
+        temperature: None,
         extra_body: Default::default(),
         max_model_attempts: None,
         render_options: Default::default(),
@@ -303,7 +304,10 @@ pub(super) fn history_definition(
         auto_compact: true,
         compact_threshold: 70,
         prompt_cache: true,
-        prelude: Default::default(),
+        prelude: tars_core::prelude::PreludeDefinition {
+            agents_enabled: false,
+            ..Default::default()
+        },
         code_execution: None,
     }
 }

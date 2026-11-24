@@ -124,9 +124,20 @@ fn actual_provider_protocols_receive_selected_model_input_and_credentials() {
         assert_eq!(body["model"], "fixture-model");
         assert_eq!(body["stream"], true);
         assert!(body.to_string().contains("user question"));
-        assert!(
-            body.get("tools")
-                .is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty))
+        let tool_names: Vec<&str> = body["tools"]
+            .as_array()
+            .expect("default collaboration tools declared")
+            .iter()
+            .map(|tool| {
+                tool["name"]
+                    .as_str()
+                    .or_else(|| tool["function"]["name"].as_str())
+                    .expect("tool name")
+            })
+            .collect();
+        assert_eq!(
+            tool_names,
+            vec!["spawn_agent", "message_agent", "read_agent", "cancel_agent"]
         );
     }
 }
@@ -155,7 +166,7 @@ fn stdin_save_reload_preserves_materials_and_creates_fresh_work() {
     requests.recv_timeout(Duration::from_secs(5)).unwrap();
     let original = tars_core::material::load(&path).unwrap();
     assert!(tars_core::prelude::has_prelude(original.blocks()));
-    assert_eq!(original.blocks().len(), 4);
+    assert_eq!(original.blocks().len(), 6);
     let bytes = std::fs::read_to_string(&path).unwrap();
     assert!(!bytes.contains("fixture-secret"));
     assert!(!bytes.contains("request_key"));
@@ -178,8 +189,8 @@ fn stdin_save_reload_preserves_materials_and_creates_fresh_work() {
         report(&second)["conversation_id"]
     );
     let restored = tars_core::material::load(&path).unwrap();
-    assert_eq!(&restored.blocks()[..4], original.blocks());
-    assert_eq!(restored.blocks().len(), 6);
+    assert_eq!(&restored.blocks()[..6], original.blocks());
+    assert_eq!(restored.blocks().len(), 8);
     let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(request.contains("original input") && request.contains("continue"));
 }
@@ -224,7 +235,7 @@ fn provider_failure_and_deadline_save_actual_input_with_distinct_exit_codes() {
         assert_eq!(report["status"], state);
         assert_eq!(report["kind"], kind);
         assert_eq!(report["saved"], true);
-        assert_eq!(tars_core::material::load(&path).unwrap().blocks().len(), 3);
+        assert_eq!(tars_core::material::load(&path).unwrap().blocks().len(), 5);
         assert!(!String::from_utf8_lossy(&output.stderr).contains("fixture-secret"));
         requests.recv_timeout(Duration::from_secs(5)).unwrap();
     }
@@ -326,7 +337,7 @@ fn ctrl_c_cancels_http_work_and_saves_returned_materials() {
     assert_eq!(report(&output)["status"], "cancelled");
     assert_eq!(report(&output)["kind"], "cancelled");
     assert_eq!(report(&output)["saved"], true);
-    assert_eq!(tars_core::material::load(&path).unwrap().blocks().len(), 3);
+    assert_eq!(tars_core::material::load(&path).unwrap().blocks().len(), 5);
 }
 
 #[test]
