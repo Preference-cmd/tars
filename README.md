@@ -1,113 +1,126 @@
 # TARS
 
-TARS is the validation project for Causa: a real agent application that exercises Causa's public contracts and feeds the problems found in use back into Causa to drive improvements. Validation comes first; the application is the vehicle for it. TARS ships as an installable, runnable program and is not published to crates.io.
+TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and both a scriptable CLI (`tars`) and a native terminal interface (`tars-tui`). TARS is in early-stage development (`0.0.0`, built from source via Cargo).
 
-## Purpose
+## Key features
 
-- **Validate.** Causa provides only the contracts for context materials and single-run execution; sessions, saving, tool policy and the interface are left to the host. TARS is such a host and uses those contracts under real conditions: persistent sessions, continuation after a cancel, workspace tools with write confirmation, and live runs against real endpoints of the three wire protocols. It answers whether those contracts are sufficient and behave correctly inside a real application.
-- **Improve.** For each problem found, first decide whether it belongs to TARS, Causa, or their wiring. Causa problems are fixed in the Causa repository under its rules and released there; TARS then upgrades the dependency and reruns the check that found the problem. For example, the Chat output-limit field in Causa 0.0.7 came from TARS's real-endpoint tests, and the tool hints and handler data in 0.1.2 came from TARS's write-tool design.
-- **The application is the vehicle.** TARS is a CLI and TUI application that can actually be used, because only real use produces valid evidence. When ordering work, prefer work that exercises Causa; work that only serves distribution (install channels, GUI, more platforms) comes later.
+- **Multi-protocol providers:** Supports `openai-chat`, `openai-responses`, and `anthropic`, custom `--endpoint` URLs, and environment-variable-only credential references (`--api-key-env`) that are never written into session records or result reports.
+- **Defense-in-depth workspace safety:** Four permission modes (`read-only`, `ask`, `accept-edits`, `full-access`), mandatory read-before-write file safety, macOS Seatbelt OS sandboxing for `run_command` and `search_text` (no outbound network by default, protected `.git` hooks/config/modules/worktrees, denied credential locations, and read-only `.tars/`), and two-layer command approval rules (`~/.tars/permissions.toml` + trust-verified `<workspace>/.tars/permissions.toml`, merged with `deny > ask > allow` precedence).
+- **Long-session context & prompt-cache engineering:** Automatic large-output spilling, zero-LLM hot/cold micro-compaction, partial LLM working briefs with brief-chain merging, temporary frame-trimming fallback, prefix prompt caching (`--prompt-cache on|off`, default `on`), and `recall` over compacted history.
+- **Persistent, crash-safe sessions:** Local JSON store (`tars-session-v2.4`) with OS exclusive file locks, atomic commits, recovery export on save failure (`tars-recovery-<uuid>.json`), and explicit `/repair` / `session repair` continuation for interrupted tool batches.
+- **Extensible tool ecosystem:** Six workspace tools (`list_directory`, `read_file`, `search_text`, `write_file`, `edit_file`, `run_command`), persistent `recall`, multi-directory `agentskills.io` `load_skill`, opt-in QuickJS ES2020 read-only programmatic tool calling (`run_code`), and standalone `mcp.json` MCP server support (tools only; no resources, prompts, or sampling).
+- **Written in Rust:** Rust `edition = 2024` (pinned to Rust `1.96.0` via `rust-toolchain.toml`), zero `unsafe` in TARS crates, and deterministic local fixture tests without live model credentials.
 
-Boundaries:
+## Quick start
 
-- TARS uses Causa only through its public facade at the version published on crates.io; it does not copy or vendor Causa sources, so what is validated is exactly what external users get.
-- When improving Causa, do not put TARS policy into it. For example, permission modes and built-in tool classification belong to TARS; Causa carries only server-advertised hints (for MCP) and per-round host data, while TARS keeps the vocabulary, lifecycle orchestration, and the decision.
-- A passing TARS test only shows that this particular wiring works; it does not replace Causa's own tests.
+**Prerequisites:** Rust `1.96.0` (pinned by `rust-toolchain.toml`).
 
-## Current status
-
-A single-session work loop is implemented: atomic submission, same-key replay, per-work assembly, cancellation and result observation, and material editing with save/import.
-
-`tars run` supports single text execution against a real provider, JSON output, cancellation/deadline and explicit material saving. `tars session create/run/list` automatically save the frozen definition and the latest materials through the shared SessionHost, and can reopen the same session. `tars-tui` provides a native terminal prototype with temporary streaming text preview; both ends share the TOML configuration and can explicitly choose the workspace and workspace tools. The standalone MCP configuration file `mcp.json` (with `${VAR}` expansion and literal-secret checks), preset/CLI/TUI selection, definition snapshots and runtime tools are wired (tools only; no resources/prompts/sampling). MCP calls run, ask (in the terminal or the TUI confirmation panel) or are rejected according to the `approval` setting in `mcp.json` and the current permission mode; verification against real third-party MCP servers is still pending. The built-in `run_command` runs in the macOS Seatbelt sandbox (no network by default, writable workspace, read-only `.git` hooks and config, read-only `<workspace>/.tars/` and in-workspace session store, unreadable/unwritable credential locations); a single command can request to run outside the sandbox with a reason and is asked or allowed according to the permission mode and two-layer command approval rules (`~/.tars/permissions.toml` user-level read-only + `<workspace>/.tars/permissions.toml` workspace-private, merged with strict `deny > ask > allow` precedence, with Store trust verification via TUI prompt or CLI `--trust-workspace-rules`, 4-option command confirmation for once / in-memory session / workspace `.tars/permissions.toml` / deny, and TUI `/rules`; `outside_sandbox: true` still runs unconfined with host write access). The built-in `search_text` runs the external `rg` in a read-only sandbox, so it follows the workspace's ignore rules and supports regular expressions, case-insensitive matching, globs and context lines; `rg` is not bundled and is installed only after `tars tools install rg` asks for consent. The TUI `/status` and CLI `session create` display the sandbox backend and capabilities; both `run_command` and `search_text` are unavailable on Linux/Windows until those platforms have a sandbox backend (sessions containing them still open, and calls are rejected with the reason). GUI, parent/child agents and install channels are not implemented. CLI and TUI can write files: `ask` confirms in the terminal/confirmation panel and refuses in non-terminal contexts; `accept-edits` and `full-access` do not ask for file writes, while sandbox-outside requests for commands still ask under `accept-edits`. `tars-tui` has the write confirmation panel, command confirmation panel, `/mode` command and `Shift-Tab` mode switching wired. The current development version is `0.0.0`, with no public release yet.
-
-## Build and run locally
-
-Rust 1.96.0 is used (pinned by `rust-toolchain.toml`):
+Build the workspace binaries from source:
 
 ```sh
-cargo build --locked
-cargo run --locked -- --help
-cargo build --locked --release
-./target/release/tars --help
+cargo build --workspace --locked --release
 ```
 
-On Windows use `target\release\tars.exe`. No arguments prints help; argument errors exit with code 2, execution or file errors with 1.
+This produces `./target/release/tars` and `./target/release/tars-tui` (`target\release\tars.exe` and `target\release\tars-tui.exe` on Windows).
 
-## Single model execution
+Set a provider API key in your shell (`OPENAI_API_KEY` for OpenAI protocols or `ANTHROPIC_API_KEY` for Anthropic).
 
-First set `OPENAI_API_KEY` (OpenAI protocols) or `ANTHROPIC_API_KEY` (Anthropic) in the current shell, then specify the model ID explicitly:
+### Interactive TUI
+
+Copy and customize [config.example.toml](config.example.toml), then launch `tars-tui`:
 
 ```sh
-./target/release/tars run --provider openai-responses --model "$MODEL_ID" --input 'Explain this design' --save materials.json
-printf 'Continue analyzing the material' | ./target/release/tars run --provider openai-responses --model "$MODEL_ID" --stdin --load materials.json --save materials.json --json
+./target/release/tars-tui --config /path/to/config.toml
+# Or run directly with Cargo:
+cargo run -p tars-tui -- --config /path/to/config.toml
 ```
 
-You set `MODEL_ID` to a model available on the server. Protocol options are `openai-chat`, `openai-responses` and `anthropic`; `--endpoint` overrides the full URL (including the path), and `--api-key-env` names another credential environment variable. Credentials are never written into materials or result reports by the configuration layer. The default workspace tool catalog is empty; use `--workspace DIR --tools list_directory,read_file,search_text,write_file,edit_file,run_command` to enable workspace tool capabilities, while still printing only the final result. Pass `--code-execution` (or enable `[code_execution]` / `[profiles.<name>.code_execution]` in TOML; `--no-code-execution` overrides an enabled preset) to also register the read-only ES2020 QuickJS programmatic tool-calling sandbox `run_code` whenever at least one read-only workspace tool, `recall`, or MCP is active (see [Code execution](docs/workspace-tools.md#code-execution-run_code)). Every new session or transient `tars run` also injects the unified prelude (`Role::System` static host contract + optional `--system`/`--system-file`, followed by `Role::User` dynamic `<user_instructions>`, `<workspace_instructions>`, `<available_skills>`, `<env>`, and optional `--dynamic-context`/`--dynamic-context-file`); when skills are enabled and discovered (from configured `[skills].dirs`, repeatable `--skill-dir`, or `<workspace>/.tars/skills`, unless `--no-skills` is passed), TARS also declares the read-only `load_skill` tool (bringing the total built-in tool set to 9 alongside the 6 workspace tools, persistent `recall`, and opt-in `run_code`). `search_text` runs the external `rg` in a read-only sandbox and supports `regex`, `ignore_case`, `glob` and `context_lines`; `run_command` launches `/bin/bash -c` inside the sandbox by default; the command timeout defaults to 120 seconds and can be at most 600 seconds. `--command-network none|open` selects whether outbound network is denied by default or allowed. A command can carry `outside_sandbox` and a reason to request running outside the sandbox, and is confirmed or executed directly according to the permission mode. Reading an existing file before writing is mandatory; `--permission-mode` sets the initial permission mode, and `ask` refuses writes directly in non-terminal contexts. See [Workspace tools](docs/workspace-tools.md) for access scope, ignore rules, confirmation, limits and legacy record export.
-
-Input must be exactly one of `--input <text>` or `--stdin` (read to EOF, UTF-8, not entirely whitespace). `--timeout-secs` defaults to 120 and accepts 1–86400, starting when the work is accepted and covering assembly and execution; it does not cover reading stdin, loading or saving files.
-
-In normal mode stdout contains only the completion text, and diagnostics go to stderr. `--json` outputs `status`, `text`, `conversation_id`, `work_id`, `saved`, `error` and `usage`, this work's call counts, token figures, model rounds and last call (`null` when the work never started; fields are described in [Usage statistics](docs/session-lifecycle.md#7-usage-statistics)). Status is `not_started`, `completed`, `failed`, `cancelled` or `timed_out`. When a model call fails or ends with an unrecognized stop value, there are also `error_kind` and `error_detail`. `error_kind` is `transient`, `timed_out`, `cancelled`, `invalid_request`, `unknown_outcome`, `credential_rejected` for rejected credentials, `not_found` for a missing model or path, `permanent` for other rejections, `undecodable` when the service answered but the response could not be read, `unclassified` for a failure class unknown to this version, or `unrecognized_stop` when the service returned a stop value unknown to this version, in which case `error_detail` is that stop value. Otherwise `error_detail` is the raw message from the gateway, possibly containing server-provided text, and both fields are null when there is no such failure. In normal mode `error_detail` is written to stderr as `TARS: detail: …`. Argument errors go only to stderr. Execution and file results are separate: when the model completes but saving fails, the result is still `completed` with `saved=false`, non-empty `error` and exit code 1. Check the exit code to judge overall success.
-
-Exit codes: 0 completed; 1 configuration, execution or file failure; 2 argument error; 124 work deadline; 130 cancelled. Ctrl-C during execution requests cancellation and waits for the real materials to be returned; `--save` saves the current materials after success, execution failure or controlled interruption, and without that option nothing is saved automatically. It does not save uncommitted output or uncommitted tool batches, nor does it restore old work or request keys. The default material interface rejects external media/asset references.
-
-These paths are verified by local HTTP fixtures and real process tests without live credentials; minimal requests against a user-configured service, three-tool round trips and the BA09 three-protocol run with confirmation-enabled writes have also been done. Live samples do not replace interruption/race verification, and public installation has not been accepted yet.
-
-## External tools
-
-`search_text` needs the external `rg` executable. TARS does not bundle it and never downloads it silently:
+### CLI one-shot & persistent sessions
 
 ```sh
-./target/release/tars tools status          # source, path, version, state and the sandbox backend probe
-./target/release/tars tools status --json
-./target/release/tars tools install rg      # asks before downloading the pinned ripgrep 15.2.0
-./target/release/tars tools install rg --yes
-```
+# One-shot execution with explicit material saving
+./target/release/tars run --provider openai-responses --model "$MODEL_ID" \
+  --input 'Explain this design' --save materials.json
+printf 'Continue analyzing the material' | ./target/release/tars run \
+  --provider openai-responses --model "$MODEL_ID" --stdin \
+  --load materials.json --save materials.json --json
 
-The default source is the managed copy under `~/.tars/tools/` (overridden by `$TARS_HOME/tools/`, or `%USERPROFILE%\.tars\tools\` on Windows); its SHA-256 is checked against the value compiled into TARS before it is ever executed. `[external_tools] rg = "managed" | "system" | "<absolute path>"` in the shared TOML selects another source. Only `tars tools install rg` performs network access; every other command, and a non-interactive run without `--yes`, never downloads, and a missing tool is reported with the remedy. The TUI asks the same question from its startup check before the conversation screen, ignores keys for 0.5 seconds, and shows the reason in the footer and `/status` when search stays unavailable. The managed directory is outside the command sandbox's writable roots, so a search never runs a file that `run_command` could replace. Linux and Windows have no sandbox backend yet, so the built-in search is unavailable there.
-
-## Save and reopen a session
-
-```sh
-# First create, printing the ConversationId; creation itself does not call the model
+# Persistent sessions (creation itself does not call the model)
 ./target/release/tars session create --store ./tars-data \
   --provider openai-chat --model "$MODEL_ID" --json
-
-# Use the printed ID; provider/model/deadline come from the saved definition
 ./target/release/tars session run "$SESSION_ID" --store ./tars-data \
   --input 'Continue this session' --json
 ./target/release/tars session list --store ./tars-data --json
-
-# Inspect or manage a long session's replaced material
 ./target/release/tars session show "$SESSION_ID" --store ./tars-data --json
 ./target/release/tars session compact "$SESSION_ID" --store ./tars-data
 ./target/release/tars session history "$SESSION_ID" --store ./tars-data --last 3
 ```
 
-Set `--context-window N` (the model's token window) and `--auto-compact on|off|PERCENT` when creating a session, or put `context_window`, `auto_compact` and `compact_threshold` in a preset, to let TARS replace the older part of a Context that approaches the window with a model-written working brief, keeping the fixed prefix (static system prelude plus initial dynamic prelude), protected skill blocks, the request in progress and the newest messages verbatim. Set `--prompt-cache on|off` (preset key `prompt_cache`, default `on`) to control prefix prompt caching. The replaced conversation is kept as read-only history rewrite records next to the record, which `session history` expands into the full conversation (`--json` prints one block per line, `--last N` limits to the newest N blocks) and which the TUI shows above the current conversation. `session compact` performs the replacement manually; `session show` runs read-only without requiring model credentials and reports the title, creation and last-activity timestamps (in UTC), prompt-cache setting, prelude and skills summary (`static_custom`, `dynamic_custom`, `skills_enabled`, frozen directory count, and discovered skill count), current estimate, compaction settings, history record count, retained-work occupancy and session usage. `session list` displays sessions ordered by last activity newest first (with unreadable records sorted by ID after valid records), and `--json` includes `title`, `created_at_ms`, and `updated_at_ms`. Material export, recovery exports and `--load` always contain the current Context only. Details are in [Configuration](docs/configuration.md#long-session-compaction) and [Current implementation](docs/README.md#compaction-and-history).
+### Optional `rg` setup for `search_text`
 
-`--store` is given by an argument or the shared configuration. Records keep the frozen definition and the latest Context; reopening preserves the ConversationId and BlockIds but does not restore old work, request keys or uncommitted output. Environment-variable credentials are resolved again on every open; the record stores only the variable reference. The definition defaults to a 120-second deadline, 256 retained works, 10 model calls and 64 tool declarations; see `tars session --help` for details.
+`search_text` uses external `rg` (ripgrep), which is not bundled and is never downloaded silently. Inspect status or install the pinned `15.2.0` release (consent-gated and SHA-256 verified):
 
-`session run` waits for the automatic save after execution succeeds, fails or is cancelled. JSON returns execution fields `status/text/execution_error/error_kind/error_detail` (and `usage`, the same work statistics as `tars run --json`) separately from `saved/revision/save_error`, and also includes `recovery_file/recovery_importable/recovery_error/close_error/close_outcome` and `save_wait_abandoned`. When saving fails, the current materials are exported to `tars-recovery-<uuid>.json` and the command exits 1; the default export goes to the current directory, and `--recovery-dir` can name an existing directory. During the save wait, the first Ctrl-C prints a notice and the second stops waiting and exports through the same failure path. Export failure is reported separately and must not claim that materials were recovered. Recovery files can be imported as a new session with `--load` when creating; files over 64 MiB are still written completely but cannot be imported directly by this version, which the result reports explicitly. Closing confirms the original pending save; `close_outcome` distinguishes committed, uncommitted and still-unconfirmed. If closing confirms a commit whose earlier result was unknown, `saved/revision` updates to the confirmed fact while the original `save_error` and error exit remain.
+```sh
+./target/release/tars tools status
+./target/release/tars tools install rg
+```
 
-Storage uses a local stable file lock: another process holding the same session is refused explicitly. Corrupt records are listed separately and make the command fail; they are not overwritten automatically. Each record is at most 64 MiB; this is not a process memory budget. The current scope excludes power-loss durability, network shares and cross-host writes; see [Current boundaries](docs/README.md) for details.
+## Usage overview
 
-If a cancel leaves unpaired tool declarations, new input is preserved as-is with a prompt to handle the materials. In the TUI, F7 or `/repair` previews accepting the original result or removing the unpaired declaration, then Enter applies and saves. In the CLI, `session repair ID --store DIR --json` inspects it, and `--apply --expected-revision N` explicitly applies the removal mode. Repair does not rerun the old tool and the original work state is kept; after saving, send new input separately. Conditions, reopening and the retention scope of the original batch are described in [Continuation after interruption](docs/session-continuation.md).
+### Interactive TUI (`tars-tui`)
 
-## Project layout
+`tars-tui` provides a single-column Ratatui terminal interface with streaming response previews, inline confirmation panels for file writes, commands, and MCP calls, startup checks for the sandbox backend and `rg`, and lazy history expansion. Common commands and shortcuts include `/sessions`, `/mode` or `Shift-Tab`, `/rules`, `/tools`, `/compact`, `/auto_compact`, `/summary`, `/status`, and `F7` / `/repair`. See the [TUI guide](docs/tui.md).
 
-The root is a Cargo workspace whose directory names omit the `tars-` prefix: `crates/core/` (package `tars-core`) provides the shared application core and configuration, `crates/sandbox/` (`tars-sandbox`) provides the platform sandbox policy, backends and process control, `crates/cli/` (`tars-cli`) provides `tars`, and `crates/tui/` (`tars-tui`) provides the `tars-tui` prototype. Default `cargo run/build` still selects the CLI; the TUI is started with `cargo run -p tars-tui -- --config /path/to/config.toml`, and everything is built with `cargo build --workspace --locked`. Entry points depend one-way on the core; `tars-core` depends one-way on the library package `tars-sandbox` and keeps the `tars_core::sandbox` path through `pub use tars_sandbox as sandbox`, and CLI/TUI do not depend on it directly. All packages have `publish = false`. Causa is used through the crates.io release `causa = "0.3"` with the runtime, providers and extensions features enabled, and the exact version is fixed by Cargo.lock; builds no longer need a sibling Causa checkout. Standalone distribution is handled separately.
+### Persistent sessions, compaction & recovery
 
-CLI and TUI share the [TOML configuration](docs/configuration.md) and support the user TARS directory `~/.tars/` (`$TARS_HOME` override; `%USERPROFILE%\.tars\` on Windows), `TARS_CONFIG`, `--config` and named model presets; explicit arguments take precedence. `~/.tars/permissions.toml` holds user-level read-only command rules (skipped by `--no-config`, never modified automatically by TARS), while project-local `.tars/` directories (such as `.tars/permissions.toml` with `.tars/.gitignore` and `.tars/skills`) are workspace-private, gitignored, read-only to sandboxed `run_command`, and rejected by `write_file`/`edit_file` in every permission mode (as are in-workspace session store directories). Start from [config.example.toml](config.example.toml); MCP server definitions are in [mcp.example.json](mcp.example.json) and [Configuration](docs/configuration.md#mcp-servers). Reopening an existing session is unaffected by changes to global model presets.
+Configure `--store`, `--context-window`, `--auto-compact on|off|PERCENT`, and `--prompt-cache on|off` when creating a session (or via TOML presets), and inspect or manage sessions with `session show`, `session compact`, `session history`, and `session repair`. Records use OS exclusive `<uuid>.lock` files and a 64 MiB per-record limit; if saving fails, uncommitted materials export to `tars-recovery-<uuid>.json` (directory configurable via `--recovery-dir`) without overwriting existing files. See [Long-session compaction](docs/configuration.md#long-session-compaction), [Session lifecycle](docs/session-lifecycle.md), [Session continuation](docs/session-continuation.md), and [Compaction and history](docs/README.md#compaction-and-history).
 
-- [Current structure, interface boundaries and checks](docs/README.md)
-- [Shared configuration](docs/configuration.md)
-- [Workspace tools: read/write, confirmation and record migration](docs/workspace-tools.md)
-- [Material handling and continuation after interruption](docs/session-continuation.md)
-- [TUI operation, keys and validation boundaries](docs/tui.md)
+### CLI automation & workspace tools
 
-Causa owns Context and single-run execution; TARS owns sessions, work acceptance, dependency assembly and application interaction.
+`tars run` supports `--input` or `--stdin`, `--load` / `--save`, and `--json`, with distinct exit codes (`0` completed, `1` configuration, execution, or file error, `2` argument error, `124` deadline, `130` cancelled). Workspace tools are opt-in via `--workspace DIR --tools ...` alongside `--permission-mode`, `--command-network none|open`, `--code-execution` / `--no-code-execution`, and unified prelude/skill controls (`--skill-dir`, `--no-skills`). CLI and TUI share TOML configuration (`~/.tars/`, `$TARS_HOME`, `TARS_CONFIG`, `--config`; see [config.example.toml](config.example.toml)) and `mcp.json` ([mcp.example.json](mcp.example.json)). See [Workspace tools](docs/workspace-tools.md) and [Configuration](docs/configuration.md).
 
-Development workflow materials and local scripts stay on the local machine and are Git-ignored; they are not distributed with the application.
+## Platform support and current status
+
+| Capability | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| Core runtime, CLI (`tars`), TUI (`tars-tui`), persistent sessions, MCP | Verified in CI | Verified in CI | Not currently in CI (unverified) |
+| Workspace file tools (`list_directory`, `read_file`, `write_file`, `edit_file`) | Supported | Supported | Not yet implemented |
+| Sandboxed `run_command` and `search_text` | Supported (Seatbelt) | Fail-closed (no sandbox backend yet) | Fail-closed (no sandbox backend yet) |
+
+Current gaps and roadmap items not yet implemented:
+
+- Prebuilt binaries and package-manager installers (currently source build via Cargo only)
+- Linux and Windows sandbox backends for `run_command` and `search_text` (and restoring Windows CI)
+- Multi-agent / subagent collaboration
+- Desktop GUI
+- Live verification against third-party MCP servers (current tests cover local fixtures)
+
+## Architecture
+
+| Crate | Package | Role |
+| --- | --- | --- |
+| `crates/core` | `tars-core` | Shared session host, configuration, tools, permission policy, compaction, and store |
+| `crates/sandbox` | `tars-sandbox` | Platform-independent sandbox policy, capability probes, process trees, and Seatbelt backend |
+| `crates/cli` | `tars-cli` | `tars` CLI binary |
+| `crates/tui` | `tars-tui` | `tars-tui` native terminal interface |
+
+Dependencies flow strictly one way (`tars-cli` / `tars-tui` → `tars-core` → `tars-sandbox`, with `tars-core` re-exporting `tars_core::sandbox`), and all workspace packages are `publish = false`.
+
+**Causa dependency boundary:** The workspace (`tars-core`, `tars-cli`, and `tars-tui`; `tars-sandbox` depends on neither `causa` nor `tars-core`) consumes `causa 0.3` with the `runtime`, `providers`, and `extensions` features enabled (exact version locked in `Cargo.lock`) strictly through its public facade. TARS owns application policy—sessions, persistence, workspace tools, sandboxing, permission modes, compaction, and UIs—on top of Causa's `Context` and single-run execution primitives; general runtime or protocol improvements uncovered here are contributed upstream to Causa rather than mixing policy across the boundary.
+
+## Documentation
+
+- [Current implementation](docs/README.md) — code layout, module boundaries, and local verification checks
+- [Shared configuration](docs/configuration.md) — TOML schema, presets, compaction, prelude/skills, external tools, and MCP
+- [Workspace tools](docs/workspace-tools.md) — file safety, permission modes, command rules, Seatbelt sandbox, `run_code`, and record migration
+- [Session lifecycle](docs/session-lifecycle.md) — session assembly, execution, saving, closing, and usage statistics
+- [Session continuation](docs/session-continuation.md) — repairing interrupted tool batches
+- [TUI guide](docs/tui.md) — terminal layout, keybindings, startup checks, and history display
+- [config.example.toml](config.example.toml) & [mcp.example.json](mcp.example.json) — starter configuration examples
+
+## Contributing
+
+See [AGENTS.md](AGENTS.md) and [Local checks](docs/README.md#local-checks) for architecture conventions, layer boundaries, and verification commands. Local development workflow materials stay gitignored and are not part of the public repository.
 
 ## License
 
