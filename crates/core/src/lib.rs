@@ -5,6 +5,7 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod agent;
 pub mod application;
 pub(crate) mod assembly;
 pub mod compact;

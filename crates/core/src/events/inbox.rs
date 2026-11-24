@@ -555,6 +555,18 @@ pub struct ConsumedInboxEvents {
     pub dropped_ids: Vec<i64>,
 }
 
+/// Detailed drain result allowing rollback back into the mailbox if submission fails
+/// before the target turn starts.
+#[derive(Clone, Debug)]
+pub struct DrainedNotification {
+    /// Rendered `<task-notification>` envelope block.
+    pub rendered: String,
+    /// Original uncoalesced events drained in this batch.
+    pub drained_events: Vec<InboxEvent>,
+    /// Consumed event ID lists (`delivered_ids` / `dropped_ids`).
+    pub consumed: ConsumedInboxEvents,
+}
+
 #[derive(Default)]
 struct InboxDrainState {
     queued: Vec<InboxEvent>,
@@ -610,23 +622,61 @@ impl InboxDrainHandle {
     /// Drain and coalesce currently queued events, recording consumed IDs and returning
     /// the rendered `<task-notification>` envelope block if any events were queued.
     pub fn drain_notification(&self) -> Option<String> {
-        let kept = {
+        self.drain_notification_detailed().map(|d| d.rendered)
+    }
+
+    /// Drain and coalesce currently queued events, returning both the rendered text
+    /// and the drained events/IDs so a caller can call [`Self::restore_drained`] if
+    /// turn submission fails before the work begins.
+    pub fn drain_notification_detailed(&self) -> Option<DrainedNotification> {
+        let (kept, original_events, dropped_ids) = {
             let mut state = self.state.lock().expect("inbox drain lock");
             if state.queued.is_empty() {
                 return None;
             }
             let queued = std::mem::take(&mut state.queued);
+            let original_events = queued.clone();
             let coalesced = coalesce_inbox_events(queued);
             for event in &coalesced.kept {
                 state.delivered_ids.push(event.event_id);
             }
-            state.dropped_ids.extend(coalesced.dropped_ids);
-            coalesced.kept
+            state
+                .dropped_ids
+                .extend(coalesced.dropped_ids.iter().copied());
+            (coalesced.kept, original_events, coalesced.dropped_ids)
         };
         if kept.is_empty() {
             return None;
         }
-        Some(render_task_notifications(&kept, self.inline_max_bytes))
+        let consumed = ConsumedInboxEvents {
+            delivered_ids: kept.iter().map(|e| e.event_id).collect(),
+            dropped_ids,
+        };
+        Some(DrainedNotification {
+            rendered: render_task_notifications(&kept, self.inline_max_bytes),
+            drained_events: original_events,
+            consumed,
+        })
+    }
+
+    /// Restore previously drained events back into the mailbox when turn submission fails
+    /// before entering execution.
+    pub fn restore_drained(&self, drained: &DrainedNotification) {
+        let mut state = self.state.lock().expect("inbox drain lock");
+        let delivered_set: HashSet<i64> = drained.consumed.delivered_ids.iter().copied().collect();
+        let dropped_set: HashSet<i64> = drained.consumed.dropped_ids.iter().copied().collect();
+        state.delivered_ids.retain(|id| !delivered_set.contains(id));
+        state.dropped_ids.retain(|id| !dropped_set.contains(id));
+
+        let existing: HashSet<i64> = state.queued.iter().map(|e| e.event_id).collect();
+        let mut restored = Vec::with_capacity(drained.drained_events.len() + state.queued.len());
+        for ev in &drained.drained_events {
+            if !existing.contains(&ev.event_id) {
+                restored.push(ev.clone());
+            }
+        }
+        restored.append(&mut state.queued);
+        state.queued = restored;
     }
 
     /// Return a non-destructive snapshot of event IDs consumed so far.

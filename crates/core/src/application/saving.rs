@@ -64,6 +64,14 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
         updated_at_ms,
     )?;
     state.pending = Some(Arc::new(PreparedCommit::new(state.revision, record)?));
+    if let Some(coord) = entry.coordinator.get() {
+        let taken = coord.entry_inbox().take_consumed();
+        state
+            .pending_consumed
+            .delivered_ids
+            .extend(taken.delivered_ids);
+        state.pending_consumed.dropped_ids.extend(taken.dropped_ids);
+    }
     state.save_requested = true;
     state.pending_attempted = false;
     state.save = SaveStatus::Dirty {
@@ -74,12 +82,22 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
 }
 
 pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
-    let (writer, pending, attempted, history_store) = {
+    let _writer_guard = entry.writer_gate.lock().await;
+    let (writer, pending, consumed, attempted, history_store, entry_agent_id) = {
         let mut state = entry.lock();
         state.save_requested = false;
         let attempted = state.pending_attempted;
         state.pending_attempted = true;
-        let pending = state.pending.clone().expect("pending save");
+        let mut pending = state.pending.clone().expect("pending save");
+        if !attempted && pending.expected_revision != state.revision {
+            let mut updated_record = pending.record.clone();
+            updated_record.revision = state.revision.map_or(1, |r| r.saturating_add(1));
+            if let Ok(rebuilt) = PreparedCommit::new(state.revision, updated_record) {
+                pending = Arc::new(rebuilt);
+                state.pending = Some(pending.clone());
+            }
+        }
+        let consumed = state.pending_consumed.clone();
         state.save = SaveStatus::Saving {
             commit_id: pending.record.last_commit_id.clone(),
             base_revision: pending.expected_revision,
@@ -94,8 +112,10 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
         (
             state.writer.clone().expect("persistent writer"),
             pending,
+            consumed,
             attempted,
             history_store,
+            entry.target.conversation_id.as_str().to_owned(),
         )
     };
     // Both the supervisor and blocking closure own the writer. Dropping a wait
@@ -108,61 +128,60 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
             }
         }
         check_artifact_references(&pending.record, history_store.as_deref())?;
-        writer.commit(&pending)
+        writer.commit_with_consumed_events(
+            &pending,
+            &entry_agent_id,
+            &consumed.delivered_ids,
+            &consumed.dropped_ids,
+        )
     })
     .await;
-    let mut state = entry.lock();
-    match result {
-        Ok(record) => {
-            state.revision = Some(record.revision);
-            state.saved = crate::store::RecordMetadata::of(&record);
-            state.pending = None;
-            state.save_requested = false;
-            state.save = SaveStatus::Saved {
-                revision: record.revision,
-                material_version: entry.version(&state),
-            };
-            state.active = None;
-            state.error = None;
-            state.initialized = true;
-            if state.closing.is_none() {
-                state.lifecycle = Lifecycle::Open;
-            }
-            if state.persistent {
-                let initial_mode = state
-                    .definition
-                    .as_ref()
-                    .map(crate::definition::SessionDefinition::initial_permission_mode)
-                    .unwrap_or(crate::policy::PermissionMode::Ask);
-                let committed_mode = record.permission_mode.unwrap_or(initial_mode);
-                let current_mode = state
-                    .permissions
-                    .as_ref()
-                    .map(|p| p.get().0)
-                    .unwrap_or(initial_mode);
-                if current_mode != committed_mode
-                    && state.active.is_none()
-                    && state.closing != Some(ClosePolicy::DiscardLocal)
-                {
-                    if let Err(error) = prepare(entry, &mut state) {
-                        state.lifecycle = Lifecycle::Faulted;
-                        state.error = Some(error);
-                        state.fault = state.error.clone();
-                    } else {
-                        entry.wake.notify_one();
+    let mut just_opened = false;
+    let mut sync_after_save = None;
+    {
+        let mut state = entry.lock();
+        match result {
+            Ok(record) => {
+                let was_initialized = state.initialized;
+                state.revision = Some(record.revision);
+                state.saved = crate::store::RecordMetadata::of(&record);
+                state.pending = None;
+                let committed_consumed = std::mem::take(&mut state.pending_consumed);
+                state.save_requested = false;
+                state.save = SaveStatus::Saved {
+                    revision: record.revision,
+                    material_version: entry.version(&state),
+                };
+                state.active = None;
+                state.error = None;
+                state.initialized = true;
+                if state.closing.is_none() {
+                    state.lifecycle = Lifecycle::Open;
+                    if !was_initialized {
+                        just_opened = true;
                     }
                 }
-                // A running setting changed while this commit was in flight;
-                // the next fixed snapshot carries it, like the permission mode.
-                if let Some(definition) = state.definition.clone()
-                    && let Some(runtime) = state.owner.as_ref().and_then(|o| o.compaction())
-                {
-                    let (auto_compact, compact_threshold) = runtime.settings();
-                    let committed_auto = record.auto_compact.unwrap_or(definition.auto_compact);
-                    let committed_threshold = record
-                        .compact_threshold
-                        .unwrap_or(definition.compact_threshold);
-                    if (auto_compact != committed_auto || compact_threshold != committed_threshold)
+                sync_after_save = Some((
+                    Some(record.revision),
+                    state.generation,
+                    record.context.clone(),
+                    record.history.clone(),
+                    record.session_usage(),
+                    committed_consumed,
+                ));
+                if state.persistent {
+                    let initial_mode = state
+                        .definition
+                        .as_ref()
+                        .map(crate::definition::SessionDefinition::initial_permission_mode)
+                        .unwrap_or(crate::policy::PermissionMode::Ask);
+                    let committed_mode = record.permission_mode.unwrap_or(initial_mode);
+                    let current_mode = state
+                        .permissions
+                        .as_ref()
+                        .map(|p| p.get().0)
+                        .unwrap_or(initial_mode);
+                    if current_mode != committed_mode
                         && state.active.is_none()
                         && state.closing != Some(ClosePolicy::DiscardLocal)
                     {
@@ -174,33 +193,88 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
                             entry.wake.notify_one();
                         }
                     }
+                    // A running setting changed while this commit was in flight;
+                    // the next fixed snapshot carries it, like the permission mode.
+                    if let Some(definition) = state.definition.clone()
+                        && let Some(runtime) = state.owner.as_ref().and_then(|o| o.compaction())
+                    {
+                        let (auto_compact, compact_threshold) = runtime.settings();
+                        let committed_auto = record.auto_compact.unwrap_or(definition.auto_compact);
+                        let committed_threshold = record
+                            .compact_threshold
+                            .unwrap_or(definition.compact_threshold);
+                        if (auto_compact != committed_auto
+                            || compact_threshold != committed_threshold)
+                            && state.active.is_none()
+                            && state.closing != Some(ClosePolicy::DiscardLocal)
+                        {
+                            if let Err(error) = prepare(entry, &mut state) {
+                                state.lifecycle = Lifecycle::Faulted;
+                                state.error = Some(error);
+                                state.fault = state.error.clone();
+                            } else {
+                                entry.wake.notify_one();
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                let pending_commit_id = state
+                    .pending
+                    .as_ref()
+                    .expect("failed save retained")
+                    .record
+                    .last_commit_id
+                    .clone();
+                let error = match error {
+                    ApplicationError::Store(error) => error,
+                    other => {
+                        state.lifecycle = Lifecycle::Faulted;
+                        state.error = Some(other);
+                        state.fault = state.error.clone();
+                        state.close_in_flight = state.closing == Some(ClosePolicy::DiscardLocal);
+                        entry.changed();
+                        return;
+                    }
+                };
+                if matches!(&*error, crate::store::StoreError::PendingCommit)
+                    && state.writer.as_ref().is_none_or(|w| {
+                        w.pending_kind() != crate::store::PendingWriterKind::RootCommit
+                    })
+                {
+                    // Commit was rejected before touching `WriterState::pending` (e.g. a child
+                    // outbox was pending). Keep `pending_attempted = false` so retry refreshes
+                    // `expected_revision` once the blocking outbox clears.
+                    state.pending_attempted = false;
+                }
+                state.save = SaveStatus::SaveBlocked {
+                    error: error.clone(),
+                    commit_id: pending_commit_id,
+                    material_version: entry.version(&state),
+                };
+                state.error = Some(ApplicationError::SaveBlocked(error));
+                if state.closing == Some(ClosePolicy::Save) {
+                    state.close_in_flight = false;
+                } else if !state.initialized {
+                    state.lifecycle = Lifecycle::InitializationBlocked;
                 }
             }
         }
-        Err(error) => {
-            let pending = state.pending.as_ref().expect("failed save retained");
-            let error = match error {
-                ApplicationError::Store(error) => error,
-                other => {
-                    state.lifecycle = Lifecycle::Faulted;
-                    state.error = Some(other);
-                    state.fault = state.error.clone();
-                    state.close_in_flight = state.closing == Some(ClosePolicy::DiscardLocal);
-                    entry.changed();
-                    return;
-                }
-            };
-            state.save = SaveStatus::SaveBlocked {
-                error: error.clone(),
-                commit_id: pending.record.last_commit_id.clone(),
-                material_version: entry.version(&state),
-            };
-            state.error = Some(ApplicationError::SaveBlocked(error));
-            if state.closing == Some(ClosePolicy::Save) {
-                state.close_in_flight = false;
-            } else if !state.initialized {
-                state.lifecycle = Lifecycle::InitializationBlocked;
-            }
+    }
+    if let Some((rev, gen_id, ctx, hist, usage, committed_consumed)) = sync_after_save
+        && let Some(coord) = entry.coordinator.get()
+    {
+        coord.sync_entry_materials_after_save(
+            rev,
+            gen_id,
+            Some(ctx),
+            Some(hist),
+            Some(usage),
+            &committed_consumed,
+        );
+        if just_opened {
+            coord.publish_lifecycle(Lifecycle::Open);
         }
     }
     entry.changed();

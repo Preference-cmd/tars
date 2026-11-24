@@ -153,6 +153,14 @@ pub(crate) struct ReadAgentPage {
     pub(crate) page: Utf8PageSlice,
 }
 
+/// Summary of rows reconciled during session reopen recovery.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ReopenReconcileSummary {
+    pub(crate) reset_claimed_events: usize,
+    pub(crate) downgraded_wakeups: usize,
+    pub(crate) interrupted_operations: usize,
+}
+
 fn to_i64(value: u64, field: &str) -> Result<i64, StoreError> {
     i64::try_from(value).map_err(|_| StoreError::InvalidDatabase(format!("{field} overflows i64")))
 }
@@ -574,7 +582,7 @@ fn verify_outbox_matches_db(
     })
 }
 
-fn validate_event_ownership(
+pub(super) fn validate_event_ownership(
     conn: &Connection,
     session_id: &str,
     event_id: i64,
@@ -598,6 +606,38 @@ fn validate_event_ownership(
         return Err(StoreError::InvalidDatabase(format!(
             "event {event_id} belongs to agent {target_agent_id}, not {expected}"
         )));
+    }
+    Ok(())
+}
+
+pub(super) fn mark_events_consumed_in_tx(
+    conn: &Connection,
+    session_id: &str,
+    delivered_event_ids: &[i64],
+    dropped_event_ids: &[i64],
+    updated_at_ms_i64: i64,
+) -> Result<(), StoreError> {
+    for &event_id in delivered_event_ids {
+        conn.execute(
+            "UPDATE agent_events
+             SET state = 'delivered',
+                 delivered_at_ms = ?3
+             WHERE session_id = ?1
+               AND event_id = ?2
+               AND state IN ('pending', 'claimed')",
+            params![session_id, event_id, updated_at_ms_i64],
+        )?;
+    }
+
+    for &event_id in dropped_event_ids {
+        conn.execute(
+            "UPDATE agent_events
+             SET state = 'dropped'
+             WHERE session_id = ?1
+               AND event_id = ?2
+               AND state IN ('pending', 'claimed')",
+            params![session_id, event_id],
+        )?;
     }
     Ok(())
 }
@@ -1157,28 +1197,13 @@ impl Writer {
                 inserted_event_ids.push(conn.last_insert_rowid());
             }
 
-            for &event_id in &req.delivered_event_ids {
-                conn.execute(
-                    "UPDATE agent_events
-                     SET state = 'delivered',
-                         delivered_at_ms = ?3
-                     WHERE session_id = ?1
-                       AND event_id = ?2
-                       AND state IN ('pending', 'claimed')",
-                    params![self.session_id(), event_id, updated_at_ms_i64],
-                )?;
-            }
-
-            for &event_id in &req.dropped_event_ids {
-                conn.execute(
-                    "UPDATE agent_events
-                     SET state = 'dropped'
-                     WHERE session_id = ?1
-                       AND event_id = ?2
-                       AND state IN ('pending', 'claimed')",
-                    params![self.session_id(), event_id],
-                )?;
-            }
+            mark_events_consumed_in_tx(
+                &conn,
+                self.session_id(),
+                &req.delivered_event_ids,
+                &req.dropped_event_ids,
+                updated_at_ms_i64,
+            )?;
 
             conn.execute(
                 "UPDATE sessions
@@ -1224,19 +1249,24 @@ impl Writer {
         Ok(result)
     }
 
-    /// Reset any crashed `claimed` events back to `pending` and downgrade `wake_if_idle`
-    /// pending events to `deliver_on_next_turn` so reopening a session never auto-wakes.
-    pub(crate) fn downgrade_pending_wakeups_on_reopen(&self) -> Result<usize, StoreError> {
+    /// Reset any crashed `claimed` events back to `pending`, downgrade `wake_if_idle`
+    /// pending events to `deliver_on_next_turn`, and mark stale `creating`/`running`
+    /// operations as `interrupted` inside one `BEGIN IMMEDIATE` transaction.
+    pub(crate) fn reconcile_on_reopen(
+        &self,
+        now_ms: u64,
+    ) -> Result<ReopenReconcileSummary, StoreError> {
+        let now_ms_i64 = to_i64(now_ms, "now_ms")?;
         let (_state, conn) = self.lock_state_and_conn()?;
         let tx = ImmediateTx::begin(&conn)?;
-        conn.execute(
+        let reset_claimed_events = conn.execute(
             "UPDATE agent_events
              SET state = 'pending',
                  claimed_op_id = NULL
              WHERE session_id = ?1 AND state = 'claimed'",
             params![self.session_id()],
         )?;
-        let downgraded = conn.execute(
+        let downgraded_wakeups = conn.execute(
             "UPDATE agent_events
              SET wake_policy = 'deliver_on_next_turn'
              WHERE session_id = ?1
@@ -1244,8 +1274,67 @@ impl Writer {
                AND wake_policy = 'wake_if_idle'",
             params![self.session_id()],
         )?;
+        let interrupted_operations = conn.execute(
+            "UPDATE operations
+             SET status = 'interrupted',
+                 finished_at_ms = COALESCE(finished_at_ms, ?2)
+             WHERE session_id = ?1
+               AND status IN ('creating', 'running')",
+            params![self.session_id(), now_ms_i64],
+        )?;
         tx.commit()?;
-        Ok(downgraded)
+        Ok(ReopenReconcileSummary {
+            reset_claimed_events,
+            downgraded_wakeups,
+            interrupted_operations,
+        })
+    }
+
+    /// Reset any crashed `claimed` events back to `pending` and downgrade `wake_if_idle`
+    /// pending events to `deliver_on_next_turn` so reopening a session never auto-wakes.
+    pub(crate) fn downgrade_pending_wakeups_on_reopen(&self) -> Result<usize, StoreError> {
+        Ok(self
+            .reconcile_on_reopen(crate::time::current_time_ms())?
+            .downgraded_wakeups)
+    }
+
+    /// Downgrade `wake_if_idle` pending events for `target_agent_id` to `deliver_on_next_turn`
+    /// (for example, when `max_auto_wakeups` is reached), returning the affected `event_id`s.
+    pub(crate) fn downgrade_agent_wakeups(
+        &self,
+        target_agent_id: &str,
+    ) -> Result<Vec<i64>, StoreError> {
+        canonical_uuid(target_agent_id)?;
+        let (_state, conn) = self.lock_state_and_conn()?;
+        let tx = ImmediateTx::begin(&conn)?;
+        let mut stmt = conn.prepare(
+            "SELECT event_id
+             FROM agent_events
+             WHERE session_id = ?1
+               AND target_agent_id = ?2
+               AND state = 'pending'
+               AND wake_policy = 'wake_if_idle'
+             ORDER BY event_id ASC",
+        )?;
+        let ids: Vec<i64> = stmt
+            .query_map(params![self.session_id(), target_agent_id], |row| {
+                row.get(0)
+            })?
+            .collect::<Result<Vec<i64>, _>>()?;
+        drop(stmt);
+        if !ids.is_empty() {
+            conn.execute(
+                "UPDATE agent_events
+                 SET wake_policy = 'deliver_on_next_turn'
+                 WHERE session_id = ?1
+                   AND target_agent_id = ?2
+                   AND state = 'pending'
+                   AND wake_policy = 'wake_if_idle'",
+                params![self.session_id(), target_agent_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(ids)
     }
 
     /// Downgrade pending/claimed events emitted by `(source_kind, source_id)` to `suppress_wake`.

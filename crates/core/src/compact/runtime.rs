@@ -92,7 +92,7 @@ impl CompactionRuntime {
     }
 
     /// Build the per-session runtime with strict SQLite foreign-key enforcement.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, dead_code)]
     pub(crate) fn new_strict(
         definition: &SessionDefinition,
         conversation_id: &ConversationId,
@@ -103,10 +103,37 @@ impl CompactionRuntime {
         gateway: Arc<dyn ModelGateway>,
         usage: Arc<UsageTracker>,
     ) -> Option<Arc<Self>> {
+        Self::new_strict_for_agent(
+            definition,
+            conversation_id,
+            conversation_id.as_str(),
+            store_root,
+            history,
+            current_auto_compact,
+            current_threshold,
+            gateway,
+            usage,
+        )
+    }
+
+    /// Build a per-agent runtime with strict SQLite foreign-key enforcement.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_strict_for_agent(
+        definition: &SessionDefinition,
+        conversation_id: &ConversationId,
+        agent_id: &str,
+        store_root: Option<&Path>,
+        history: Vec<HistoryRecordEntry>,
+        current_auto_compact: Option<bool>,
+        current_threshold: Option<u8>,
+        gateway: Arc<dyn ModelGateway>,
+        usage: Arc<UsageTracker>,
+    ) -> Option<Arc<Self>> {
         let store_root = store_root?;
-        let history = Arc::new(HistoryStore::new_strict(
+        let history = Arc::new(HistoryStore::new_strict_for_agent(
             store_root,
             conversation_id.as_str(),
+            agent_id,
             history,
         ));
         Some(Self::with_history(

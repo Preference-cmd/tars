@@ -88,6 +88,9 @@ async fn run(shared: Arc<Shared>, record: Arc<Record>, context: Context) -> Retu
             };
         }
     };
+    if let Some(max_rounds) = record.max_model_rounds_override {
+        options.limits.max_model_rounds = options.limits.max_model_rounds.min(max_rounds);
+    }
     options.observer = Some(super::progress::observer(
         shared.progress.clone(),
         record.work.clone(),

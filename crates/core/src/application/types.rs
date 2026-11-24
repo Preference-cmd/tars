@@ -192,6 +192,8 @@ pub struct HostOptions {
     /// Defaults to `None` so hosts without explicit configuration stay isolated
     /// from the process user's `~/.tars/permissions.toml`.
     pub user_rules_path: Option<std::path::PathBuf>,
+    /// Multi-agent coordinator limits and event scheduling configuration.
+    pub coordinator: super::CoordinatorConfig,
 }
 impl Default for HostOptions {
     fn default() -> Self {
@@ -200,6 +202,7 @@ impl Default for HostOptions {
             max_storage_operations: 4,
             connect_mcp_servers: true,
             user_rules_path: None,
+            coordinator: super::CoordinatorConfig::default(),
         }
     }
 }

@@ -181,7 +181,7 @@ pub(super) fn render(
     res.map_err(|error| bounded(&error.to_string(), 512))
 }
 
-pub(super) fn diagnose(
+pub(in crate::application) fn diagnose(
     context: &Context,
     history: &[HistoryRecordEntry],
     artifacts: Option<&crate::compact::history::HistoryStore>,
@@ -231,7 +231,7 @@ pub(super) fn candidate_check(
     }
 }
 
-pub(in crate::application) fn admission_check(
+pub(crate) fn admission_check(
     context: &Context,
     history: &[HistoryRecordEntry],
     artifacts: Option<&crate::compact::history::HistoryStore>,
@@ -244,6 +244,70 @@ pub(in crate::application) fn admission_check(
     } else {
         Err(RepairError::Materials(diagnosis))
     }
+}
+
+pub(in crate::application) fn inspect_original_batch(
+    owner: &crate::session::Session,
+    work: &WorkRef,
+) -> Result<OriginalBatchPreview, ApplicationError> {
+    Ok(owner.inspect_uncommitted(work, |standard, result, batch| {
+        let adoption_error = super::plan::source_check(standard, result, batch).err();
+        let warned = |entry: &causa::kernel::ToolCallEntry| {
+            let (_, result) = entry.result()?;
+            warning_kind(&entry.call().input.tool_name)
+                .filter(|kind| match kind {
+                    RepairWarningKind::Command => {
+                        matches!(result.status, UnknownOutcome | TimedOut | Cancelled)
+                    }
+                    _ => result.status == UnknownOutcome,
+                })
+                .map(|kind| RepairWriteWarning {
+                    call_block_id: result.call_block_id,
+                    tool_name: entry.call().input.tool_name.clone(),
+                    path: extract_call_path(&entry.call().input.arguments),
+                    kind,
+                })
+        };
+        let warnings: Vec<_> = batch
+            .map(|b| b.results().iter().filter_map(warned).collect())
+            .unwrap_or_default();
+        let write_warnings_count = warnings.len();
+        let external_warnings_count = warnings
+            .iter()
+            .filter(|warning| warning.kind == RepairWarningKind::External)
+            .count();
+        let command_warnings_count = warnings
+            .iter()
+            .filter(|warning| warning.kind == RepairWarningKind::Command)
+            .count();
+        OriginalBatchPreview {
+            work: work.clone(),
+            available: batch.is_some(),
+            completed_count: batch.map_or(0, |batch| batch.completed_len()),
+            pending_count: batch.map_or(0, |batch| batch.calls().len()),
+            results: batch
+                .into_iter()
+                .flat_map(|batch| batch.results())
+                .take(DISPLAY_LIMIT)
+                .filter_map(|entry| {
+                    entry.result().map(|(id, result)| {
+                        let write_warning = warned(entry);
+                        OriginalResultPreview {
+                            result_id: *id,
+                            call_block_id: result.call_block_id,
+                            status: result.status.clone(),
+                            excerpt: json_excerpt(result, 1024),
+                            write_warning,
+                        }
+                    })
+                })
+                .collect(),
+            adoption_error,
+            write_warnings_count,
+            external_warnings_count,
+            command_warnings_count,
+        }
+    })?)
 }
 
 impl ManagedSession {
@@ -271,66 +335,7 @@ impl ManagedSession {
             context.clone()
         })?;
         let original = work
-            .map(|work| {
-                owner.inspect_uncommitted(work, |standard, result, batch| {
-                    let adoption_error = super::plan::source_check(standard, result, batch).err();
-                    let warned = |entry: &causa::kernel::ToolCallEntry| {
-                        let (_, result) = entry.result()?;
-                        warning_kind(&entry.call().input.tool_name)
-                            .filter(|kind| match kind {
-                                RepairWarningKind::Command => {
-                                    matches!(result.status, UnknownOutcome | TimedOut | Cancelled)
-                                }
-                                _ => result.status == UnknownOutcome,
-                            })
-                            .map(|kind| RepairWriteWarning {
-                                call_block_id: result.call_block_id,
-                                tool_name: entry.call().input.tool_name.clone(),
-                                path: extract_call_path(&entry.call().input.arguments),
-                                kind,
-                            })
-                    };
-                    let warnings: Vec<_> = batch
-                        .map(|b| b.results().iter().filter_map(warned).collect())
-                        .unwrap_or_default();
-                    let write_warnings_count = warnings.len();
-                    let external_warnings_count = warnings
-                        .iter()
-                        .filter(|warning| warning.kind == RepairWarningKind::External)
-                        .count();
-                    let command_warnings_count = warnings
-                        .iter()
-                        .filter(|warning| warning.kind == RepairWarningKind::Command)
-                        .count();
-                    OriginalBatchPreview {
-                        work: work.clone(),
-                        available: batch.is_some(),
-                        completed_count: batch.map_or(0, |batch| batch.completed_len()),
-                        pending_count: batch.map_or(0, |batch| batch.calls().len()),
-                        results: batch
-                            .into_iter()
-                            .flat_map(|batch| batch.results())
-                            .take(DISPLAY_LIMIT)
-                            .filter_map(|entry| {
-                                entry.result().map(|(id, result)| {
-                                    let write_warning = warned(entry);
-                                    OriginalResultPreview {
-                                        result_id: *id,
-                                        call_block_id: result.call_block_id,
-                                        status: result.status.clone(),
-                                        excerpt: json_excerpt(result, 1024),
-                                        write_warning,
-                                    }
-                                })
-                            })
-                            .collect(),
-                        adoption_error,
-                        write_warnings_count,
-                        external_warnings_count,
-                        command_warnings_count,
-                    }
-                })
-            })
+            .map(|work| inspect_original_batch(owner, work))
             .transpose()?;
         drop(state);
         let diagnosis = diagnose(&context, &history, artifacts.as_deref(), &definition);

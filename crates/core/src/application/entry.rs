@@ -1,32 +1,36 @@
+use super::coordinator::SessionCoordinator;
 use super::types::*;
 use crate::definition::SessionDefinition;
+use crate::events::ConsumedInboxEvents;
 use crate::session::{Session, SessionHandle, WorkRef};
 use crate::store::{PreparedCommit, SessionStore, Writer};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use tokio::sync::{Notify, Semaphore};
 
 #[derive(Clone, Debug)]
-pub(super) struct WorkspaceRulesSnapshot {
+pub(crate) struct WorkspaceRulesSnapshot {
     pub workspace_root: PathBuf,
     pub raw_text: String,
     pub rules: Vec<crate::permission::CommandRule>,
 }
 
-pub(super) struct Entry {
+pub(crate) struct Entry {
     pub target: SessionTarget,
     pub state: Mutex<State>,
     pub changed: Notify,
     pub wake: Notify,
     pub store: Option<SessionStore>,
     pub io: Arc<Semaphore>,
+    pub writer_gate: Arc<tokio::sync::Mutex<()>>,
+    pub coordinator: OnceLock<Arc<SessionCoordinator>>,
     #[cfg(test)]
     pub panic_owner: Notify,
     #[cfg(test)]
     pub before_close: Mutex<Option<(Arc<Notify>, Arc<Notify>)>>,
     pub snapshot_clones: Arc<std::sync::atomic::AtomicU64>,
 }
-pub(super) struct State {
+pub(crate) struct State {
     pub prepared: Option<PreparedCreate>,
     pub definition: Option<SessionDefinition>,
     pub persistent: bool,
@@ -44,6 +48,7 @@ pub(super) struct State {
     /// A manual compaction is between its material snapshot and its edit.
     pub compacting: bool,
     pub pending: Option<Arc<PreparedCommit>>,
+    pub pending_consumed: ConsumedInboxEvents,
     pub save_requested: bool,
     pub pending_attempted: bool,
     pub initialized: bool,
@@ -79,6 +84,8 @@ impl Entry {
             target,
             store,
             io,
+            writer_gate: Arc::new(tokio::sync::Mutex::new(())),
+            coordinator: OnceLock::new(),
             snapshot_clones,
             state: Mutex::new(State {
                 definition: prepared.as_ref().map(|p| p.definition.clone()),
@@ -104,6 +111,7 @@ impl Entry {
                 active: None,
                 compacting: false,
                 pending: None,
+                pending_consumed: ConsumedInboxEvents::default(),
                 save_requested: false,
                 pending_attempted: false,
                 initialized: false,

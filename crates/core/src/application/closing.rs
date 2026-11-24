@@ -20,6 +20,7 @@ pub(super) async fn finish(host: &Arc<HostInner>, entry: &Arc<Entry>, policy: Cl
     // Confirmation never retries a write. The original commit remains fixed,
     // and the guard remains held even if all close waiters abandon this call.
     let disposition = if let Some((pending, writer)) = confirm {
+        let _writer_guard = entry.writer_gate.lock().await;
         Some(
             match saving::io(host, move || writer.resolve_commit(&pending)).await {
                 Ok(CommitResolution::Applied(record)) => CommitDisposition::Applied {
@@ -39,7 +40,8 @@ pub(super) async fn finish(host: &Arc<HostInner>, entry: &Arc<Entry>, policy: Cl
     // Release MCP connections before publishing Closed. The owner is removed
     // from the lock scope so no application lock is held across the wait; a
     // policy replacement while we wait leaves the rest to the next attempt.
-    let mcp = {
+    let child_save_blocked = entry.coordinator.get().and_then(|c| c.save_blocked_error());
+    let (mcp, child_mcps) = {
         let entries = host.entries.lock().expect("directory has no callbacks");
         let mut state = entry.lock();
         if state.closing != Some(policy) {
@@ -48,6 +50,8 @@ pub(super) async fn finish(host: &Arc<HostInner>, entry: &Arc<Entry>, policy: Cl
         if policy == ClosePolicy::Save && state.persistent {
             let error = if state.fault.is_some() {
                 state.fault.clone()
+            } else if let Some(err) = child_save_blocked {
+                Some(ApplicationError::SaveBlocked(err))
             } else if state.pending.is_some() {
                 state.error.clone().or(Some(ApplicationError::SavePending))
             } else if !matches!(state.save, SaveStatus::Saved { .. }) {
@@ -73,11 +77,18 @@ pub(super) async fn finish(host: &Arc<HostInner>, entry: &Arc<Entry>, policy: Cl
         let mcp = state.owner.as_mut().and_then(|owner| owner.take_mcp());
         drop(state);
         drop(entries);
-        mcp
+        let child_mcps = entry
+            .coordinator
+            .get()
+            .map_or_else(Vec::new, |c| c.take_child_mcps());
+        (mcp, child_mcps)
     };
     if let Some(mcp) = mcp {
         // Close failures are not a close outcome; the transport is gone either
         // way and the session state must still be published.
+        mcp.close().await;
+    }
+    for mcp in child_mcps {
         mcp.close().await;
     }
     let mut entries = host.entries.lock().expect("directory has no callbacks");
@@ -123,6 +134,9 @@ pub(super) async fn finish(host: &Arc<HostInner>, entry: &Arc<Entry>, policy: Cl
     }
     drop(state);
     drop(entries);
+    if let Some(coord) = entry.coordinator.get() {
+        coord.publish_lifecycle(Lifecycle::Closed);
+    }
     entry.changed();
     true
 }

@@ -53,7 +53,6 @@ impl CompactionPreparer {
 
     /// Attach the per-work inbox drain handle so queued task notifications
     /// are appended strictly after compaction evaluation.
-    #[allow(dead_code)]
     pub(crate) fn with_inbox(mut self, inbox: Arc<InboxDrainHandle>) -> Self {
         self.inbox = Some(inbox);
         self
@@ -244,7 +243,6 @@ impl TransientTrimPreparer {
 
     /// Attach the per-work inbox drain handle so queued task notifications
     /// are appended before frame trimming.
-    #[allow(dead_code)]
     pub(crate) fn with_inbox(mut self, inbox: Arc<InboxDrainHandle>) -> Self {
         self.inbox = Some(inbox);
         self
@@ -359,5 +357,48 @@ fn append_inbox_notification(
             Err(failure) if matches!(failure.reason, EditError::DuplicateBlockId(_)) => continue,
             Err(failure) => return Err(PrepareError::new(failure.reason.to_string())),
         }
+    }
+}
+
+/// Lightweight per-work preparer that injects mid-turn `<task-notification>` envelopes
+/// and keeps `loaded_skills` synchronized when neither compaction nor transient
+/// frame trimming is active.
+pub(crate) struct InboxOnlyPreparer {
+    inbox: Arc<InboxDrainHandle>,
+    loaded_skills: Option<Arc<crate::skills::LoadedSkillsState>>,
+}
+
+impl InboxOnlyPreparer {
+    /// Construct a lightweight preparer backed by `inbox`.
+    pub(crate) fn new(inbox: Arc<InboxDrainHandle>) -> Self {
+        Self {
+            inbox,
+            loaded_skills: None,
+        }
+    }
+
+    /// Attach the session's loaded-skills view so round transitions stay synchronized.
+    pub(crate) fn with_loaded_skills(
+        mut self,
+        loaded_skills: Arc<crate::skills::LoadedSkillsState>,
+    ) -> Self {
+        self.loaded_skills = Some(loaded_skills);
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl ContextPreparer for InboxOnlyPreparer {
+    async fn prepare(
+        &self,
+        context: &mut Context,
+        _round: &RoundInfo<'_>,
+        _control: &CallControl,
+    ) -> Result<ContextFrame, PrepareError> {
+        if let Some(loaded) = &self.loaded_skills {
+            loaded.sync_from_context(context.blocks());
+        }
+        append_inbox_notification(context, Some(&self.inbox))?;
+        Ok(context.frame())
     }
 }

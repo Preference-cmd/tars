@@ -81,8 +81,25 @@ impl SessionHandle {
 
     pub(crate) fn submit_with_prelude_updates(
         &self,
+        request: SubmitRequest,
+        prelude_updates: Vec<causa::kernel::ContextBlock>,
+    ) -> Result<WorkReceipt, SubmitRejection> {
+        self.submit_with_prelude_and_limits(request, prelude_updates, None)
+    }
+
+    pub(crate) fn submit_with_max_rounds(
+        &self,
+        request: SubmitRequest,
+        max_model_rounds_override: Option<u32>,
+    ) -> Result<WorkReceipt, SubmitRejection> {
+        self.submit_with_prelude_and_limits(request, Vec::new(), max_model_rounds_override)
+    }
+
+    pub(crate) fn submit_with_prelude_and_limits(
+        &self,
         mut request: SubmitRequest,
         prelude_updates: Vec<causa::kernel::ContextBlock>,
+        max_model_rounds_override: Option<u32>,
     ) -> Result<WorkReceipt, SubmitRejection> {
         let mut state = self.shared.lock();
         if let Some(turn_id) = state.keys.get(&request.request_key) {
@@ -159,6 +176,7 @@ impl SessionHandle {
         let record = Arc::new(Record {
             work: work.clone(),
             control,
+            max_model_rounds_override,
             state: Mutex::new(WorkState::Accepted),
             changed: Notify::new(),
             tools: super::ToolReporter::new(work.clone(), self.shared.progress.clone()),
@@ -221,12 +239,14 @@ impl SessionHandle {
         )
     }
 
+    pub(crate) fn peek_observation(&self, work: &WorkRef) -> Result<WorkObservation, SessionError> {
+        let state = self.shared.lock();
+        Ok(self.shared.record(&state, work)?.snapshot())
+    }
+
     /// Read retained progress; references from other conversations are not found.
     pub fn observe(&self, work: &WorkRef) -> Result<WorkObservation, SessionError> {
-        let observation = {
-            let state = self.shared.lock();
-            self.shared.record(&state, work)?.snapshot()
-        };
+        let observation = self.peek_observation(work)?;
         if matches!(observation.state, WorkState::Finished(_)) {
             self.shared.mark_read(work);
         }

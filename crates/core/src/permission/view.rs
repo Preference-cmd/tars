@@ -76,12 +76,26 @@ impl PermissionHub {
         rules: CommandRuleSet,
         workspace_backend: Option<WorkspaceRulesBackend>,
     ) -> Self {
+        Self::with_shared_approvals(
+            initial_mode,
+            rules,
+            workspace_backend,
+            Arc::new(ApprovalsHub::new()),
+        )
+    }
+
+    pub(crate) fn with_shared_approvals(
+        initial_mode: PermissionMode,
+        rules: CommandRuleSet,
+        workspace_backend: Option<WorkspaceRulesBackend>,
+        approvals: Arc<ApprovalsHub>,
+    ) -> Self {
         Self {
             state: Arc::new(RwLock::new(PermissionStateInner {
                 mode: initial_mode,
                 revision: 0,
             })),
-            approvals: Arc::new(ApprovalsHub::new()),
+            approvals,
             rules: Arc::new(RwLock::new(rules)),
             workspace_backend: Arc::new(Mutex::new(workspace_backend)),
         }

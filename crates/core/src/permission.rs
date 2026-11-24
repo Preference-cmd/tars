@@ -9,6 +9,7 @@ pub use crate::policy::{
     ParsePermissionModeError, PermissionDecision, PermissionDecisionKind, PermissionMode,
     RuleScope, RuleSource, ToolPermissionClass, WriteAction, escape_untrusted_text,
 };
+pub(crate) use approval::ApprovalsHub;
 pub use approval::{
     ApprovalDecision, ApprovalOrigin, ApprovalReceiver, ApprovalReply, ApprovalRequest,
     ApprovalSubject, CommandTarget, command_body,

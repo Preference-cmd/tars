@@ -20,10 +20,12 @@ pub use legacy::LegacyImportSummary;
 pub(crate) use multi_agent::{
     AdmitOperationOutcome, AdmitOperationRequest, AgentMaterialUpdate, NewAgentRow,
     OperationTerminalUpdate, OutboxCommitRequest, OutboxCommitResult, ReadAgentPage,
-    StoredAgentRow, StoredOperationRow,
+    ReopenReconcileSummary, StoredAgentRow, StoredOperationRow,
 };
-pub(crate) use record::{PreparedCommit, RecordMetadata, SavedSessionRecord};
-pub(crate) use sqlite::{CommitResolution, MAX_RECORD_BYTES, SessionStore, Writer};
+pub(crate) use record::{PreparedCommit, RecordMetadata, SavedSessionRecord, WireSessionUsage};
+pub(crate) use sqlite::{
+    CommitResolution, MAX_RECORD_BYTES, PendingWriterKind, SessionStore, Writer,
+};
 
 #[cfg(test)]
 pub(crate) use sqlite::{FaultAction, FaultHook};

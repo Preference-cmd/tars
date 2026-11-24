@@ -1,5 +1,5 @@
 use crate::compact::estimate::{UsageTracker, UsageTrackingGateway};
-use crate::compact::preparer::{CompactionPreparer, TransientTrimPreparer};
+use crate::compact::preparer::{CompactionPreparer, InboxOnlyPreparer, TransientTrimPreparer};
 use crate::compact::{CompactionRuntime, ProtectedInputs};
 use crate::definition::{CredentialRef, DefinitionError, RenderOptions, SessionDefinition};
 use crate::external_tools::ExternalTools;
@@ -72,6 +72,16 @@ pub(crate) struct SessionResources {
     pub(crate) command_rules: crate::permission::CommandRuleSet,
     /// Optional workspace rules persistence backend for safe `.tars/permissions.toml` appending.
     pub(crate) workspace_rules_backend: Option<crate::permission::WorkspaceRulesBackend>,
+    /// Agent identity for per-agent compaction history & artifacts (defaults to `conversation_id`).
+    pub(crate) agent_id: Option<String>,
+    /// Per-agent causal mailbox drain handle injected into `ContextPreparer`.
+    pub(crate) inbox: Option<Arc<crate::events::InboxDrainHandle>>,
+    /// Explicit origin metadata attached to `ApprovalRequest`s.
+    pub(crate) approval_origin: Option<crate::permission::ApprovalOrigin>,
+    /// Session-shared interactive approval hub (`child <= parent`).
+    pub(crate) shared_approvals: Option<Arc<crate::permission::ApprovalsHub>>,
+    /// Additional tools registered on `ToolExecutor` (e.g. collaboration tools).
+    pub(crate) extra_tools: Vec<Arc<dyn causa::kernel::Tool>>,
     /// Test-only command sandbox probe result injected into the real assembly
     /// path. Mirrors `CommandRuntime::bind_with_sandbox`: no production code
     /// can choose a backend or a probe result.
@@ -98,6 +108,11 @@ impl SessionResources {
             skill_registry: None,
             command_rules: crate::permission::CommandRuleSet::new(),
             workspace_rules_backend: None,
+            agent_id: None,
+            inbox: None,
+            approval_origin: None,
+            shared_approvals: None,
+            extra_tools: Vec::new(),
             #[cfg(test)]
             gateway_override: None,
             #[cfg(test)]
@@ -143,6 +158,43 @@ impl SessionResources {
         backend: Option<crate::permission::WorkspaceRulesBackend>,
     ) -> Self {
         self.workspace_rules_backend = backend;
+        self
+    }
+
+    /// Override the agent identity used for per-agent history and artifacts.
+    pub(crate) fn with_agent_id(mut self, agent_id: String) -> Self {
+        self.agent_id = Some(agent_id);
+        self
+    }
+
+    /// Attach the per-agent causal inbox drain handle for `ContextPreparer`.
+    pub(crate) fn with_inbox(mut self, inbox: Arc<crate::events::InboxDrainHandle>) -> Self {
+        self.inbox = Some(inbox);
+        self
+    }
+
+    /// Attach explicit approval origin metadata for `ToolPolicyProcessor`.
+    pub(crate) fn with_approval_origin(
+        mut self,
+        origin: crate::permission::ApprovalOrigin,
+    ) -> Self {
+        self.approval_origin = Some(origin);
+        self
+    }
+
+    /// Share the session's single `ApprovalsHub` across agents.
+    pub(crate) fn with_shared_approvals(
+        mut self,
+        approvals: Arc<crate::permission::ApprovalsHub>,
+    ) -> Self {
+        self.shared_approvals = Some(approvals);
+        self
+    }
+
+    /// Append extra tools (such as multi-agent collaboration tools) to the assembled `ToolExecutor`.
+    #[allow(dead_code)]
+    pub(crate) fn with_extra_tools(mut self, tools: Vec<Arc<dyn causa::kernel::Tool>>) -> Self {
+        self.extra_tools = tools;
         self
     }
 
@@ -228,6 +280,11 @@ pub(crate) fn assemble(
         skill_registry,
         command_rules,
         workspace_rules_backend,
+        agent_id,
+        inbox,
+        approval_origin,
+        shared_approvals,
+        extra_tools,
         #[cfg(test)]
         gateway_override,
         #[cfg(test)]
@@ -365,9 +422,11 @@ pub(crate) fn assemble(
     // prompt is not the conversation's next request.
     let gateway: Arc<dyn ModelGateway> =
         Arc::new(UsageTrackingGateway::new(conversation_retry, usage.clone()));
-    let compaction = CompactionRuntime::new_strict(
+    let effective_agent_id = agent_id.unwrap_or_else(|| conversation_id.as_str().to_owned());
+    let compaction = CompactionRuntime::new_strict_for_agent(
         definition,
         &conversation_id,
+        &effective_agent_id,
         persistent
             .then_some(storage_for_history.as_deref())
             .flatten(),
@@ -413,8 +472,10 @@ pub(crate) fn assemble(
         .code_execution
         .filter(|_| code_execution_bindings.any() || mcp.is_some());
     let call_timeout_secs = definition.tool_limits.call_timeout_secs;
-    let builtin_timeout = (!selected.is_empty() || has_persistent_compaction || skills_enabled)
-        .then(|| std::time::Duration::from_secs(call_timeout_secs));
+    let has_extra_tools = !extra_tools.is_empty();
+    let builtin_timeout =
+        (!selected.is_empty() || has_persistent_compaction || skills_enabled || has_extra_tools)
+            .then(|| std::time::Duration::from_secs(call_timeout_secs));
     let builtin_timeout = match (
         builtin_timeout,
         command_settings
@@ -438,11 +499,19 @@ pub(crate) fn assemble(
         (Some(builtin), Some(mcp)) => Some(builtin.max(mcp)),
         (builtin, mcp) => builtin.or(mcp),
     };
-    let permissions = Arc::new(crate::permission::PermissionHub::with_rules_and_backend(
-        current_mode,
-        command_rules,
-        workspace_rules_backend,
-    ));
+    let permissions = Arc::new(match shared_approvals {
+        Some(approvals) => crate::permission::PermissionHub::with_shared_approvals(
+            current_mode,
+            command_rules,
+            workspace_rules_backend,
+            approvals,
+        ),
+        None => crate::permission::PermissionHub::with_rules_and_backend(
+            current_mode,
+            command_rules,
+            workspace_rules_backend,
+        ),
+    });
     let view = permissions.view();
     #[cfg(test)]
     let test_processors = Arc::new(std::sync::Mutex::new(
@@ -465,6 +534,10 @@ pub(crate) fn assemble(
     let loaded_skills_for_work = loaded_skills.clone();
     let permissions_for_work = permissions.clone();
     let mcp_for_work = mcp.clone();
+    let inbox_for_work = inbox;
+    let approval_origin_slot = Arc::new(std::sync::Mutex::new(approval_origin));
+    let approval_origin_for_work = approval_origin_slot.clone();
+    let extra_tools_for_work = extra_tools;
     let session = Session::new_with_tools(
         conversation_id,
         context,
@@ -476,6 +549,9 @@ pub(crate) fn assemble(
             let reporter_for_compaction = reporter.clone();
             let skill_registry_for_work = skill_registry_for_work.clone();
             let loaded_skills_for_work = loaded_skills_for_work.clone();
+            let inbox_for_work = inbox_for_work.clone();
+            let approval_origin_for_work = approval_origin_for_work.clone();
+            let extra_tools_for_work = extra_tools_for_work.clone();
             let options = options
                 .clone()
                 .with_processor_data(causa::kernel::ProcessorData::new(view.clone()));
@@ -483,6 +559,7 @@ pub(crate) fn assemble(
             if let Some(wt) = &workspace_tools {
                 tools.extend(wt.bind_work(&selected, reporter.clone()));
             }
+            tools.extend(extra_tools_for_work);
             let recall_tool = compact_for_work.as_ref().map(|runtime| {
                 let recall = Arc::new(crate::compact::RecallTool::new(
                     runtime.clone(),
@@ -529,6 +606,14 @@ pub(crate) fn assemble(
                 reporter,
                 permissions_for_work.clone(),
             );
+            let orchestrator = match approval_origin_for_work
+                .lock()
+                .expect("approval origin slot lock")
+                .clone()
+            {
+                Some(origin) => orchestrator.with_origin(origin),
+                None => orchestrator,
+            };
             #[cfg(test)]
             let orchestrator = match test_after_prepare_hook_capture
                 .lock()
@@ -582,21 +667,29 @@ pub(crate) fn assemble(
                 }
                 let mut options = options;
                 if let Some(runtime) = compact_for_work {
-                    options = options.with_preparer(Arc::new(
-                        CompactionPreparer::new(runtime, reporter_for_compaction)
-                            .with_loaded_skills(loaded_skills_for_work),
-                    ));
+                    let mut preparer = CompactionPreparer::new(runtime, reporter_for_compaction)
+                        .with_loaded_skills(loaded_skills_for_work);
+                    if let Some(inbox) = inbox_for_work {
+                        preparer = preparer.with_inbox(inbox);
+                    }
+                    options = options.with_preparer(Arc::new(preparer));
                 } else if let Some((window, protected)) = transient_trim_for_work {
-                    options = options.with_preparer(Arc::new(
-                        TransientTrimPreparer::new(
-                            window,
-                            max_tokens,
-                            usage_for_trim,
-                            protected,
-                            reporter_for_compaction,
-                        )
-                        .with_loaded_skills(loaded_skills_for_work),
-                    ));
+                    let mut preparer = TransientTrimPreparer::new(
+                        window,
+                        max_tokens,
+                        usage_for_trim,
+                        protected,
+                        reporter_for_compaction,
+                    )
+                    .with_loaded_skills(loaded_skills_for_work);
+                    if let Some(inbox) = inbox_for_work {
+                        preparer = preparer.with_inbox(inbox);
+                    }
+                    options = options.with_preparer(Arc::new(preparer));
+                } else if let Some(inbox) = inbox_for_work {
+                    let preparer =
+                        InboxOnlyPreparer::new(inbox).with_loaded_skills(loaded_skills_for_work);
+                    options = options.with_preparer(Arc::new(preparer));
                 }
                 Ok((
                     Arc::new(TurnRunner::new(gateway, Arc::new(executor))),
@@ -607,6 +700,7 @@ pub(crate) fn assemble(
         definition.session_config(),
     )
     .allow_builtin_repair()
+    .with_approval_origin_slot(approval_origin_slot)
     .with_skills(skill_registry, loaded_skills);
     let session = match mcp {
         Some(mcp) => session.with_mcp(mcp),

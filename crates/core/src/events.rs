@@ -21,11 +21,11 @@ pub use background::{
 };
 pub use bus::{DEFAULT_SESSION_BUS_CAPACITY, SessionBus, SessionEvent};
 pub use inbox::{
-    AgentNotificationPayload, CoalescedInbox, ConsumedInboxEvents, EventDeliveryState,
-    EventPriority, EventSourceKind, InboxDrainHandle, InboxEvent, NewInboxEvent,
-    ParseEventDeliveryStateError, ParseEventPriorityError, ParseEventSourceKindError,
-    ParseWakePolicyError, Utf8PageSlice, WakePolicy, coalesce_inbox_events,
-    render_task_notifications, slice_utf8_page, truncate_utf8_boundary,
+    AgentNotificationPayload, CoalescedInbox, ConsumedInboxEvents, DrainedNotification,
+    EventDeliveryState, EventPriority, EventSourceKind, InboxDrainHandle, InboxEvent,
+    NewInboxEvent, ParseEventDeliveryStateError, ParseEventPriorityError,
+    ParseEventSourceKindError, ParseWakePolicyError, Utf8PageSlice, WakePolicy,
+    coalesce_inbox_events, render_task_notifications, slice_utf8_page, truncate_utf8_boundary,
 };
 pub use types::{
     AgentInteraction, DEFAULT_DELEGATION_MAX_DEPTH, DEFAULT_MAX_ACTIVE_CHILD_OPS_PER_SESSION,

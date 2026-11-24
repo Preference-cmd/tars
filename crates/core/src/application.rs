@@ -5,12 +5,13 @@ mod execution;
 pub use execution::text_input;
 
 mod closing;
+mod coordinator;
 mod entry;
 mod host;
 mod managed;
 mod opening;
 mod outcome;
-mod repair;
+pub(crate) mod repair;
 mod saving;
 mod supervisor;
 mod types;
@@ -21,6 +22,10 @@ pub use crate::store::{CommitStage, LegacyImportSummary, StoreError};
 pub use crate::usage::{
     CallCounts, CallUsage, LastCall, PurposeUsage, SessionUsage, UsageFigures, UsagePurpose,
     UsageTotals, WorkUsage, session_usage_lines,
+};
+pub use coordinator::{
+    CoordinatorConfig, CoordinatorError, MessageAgentRequest, OperationOutcome, OperationReceipt,
+    ReadAgentResult, SpawnAgentOutcome, SpawnAgentRequest,
 };
 pub use host::SessionHost;
 pub use managed::ManagedSession;

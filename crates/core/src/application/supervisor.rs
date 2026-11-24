@@ -92,39 +92,69 @@ async fn drive(host: &Arc<HostInner>, entry: &Arc<Entry>) {
             };
             #[cfg(not(test))]
             let result = handle.wait_finished(&work).await;
-            let mut state = entry.lock();
-            let captured = result.map_err(ApplicationError::from).and_then(|_| {
-                // Even transient instances verify actual material return.
-                state
-                    .owner
-                    .as_mut()
-                    .expect("active owner")
-                    .with_context(|_| ())
-                    .map_err(Into::into)
-            });
-            match captured {
-                Ok(()) => {
-                    state.generation = state
-                        .generation
-                        .checked_add(1)
-                        .expect("material generation exhausted");
-                    if state.persistent {
-                        if let Err(error) = saving::prepare(entry, &mut state) {
-                            state.lifecycle = Lifecycle::Faulted;
-                            state.error = Some(error);
-                            state.fault = state.error.clone();
-                            state.close_in_flight =
-                                state.closing == Some(ClosePolicy::DiscardLocal);
+            let observation = handle.peek_observation(&work).ok();
+            let mut sync_info = None;
+            let mut cancel_root_children = false;
+            {
+                let mut state = entry.lock();
+                let captured = result.map_err(ApplicationError::from).and_then(|_| {
+                    let owner = state.owner.as_mut().expect("active owner");
+                    let history = owner.history_entries();
+                    let usage = owner.session_usage();
+                    // Even transient instances verify actual material return.
+                    let context = owner
+                        .with_context(|ctx| ctx.clone())
+                        .map_err(ApplicationError::from)?;
+                    Ok((context, history, usage))
+                });
+                match captured {
+                    Ok((context, history, usage)) => {
+                        state.generation = state
+                            .generation
+                            .checked_add(1)
+                            .expect("material generation exhausted");
+                        let generation = state.generation;
+                        let persistent = state.persistent;
+                        if persistent {
+                            if let Err(error) = saving::prepare(entry, &mut state) {
+                                state.lifecycle = Lifecycle::Faulted;
+                                state.error = Some(error);
+                                state.fault = state.error.clone();
+                                state.close_in_flight =
+                                    state.closing == Some(ClosePolicy::DiscardLocal);
+                            }
+                        } else {
+                            state.active = None;
                         }
-                    } else {
-                        state.active = None;
+                        if let Some(obs) = observation
+                            && let crate::session::WorkState::Finished(work_res) = obs.state
+                        {
+                            sync_info =
+                                Some((work_res, context, history, usage, generation, persistent));
+                        }
+                    }
+                    Err(error) => {
+                        state.lifecycle = Lifecycle::Faulted;
+                        state.error = Some(error);
+                        state.fault = state.error.clone();
+                        state.close_in_flight = state.closing == Some(ClosePolicy::DiscardLocal);
+                        cancel_root_children = true;
                     }
                 }
-                Err(error) => {
-                    state.lifecycle = Lifecycle::Faulted;
-                    state.error = Some(error);
-                    state.fault = state.error.clone();
-                    state.close_in_flight = state.closing == Some(ClosePolicy::DiscardLocal);
+            }
+            if let Some(coord) = entry.coordinator.get() {
+                if let Some((work_res, context, history, usage, generation, persistent)) = sync_info
+                {
+                    let consumed = if persistent {
+                        Default::default()
+                    } else {
+                        coord.entry_inbox().take_consumed()
+                    };
+                    coord.sync_entry_after_work_finished(
+                        &work, &work_res, context, history, usage, generation, None, &consumed,
+                    );
+                } else if cancel_root_children {
+                    coord.cancel_children_of_root_work(&work);
                 }
             }
             entry.changed();
@@ -166,6 +196,9 @@ async fn drive(host: &Arc<HostInner>, entry: &Arc<Entry>) {
             };
             if let Some((handle, work)) = active {
                 let _ = handle.wait_finished(&work).await;
+            }
+            if let Some(coord) = entry.coordinator.get() {
+                coord.wait_all_tasks_settled().await;
             }
             if super::closing::finish(host, entry, policy).await {
                 return;

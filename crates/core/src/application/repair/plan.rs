@@ -12,7 +12,7 @@ use causa::kernel::{
 use causa::runtime::{TurnInterruption, TurnResult, new_block_id};
 use std::collections::{HashMap, HashSet};
 
-pub(super) fn source_check(
+pub(in crate::application) fn source_check(
     standard: bool,
     result: &WorkResult,
     batch: Option<&ToolBatch>,
@@ -91,6 +91,158 @@ fn validate_original(
     Ok(())
 }
 
+pub(in crate::application) struct BuiltRepairPlan {
+    pub(in crate::application) candidate: Context,
+    pub(in crate::application) summary: RepairSummary,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::application) fn build_repair_plan(
+    context: &Context,
+    history: &[crate::compact::HistoryRecordEntry],
+    artifacts: Option<&crate::compact::history::HistoryStore>,
+    definition: &SessionDefinition,
+    owner: Option<&crate::session::Session>,
+    mode: &RepairMode,
+) -> Result<BuiltRepairPlan, ApplicationError> {
+    let scan = scan(context, history, artifacts);
+    if scan.fatal {
+        return Err(RepairError::Materials(scan.diagnosis).into());
+    }
+    if scan.unpaired.is_empty() {
+        let diagnosis = diagnose(context, history, artifacts, definition);
+        if !diagnosis.is_ready() {
+            return Err(RepairError::Materials(diagnosis).into());
+        }
+        return Err(RepairError::NotNeeded.into());
+    }
+    let results = match mode {
+        RepairMode::RemoveUnpaired => HashMap::new(),
+        RepairMode::AdoptOriginal(work) => {
+            let owner = owner.ok_or(RepairError::OriginalUnavailable)?;
+            owner.inspect_uncommitted(work, |standard, result, batch| {
+                source_check(standard, result, batch)?;
+                let batch = batch.expect("checked original");
+                validate_original(context, definition, batch, &scan.unpaired)?;
+                Ok::<_, RepairError>(
+                    batch
+                        .results()
+                        .iter()
+                        .map(|entry| {
+                            let (id, payload) = entry.result().expect("validated result");
+                            (
+                                payload.call_block_id,
+                                ContextBlock::new(
+                                    *id,
+                                    BlockContent::ToolResult(payload.clone()),
+                                    BlockMeta::default(),
+                                ),
+                            )
+                        })
+                        .collect::<HashMap<_, _>>(),
+                )
+            })??
+        }
+    };
+    let declarations: HashMap<BlockId, ToolCallPayload> = context
+        .blocks()
+        .iter()
+        .filter_map(|block| {
+            if let BlockContent::ToolCall(call) = block.content() {
+                Some((block.id(), call.clone()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let require_unknown = matches!(mode, RepairMode::AdoptOriginal(_));
+    let warnings: Vec<RepairWriteWarning> = scan
+        .unpaired
+        .iter()
+        .filter_map(|id| {
+            let call = declarations.get(id)?;
+            let kind = warning_kind(&call.tool_name)?;
+            if require_unknown {
+                let Some(BlockContent::ToolResult(payload)) =
+                    results.get(id).map(|block| block.content())
+                else {
+                    return None;
+                };
+                if !warning_status_applies(&kind, &payload.status) {
+                    return None;
+                }
+            }
+            Some(RepairWriteWarning {
+                call_block_id: *id,
+                tool_name: call.tool_name.clone(),
+                path: extract_call_path(&call.arguments),
+                kind,
+            })
+        })
+        .collect();
+    let write_warnings_count = warnings.len();
+    let external_warnings_count = warnings
+        .iter()
+        .filter(|warning| warning.kind == RepairWarningKind::External)
+        .count();
+    let command_warnings_count = warnings
+        .iter()
+        .filter(|warning| warning.kind == RepairWarningKind::Command)
+        .count();
+    let write_warnings: Vec<RepairWriteWarning> =
+        warnings.into_iter().take(DISPLAY_LIMIT).collect();
+    let removed: Vec<_> = scan
+        .unpaired
+        .iter()
+        .filter(|id| !results.contains_key(id))
+        .copied()
+        .collect();
+    let removed_set: HashSet<_> = removed.iter().copied().collect();
+    let original_blocks = context.blocks().len();
+    let mut blocks: Vec<_> = context
+        .clone()
+        .into_blocks()
+        .into_iter()
+        .filter(|block| !removed_set.contains(&block.id()))
+        .collect();
+    let mut results = results;
+    let mut adopted = Vec::new();
+    for id in &scan.unpaired {
+        if let Some(result) = results.remove(id) {
+            adopted.push(result.id());
+            blocks.push(result);
+        }
+    }
+    let explanation_id = new_block_id();
+    let explanation = serde_json::json!({
+        "application": "tars", "action": "material_repair",
+        "removed_declaration_ids": removed, "adopted_original_result_ids": adopted,
+        "meaning": "Declarations were removed only from future request materials. This does not establish whether operations occurred. Original work states and result statuses remain unchanged. No old work was resumed or executed.",
+    });
+    blocks.push(ContextBlock::new(
+        explanation_id,
+        BlockContent::text(Role::System, explanation.to_string()),
+        BlockMeta::from_source("application:tars:material-repair"),
+    ));
+    let candidate = Context::from_blocks(blocks)
+        .map_err(|failure| SessionError::ContextEdit(failure.reason))?;
+    candidate_check(&candidate, history, artifacts, definition)?;
+    let summary = RepairSummary {
+        original_blocks,
+        candidate_blocks: candidate.blocks().len(),
+        removed_count: removed.len(),
+        removed: removed.into_iter().take(DISPLAY_LIMIT).collect(),
+        adopted_count: adopted.len(),
+        adopted: adopted.into_iter().take(DISPLAY_LIMIT).collect(),
+        explanation_id,
+        write_warnings_count,
+        external_warnings_count,
+        command_warnings_count,
+        write_warnings,
+    };
+    Ok(BuiltRepairPlan { candidate, summary })
+}
+
 impl ManagedSession {
     /// Prepare an immutable, locally validated candidate without consuming a batch.
     /// This copies materials and may render them; call off the interactive draw path.
@@ -111,155 +263,23 @@ impl ManagedSession {
             self.entry.cloned_snapshot();
             context.clone()
         })?;
-        let scan = scan(&context, &history, artifacts.as_deref());
-        if scan.fatal {
-            return Err(RepairError::Materials(scan.diagnosis).into());
-        }
-        if scan.unpaired.is_empty() {
-            drop(state);
-            let diagnosis = diagnose(&context, &history, artifacts.as_deref(), &definition);
-            if !diagnosis.is_ready() {
-                return Err(RepairError::Materials(diagnosis).into());
-            }
-            return Err(RepairError::NotNeeded.into());
-        }
-        let results = match &mode {
-            RepairMode::RemoveUnpaired => HashMap::new(),
-            RepairMode::AdoptOriginal(work) => {
-                owner.inspect_uncommitted(work, |standard, result, batch| {
-                    source_check(standard, result, batch)?;
-                    let batch = batch.expect("checked original");
-                    validate_original(&context, &definition, batch, &scan.unpaired)?;
-                    Ok::<_, RepairError>(
-                        batch
-                            .results()
-                            .iter()
-                            .map(|entry| {
-                                let (id, payload) = entry.result().expect("validated result");
-                                (
-                                    payload.call_block_id,
-                                    ContextBlock::new(
-                                        *id,
-                                        BlockContent::ToolResult(payload.clone()),
-                                        BlockMeta::default(),
-                                    ),
-                                )
-                            })
-                            .collect::<HashMap<_, _>>(),
-                    )
-                })??
-            }
-        };
-        let declarations: HashMap<BlockId, ToolCallPayload> = context
-            .blocks()
-            .iter()
-            .filter_map(|block| {
-                if let BlockContent::ToolCall(call) = block.content() {
-                    Some((block.id(), call.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        // A removed or adopted-unknown declaration is flagged when its tool can
-        // have had a side effect before the interruption: built-in writes for
-        // the workspace file, any non-builtin name for its own server. Removal
-        // flags every removed declaration; adoption only unknown outcomes.
-        let require_unknown = matches!(&mode, RepairMode::AdoptOriginal(_));
-        let warnings: Vec<RepairWriteWarning> = scan
-            .unpaired
-            .iter()
-            .filter_map(|id| {
-                let call = declarations.get(id)?;
-                let kind = warning_kind(&call.tool_name)?;
-                if require_unknown {
-                    let Some(BlockContent::ToolResult(payload)) =
-                        results.get(id).map(|block| block.content())
-                    else {
-                        return None;
-                    };
-                    if !warning_status_applies(&kind, &payload.status) {
-                        return None;
-                    }
-                }
-                Some(RepairWriteWarning {
-                    call_block_id: *id,
-                    tool_name: call.tool_name.clone(),
-                    path: extract_call_path(&call.arguments),
-                    kind,
-                })
-            })
-            .collect();
-        let write_warnings_count = warnings.len();
-        let external_warnings_count = warnings
-            .iter()
-            .filter(|warning| warning.kind == RepairWarningKind::External)
-            .count();
-        let command_warnings_count = warnings
-            .iter()
-            .filter(|warning| warning.kind == RepairWarningKind::Command)
-            .count();
-        let write_warnings: Vec<RepairWriteWarning> =
-            warnings.into_iter().take(DISPLAY_LIMIT).collect();
-        // Sorting, explanation construction and protocol rendering need no
-        // coordination lock. The eventual apply rechecks this exact baseline.
+        // Prepare local plan from a cloned snapshot; inspect_uncommitted needs owner
+        // only when adopting original results.
+        let built = build_repair_plan(
+            &context,
+            &history,
+            artifacts.as_deref(),
+            &definition,
+            Some(owner),
+            &mode,
+        )?;
         drop(state);
-        let removed: Vec<_> = scan
-            .unpaired
-            .iter()
-            .filter(|id| !results.contains_key(id))
-            .copied()
-            .collect();
-        let removed_set: HashSet<_> = removed.iter().copied().collect();
-        let original_blocks = context.blocks().len();
-        let mut blocks: Vec<_> = context
-            .into_blocks()
-            .into_iter()
-            .filter(|block| !removed_set.contains(&block.id()))
-            .collect();
-        // Pending-suffix partition swaps completion order. Restore declaration
-        // order when appending original results, without changing any payload.
-        let mut results = results;
-        let mut adopted = Vec::new();
-        for id in &scan.unpaired {
-            if let Some(result) = results.remove(id) {
-                adopted.push(result.id());
-                blocks.push(result);
-            }
-        }
-        let explanation_id = new_block_id();
-        let explanation = serde_json::json!({
-            "application": "tars", "action": "material_repair",
-            "removed_declaration_ids": removed, "adopted_original_result_ids": adopted,
-            "meaning": "Declarations were removed only from future request materials. This does not establish whether operations occurred. Original work states and result statuses remain unchanged. No old work was resumed or executed.",
-        });
-        blocks.push(ContextBlock::new(
-            explanation_id,
-            BlockContent::text(Role::System, explanation.to_string()),
-            BlockMeta::from_source("application:tars:material-repair"),
-        ));
-        let candidate = Context::from_blocks(blocks)
-            .map_err(|failure| SessionError::ContextEdit(failure.reason))?;
-        candidate_check(&candidate, &history, artifacts.as_deref(), &definition)?;
-        let summary = RepairSummary {
-            original_blocks,
-            candidate_blocks: candidate.blocks().len(),
-            removed_count: removed.len(),
-            removed: removed.into_iter().take(DISPLAY_LIMIT).collect(),
-            adopted_count: adopted.len(),
-            adopted: adopted.into_iter().take(DISPLAY_LIMIT).collect(),
-            explanation_id,
-            write_warnings_count,
-            external_warnings_count,
-            command_warnings_count,
-            write_warnings,
-        };
         Ok(RepairPlan {
             base,
             claims_revision,
             mode,
-            candidate,
-            summary,
+            candidate: built.candidate,
+            summary: built.summary,
         })
     }
 

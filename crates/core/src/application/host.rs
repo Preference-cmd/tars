@@ -30,11 +30,18 @@ pub(super) struct HostInner {
     /// Test-only model gateway injection for the real assembly path.
     #[cfg(test)]
     pub gateway_override: Mutex<Option<Arc<dyn causa::kernel::ModelGateway>>>,
+    /// Test-only per-agent gateway factory for deterministic multi-agent tests.
+    #[cfg(test)]
+    pub agent_gateway_override: Mutex<Option<Arc<TestAgentGatewayFactory>>>,
     /// Test-only command sandbox probe injection for the real assembly path.
     #[cfg(test)]
     pub command_sandbox:
         Mutex<Option<Result<crate::sandbox::Sandbox, crate::sandbox::SandboxUnavailable>>>,
 }
+#[cfg(test)]
+pub(super) type TestAgentGatewayFactory = dyn Fn(&str, &crate::definition::SessionDefinition) -> Option<Arc<dyn causa::kernel::ModelGateway>>
+    + Send
+    + Sync;
 #[cfg(test)]
 pub(super) type TestAssembly = dyn Fn(
         &crate::definition::SessionDefinition,
@@ -101,6 +108,8 @@ impl SessionHost {
                 #[cfg(test)]
                 gateway_override: Mutex::new(None),
                 #[cfg(test)]
+                agent_gateway_override: Mutex::new(None),
+                #[cfg(test)]
                 command_sandbox: Mutex::new(None),
             }),
         })
@@ -122,6 +131,16 @@ impl SessionHost {
     #[cfg(test)]
     pub(crate) fn set_test_gateway(&self, gateway: Option<Arc<dyn causa::kernel::ModelGateway>>) {
         *self.inner.gateway_override.lock().expect("test gateway") = gateway;
+    }
+
+    /// Route per-agent assembly through a custom gateway factory during tests.
+    #[cfg(test)]
+    pub(crate) fn set_test_agent_gateway(&self, factory: Option<Arc<TestAgentGatewayFactory>>) {
+        *self
+            .inner
+            .agent_gateway_override
+            .lock()
+            .expect("test agent gateway") = factory;
     }
 
     /// Override session assembly during tests to construct a fixture without permissions.
@@ -449,6 +468,9 @@ impl SessionHost {
                 }
                 entry.notify();
             }
+            if let Some(coord) = entry.coordinator.get() {
+                coord.begin_session_shutdown();
+            }
             entry
         };
         loop {
@@ -536,6 +558,10 @@ impl Drop for SessionHost {
                 handle.begin_shutdown();
             }
             entry.notify();
+            drop(state);
+            if let Some(coord) = entry.coordinator.get() {
+                coord.begin_session_shutdown();
+            }
         }
     }
 }

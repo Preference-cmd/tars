@@ -1,8 +1,19 @@
+#[cfg(test)]
+use super::coordinator::CoordinatorConfig;
+use super::coordinator::{
+    CoordinatorError, MessageAgentRequest, OperationOutcome, ReadAgentResult, SpawnAgentOutcome,
+    SpawnAgentRequest,
+};
 use super::entry::Entry;
 use super::saving;
 use super::types::*;
+use crate::agent::{
+    AgentMaterialSnapshot, AgentMaterialVersion, AgentRepairInspection, AgentRepairPlan,
+    AgentSnapshot,
+};
 use crate::compact::{CompactionOutcome, CompactionRuntime, HistoryRecordEntry};
 use crate::definition::SessionDefinition;
+use crate::events::{BackgroundTaskSnapshot, ConsumedInboxEvents, SessionEvent};
 use crate::session::{
     SessionError, SubmitRequest, WorkObservation, WorkProgress, WorkReceipt, WorkRef,
 };
@@ -235,7 +246,13 @@ impl ManagedSession {
             .permissions
             .as_ref()
             .ok_or(ApplicationError::PermissionUnavailable)?;
-        Ok(permissions.remove_session_rule(index))
+        let removed = permissions.remove_session_rule(index);
+        let rules = permissions.command_rules();
+        drop(state);
+        if let Some(coord) = self.entry.coordinator.get() {
+            coord.update_command_rules(rules);
+        }
+        Ok(removed)
     }
 
     /// Clear all in-memory session command rules, returning the number of rules cleared.
@@ -254,7 +271,13 @@ impl ManagedSession {
             .permissions
             .as_ref()
             .ok_or(ApplicationError::PermissionUnavailable)?;
-        Ok(permissions.clear_session_rules())
+        let count = permissions.clear_session_rules();
+        let rules = permissions.command_rules();
+        drop(state);
+        if let Some(coord) = self.entry.coordinator.get() {
+            coord.update_command_rules(rules);
+        }
+        Ok(count)
     }
 
     /// Trust the workspace `.tars/permissions.toml` snapshot captured when this
@@ -312,7 +335,22 @@ impl ManagedSession {
             .filter(|rule| rule.decision == crate::permission::RuleDecision::Allow)
             .count();
         if let Some(permissions) = &state.permissions {
-            permissions.trust_workspace_rules(snapshot.rules, snapshot.raw_text);
+            permissions.trust_workspace_rules(snapshot.rules, snapshot.raw_text.clone());
+            let rules = permissions.command_rules();
+            let backend =
+                self.entry
+                    .store
+                    .as_ref()
+                    .map(|store| crate::permission::WorkspaceRulesBackend {
+                        workspace_root: snapshot.workspace_root,
+                        store: store.clone(),
+                        trusted: true,
+                        trusted_raw_text: Some(snapshot.raw_text),
+                    });
+            if let Some(coord) = self.entry.coordinator.get() {
+                coord.update_command_rules(rules);
+                coord.update_workspace_rules_backend(backend);
+            }
         }
         state.open_report.workspace_rules.allow_rules.clear();
         state.open_report.workspace_rules.previous_trusted_text = None;
@@ -445,6 +483,9 @@ impl ManagedSession {
                 material_version: self.entry.version(&state),
             };
         }
+        if let Some(coord) = self.entry.coordinator.get() {
+            coord.note_entry_user_submit(&receipt.work);
+        }
         self.entry.notify();
         Ok(receipt)
     }
@@ -474,12 +515,18 @@ impl ManagedSession {
     }
     /// Request cooperative cancellation without changing a finished result.
     pub fn cancel(&self, work: &WorkRef) -> Result<(), SessionError> {
-        self.entry
+        let handle = self
+            .entry
             .lock()
             .handle
             .as_ref()
             .expect("published handle")
-            .cancel(work)
+            .clone();
+        handle.cancel(work)?;
+        if let Some(coord) = self.entry.coordinator.get() {
+            coord.cancel_children_of_root_work(work);
+        }
+        Ok(())
     }
     /// Copy actual idle materials, including while save is blocked, for recovery/export.
     pub fn read_materials(&self) -> Result<MaterialSnapshot, ApplicationError> {
@@ -577,6 +624,17 @@ impl ManagedSession {
         } else {
             None
         };
+        let persistent = state.persistent;
+        let transient_sync = if !persistent {
+            let owner = state.owner.as_ref().expect("published owner");
+            Some((
+                candidate.clone(),
+                owner.history_entries(),
+                owner.session_usage(),
+            ))
+        } else {
+            None
+        };
         state
             .owner
             .as_mut()
@@ -593,10 +651,23 @@ impl ManagedSession {
             };
         }
         self.entry.notify();
-        Ok(self.entry.version(state))
+        let version = self.entry.version(state);
+        if let Some((ctx, hist, usage)) = transient_sync
+            && let Some(coord) = self.entry.coordinator.get()
+        {
+            coord.sync_entry_materials_after_save(
+                None,
+                next,
+                Some(ctx),
+                Some(hist),
+                Some(usage),
+                &ConsumedInboxEvents::default(),
+            );
+        }
+        Ok(version)
     }
-    /// Wait for this instance's current execution/save barrier to settle.
-    pub async fn wait_saved(&self) -> Result<SaveStatus, ApplicationError> {
+    /// Wait for the entry root commit/save barrier without checking child outboxes.
+    async fn wait_entry_saved(&self) -> Result<SaveStatus, ApplicationError> {
         loop {
             let changed = self.entry.changed.notified();
             tokio::pin!(changed);
@@ -626,22 +697,89 @@ impl ManagedSession {
             changed.await;
         }
     }
-    /// Confirm or retry the same immutable pending commit; concurrent retries join.
-    pub async fn retry_save(&self) -> Result<SaveStatus, ApplicationError> {
-        {
-            let mut state = self.entry.lock();
-            if state.lifecycle == Lifecycle::Closed {
-                return Err(ApplicationError::Closed);
+
+    fn trigger_root_retry_save(&self, allow_close: bool) -> Result<(), ApplicationError> {
+        let mut state = self.entry.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return Err(ApplicationError::Closed);
+        }
+        if state.pending.is_some() && matches!(state.save, SaveStatus::SaveBlocked { .. }) {
+            state.save_requested = true;
+            state.error = None;
+            if allow_close && state.closing.is_some() {
+                state.close_in_flight = true;
             }
-            if state.pending.is_some() && matches!(state.save, SaveStatus::SaveBlocked { .. }) {
-                state.save_requested = true;
-                state.error = None;
-                if state.closing.is_some() {
-                    state.close_in_flight = true;
-                }
+            self.entry.notify();
+        } else if state.pending.is_none() && matches!(state.save, SaveStatus::SaveBlocked { .. }) {
+            if let Some(rev) = state.revision {
+                state.save = SaveStatus::Saved {
+                    revision: rev,
+                    material_version: self.entry.version(&state),
+                };
+            } else {
+                state.save = SaveStatus::NotTracked;
+            }
+            state.error = None;
+            if allow_close && state.closing.is_some() {
+                state.close_in_flight = true;
                 self.entry.notify();
             }
+            self.entry.changed();
+        } else if allow_close && state.closing.is_some() && !state.close_in_flight {
+            state.close_in_flight = true;
+            self.entry.notify();
         }
+        Ok(())
+    }
+
+    /// Wait for this instance's current execution/save barrier to settle.
+    pub async fn wait_saved(&self) -> Result<SaveStatus, ApplicationError> {
+        let entry_status = self.wait_entry_saved().await?;
+        if let Some(coord) = self.entry.coordinator.get() {
+            loop {
+                let notified = coord.state_changed.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if let Some(err) = coord.save_blocked_error() {
+                    return Err(ApplicationError::SaveBlocked(err));
+                }
+                if !coord.has_pending_child_saves() {
+                    break;
+                }
+                notified.await;
+            }
+        }
+        Ok(entry_status)
+    }
+    /// Confirm or retry the same immutable pending commit; concurrent retries join.
+    pub async fn retry_save(&self) -> Result<SaveStatus, ApplicationError> {
+        let writer = self.entry.lock().writer.clone();
+        let pending_kind = writer
+            .as_ref()
+            .map_or(crate::store::PendingWriterKind::None, |w| w.pending_kind());
+        let coord = self.entry.coordinator.get().cloned();
+
+        if pending_kind == crate::store::PendingWriterKind::RootCommit {
+            // Order A: Writer holds a retained root commit; settle it first so
+            // WriterState::pending clears before retrying any deferred outboxes.
+            self.trigger_root_retry_save(false)?;
+            let _ = self.wait_entry_saved().await?;
+            if let Some(coord) = &coord
+                && (coord.has_pending_child_saves() || coord.save_blocked_error().is_some())
+            {
+                coord.retry_pending_outboxes(&self.entry).await?;
+            }
+            self.trigger_root_retry_save(true)?;
+            return self.wait_saved().await;
+        }
+
+        // Order B / outbox-first: drain pending outboxes first, then retry any pending root commit.
+        if let Some(coord) = &coord
+            && (coord.has_pending_child_saves() || coord.save_blocked_error().is_some())
+        {
+            coord.retry_pending_outboxes(&self.entry).await?;
+        }
+        self.trigger_root_retry_save(true)?;
         self.wait_saved().await
     }
 
@@ -1118,6 +1256,159 @@ impl ManagedSession {
             .ok_or(ApplicationError::InstanceGone)?
             .forget(work)?;
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-agent coordination, observability, and per-agent material APIs
+    // -----------------------------------------------------------------------
+
+    fn coordinator(
+        &self,
+    ) -> Result<&Arc<super::coordinator::SessionCoordinator>, CoordinatorError> {
+        self.entry
+            .coordinator
+            .get()
+            .ok_or(CoordinatorError::Application(
+                ApplicationError::InstanceGone,
+            ))
+    }
+
+    /// Subscribe to Plane 2 non-blocking observability events for this session.
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<Arc<SessionEvent>> {
+        match self.entry.coordinator.get() {
+            Some(coord) => coord.subscribe_events(),
+            None => {
+                let (tx, rx) = tokio::sync::broadcast::channel(1);
+                drop(tx);
+                rx
+            }
+        }
+    }
+
+    /// Return point-in-time read-only snapshots of all registered agents in this session.
+    pub fn list_agents(&self) -> Vec<AgentSnapshot> {
+        self.entry
+            .coordinator
+            .get()
+            .map_or_else(Vec::new, |coord| coord.list_agents())
+    }
+
+    /// Return a point-in-time read-only snapshot for a single agent in this session.
+    pub fn agent_snapshot(&self, agent_id: &str) -> Option<AgentSnapshot> {
+        self.entry
+            .coordinator
+            .get()
+            .and_then(|coord| coord.agent_snapshot(agent_id))
+    }
+
+    /// Number of currently active `Finite` background tasks in this session.
+    pub fn active_finite_background_tasks(&self) -> usize {
+        self.entry
+            .coordinator
+            .get()
+            .map_or(0, |coord| coord.active_finite_background_tasks())
+    }
+
+    /// Return a deterministic snapshot of all registered background tasks in this session.
+    pub fn background_task_snapshot(&self) -> Vec<BackgroundTaskSnapshot> {
+        self.entry
+            .coordinator
+            .get()
+            .map_or_else(Vec::new, |coord| coord.background_task_snapshot())
+    }
+
+    /// Suspend until all active `Finite` background tasks in this session have settled.
+    pub async fn wait_background_tasks_settled(&self) {
+        if let Some(coord) = self.entry.coordinator.get() {
+            coord.wait_background_tasks_settled().await;
+        }
+    }
+
+    /// Spawn a new narrowed child agent and admit its initial operation.
+    pub async fn spawn_agent(
+        &self,
+        request: SpawnAgentRequest,
+    ) -> Result<SpawnAgentOutcome, CoordinatorError> {
+        self.coordinator()?.spawn_agent_operation(request).await
+    }
+
+    /// Send follow-up instructions to an existing `Reusable` idle agent.
+    pub async fn message_agent(
+        &self,
+        request: MessageAgentRequest,
+    ) -> Result<SpawnAgentOutcome, CoordinatorError> {
+        self.coordinator()?.message_agent_operation(request).await
+    }
+
+    /// Read-only paginated output slice for a fixed `operation_id`.
+    pub async fn read_agent(
+        &self,
+        operation_id: &str,
+        offset_bytes: usize,
+        limit_bytes: usize,
+    ) -> Result<ReadAgentResult, CoordinatorError> {
+        self.coordinator()?
+            .read_agent(operation_id, offset_bytes, limit_bytes)
+            .await
+    }
+
+    /// Cooperatively cancel `operation_id` (and all active descendants) and await settlement.
+    pub async fn cancel_agent(
+        &self,
+        operation_id: &str,
+    ) -> Result<OperationOutcome, CoordinatorError> {
+        self.coordinator()?.cancel_agent(operation_id).await
+    }
+
+    /// Read idle materials for a specific agent scoped by `agent_id`.
+    pub fn read_agent_materials(
+        &self,
+        agent_id: &str,
+    ) -> Result<AgentMaterialSnapshot, CoordinatorError> {
+        self.coordinator()?.read_agent_materials(agent_id)
+    }
+
+    /// Atomically replace an idle agent's Context blocks bound to `(SessionTarget, agent_id, generation)`.
+    pub fn edit_agent_materials(
+        &self,
+        base: AgentMaterialVersion,
+        blocks: Vec<ContextBlock>,
+    ) -> Result<AgentMaterialVersion, CoordinatorError> {
+        self.coordinator()?.edit_agent_materials(base, blocks)
+    }
+
+    /// Inspect an agent's idle materials for repair issues without mutating Context.
+    pub fn inspect_agent_repair(
+        &self,
+        agent_id: &str,
+        work: Option<&WorkRef>,
+    ) -> Result<AgentRepairInspection, CoordinatorError> {
+        self.coordinator()?.inspect_agent_repair(agent_id, work)
+    }
+
+    /// Prepare a validated repair candidate strictly bound to `(SessionTarget, agent_id, generation)`.
+    pub fn prepare_agent_repair(
+        &self,
+        agent_id: &str,
+        mode: super::RepairMode,
+    ) -> Result<AgentRepairPlan, CoordinatorError> {
+        self.coordinator()?.prepare_agent_repair(agent_id, mode)
+    }
+
+    /// Apply a previously prepared [`AgentRepairPlan`] to its exact target agent and generation.
+    pub fn apply_agent_repair(
+        &self,
+        plan: AgentRepairPlan,
+    ) -> Result<AgentMaterialVersion, CoordinatorError> {
+        self.coordinator()?.apply_agent_repair(plan)
+    }
+
+    /// Override coordinator configuration during unit and integration tests.
+    #[cfg(test)]
+    pub(crate) fn set_coordinator_config(&self, config: CoordinatorConfig) {
+        if let Some(coord) = self.entry.coordinator.get() {
+            coord.set_config(config);
+        }
     }
 }
 

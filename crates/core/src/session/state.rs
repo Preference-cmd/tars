@@ -49,6 +49,7 @@ pub(super) struct Entry {
 pub(super) struct Record {
     pub work: WorkRef,
     pub control: CallControl,
+    pub max_model_rounds_override: Option<u32>,
     pub state: Mutex<WorkState>,
     pub changed: Notify,
     pub tools: super::ToolReporter,

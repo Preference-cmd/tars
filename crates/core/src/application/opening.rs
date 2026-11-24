@@ -1,8 +1,13 @@
+use super::coordinator::SessionCoordinator;
 use super::entry::Entry;
 use super::host::HostInner;
 use super::saving;
 use super::types::*;
+use crate::agent::{AgentDescriptor, AgentUnit};
+use crate::events::{AgentInteraction, DEFAULT_NOTIFICATION_INLINE_MAX_BYTES, InboxDrainHandle};
+use crate::permission::ApprovalsHub;
 use crate::store::{PreparedCommit, SavedSessionRecord};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub(super) async fn initialize(
@@ -16,7 +21,7 @@ pub(super) async fn initialize(
         }
         (state.prepared.clone(), state.persistent)
     };
-    let record = if persistent {
+    let (record, restored_agents, restored_operations, restored_pending_events) = if persistent {
         let store = host
             .store
             .clone()
@@ -24,7 +29,34 @@ pub(super) async fn initialize(
         let id = entry.target.conversation_id.as_str().to_owned();
         let writer = Arc::new(saving::io(host, move || store.acquire_writer(&id)).await?);
         entry.lock().writer = Some(writer.clone());
-        let record = saving::io(host, move || writer.read_latest()).await?;
+        let writer_for_read = writer.clone();
+        let record = saving::io(host, move || writer_for_read.read_latest()).await?;
+        let (restored_agents, restored_operations, restored_pending_events) = if record.is_some() {
+            let now_ms = crate::time::current_time_ms();
+            let writer_for_reconcile = writer.clone();
+            saving::io(host, move || {
+                writer_for_reconcile.reconcile_on_reopen(now_ms)
+            })
+            .await?;
+            let store = host
+                .store
+                .clone()
+                .ok_or(ApplicationError::StoreUnavailable)?;
+            let id = entry.target.conversation_id.as_str().to_owned();
+            saving::io(host, move || {
+                let agents = store.list_agents(&id)?;
+                let operations = store.list_operations(&id)?;
+                let mut pending = HashMap::new();
+                for agent in &agents {
+                    let events = store.list_pending_inbox_events(&id, &agent.agent_id)?;
+                    pending.insert(agent.agent_id.clone(), events);
+                }
+                Ok((agents, operations, pending))
+            })
+            .await?
+        } else {
+            (Vec::new(), Vec::new(), HashMap::new())
+        };
         // Under the write lock, drop record files the record does not
         // reference: an interrupted compaction leaves an orphan behind.
         let store = host
@@ -37,6 +69,19 @@ pub(super) async fn initialize(
             .unwrap_or_default();
         let saved_context = record.as_ref().map(|record| record.context.clone());
         let id = entry.target.conversation_id.as_str().to_owned();
+        let extra_cleanups: Vec<(
+            String,
+            Vec<crate::compact::HistoryRecordEntry>,
+            Option<causa::kernel::Context>,
+        )> = restored_agents
+            .iter()
+            .filter(|a| a.agent_id != id)
+            .map(|a| {
+                let hist = serde_json::from_str(&a.history_index_json).unwrap_or_default();
+                let ctx = crate::material::decode_stored(a.context_json.as_bytes()).ok();
+                (a.agent_id.clone(), hist, ctx)
+            })
+            .collect();
         saving::io(host, move || {
             crate::compact::history::cleanup_records(store.root(), &id, &history)?;
             crate::compact::history::cleanup_artifacts(
@@ -44,12 +89,33 @@ pub(super) async fn initialize(
                 &id,
                 &history,
                 saved_context.as_ref(),
-            )
+            )?;
+            for (agent_id, hist, ctx) in &extra_cleanups {
+                crate::compact::history::cleanup_records_for_agent(
+                    store.root(),
+                    &id,
+                    agent_id,
+                    hist,
+                )?;
+                crate::compact::history::cleanup_artifacts_for_agent(
+                    store.root(),
+                    &id,
+                    agent_id,
+                    hist,
+                    ctx.as_ref(),
+                )?;
+            }
+            Ok(())
         })
         .await?;
-        record
+        (
+            record,
+            restored_agents,
+            restored_operations,
+            restored_pending_events,
+        )
     } else {
-        None
+        (None, Vec::new(), Vec::new(), HashMap::new())
     };
     let (
         definition,
@@ -150,6 +216,22 @@ pub(super) async fn initialize(
     } else {
         None
     };
+    let entry_id = entry.target.conversation_id.as_str().to_owned();
+    let entry_pending_events = restored_pending_events
+        .get(&entry_id)
+        .cloned()
+        .unwrap_or_default();
+    let entry_inbox = Arc::new(InboxDrainHandle::with_initial(
+        entry_pending_events.clone(),
+        DEFAULT_NOTIFICATION_INLINE_MAX_BYTES,
+    ));
+    let shared_approvals = Arc::new(ApprovalsHub::new());
+    let entry_context_snapshot = context.clone();
+    let entry_history_snapshot = history.clone();
+    let entry_usage_snapshot = usage.unwrap_or_default();
+    let coord_command_rules = command_rules.clone();
+    let coord_workspace_rules_backend = workspace_rules_backend.clone();
+
     #[cfg(test)]
     let (owner, permissions) = if let Some(assemble) = fixture {
         (
@@ -175,6 +257,8 @@ pub(super) async fn initialize(
             prepared.as_ref().and_then(|p| p.skill_registry.clone()),
             command_rules,
             workspace_rules_backend.clone(),
+            Some(entry_inbox.clone()),
+            Some(shared_approvals.clone()),
         )
         .await?;
         (
@@ -200,6 +284,8 @@ pub(super) async fn initialize(
             prepared.as_ref().and_then(|p| p.skill_registry.clone()),
             command_rules,
             workspace_rules_backend,
+            Some(entry_inbox.clone()),
+            Some(shared_approvals.clone()),
         )
         .await?;
         (
@@ -207,6 +293,55 @@ pub(super) async fn initialize(
             Some(assembled_session.permissions),
         )
     };
+
+    let created_at_ms = crate::time::created_at_from_id(&entry_id).unwrap_or(saved.updated_at_ms);
+    let entry_descriptor = AgentDescriptor {
+        agent_id: entry_id.clone(),
+        name: "main".to_owned(),
+        preset_name: None,
+        interaction: AgentInteraction::Reusable,
+        definition: definition.clone(),
+        role_prompt: None,
+        created_at_ms,
+    };
+    let store_root = persistent
+        .then(|| host.store.as_ref().map(|s| s.root().to_path_buf()))
+        .flatten();
+    let mut entry_unit = AgentUnit::new(
+        &entry_id,
+        entry_descriptor,
+        0,
+        revision.unwrap_or(0),
+        entry_context_snapshot,
+        entry_history_snapshot,
+        entry_usage_snapshot,
+        entry_pending_events,
+        0,
+        store_root.as_deref(),
+    );
+    entry_unit.inbox = entry_inbox;
+    entry_unit.permissions = permissions.clone();
+
+    let coordinator = SessionCoordinator::new(
+        entry_id,
+        host.options.coordinator.clone(),
+        persistent,
+        host.clone(),
+        Arc::downgrade(entry),
+        shared_approvals,
+        entry.writer_gate.clone(),
+        entry_unit,
+        restored_agents,
+        restored_operations,
+        restored_pending_events,
+        coord_command_rules,
+        coord_workspace_rules_backend,
+    );
+    let _ = entry.coordinator.set(coordinator.clone());
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        coordinator.start_scheduler(&runtime);
+    }
+
     let mut state = entry.lock();
     state.handle = Some(owner.handle());
     state.owner = Some(owner);
@@ -223,6 +358,7 @@ pub(super) async fn initialize(
             .as_ref()
             .expect("assembled handle")
             .begin_shutdown();
+        coordinator.begin_session_shutdown();
     }
     if state.pending.is_some() {
         state.save_requested = state.closing != Some(ClosePolicy::DiscardLocal);
@@ -238,6 +374,11 @@ pub(super) async fn initialize(
             },
             None => SaveStatus::NotTracked,
         };
+    }
+    let is_open = state.lifecycle == Lifecycle::Open;
+    drop(state);
+    if is_open {
+        coordinator.publish_lifecycle(Lifecycle::Open);
     }
     entry.changed();
     Ok(())
@@ -459,6 +600,8 @@ async fn assembled(
     initial_skills: Option<crate::skills::SkillRegistry>,
     command_rules: crate::permission::CommandRuleSet,
     workspace_rules_backend: Option<crate::permission::WorkspaceRulesBackend>,
+    inbox: Option<Arc<InboxDrainHandle>>,
+    shared_approvals: Option<Arc<ApprovalsHub>>,
 ) -> Result<crate::assembly::AssembledSession, ApplicationError> {
     let registry = match initial_skills {
         Some(registry) => registry,
@@ -472,7 +615,7 @@ async fn assembled(
         }
         None => crate::skills::SkillRegistry::new(),
     };
-    let base = crate::assembly::SessionResources::new(host.tool_resources.clone())
+    let mut base = crate::assembly::SessionResources::new(host.tool_resources.clone())
         .with_storage(host.store.as_ref().map(|store| store.root().to_path_buf()))
         .with_compaction(history, auto_compact, compact_threshold)
         .with_usage(usage)
@@ -480,6 +623,12 @@ async fn assembled(
         .with_command_rules(command_rules)
         .with_workspace_rules_backend(workspace_rules_backend)
         .persistent(persistent);
+    if let Some(inbox) = inbox {
+        base = base.with_inbox(inbox);
+    }
+    if let Some(approvals) = shared_approvals {
+        base = base.with_shared_approvals(approvals);
+    }
     let base = match host.external_tools.clone() {
         Some(tools) => base.with_external_tools(tools),
         None => base,
@@ -498,7 +647,14 @@ async fn assembled(
     };
     #[cfg(test)]
     let resources = {
-        let gateway = host.gateway_override.lock().expect("test gateway").clone();
+        let host_gw = host.gateway_override.lock().expect("test gateway").clone();
+        let gateway = host_gw.or_else(|| {
+            host.agent_gateway_override
+                .lock()
+                .expect("test agent gateway")
+                .as_ref()
+                .and_then(|f| f("main", definition))
+        });
         match gateway {
             Some(gateway) => base.with_test_gateway(gateway),
             None => base,

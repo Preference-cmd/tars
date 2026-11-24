@@ -181,7 +181,6 @@ impl ToolPolicyProcessor {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn with_origin(mut self, origin: ApprovalOrigin) -> Self {
         self.origin = origin;
         self

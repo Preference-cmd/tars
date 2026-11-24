@@ -19,6 +19,7 @@ pub struct Session {
     command_status: Option<crate::sandbox::SandboxStatus>,
     skill_registry: Arc<RwLock<crate::skills::SkillRegistry>>,
     loaded_skills: Arc<crate::skills::LoadedSkillsState>,
+    approval_origin_slot: Option<Arc<Mutex<Option<crate::permission::ApprovalOrigin>>>>,
     #[cfg(test)]
     pub(crate) workspace_tools: Option<Arc<crate::tools::WorkspaceTools>>,
     #[cfg(test)]
@@ -74,6 +75,20 @@ impl Session {
 
     pub(crate) fn mcp_status(&self) -> Vec<crate::McpServerStatus> {
         self.mcp.as_ref().map_or_else(Vec::new, |mcp| mcp.status())
+    }
+
+    pub(crate) fn with_approval_origin_slot(
+        mut self,
+        slot: Arc<Mutex<Option<crate::permission::ApprovalOrigin>>>,
+    ) -> Self {
+        self.approval_origin_slot = Some(slot);
+        self
+    }
+
+    pub(crate) fn set_approval_origin(&self, origin: crate::permission::ApprovalOrigin) {
+        if let Some(slot) = &self.approval_origin_slot {
+            *slot.lock().expect("approval origin slot lock") = Some(origin);
+        }
     }
 
     /// Append an extra before processor after the permission processor during test runs.
@@ -139,6 +154,7 @@ impl Session {
             command_status: None,
             skill_registry: Arc::new(RwLock::new(crate::skills::SkillRegistry::new())),
             loaded_skills: Arc::new(crate::skills::LoadedSkillsState::new()),
+            approval_origin_slot: None,
             #[cfg(test)]
             workspace_tools: None,
             #[cfg(test)]

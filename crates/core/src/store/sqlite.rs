@@ -235,6 +235,19 @@ impl SessionStore {
     }
 }
 
+/// Which kind of uncommitted writer operation is currently retained on `Writer`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingWriterKind {
+    /// No pending write is retained on the writer.
+    None,
+    /// A root snapshot/session commit is pending confirmation/retry.
+    RootCommit,
+    /// An operation admission is pending confirmation/retry.
+    Admit,
+    /// A multi-agent outbox commit is pending confirmation/retry.
+    Outbox,
+}
+
 // The outer Option distinguishes an unread baseline from confirmed absence.
 #[derive(Default)]
 pub(super) struct WriterState {
@@ -339,11 +352,25 @@ impl Writer {
         Ok(record)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn commit(
         &self,
         operation: &PreparedCommit,
     ) -> Result<SavedSessionRecord, StoreError> {
+        self.commit_with_consumed_events(operation, &self.id, &[], &[])
+    }
+
+    /// Atomically commit `operation` and mark `delivered_ids` / `dropped_ids` consumed
+    /// inside the exact same `BEGIN IMMEDIATE` transaction.
+    pub(crate) fn commit_with_consumed_events(
+        &self,
+        operation: &PreparedCommit,
+        target_agent_id: &str,
+        delivered_ids: &[i64],
+        dropped_ids: &[i64],
+    ) -> Result<SavedSessionRecord, StoreError> {
         operation.validate(&self.id)?;
+        canonical_uuid(target_agent_id)?;
         let mut state = self.state.lock().map_err(|_| StoreError::Poisoned)?;
         let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
         if state.pending_admit.is_some() || state.pending_outbox.is_some() {
@@ -416,10 +443,35 @@ impl Writer {
             .serialization_count
             .fetch_add(1, Ordering::Relaxed);
         let serialized = serialize_record_columns(&operation.record)?;
+        let updated_at_ms_i64 = i64::try_from(operation.record.updated_at_ms)
+            .map_err(|_| StoreError::InvalidDatabase("updated_at_ms overflows i64".into()))?;
 
         self.hit(CommitStage::Write)?;
         let tx = ImmediateTx::begin(&conn)?;
+        for &event_id in delivered_ids {
+            super::multi_agent::validate_event_ownership(
+                &conn,
+                &self.id,
+                event_id,
+                Some(target_agent_id),
+            )?;
+        }
+        for &event_id in dropped_ids {
+            super::multi_agent::validate_event_ownership(
+                &conn,
+                &self.id,
+                event_id,
+                Some(target_agent_id),
+            )?;
+        }
         upsert_session_and_entry_agent(&conn, &operation.record, &serialized)?;
+        super::multi_agent::mark_events_consumed_in_tx(
+            &conn,
+            &self.id,
+            delivered_ids,
+            dropped_ids,
+            updated_at_ms_i64,
+        )?;
         self.counters
             .bytes_written
             .fetch_add(serialized.total_bytes as u64, Ordering::Relaxed);
@@ -488,6 +540,21 @@ impl Writer {
     #[cfg(test)]
     pub(crate) fn set_fault_hook(&self, hook: Option<FaultHook>) {
         *self.hook.lock().unwrap() = hook;
+    }
+
+    pub(crate) fn pending_kind(&self) -> PendingWriterKind {
+        let Ok(state) = self.state.lock() else {
+            return PendingWriterKind::None;
+        };
+        if state.pending.is_some() {
+            PendingWriterKind::RootCommit
+        } else if state.pending_admit.is_some() {
+            PendingWriterKind::Admit
+        } else if state.pending_outbox.is_some() {
+            PendingWriterKind::Outbox
+        } else {
+            PendingWriterKind::None
+        }
     }
 
     pub(super) fn hit(&self, stage: CommitStage) -> Result<(), StoreError> {

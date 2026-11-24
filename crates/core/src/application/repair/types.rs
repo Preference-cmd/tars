@@ -210,11 +210,11 @@ pub struct RepairSummary {
 /// Holding a plan owns a material copy, not a lock, batch claim or execution task.
 #[derive(Debug)]
 pub struct RepairPlan {
-    pub(super) base: MaterialVersion,
-    pub(super) claims_revision: u64,
-    pub(super) mode: RepairMode,
-    pub(super) candidate: Context,
-    pub(super) summary: RepairSummary,
+    pub(in crate::application) base: MaterialVersion,
+    pub(in crate::application) claims_revision: u64,
+    pub(in crate::application) mode: RepairMode,
+    pub(in crate::application) candidate: Context,
+    pub(in crate::application) summary: RepairSummary,
 }
 impl RepairPlan {
     /// Exact baseline required by application.

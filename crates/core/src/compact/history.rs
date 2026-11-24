@@ -321,28 +321,40 @@ impl HistoryStore {
         conversation_id: &str,
         entries: Vec<HistoryRecordEntry>,
     ) -> Self {
-        Self::with_mode(store_root, conversation_id, entries, true)
+        Self::with_mode(store_root, conversation_id, conversation_id, entries, true)
     }
 
     /// Bind one conversation's SQLite history and artifact store with strict FK enforcement.
+    #[allow(dead_code)]
     pub(crate) fn new_strict(
         store_root: &Path,
         conversation_id: &str,
         entries: Vec<HistoryRecordEntry>,
     ) -> Self {
-        Self::with_mode(store_root, conversation_id, entries, false)
+        Self::new_strict_for_agent(store_root, conversation_id, conversation_id, entries)
+    }
+
+    /// Bind a specific agent's SQLite history and artifact store with strict FK enforcement.
+    pub(crate) fn new_strict_for_agent(
+        store_root: &Path,
+        conversation_id: &str,
+        agent_id: &str,
+        entries: Vec<HistoryRecordEntry>,
+    ) -> Self {
+        Self::with_mode(store_root, conversation_id, agent_id, entries, false)
     }
 
     fn with_mode(
         store_root: &Path,
         conversation_id: &str,
+        agent_id: &str,
         entries: Vec<HistoryRecordEntry>,
         #[allow(unused_variables)] allow_stub_parent: bool,
     ) -> Self {
         Self {
             db_path: store_root.join("tars.db"),
             conversation_id: conversation_id.to_owned(),
-            agent_id: conversation_id.to_owned(),
+            agent_id: agent_id.to_owned(),
             entries: Mutex::new(entries),
             original_ids: Mutex::new(HashMap::new()),
             written_records: Mutex::new((VecDeque::new(), HashMap::new())),
@@ -996,6 +1008,16 @@ pub(crate) fn cleanup_records(
     conversation_id: &str,
     entries: &[HistoryRecordEntry],
 ) -> Result<(), StoreError> {
+    cleanup_records_for_agent(store_root, conversation_id, conversation_id, entries)
+}
+
+/// Remove unreferenced history record rows for `(conversation_id, agent_id)`.
+pub(crate) fn cleanup_records_for_agent(
+    store_root: &Path,
+    conversation_id: &str,
+    agent_id: &str,
+    entries: &[HistoryRecordEntry],
+) -> Result<(), StoreError> {
     let mut referenced = HashSet::with_capacity(entries.len());
     for entry in entries {
         canonical_record_id(&entry.record_id)?;
@@ -1011,7 +1033,7 @@ pub(crate) fn cleanup_records(
         let mut stmt = conn.prepare(
             "SELECT record_id FROM history_records WHERE session_id = ?1 AND agent_id = ?2",
         )?;
-        stmt.query_map(params![conversation_id, conversation_id], |row| row.get(0))?
+        stmt.query_map(params![conversation_id, agent_id], |row| row.get(0))?
             .collect::<Result<Vec<String>, _>>()?
     };
     for record_id in existing {
@@ -1019,7 +1041,7 @@ pub(crate) fn cleanup_records(
             conn.execute(
                 "DELETE FROM history_records
                  WHERE session_id = ?1 AND agent_id = ?2 AND record_id = ?3",
-                params![conversation_id, conversation_id, record_id],
+                params![conversation_id, agent_id, record_id],
             )?;
         }
     }
@@ -1045,6 +1067,7 @@ fn collect_spilled_artifact_ids(blocks: &[ContextBlock], into: &mut HashSet<Stri
 fn read_record_for_cleanup(
     conn: &rusqlite::Connection,
     conversation_id: &str,
+    agent_id: &str,
     record_id: &str,
 ) -> Option<HistoryRecord> {
     if canonical_record_id(record_id).is_err() {
@@ -1055,7 +1078,7 @@ fn read_record_for_cleanup(
             "SELECT length(CAST(document_json AS BLOB)), document_json
              FROM history_records
              WHERE session_id = ?1 AND agent_id = ?2 AND record_id = ?3",
-            params![conversation_id, conversation_id, record_id],
+            params![conversation_id, agent_id, record_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
@@ -1080,6 +1103,23 @@ pub(crate) fn cleanup_artifacts(
     entries: &[HistoryRecordEntry],
     context: Option<&Context>,
 ) -> Result<(), StoreError> {
+    cleanup_artifacts_for_agent(
+        store_root,
+        conversation_id,
+        conversation_id,
+        entries,
+        context,
+    )
+}
+
+/// Remove unreferenced spilled artifact rows for a specific `(conversation_id, agent_id)`.
+pub(crate) fn cleanup_artifacts_for_agent(
+    store_root: &Path,
+    conversation_id: &str,
+    agent_id: &str,
+    entries: &[HistoryRecordEntry],
+    context: Option<&Context>,
+) -> Result<(), StoreError> {
     let db_path = store_root.join("tars.db");
     if !db_path.exists() {
         return Ok(());
@@ -1089,7 +1129,7 @@ pub(crate) fn cleanup_artifacts(
     let existing: Vec<String> = {
         let mut stmt = conn
             .prepare("SELECT artifact_id FROM artifacts WHERE session_id = ?1 AND agent_id = ?2")?;
-        stmt.query_map(params![conversation_id, conversation_id], |row| row.get(0))?
+        stmt.query_map(params![conversation_id, agent_id], |row| row.get(0))?
             .collect::<Result<Vec<String>, _>>()?
     };
     if existing.is_empty() {
@@ -1102,7 +1142,8 @@ pub(crate) fn cleanup_artifacts(
     }
     if existing.iter().any(|name| !referenced.contains(name)) && !entries.is_empty() {
         for entry in entries {
-            if let Some(record) = read_record_for_cleanup(&conn, conversation_id, &entry.record_id)
+            if let Some(record) =
+                read_record_for_cleanup(&conn, conversation_id, agent_id, &entry.record_id)
             {
                 for replacement in &record.replacements {
                     collect_spilled_artifact_ids(&replacement.originals, &mut referenced);
@@ -1115,7 +1156,7 @@ pub(crate) fn cleanup_artifacts(
             conn.execute(
                 "DELETE FROM artifacts
                  WHERE session_id = ?1 AND agent_id = ?2 AND artifact_id = ?3",
-                params![conversation_id, conversation_id, artifact_id],
+                params![conversation_id, agent_id, artifact_id],
             )?;
         }
     }
