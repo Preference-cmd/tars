@@ -10,6 +10,11 @@ pub(crate) enum SessionCommand {
         record: PathBuf,
         output: PathBuf,
     },
+    ImportLegacy {
+        record: PathBuf,
+        store: PathBuf,
+        json: bool,
+    },
     Create {
         store: PathBuf,
         // Boxed: the definition is far larger than the other variants.
@@ -103,7 +108,7 @@ impl SessionCommand {
         };
         if !matches!(
             command,
-            "create" | "run" | "list" | "repair" | "compact" | "history" | "show"
+            "create" | "run" | "list" | "repair" | "compact" | "history" | "show" | "import-legacy"
         ) {
             return Err("unknown session command".into());
         }
@@ -191,6 +196,9 @@ impl SessionCommand {
                     insert(&mut values, flag, &mut args)?;
                 }
                 "--expected-revision" if command == "repair" => {
+                    insert(&mut values, flag, &mut args)?;
+                }
+                "--record" if command == "import-legacy" => {
                     insert(&mut values, flag, &mut args)?;
                 }
                 "--recovery-dir" if matches!(command, "create" | "run" | "repair" | "compact") => {
@@ -338,6 +346,14 @@ impl SessionCommand {
             "show" => Ok(Self::Show {
                 store,
                 id: id.expect("show ID parsed"),
+                json,
+            }),
+            "import-legacy" => Ok(Self::ImportLegacy {
+                record: values
+                    .get("--record")
+                    .map(PathBuf::from)
+                    .ok_or("--record is required")?,
+                store,
                 json,
             }),
             _ => Ok(Self::List { store, json }),

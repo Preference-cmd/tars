@@ -1462,19 +1462,21 @@ fn tool_result_error(session: &ManagedSession, call_block_id: causa::kernel::Blo
 async fn minimal_record_fixture_reopen_preserves_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let storage = dir.path().join("store");
-    let sessions_dir = storage.join("sessions");
-    std::fs::create_dir_all(&sessions_dir).unwrap();
+    let legacy_dir = dir.path().join("legacy");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
 
     let id = uuid::Uuid::now_v7().to_string();
     let commit = uuid::Uuid::now_v7().to_string();
-    let record_path = sessions_dir.join(format!("{id}.json"));
+    let record_path = legacy_dir.join(format!("{id}.json"));
     let raw_json = format!(
         r#"{{"format":"tars-session-v2.4","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","updated_at_ms":1000,"definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
     );
     std::fs::write(&record_path, raw_json.as_bytes()).unwrap();
     let original_bytes = std::fs::read(&record_path).unwrap();
 
-    let host = SessionHost::new(Some(storage));
+    let host = SessionHost::new(Some(storage.clone()));
+    host.import_legacy_record(&record_path).await.unwrap();
+    let before_open = crate::application::tests::support::saved_record(&storage, &id);
     let session = host.open(id.clone().into()).await.unwrap();
 
     assert!(session.definition().tools.is_empty());
@@ -1494,8 +1496,9 @@ async fn minimal_record_fixture_reopen_preserves_bytes() {
         .await
         .unwrap();
 
-    let after_bytes = std::fs::read(&record_path).unwrap();
-    assert_eq!(after_bytes, original_bytes);
+    assert_eq!(std::fs::read(&record_path).unwrap(), original_bytes);
+    let after_close = crate::application::tests::support::saved_record(&storage, &id);
+    assert_eq!(after_close, before_open);
 }
 
 #[tokio::test]
@@ -1515,11 +1518,7 @@ async fn field_writing_rules_and_omissions() {
         .await
         .unwrap();
 
-    let record_a_path = storage
-        .join("sessions")
-        .join(format!("{}.json", id_a.as_str()));
-    let json_a: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&record_a_path).unwrap()).unwrap();
+    let json_a = crate::application::tests::support::saved_record(&storage, id_a.as_str());
     assert!(json_a.get("permission_mode").is_none());
     assert!(json_a["definition"].get("permission_mode").is_none());
     assert!(json_a["definition"].get("write_limits").is_none());
@@ -1532,11 +1531,7 @@ async fn field_writing_rules_and_omissions() {
     let session_b = host.create(prepared_b).await.unwrap();
     session_b.wait_saved().await.unwrap();
 
-    let record_b_path = storage
-        .join("sessions")
-        .join(format!("{}.json", id_b.as_str()));
-    let json_b: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&record_b_path).unwrap()).unwrap();
+    let json_b = crate::application::tests::support::saved_record(&storage, id_b.as_str());
     assert_eq!(json_b["definition"]["permission_mode"], "accept-edits");
     assert!(json_b.get("permission_mode").is_none());
 
@@ -1545,8 +1540,7 @@ async fn field_writing_rules_and_omissions() {
         .unwrap();
     session_b.wait_saved().await.unwrap();
 
-    let json_b2: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&record_b_path).unwrap()).unwrap();
+    let json_b2 = crate::application::tests::support::saved_record(&storage, id_b.as_str());
     assert_eq!(json_b2["permission_mode"], "read-only");
 
     session_b
@@ -1554,8 +1548,7 @@ async fn field_writing_rules_and_omissions() {
         .unwrap();
     session_b.wait_saved().await.unwrap();
 
-    let json_b3: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&record_b_path).unwrap()).unwrap();
+    let json_b3 = crate::application::tests::support::saved_record(&storage, id_b.as_str());
     assert!(json_b3.get("permission_mode").is_none());
 
     host.close(&session_b.target(), ClosePolicy::Save)
@@ -1586,10 +1579,11 @@ async fn explicit_ask_normalized_to_none_on_session_creation() {
         .await
         .unwrap();
 
-    let record_path = storage
-        .join("sessions")
-        .join(format!("{}.json", id.as_str()));
-    let record_str = std::fs::read_to_string(&record_path).unwrap();
+    let record_str = serde_json::to_string(&crate::application::tests::support::saved_record(
+        &storage,
+        id.as_str(),
+    ))
+    .unwrap();
     assert!(
         !record_str.contains("permission_mode"),
         "saved record must omit permission_mode key"
@@ -1715,11 +1709,7 @@ async fn saving_scenario_2_switch_during_active_work_saved_after_work() {
     let obs = finish(&s, &work).await;
     assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
 
-    let record_path = storage
-        .join("sessions")
-        .join(format!("{}.json", id.as_str()));
-    let json_val: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    let json_val = crate::application::tests::support::saved_record(&storage, id.as_str());
     assert_eq!(json_val["permission_mode"], "accept-edits");
 
     host.close(&s.target(), ClosePolicy::Save).await.unwrap();
@@ -1770,11 +1760,7 @@ async fn saving_scenario_3_switch_with_pending_failed_commit_retries_original_th
     let retry_status = s.retry_save().await.unwrap();
     assert!(matches!(retry_status, SaveStatus::Saved { .. }));
 
-    let record_path = storage
-        .join("sessions")
-        .join(format!("{}.json", id.as_str()));
-    let json_val: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
+    let json_val = crate::application::tests::support::saved_record(&storage, id.as_str());
     assert_eq!(json_val["permission_mode"], "accept-edits");
 
     host.close(&s.target(), ClosePolicy::Save).await.unwrap();

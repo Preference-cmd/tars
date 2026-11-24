@@ -272,6 +272,31 @@ impl SessionHost {
             })
             .collect())
     }
+    /// Import a legacy `tars-session-v2.4` JSON record (plus its sibling
+    /// `.history/*.json` and `.artifacts/*` files) into SQLite without modifying
+    /// any source files.
+    pub async fn import_legacy_record(
+        &self,
+        record_path: &std::path::Path,
+    ) -> Result<crate::store::LegacyImportSummary, ApplicationError> {
+        let store = self
+            .inner
+            .store
+            .clone()
+            .ok_or(ApplicationError::StoreUnavailable)?;
+        let path = record_path.to_path_buf();
+        let result = super::saving::io(&self.inner, move || store.import_legacy_v2_4(&path)).await;
+        match result {
+            Ok(summary) => Ok(summary),
+            Err(ApplicationError::Store(err))
+                if matches!(&*err, crate::store::StoreError::AlreadyExists(_)) =>
+            {
+                Err(ApplicationError::CreationConflict)
+            }
+            Err(other) => Err(other),
+        }
+    }
+
     /// Inspect one saved session record read-only without resolving credentials,
     /// locking, or mutating any Context, history, or artifact files.
     pub async fn inspect(

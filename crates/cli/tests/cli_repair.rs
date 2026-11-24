@@ -94,8 +94,19 @@ fn repair_cli_preview_apply_revision_conflict_and_new_work_for_three_protocols()
         );
         fixture.release();
         let (id, store) = create(dir.path(), provider, &fixture.endpoint);
-        let path = store.join("sessions").join(format!("{id}.json"));
-        let before = std::fs::read(&path).unwrap();
+        let db_snapshot = |store: &std::path::Path, id: &str| -> (i64, String, String) {
+            let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+            conn.query_row(
+                "SELECT s.revision, s.last_commit_id, a.context_json
+                 FROM sessions s
+                 JOIN agents a ON s.session_id = a.session_id AND s.entry_agent_id = a.agent_id
+                 WHERE s.session_id = ?1",
+                rusqlite::params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+        };
+        let before = db_snapshot(&store, &id);
         let rejected = Command::new(env!("CARGO_BIN_EXE_tars"))
             .args([
                 "session",
@@ -118,7 +129,7 @@ fn repair_cli_preview_apply_revision_conflict_and_new_work_for_three_protocols()
                 .unwrap()
                 .contains("unpaired")
         );
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(db_snapshot(&store, &id), before);
         for explicit in [false, true] {
             let mut cmd = command(&store, &id);
             if explicit {
@@ -131,7 +142,7 @@ fn repair_cli_preview_apply_revision_conflict_and_new_work_for_three_protocols()
             assert_eq!(value["revision"], 1);
             assert_eq!(value["plan"]["removed_count"], 1);
             assert_eq!(value["uncommitted_results_available"], false);
-            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(db_snapshot(&store, &id), before);
             assert_eq!(
                 fixture.accepted.load(std::sync::atomic::Ordering::SeqCst),
                 0
@@ -145,7 +156,7 @@ fn repair_cli_preview_apply_revision_conflict_and_new_work_for_three_protocols()
         assert_eq!(report(&applied)["applied"], true);
         assert_eq!(report(&applied)["revision"], 2);
         assert_eq!(report(&applied)["saved"], true);
-        let repaired = std::fs::read(&path).unwrap();
+        let repaired = db_snapshot(&store, &id);
         let conflict = command(&store, &id)
             .args(["--apply", "--expected-revision", "1"])
             .output()
@@ -157,10 +168,10 @@ fn repair_cli_preview_apply_revision_conflict_and_new_work_for_three_protocols()
                 .unwrap()
                 .contains("expected 1, current 2")
         );
-        assert_eq!(std::fs::read(&path).unwrap(), repaired);
+        assert_eq!(db_snapshot(&store, &id), repaired);
         let done = command(&store, &id).output().unwrap();
         assert_eq!(report(&done)["status"], "not_needed");
-        assert_eq!(std::fs::read(&path).unwrap(), repaired);
+        assert_eq!(db_snapshot(&store, &id), repaired);
         assert_eq!(
             fixture.accepted.load(std::sync::atomic::Ordering::SeqCst),
             0
@@ -192,7 +203,8 @@ fn repair_cli_preview_apply_revision_conflict_and_new_work_for_three_protocols()
                 .to_string()
                 .contains("new read returns this actual marker")
         );
-        let context = tars_core::material::load_session_materials(&path).unwrap();
+        let (_, _, ctx_json) = db_snapshot(&store, &id);
+        let context: causa::kernel::Context = serde_json::from_str(&ctx_json).unwrap();
         assert_eq!(
             context
                 .blocks()
@@ -224,31 +236,30 @@ fn repair_cli_requires_explicit_apply_revision_and_rejects_ambiguous_options() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn repair_cli_save_failure_exports_the_applied_candidate_without_repeating_work() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let fixture = wire::Fixture::new("anthropic", vec![], None);
     fixture.release();
     let (id, store) = create(dir.path(), "anthropic", &fixture.endpoint);
-    let sessions = store.join("sessions");
-    let path = sessions.join(format!("{id}.json"));
-    let before = std::fs::read(&path).unwrap();
-    struct Restore(std::path::PathBuf);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-    }
-    let _restore = Restore(sessions.clone());
-    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let probe = sessions.join("permission-probe");
-    if std::fs::write(&probe, "").is_ok() {
-        std::fs::remove_file(probe).unwrap();
-        eprintln!("filesystem permissions are bypassed; save-failure fixture unavailable");
-        return;
-    }
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    let snapshot = |conn: &rusqlite::Connection| -> (i64, String, String) {
+        conn.query_row(
+            "SELECT s.revision, s.last_commit_id, a.context_json
+             FROM sessions s
+             JOIN agents a ON s.session_id = a.session_id AND s.entry_agent_id = a.agent_id
+             WHERE s.session_id = ?1",
+            rusqlite::params![&id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap()
+    };
+    let before = snapshot(&conn);
+    conn.execute_batch(
+        "CREATE TRIGGER test_block_save BEFORE UPDATE ON sessions
+         BEGIN SELECT RAISE(ABORT, 'injected save failure'); END;",
+    )
+    .unwrap();
     let output = command(&store, &id)
         .args(["--apply", "--expected-revision", "1", "--recovery-dir"])
         .arg(dir.path())
@@ -273,7 +284,7 @@ fn repair_cli_save_failure_exports_the_applied_candidate_without_repeating_work(
             .unwrap()
             .contains("material_repair")
     );
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(snapshot(&conn), before);
     assert_eq!(
         fixture.accepted.load(std::sync::atomic::Ordering::SeqCst),
         0

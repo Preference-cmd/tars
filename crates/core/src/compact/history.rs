@@ -1,19 +1,20 @@
-//! Read-only history rewrite records beside a session record.
+//! Read-only history rewrite records and spilled artifacts stored in SQLite.
 //!
 //! A compaction or context edit replaces material in the current Context; the
-//! replaced original blocks are kept as one rewrite record under
-//! `<sessions>/<conversation id>.history/<record id>.json`. The session
-//! record lists which records exist in its `history` index, so a stray file
-//! never becomes visible material, and a record file is always written and
-//! synced before the Context changes.
+//! replaced original blocks are kept as one rewrite record in SQLite
+//! `history_records` inside `<store_root>/tars.db`, keyed by `(session_id,
+//! agent_id, record_id)`. Spilled tool outputs live in `artifacts` inside the
+//! same database. The session record lists which records exist in its `history`
+//! index, so an uncommitted row never becomes visible material, and a record row
+//! is always committed before the Context changes.
 
 use super::HistoryTrigger;
-use crate::store::StoreError;
+use crate::store::{StoreError, schema};
 use causa::kernel::{BlockContent, BlockId, Context, ContextBlock};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -295,14 +296,16 @@ const MAX_CACHED_WRITTEN_RECORDS: usize = 64;
 
 type WrittenRecordCache = (VecDeque<String>, HashMap<String, Arc<HistoryRecord>>);
 
-/// The history directory and the record-backed index for one conversation.
+/// SQLite-backed history rewrite records, spilled artifacts, and index for one conversation.
 pub(crate) struct HistoryStore {
-    directory: PathBuf,
-    artifacts_dir: PathBuf,
+    db_path: PathBuf,
     conversation_id: String,
+    agent_id: String,
     entries: Mutex<Vec<HistoryRecordEntry>>,
     original_ids: Mutex<HashMap<String, HashSet<BlockId>>>,
     written_records: Mutex<WrittenRecordCache>,
+    #[cfg(test)]
+    allow_stub_parent: bool,
     #[cfg(test)]
     read_count: AtomicUsize,
     #[cfg(test)]
@@ -310,19 +313,41 @@ pub(crate) struct HistoryStore {
 }
 
 impl HistoryStore {
-    /// Bind one conversation's history and artifact directories to its restored index.
+    /// Bind one conversation's SQLite history and artifact store to its restored index
+    /// for standalone unit tests (automatically seeds a stub parent row on write).
+    #[cfg(test)]
     pub(crate) fn new(
-        sessions_directory: &Path,
+        store_root: &Path,
         conversation_id: &str,
         entries: Vec<HistoryRecordEntry>,
     ) -> Self {
+        Self::with_mode(store_root, conversation_id, entries, true)
+    }
+
+    /// Bind one conversation's SQLite history and artifact store with strict FK enforcement.
+    pub(crate) fn new_strict(
+        store_root: &Path,
+        conversation_id: &str,
+        entries: Vec<HistoryRecordEntry>,
+    ) -> Self {
+        Self::with_mode(store_root, conversation_id, entries, false)
+    }
+
+    fn with_mode(
+        store_root: &Path,
+        conversation_id: &str,
+        entries: Vec<HistoryRecordEntry>,
+        #[allow(unused_variables)] allow_stub_parent: bool,
+    ) -> Self {
         Self {
-            directory: history_directory(sessions_directory, conversation_id),
-            artifacts_dir: artifacts_directory(sessions_directory, conversation_id),
+            db_path: store_root.join("tars.db"),
             conversation_id: conversation_id.to_owned(),
+            agent_id: conversation_id.to_owned(),
             entries: Mutex::new(entries),
             original_ids: Mutex::new(HashMap::new()),
             written_records: Mutex::new((VecDeque::new(), HashMap::new())),
+            #[cfg(test)]
+            allow_stub_parent,
             #[cfg(test)]
             read_count: AtomicUsize::new(0),
             #[cfg(test)]
@@ -411,16 +436,29 @@ impl HistoryStore {
             .cloned()
     }
 
-    /// Check that an indexed record file still exists before trusting it.
+    /// Check that an indexed record row still exists before trusting it.
     fn indexed_record_file(&self, record_id: &str) -> Result<(), StoreError> {
         if !self.has_record(record_id) {
             return Err(StoreError::InvalidHistory(format!(
                 "record {record_id} is not in this session's history index"
             )));
         }
-        if !fs::metadata(self.record_path(record_id))?.is_file() {
-            return Err(StoreError::InvalidHistory(format!(
-                "history record {record_id} is not a file"
+        let Some(conn) = schema::open_read_only(&self.db_path)? else {
+            return Err(not_found_error(format!(
+                "history record {record_id} does not exist"
+            )));
+        };
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM history_records
+                 WHERE session_id = ?1 AND agent_id = ?2 AND record_id = ?3",
+                params![self.conversation_id, self.agent_id, record_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(not_found_error(format!(
+                "history record {record_id} does not exist"
             )));
         }
         Ok(())
@@ -502,33 +540,38 @@ impl HistoryStore {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Atomically persist one spilled tool-output artifact and fsync it.
+    /// Atomically persist one spilled tool-output artifact into SQLite `artifacts`.
     pub(crate) fn persist_spilled_artifact(&self, data: &[u8]) -> Result<String, StoreError> {
         if data.len() > MAX_ARTIFACT_BYTES {
             return Err(StoreError::InvalidHistory(format!(
                 "artifact exceeds the {MAX_ARTIFACT_BYTES}-byte limit"
             )));
         }
-        fs::create_dir_all(&self.artifacts_dir)?;
         let artifact_id = new_record_id();
-        let path = self.artifacts_dir.join(&artifact_id);
-        let mut pending = tempfile::Builder::new()
-            .prefix(".pending-")
-            .tempfile_in(&self.artifacts_dir)?;
-        pending.write_all(data)?;
-        pending.as_file().sync_all()?;
-        pending.persist_noclobber(&path).map_err(|error| {
-            if error.error.kind() == io::ErrorKind::AlreadyExists {
-                StoreError::InvalidHistory(format!("artifact {artifact_id} already exists"))
-            } else {
-                error.error.into()
+        let conn = schema::open_read_write(&self.db_path)?;
+        let tx = schema::ImmediateTx::begin(&conn)?;
+        #[cfg(test)]
+        if self.allow_stub_parent {
+            ensure_stub_parent(&conn, &self.conversation_id, &self.agent_id)?;
+        }
+        let result = conn.execute(
+            "INSERT INTO artifacts (session_id, agent_id, artifact_id, content)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![self.conversation_id, self.agent_id, artifact_id, data],
+        );
+        if let Err(err) = result {
+            if is_primary_key_violation(&err) {
+                return Err(StoreError::InvalidHistory(format!(
+                    "artifact {artifact_id} already exists"
+                )));
             }
-        })?;
-        sync_directory(&self.artifacts_dir);
+            return Err(err.into());
+        }
+        tx.commit()?;
         Ok(artifact_id)
     }
 
-    /// Read bytes from one spilled artifact in this session's `.artifacts/` directory.
+    /// Read bytes from one spilled artifact in SQLite `artifacts`.
     pub(crate) fn read_spilled_artifact(
         &self,
         artifact_id: &str,
@@ -539,33 +582,34 @@ impl HistoryStore {
                 "artifact id is not a canonical UUID: {artifact_id}"
             )));
         }
-        let path = self.artifacts_dir.join(artifact_id);
-        let mut file = File::open(&path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() {
-            return Err(StoreError::InvalidHistory(format!(
-                "artifact {artifact_id} is not a file"
+        let Some(conn) = schema::open_read_only(&self.db_path)? else {
+            return Err(not_found_error(format!(
+                "artifact {artifact_id} does not exist"
             )));
-        }
-        let len = metadata.len();
+        };
+        let len_i64: i64 = conn
+            .query_row(
+                "SELECT length(CAST(content AS BLOB)) FROM artifacts
+                 WHERE session_id = ?1 AND agent_id = ?2 AND artifact_id = ?3",
+                params![self.conversation_id, self.agent_id, artifact_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| not_found_error(format!("artifact {artifact_id} does not exist")))?;
+        let len = u64::try_from(len_i64)
+            .map_err(|_| StoreError::InvalidDatabase("negative artifact length".into()))?;
         if len > MAX_ARTIFACT_BYTES as u64 {
             return Err(StoreError::HistoryTooLarge {
                 limit: MAX_ARTIFACT_BYTES,
             });
         }
         let bytes = match range {
-            None => {
-                let mut buf = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-                (&mut file)
-                    .take(MAX_ARTIFACT_BYTES as u64 + 1)
-                    .read_to_end(&mut buf)?;
-                if buf.len() > MAX_ARTIFACT_BYTES {
-                    return Err(StoreError::HistoryTooLarge {
-                        limit: MAX_ARTIFACT_BYTES,
-                    });
-                }
-                buf
-            }
+            None => conn.query_row(
+                "SELECT CAST(content AS BLOB) FROM artifacts
+                 WHERE session_id = ?1 AND agent_id = ?2 AND artifact_id = ?3",
+                params![self.conversation_id, self.agent_id, artifact_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?,
             Some(range) => {
                 if range.start > len || range.start > range.end {
                     return Err(StoreError::InvalidHistory(format!(
@@ -575,10 +619,28 @@ impl HistoryStore {
                 }
                 let clamped_end = range.end.min(len);
                 let count = clamped_end - range.start;
-                file.seek(SeekFrom::Start(range.start))?;
-                let mut buf = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
-                (&mut file).take(count).read_to_end(&mut buf)?;
-                buf
+                if count == 0 {
+                    Vec::new()
+                } else {
+                    let start_1 = i64::try_from(range.start + 1).map_err(|_| {
+                        StoreError::InvalidHistory("artifact offset overflows i64".into())
+                    })?;
+                    let count_i64 = i64::try_from(count).map_err(|_| {
+                        StoreError::InvalidHistory("artifact slice length overflows i64".into())
+                    })?;
+                    conn.query_row(
+                        "SELECT substr(CAST(content AS BLOB), ?4, ?5) FROM artifacts
+                         WHERE session_id = ?1 AND agent_id = ?2 AND artifact_id = ?3",
+                        params![
+                            self.conversation_id,
+                            self.agent_id,
+                            artifact_id,
+                            start_1,
+                            count_i64
+                        ],
+                        |row| row.get::<_, Vec<u8>>(0),
+                    )?
+                }
             }
         };
         #[cfg(test)]
@@ -586,24 +648,31 @@ impl HistoryStore {
         Ok(bytes)
     }
 
-    /// Verify that a spilled artifact exists in this session's `.artifacts/`
-    /// directory, is a regular readable file, and fits the 64 MiB limit.
-    /// Does not read file contents.
+    /// Verify that a spilled artifact exists in SQLite `artifacts` and fits
+    /// the 64 MiB limit without reading its payload bytes.
     pub(crate) fn verify_spilled_artifact(&self, artifact_id: &str) -> Result<(), StoreError> {
         if !is_canonical_uuid(artifact_id) {
             return Err(StoreError::InvalidHistory(format!(
                 "artifact id is not a canonical UUID: {artifact_id}"
             )));
         }
-        let path = self.artifacts_dir.join(artifact_id);
-        let file = File::open(&path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() {
-            return Err(StoreError::InvalidHistory(format!(
-                "artifact {artifact_id} is not a file"
+        let Some(conn) = schema::open_read_only(&self.db_path)? else {
+            return Err(not_found_error(format!(
+                "artifact {artifact_id} does not exist"
             )));
-        }
-        if metadata.len() > MAX_ARTIFACT_BYTES as u64 {
+        };
+        let len_i64: i64 = conn
+            .query_row(
+                "SELECT length(CAST(content AS BLOB)) FROM artifacts
+                 WHERE session_id = ?1 AND agent_id = ?2 AND artifact_id = ?3",
+                params![self.conversation_id, self.agent_id, artifact_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| not_found_error(format!("artifact {artifact_id} does not exist")))?;
+        let len = u64::try_from(len_i64)
+            .map_err(|_| StoreError::InvalidDatabase("negative artifact length".into()))?;
+        if len > MAX_ARTIFACT_BYTES as u64 {
             return Err(StoreError::HistoryTooLarge {
                 limit: MAX_ARTIFACT_BYTES,
             });
@@ -611,42 +680,69 @@ impl HistoryStore {
         Ok(())
     }
 
-    /// Write one rewrite record document and fsync it.
+    /// Write one rewrite record document into SQLite `history_records`.
     ///
     /// The caller must write this before it edits the Context. A record that
     /// already exists is never overwritten: a repeated write is an error.
     pub(crate) fn write(&self, document: &HistoryRecord) -> Result<(), StoreError> {
         document.validate(&self.conversation_id, &document.record_id)?;
-        let bytes = serde_json::to_vec(document)?;
-        if bytes.len() > MAX_HISTORY_BYTES {
+        let document_json = serde_json::to_string(document)?;
+        if document_json.len() > MAX_HISTORY_BYTES {
             return Err(StoreError::HistoryTooLarge {
                 limit: MAX_HISTORY_BYTES,
             });
         }
-        fs::create_dir_all(&self.directory)?;
-        let path = self.record_path(&document.record_id);
-        if path.exists() {
+        let summary_json = serde_json::to_string(&document.index_entry())?;
+        let conn = schema::open_read_write(&self.db_path)?;
+        let tx = schema::ImmediateTx::begin(&conn)?;
+        #[cfg(test)]
+        if self.allow_stub_parent {
+            ensure_stub_parent(&conn, &self.conversation_id, &self.agent_id)?;
+        }
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM history_records
+                 WHERE session_id = ?1 AND agent_id = ?2 AND record_id = ?3",
+                params![self.conversation_id, self.agent_id, document.record_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_some() {
             return Err(StoreError::InvalidHistory(format!(
                 "history record {} already exists",
                 document.record_id
             )));
         }
-        let mut pending = tempfile::Builder::new()
-            .prefix(".pending-")
-            .tempfile_in(&self.directory)?;
-        pending.write_all(&bytes)?;
-        pending.as_file().sync_all()?;
-        pending.persist_noclobber(&path).map_err(|error| {
-            if error.error.kind() == io::ErrorKind::AlreadyExists {
-                StoreError::InvalidHistory(format!(
+        let seq: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(seq), -1) + 1 FROM history_records
+             WHERE session_id = ?1 AND agent_id = ?2",
+            params![self.conversation_id, self.agent_id],
+            |row| row.get(0),
+        )?;
+        let result = conn.execute(
+            "INSERT INTO history_records (
+                session_id, agent_id, record_id, seq, kind, summary_json, document_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                self.conversation_id,
+                self.agent_id,
+                document.record_id,
+                seq,
+                document.kind.name(),
+                summary_json,
+                document_json,
+            ],
+        );
+        if let Err(err) = result {
+            if is_primary_key_violation(&err) {
+                return Err(StoreError::InvalidHistory(format!(
                     "history record {} already exists",
                     document.record_id
-                ))
-            } else {
-                error.error.into()
+                )));
             }
-        })?;
-        sync_directory(&self.directory);
+            return Err(err.into());
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -750,25 +846,41 @@ impl HistoryStore {
             .push(entry);
     }
 
-    /// Read one rewrite record document.
+    /// Read one rewrite record document from SQLite `history_records`.
     pub(crate) fn read(&self, record_id: &str) -> Result<HistoryRecord, StoreError> {
         canonical_record_id(record_id)?;
-        let path = self.record_path(record_id);
-        let mut file = File::open(&path)?;
-        let length = file.metadata()?.len();
+        let Some(conn) = schema::open_read_only(&self.db_path)? else {
+            return Err(not_found_error(format!(
+                "history record {record_id} does not exist"
+            )));
+        };
+        let row: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT length(CAST(document_json AS BLOB)), document_json
+                 FROM history_records
+                 WHERE session_id = ?1 AND agent_id = ?2 AND record_id = ?3",
+                params![self.conversation_id, self.agent_id, record_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((len_i64, document_json)) = row else {
+            return Err(not_found_error(format!(
+                "history record {record_id} does not exist"
+            )));
+        };
+        let length = u64::try_from(len_i64)
+            .map_err(|_| StoreError::InvalidDatabase("negative history record length".into()))?;
         if length > MAX_HISTORY_BYTES as u64 {
             return Err(StoreError::HistoryTooLarge {
                 limit: MAX_HISTORY_BYTES,
             });
         }
-        let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
-        file.read_to_end(&mut bytes)?;
 
         #[derive(Deserialize)]
         struct FormatCheck {
             format: String,
         }
-        let check: FormatCheck = serde_json::from_slice(&bytes)?;
+        let check: FormatCheck = serde_json::from_str(&document_json)?;
         if check.format != HISTORY_FORMAT {
             return Err(StoreError::InvalidHistory(format!(
                 "unsupported history format: {}; expected {}. Older history records cannot be read; export materials with `tars session export-materials` to preserve conversation materials.",
@@ -776,7 +888,7 @@ impl HistoryStore {
             )));
         }
 
-        let document: HistoryRecord = serde_json::from_slice(&bytes)?;
+        let document: HistoryRecord = serde_json::from_str(&document_json)?;
         document.validate(&self.conversation_id, record_id)?;
         #[cfg(test)]
         self.read_count.fetch_add(1, Ordering::SeqCst);
@@ -799,7 +911,7 @@ impl HistoryStore {
             .retain(|entry| entry.record_id != record_id);
     }
 
-    /// Delete one record file, ignoring a file that is already gone.
+    /// Delete one record row from SQLite `history_records`, ignoring absence.
     pub(crate) fn remove(&self, record_id: &str) {
         self.uncache(record_id);
         let mut written = self
@@ -809,12 +921,66 @@ impl HistoryStore {
         written.1.remove(record_id);
         written.0.retain(|id| id != record_id);
         drop(written);
-        let _ = fs::remove_file(self.record_path(record_id));
+        if self.db_path.exists()
+            && let Ok(conn) = schema::open_read_write(&self.db_path)
+            && let Ok(tx) = schema::ImmediateTx::begin(&conn)
+        {
+            let _ = conn.execute(
+                "DELETE FROM history_records
+                 WHERE session_id = ?1 AND agent_id = ?2 AND record_id = ?3",
+                params![self.conversation_id, self.agent_id, record_id],
+            );
+            let _ = tx.commit();
+        }
     }
+}
 
-    fn record_path(&self, record_id: &str) -> PathBuf {
-        self.directory.join(format!("{record_id}.json"))
+fn not_found_error(message: String) -> StoreError {
+    StoreError::Io(Arc::new(io::Error::new(io::ErrorKind::NotFound, message)))
+}
+
+fn is_primary_key_violation(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(sqlite_err, _)
+            if matches!(
+                sqlite_err.extended_code,
+                rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY | rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            )
+    )
+}
+
+#[cfg(test)]
+fn ensure_stub_parent(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<(), StoreError> {
+    let exists: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM agents WHERE session_id = ?1 AND agent_id = ?2",
+            params![session_id, agent_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if exists.is_none() {
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions (
+                session_id, revision, last_commit_id, policy_json, entry_agent_id,
+                created_at_ms, updated_at_ms
+             ) VALUES (?1, 0, ?2, '{\"format\":\"tars-session-v2.4\"}', ?3, 0, 0)",
+            params![session_id, session_id, agent_id],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO agents (
+                session_id, agent_id, name, preset_name, interaction,
+                definition_json, material_revision, context_json, history_index_json,
+                created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, 'test-stub', NULL, 'reusable', '{}', 0, '{\"blocks\":[]}', '[]', 0, 0)",
+            params![session_id, agent_id],
+        )?;
     }
+    Ok(())
 }
 
 fn missing_block(record_id: &str, block_id: BlockId) -> StoreError {
@@ -824,26 +990,41 @@ fn missing_block(record_id: &str, block_id: BlockId) -> StoreError {
     ))
 }
 
-/// History directory for one conversation under the sessions directory.
-pub(crate) fn history_directory(sessions_directory: &Path, conversation_id: &str) -> PathBuf {
-    sessions_directory.join(format!("{conversation_id}.history"))
-}
-
-/// Spilled tool-output artifact directory for one conversation under the sessions directory.
-pub(crate) fn artifacts_directory(sessions_directory: &Path, conversation_id: &str) -> PathBuf {
-    sessions_directory.join(format!("{conversation_id}.artifacts"))
-}
-
-/// Remove unreferenced record files without requiring a bound store.
+/// Remove unreferenced history record rows for `(conversation_id, conversation_id)`.
 pub(crate) fn cleanup_records(
-    sessions_directory: &Path,
+    store_root: &Path,
     conversation_id: &str,
     entries: &[HistoryRecordEntry],
 ) -> Result<(), StoreError> {
-    cleanup_directory(
-        &history_directory(sessions_directory, conversation_id),
-        entries,
-    )
+    let mut referenced = HashSet::with_capacity(entries.len());
+    for entry in entries {
+        canonical_record_id(&entry.record_id)?;
+        referenced.insert(entry.record_id.as_str());
+    }
+    let db_path = store_root.join("tars.db");
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = schema::open_read_write(&db_path)?;
+    let tx = schema::ImmediateTx::begin(&conn)?;
+    let existing: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT record_id FROM history_records WHERE session_id = ?1 AND agent_id = ?2",
+        )?;
+        stmt.query_map(params![conversation_id, conversation_id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?
+    };
+    for record_id in existing {
+        if !referenced.contains(record_id.as_str()) {
+            conn.execute(
+                "DELETE FROM history_records
+                 WHERE session_id = ?1 AND agent_id = ?2 AND record_id = ?3",
+                params![conversation_id, conversation_id, record_id],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Collect spilled artifact UUIDs referenced by `blocks`.
@@ -858,75 +1039,70 @@ fn collect_spilled_artifact_ids(blocks: &[ContextBlock], into: &mut HashSet<Stri
     }
 }
 
-/// Read one history record from disk for orphan artifact scanning without
+/// Read one history record from SQLite for orphan artifact scanning without
 /// incrementing a bound store's read counter. Ignores missing or corrupt records
 /// so opening still succeeds and reports them on expansion.
 fn read_record_for_cleanup(
-    history_dir: &Path,
+    conn: &rusqlite::Connection,
     conversation_id: &str,
     record_id: &str,
 ) -> Option<HistoryRecord> {
     if canonical_record_id(record_id).is_err() {
         return None;
     }
-    let path = history_dir.join(format!("{record_id}.json"));
-    let file = File::open(&path).ok()?;
-    let len = file.metadata().ok()?.len();
+    let (len_i64, document_json): (i64, String) = conn
+        .query_row(
+            "SELECT length(CAST(document_json AS BLOB)), document_json
+             FROM history_records
+             WHERE session_id = ?1 AND agent_id = ?2 AND record_id = ?3",
+            params![conversation_id, conversation_id, record_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .ok()??;
+    let len = u64::try_from(len_i64).ok()?;
     if len > MAX_HISTORY_BYTES as u64 {
         return None;
     }
-    let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-    file.take(MAX_HISTORY_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() > MAX_HISTORY_BYTES {
-        return None;
-    }
-    let record: HistoryRecord = serde_json::from_slice(&bytes).ok()?;
+    let record: HistoryRecord = serde_json::from_str(&document_json).ok()?;
     record.validate(conversation_id, record_id).ok()?;
     Some(record)
 }
 
-/// Remove unreferenced spilled artifact files under the session write lock.
+/// Remove unreferenced spilled artifact rows under the session write lock.
 ///
 /// An artifact is kept if it is referenced by the saved `context` or by any
 /// original block inside an indexed rewrite record. Only reads rewrite records
-/// when `.artifacts/` contains a file not already referenced by `context`.
+/// when `artifacts` contains a row not already referenced by `context`.
 pub(crate) fn cleanup_artifacts(
-    sessions_directory: &Path,
+    store_root: &Path,
     conversation_id: &str,
     entries: &[HistoryRecordEntry],
     context: Option<&Context>,
 ) -> Result<(), StoreError> {
-    let dir = artifacts_directory(sessions_directory, conversation_id);
-    let listing = match fs::read_dir(&dir) {
-        Ok(listing) => listing,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    let mut files = Vec::new();
-    for entry in listing {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        files.push((name, entry.path()));
+    let db_path = store_root.join("tars.db");
+    if !db_path.exists() {
+        return Ok(());
     }
-    if files.is_empty() {
+    let conn = schema::open_read_write(&db_path)?;
+    let tx = schema::ImmediateTx::begin(&conn)?;
+    let existing: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT artifact_id FROM artifacts WHERE session_id = ?1 AND agent_id = ?2")?;
+        stmt.query_map(params![conversation_id, conversation_id], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?
+    };
+    if existing.is_empty() {
+        tx.commit()?;
         return Ok(());
     }
     let mut referenced = HashSet::new();
     if let Some(context) = context {
         collect_spilled_artifact_ids(context.blocks(), &mut referenced);
     }
-    if files.iter().any(|(name, _)| !referenced.contains(name)) && !entries.is_empty() {
-        let history_dir = history_directory(sessions_directory, conversation_id);
+    if existing.iter().any(|name| !referenced.contains(name)) && !entries.is_empty() {
         for entry in entries {
-            if let Some(record) =
-                read_record_for_cleanup(&history_dir, conversation_id, &entry.record_id)
+            if let Some(record) = read_record_for_cleanup(&conn, conversation_id, &entry.record_id)
             {
                 for replacement in &record.replacements {
                     collect_spilled_artifact_ids(&replacement.originals, &mut referenced);
@@ -934,47 +1110,17 @@ pub(crate) fn cleanup_artifacts(
             }
         }
     }
-    for (name, path) in files {
-        if !referenced.contains(&name) {
-            fs::remove_file(path)?;
+    for artifact_id in existing {
+        if !referenced.contains(&artifact_id) {
+            conn.execute(
+                "DELETE FROM artifacts
+                 WHERE session_id = ?1 AND agent_id = ?2 AND artifact_id = ?3",
+                params![conversation_id, conversation_id, artifact_id],
+            )?;
         }
     }
+    tx.commit()?;
     Ok(())
-}
-
-fn cleanup_directory(directory: &Path, entries: &[HistoryRecordEntry]) -> Result<(), StoreError> {
-    let mut referenced = std::collections::HashSet::with_capacity(entries.len());
-    for entry in entries {
-        canonical_record_id(&entry.record_id)?;
-        referenced.insert(format!("{}.json", entry.record_id));
-    }
-    let listing = match fs::read_dir(directory) {
-        Ok(listing) => listing,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    for entry in listing {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if referenced.contains(name) {
-            continue;
-        }
-        if entry.file_type()?.is_file() {
-            fs::remove_file(entry.path())?;
-        }
-    }
-    Ok(())
-}
-
-fn sync_directory(directory: &Path) {
-    // Directory fsync is best effort: not every platform or filesystem
-    // supports it, and the record commit is the durable authority.
-    if let Ok(directory) = File::open(directory) {
-        let _ = directory.sync_all();
-    }
 }
 
 fn canonical_record_id(record_id: &str) -> Result<(), StoreError> {

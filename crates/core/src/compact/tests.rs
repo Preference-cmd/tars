@@ -590,31 +590,24 @@ fn history_store_writes_reads_and_cleans_unreferenced_records() {
     assert_eq!(read.trigger, HistoryTrigger::Auto);
     // Writing the same record again never overwrites it.
     assert!(store.write(&document).is_err());
-    // A stray file is removed; the referenced one stays.
-    std::fs::write(
-        directory
-            .path()
-            .join("conversation.history")
-            .join("stray.json"),
-        b"{}",
-    )
-    .unwrap();
+    // A stray row is removed; the referenced one stays.
+    let stray_id = uuid::Uuid::now_v7().to_string();
+    {
+        let conn =
+            crate::store::schema::open_read_write(&directory.path().join("tars.db")).unwrap();
+        conn.execute(
+            "INSERT INTO history_records (session_id, agent_id, record_id, seq, kind, summary_json, document_json)
+             VALUES ('conversation', 'conversation', ?1, 99, 'summarize', '{}', '{}')",
+            rusqlite::params![stray_id],
+        )
+        .unwrap();
+    }
     super::history::cleanup_records(directory.path(), "conversation", &store.entries()).unwrap();
-    assert!(
-        !directory
-            .path()
-            .join("conversation.history")
-            .join("stray.json")
-            .exists()
+    assert_eq!(
+        history_files(directory.path(), "conversation"),
+        vec![record_id_value.clone()]
     );
-    assert!(
-        directory
-            .path()
-            .join("conversation.history")
-            .join(format!("{record_id_value}.json"))
-            .exists()
-    );
-    // A missing referenced file is reported on read, not on validation.
+    // A missing referenced row is reported on read, not on validation.
     store.remove(&record_id_value);
     assert!(store.read(&record_id_value).is_err());
 }
@@ -1061,16 +1054,21 @@ async fn auto_compaction_stays_below_threshold_on_uncached_input_alone() {
 }
 
 fn history_files(directory: &std::path::Path, conversation: &str) -> Vec<String> {
-    match std::fs::read_dir(directory.join(format!("{conversation}.history"))) {
-        Ok(listing) => {
-            let mut names = listing
-                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-                .collect::<Vec<_>>();
-            names.sort();
-            names
-        }
-        Err(_) => Vec::new(),
-    }
+    let db_path = directory.join("tars.db");
+    let Ok(Some(conn)) = crate::store::schema::open_read_only(&db_path) else {
+        return Vec::new();
+    };
+    let mut stmt = conn
+        .prepare(
+            "SELECT record_id FROM history_records
+             WHERE session_id = ?1 AND agent_id = ?1
+             ORDER BY record_id ASC",
+        )
+        .unwrap();
+    stmt.query_map(rusqlite::params![conversation], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<String>, _>>()
+        .unwrap()
 }
 
 fn summarize_rewrite(
@@ -1130,12 +1128,17 @@ fn test_be01_shared_commit_path_v1_1_format_multi_range_and_abandonment() {
     assert_eq!(ids, vec![r0_id, b1.id(), r2a_id, r2b_id]);
 
     let record_id = entry.record_id.clone();
-    let file_path = directory
-        .path()
-        .join("conversation-1.history")
-        .join(format!("{record_id}.json"));
-    let file_json: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&file_path).unwrap()).unwrap();
+    let stored_doc_json: String = crate::store::schema::open_read_only(&directory.path().join("tars.db"))
+        .unwrap()
+        .unwrap()
+        .query_row(
+            "SELECT document_json FROM history_records
+             WHERE session_id = 'conversation-1' AND agent_id = 'conversation-1' AND record_id = ?1",
+            rusqlite::params![&record_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let file_json: serde_json::Value = serde_json::from_str(&stored_doc_json).unwrap();
     assert_eq!(file_json["format"], "tars-history-v1.2");
     assert_eq!(file_json["kind"], "summarize");
     assert_eq!(file_json["record_id"], record_id.as_str());
@@ -1216,12 +1219,12 @@ fn test_be01_shared_commit_path_v1_1_format_multi_range_and_abandonment() {
     assert_eq!(context.blocks(), before.as_slice());
     assert_eq!(
         history_files(directory.path(), "conversation-1"),
-        vec![format!("{record_id}.json")]
+        vec![record_id.clone()]
     );
     assert_eq!(store.entries(), vec![entry.clone()]);
 
     // Refused by Causa after the record was written: reusing a kept block's
-    // identity with other content. The written file is removed again.
+    // identity with other content. The written row is removed again.
     let error = store
         .commit_rewrite(
             &mut context,
@@ -1235,19 +1238,25 @@ fn test_be01_shared_commit_path_v1_1_format_multi_range_and_abandonment() {
     assert_eq!(context.blocks(), before.as_slice());
     assert_eq!(
         history_files(directory.path(), "conversation-1"),
-        vec![format!("{record_id}.json")]
+        vec![record_id.clone()]
     );
     assert_eq!(store.entries(), vec![entry]);
 
-    // An unindexed file left by an interrupted rewrite is removed on reopen.
-    let stray_path = directory
-        .path()
-        .join("conversation-1.history")
-        .join("stray-unindexed.json");
-    std::fs::write(&stray_path, b"{}").unwrap();
+    // An unindexed row left by an interrupted rewrite is removed on reopen.
+    let stray_id = uuid::Uuid::now_v7().to_string();
+    crate::store::schema::open_read_write(&directory.path().join("tars.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO history_records (session_id, agent_id, record_id, seq, kind, summary_json, document_json)
+             VALUES ('conversation-1', 'conversation-1', ?1, 99, 'summarize', '{}', '{}')",
+            rusqlite::params![&stray_id],
+        )
+        .unwrap();
     super::history::cleanup_records(directory.path(), "conversation-1", &store.entries()).unwrap();
-    assert!(!stray_path.exists(), "unindexed file cleaned up on reopen");
-    assert!(file_path.exists(), "referenced file remains");
+    assert_eq!(
+        history_files(directory.path(), "conversation-1"),
+        vec![record_id]
+    );
 }
 
 #[tokio::test]
@@ -1660,11 +1669,15 @@ fn test_be04_expansion_fixture_summarize_merge_nesting_and_lazy_reading() {
     );
 
     // 6. Test unreadable record:
-    // Corrupt record 1, expand again: reports unreadable record without failing the rest
-    let rec1_file = session_dir
-        .join(format!("{conv_id}.history"))
-        .join(format!("{rec1_id}.json"));
-    std::fs::write(&rec1_file, b"corrupted content").unwrap();
+    // Corrupt record 1 in SQLite, expand again: reports unreadable record without failing the rest
+    crate::store::schema::open_read_write(&session_dir.join("tars.db"))
+        .unwrap()
+        .execute(
+            "UPDATE history_records SET document_json = 'corrupted content'
+             WHERE session_id = ?1 AND agent_id = ?1 AND record_id = ?2",
+            rusqlite::params![conv_id, &rec1_id],
+        )
+        .unwrap();
     let corrupted_expansion =
         expand_conversation(&current_context_blocks, &index, None, |id| store.read(id));
     assert_eq!(corrupted_expansion.unreadable_records.len(), 1);
@@ -1860,13 +1873,7 @@ fn cursor_continues_past_an_unreadable_record_with_the_older_ones() {
 
     // Record 2 is missing: its brief stands in, then records 1 and 0 are
     // still expanded by their place in the index.
-    std::fs::remove_file(
-        directory
-            .path()
-            .join("conversation-chain.history")
-            .join(format!("{}.json", ids[2])),
-    )
-    .unwrap();
+    store.remove(&ids[2]);
     let expanded =
         super::expansion::expand_conversation(context.blocks(), &store.entries(), None, |id| {
             store.read(id)
@@ -2148,13 +2155,16 @@ async fn test_be06_history_artifacts_read_range_and_errors() {
     let err_malformed = artifacts.read("not-a-valid-id", None).await.unwrap_err();
     assert!(matches!(err_malformed, StoreError::Read(_)));
 
-    // 2. Record id not in index while a file with that name exists in history directory
+    // 2. Record id not in index while a row with that id exists in SQLite
     let stray_id = uuid::Uuid::now_v7().to_string();
-    let stray_path = dir
-        .path()
-        .join("conversation-be06.history")
-        .join(format!("{stray_id}.json"));
-    std::fs::write(&stray_path, b"{}").unwrap();
+    crate::store::schema::open_read_write(&dir.path().join("tars.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO history_records (session_id, agent_id, record_id, seq, kind, summary_json, document_json)
+             VALUES ('conversation-be06', 'conversation-be06', ?1, 99, 'summarize', '{}', '{}')",
+            rusqlite::params![&stray_id],
+        )
+        .unwrap();
     let err_not_in_index = artifacts
         .read(&format!("{stray_id}/{}", b0.id().0), None)
         .await
@@ -2174,12 +2184,8 @@ async fn test_be06_history_artifacts_read_range_and_errors() {
         .unwrap_err();
     assert!(matches!(err_random_block, StoreError::Read(_)));
 
-    // 4. Record in index but file deleted
-    let record_file = dir
-        .path()
-        .join("conversation-be06.history")
-        .join(format!("{record_id}.json"));
-    std::fs::remove_file(&record_file).unwrap();
+    // 4. Record in index but row deleted
+    store.remove(&record_id);
     let err_file_deleted = artifacts
         .read(&format!("{record_id}/{}", b0.id().0), None)
         .await
@@ -2241,13 +2247,9 @@ fn test_be06_record_id_allocation_and_commit_rewrite_validation() {
         .commit_rewrite(&mut context, rewrite)
         .expect("commit should succeed");
     assert_eq!(entry.record_id, allocated_id);
-    let written_file = dir
-        .path()
-        .join("conversation-rec-alloc.history")
-        .join(format!("{allocated_id}.json"));
-    assert!(written_file.exists());
+    assert!(store.read(&allocated_id).is_ok());
 
-    // Duplicate record id is rejected without leaving a new file
+    // Duplicate record id is rejected without leaving a new row
     let b1 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "another");
     let brief2 = ContextBlock::text(BlockId::new(uuid::Uuid::now_v7()), Role::User, "brief2");
     context.edit().append(vec![b1.clone()]).commit().unwrap();
@@ -2266,12 +2268,8 @@ fn test_be06_record_id_allocation_and_commit_rewrite_validation() {
     let err_dup = store.commit_rewrite(&mut context, dup_rewrite).unwrap_err();
     assert!(matches!(err_dup, RewriteError::Rejected(_)));
 
-    // Non-canonical record id is rejected without leaving a file
+    // Non-canonical record id is rejected without leaving a row
     let bad_id = "NOT-A-CANONICAL-UUID";
-    let bad_file = dir
-        .path()
-        .join("conversation-rec-alloc.history")
-        .join(format!("{bad_id}.json"));
     let bad_rewrite = Rewrite {
         record_id: bad_id.to_string(),
         trigger: HistoryTrigger::Auto,
@@ -2285,7 +2283,7 @@ fn test_be06_record_id_allocation_and_commit_rewrite_validation() {
     };
     let err_bad = store.commit_rewrite(&mut context, bad_rewrite).unwrap_err();
     assert!(matches!(err_bad, RewriteError::Rejected(_)));
-    assert!(!bad_file.exists());
+    assert!(store.read(bad_id).is_err());
 }
 
 pub(super) fn setup_recall_test(

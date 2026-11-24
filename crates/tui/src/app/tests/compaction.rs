@@ -1412,15 +1412,14 @@ async fn test_mc07_tui_micro_compact_zero_reads_on_open_tools_on_demand_and_scro
     }
     app2.event(key(KeyCode::Esc));
 
-    // Delete the MicroCompact record file and press F6 again: degrades cleanly.
-    let history_dir = dir
-        .path()
-        .join("store")
-        .join("sessions")
-        .join(format!("{session_id}.history"));
-    for entry in std::fs::read_dir(&history_dir).unwrap() {
-        std::fs::remove_file(entry.unwrap().path()).unwrap();
-    }
+    // Delete the MicroCompact record row from SQLite and press F6 again: degrades cleanly.
+    let conn = rusqlite::Connection::open(dir.path().join("store").join("tars.db")).unwrap();
+    conn.execute(
+        "DELETE FROM history_records WHERE session_id = ?1 AND agent_id = ?1",
+        rusqlite::params![&session_id],
+    )
+    .unwrap();
+    drop(conn);
     app2.event(key(KeyCode::F(6)));
     until(&mut app2, |a| a.entries[idx].artifact_reads == 8).await;
     if let Some(Panel::Info { lines, .. }) = &app2.panel {

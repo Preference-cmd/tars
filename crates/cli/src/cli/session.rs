@@ -19,6 +19,7 @@ Usage: tars session create --store <directory> --provider <protocol> --model <id
        tars session history <conversation-id> --store <directory> [--last N] [--json]
        tars session repair <conversation-id> --store <directory> [--dry-run | --apply --expected-revision N] [--json]
        tars session export-materials --record <file> --output <new-file>
+       tars session import-legacy --record <file> --store <directory> [--json]
 
 Create options:
   --provider          openai-chat | openai-responses | anthropic (or profile)
@@ -115,6 +116,8 @@ history records.
 
 export-materials extracts validated Context from a v1/v2 session record offline.
 It neither loads configuration nor opens a session; an existing output is refused.
+import-legacy imports a validated tars-session-v2.4 JSON record (and any
+referenced .history/.artifacts files) into SQLite without modifying the source.
 Create saves the fixed definition and materials without calling a model.
 Run reopens that definition, executes, saves, and closes the local instance.
 Model and execution options cannot be overridden during run.

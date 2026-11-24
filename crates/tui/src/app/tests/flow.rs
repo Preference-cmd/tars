@@ -109,15 +109,20 @@ async fn save_failure_keeps_result_owner_and_original_retry_then_export_is_indep
     app.event(ctrl('s'));
     until(&mut app, |_| server.requests.lock().unwrap().len() == 1).await;
     // Keep the separate OS lock open but obstruct the record's pre-write read.
-    // Restoring the exact file allows the same retained operation to retry.
-    let record = app
-        .options
-        .store
-        .join("sessions")
-        .join(format!("{}.json", app.entries[0].id()));
-    let held = app.options.store.join("held.json");
-    std::fs::rename(&record, &held).unwrap();
-    std::fs::create_dir(&record).unwrap();
+    // Restoring the exact policy_json allows the same retained operation to retry.
+    let conn = rusqlite::Connection::open(app.options.store.join("tars.db")).unwrap();
+    let orig_policy: String = conn
+        .query_row(
+            "SELECT policy_json FROM sessions WHERE session_id = ?1",
+            rusqlite::params![app.entries[0].id()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "UPDATE sessions SET policy_json = 'corrupt' WHERE session_id = ?1",
+        rusqlite::params![app.entries[0].id()],
+    )
+    .unwrap();
     server.release.add_permits(1);
     until(&mut app, |a| {
         a.entries[0].execution == "Completed"
@@ -147,8 +152,12 @@ async fn save_failure_keeps_result_owner_and_original_retry_then_export_is_indep
     assert_eq!(exports.len(), 1);
     let recovered = tars_core::material::load(exports[0].path()).unwrap();
     assert!(format!("{recovered:?}").contains("persist me"));
-    std::fs::remove_dir(&record).unwrap();
-    std::fs::rename(&held, &record).unwrap();
+    conn.execute(
+        "UPDATE sessions SET policy_json = ?1 WHERE session_id = ?2",
+        rusqlite::params![orig_policy, app.entries[0].id()],
+    )
+    .unwrap();
+    drop(conn);
     app.event(ctrl('r'));
     until(&mut app, |a| a.entries[0].session.is_none()).await;
     assert_eq!(server.requests.lock().unwrap().len(), 1);

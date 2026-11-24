@@ -6,7 +6,7 @@ const HELP: &str = "TARS — agent application
 
 Usage: tars [--help | --version]
        tars run --provider <protocol> --model <id> (--input <text> | --stdin) [options]
-       tars session <create | run | list | show | compact | history | repair | export-materials> [options]
+       tars session <create | run | list | show | compact | history | repair | export-materials | import-legacy> [options]
        tars tools <status | install> [options]
 
 Commands:
@@ -95,6 +95,7 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                             | "history"
                             | "repair"
                             | "export-materials"
+                            | "import-legacy"
                     )
                 )
                 && (help == "--help" || help == "-h") =>

@@ -84,14 +84,24 @@ async fn test_be16_artifacts_persist_atomic_and_read_ranges_and_64mib_cap() {
     assert_eq!(art_ref.kind, ArtifactKind::FullOutput);
     assert!(art_ref.persisted);
 
-    let artifacts_dir = dir.path().join(format!("{conv_id}.artifacts"));
-    let stored_file = artifacts_dir.join(artifact_uuid);
-    assert!(stored_file.is_file());
-    assert_eq!(std::fs::read(&stored_file).unwrap(), content);
-    let entries: Vec<_> = std::fs::read_dir(&artifacts_dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    let conn = crate::store::schema::open_read_write(&dir.path().join("tars.db")).unwrap();
+    let stored_bytes: Vec<u8> = conn
+        .query_row(
+            "SELECT content FROM artifacts WHERE session_id = ?1 AND agent_id = ?1 AND artifact_id = ?2",
+            rusqlite::params![conv_id, artifact_uuid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_bytes, content);
+    let entries: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT artifact_id FROM artifacts WHERE session_id = ?1 AND agent_id = ?1")
+            .unwrap();
+        stmt.query_map(rusqlite::params![conv_id], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<String>, _>>()
+            .unwrap()
+    };
     assert_eq!(entries, vec![artifact_uuid.to_owned()]);
 
     // Range reads (full, slice, clamped, invalid)
@@ -117,14 +127,81 @@ async fn test_be16_artifacts_persist_atomic_and_read_ranges_and_64mib_cap() {
 
     // Reject oversized (> 64 MiB) artifact on read
     let huge_id = uuid::Uuid::now_v7().to_string();
-    let huge_path = artifacts_dir.join(&huge_id);
-    let huge_file = std::fs::File::create(&huge_path).unwrap();
-    huge_file.set_len((MAX_ARTIFACT_BYTES as u64) + 1).unwrap();
+    conn.execute(
+        "INSERT INTO artifacts (session_id, agent_id, artifact_id, content)
+         VALUES (?1, ?1, ?2, zeroblob(?3))",
+        rusqlite::params![conv_id, &huge_id, (MAX_ARTIFACT_BYTES as i64) + 1],
+    )
+    .unwrap();
     let huge_err = artifacts
         .read(&format!("artifact:{huge_id}"), None)
         .await
         .unwrap_err();
     assert!(matches!(huge_err, StoreError::Read(_)));
+}
+
+#[tokio::test]
+async fn read_spilled_artifact_uses_byte_offsets_for_multibyte_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    let conv_id = "0190a000-0000-7000-8000-000000000018";
+    let store = Arc::new(HistoryStore::new(dir.path(), conv_id, Vec::new()));
+    let artifacts = Arc::new(HistoryArtifacts::new(store.clone()));
+
+    let text = "αβ🚀日本語\n";
+    let bytes = text.as_bytes();
+    assert_eq!(bytes.len(), 18); // 2 + 2 + 4 + 3 + 3 + 3 + 1
+
+    let art_ref = artifacts
+        .persist(
+            bytes,
+            ArtifactHint::new(
+                "read_file",
+                BlockId::new(uuid::Uuid::now_v7()),
+                ArtifactKind::FullOutput,
+            ),
+        )
+        .await
+        .unwrap();
+    let art_uuid = art_ref.id.strip_prefix("artifact:").unwrap();
+
+    // Verify exact byte slices (including inside a 4-byte UTF-8 sequence).
+    store.verify_spilled_artifact(art_uuid).unwrap();
+    assert_eq!(artifacts.read(&art_ref.id, None).await.unwrap(), bytes);
+    assert_eq!(
+        artifacts.read(&art_ref.id, Some(4..8)).await.unwrap(),
+        "🚀".as_bytes()
+    );
+    assert_eq!(
+        artifacts.read(&art_ref.id, Some(2..5)).await.unwrap(),
+        &bytes[2..5]
+    );
+    assert_eq!(
+        artifacts.read(&art_ref.id, Some(14..999)).await.unwrap(),
+        &bytes[14..18]
+    );
+
+    // Force SQLite TEXT storage class to verify CAST(content AS BLOB) uses byte offsets, not char counts.
+    let text_art_uuid = uuid::Uuid::now_v7().to_string();
+    let conn = rusqlite::Connection::open(dir.path().join("tars.db")).unwrap();
+    conn.execute(
+        "INSERT INTO artifacts (session_id, agent_id, artifact_id, content)
+         VALUES (?1, ?1, ?2, ?3)",
+        rusqlite::params![conv_id, &text_art_uuid, text],
+    )
+    .unwrap();
+    store.verify_spilled_artifact(&text_art_uuid).unwrap();
+    assert_eq!(
+        store
+            .read_spilled_artifact(&text_art_uuid, Some(4..8))
+            .unwrap(),
+        "🚀".as_bytes()
+    );
+    assert_eq!(
+        store
+            .read_spilled_artifact(&text_art_uuid, Some(14..999))
+            .unwrap(),
+        &bytes[14..18]
+    );
 }
 
 #[tokio::test]
@@ -307,8 +384,8 @@ async fn test_be16_after_processor_skips_under_threshold_recall_and_existing_art
     assert_eq!(r2.output.artifact.as_ref(), Some(&existing_ref));
     assert_eq!(r2.output.truncation, Truncation::None);
 
-    // No .artifacts directory should even have been created
-    assert!(!dir.path().join(format!("{conv_id}.artifacts")).exists());
+    // No tars.db should even have been created
+    assert!(!dir.path().join("tars.db").exists());
 }
 
 #[tokio::test]
@@ -350,7 +427,7 @@ async fn test_si06_output_spill_exempts_tars_skill_tool_output() {
     assert_eq!(res.output.truncation, Truncation::None);
     assert!(res.output.artifact.is_none());
     assert_eq!(res.output.content.as_str().unwrap(), body);
-    assert!(!dir.path().join(format!("{conv_id}.artifacts")).exists());
+    assert!(!dir.path().join("tars.db").exists());
 }
 
 #[tokio::test]
@@ -718,13 +795,7 @@ async fn test_tb03_e2e_read_file_spill_and_recall_artifact() {
         .as_ref()
         .expect("read_file output must be spilled to .artifacts");
     let uuid_part = art_ref.id.strip_prefix("artifact:").unwrap();
-    assert!(
-        store_dir
-            .path()
-            .join("conversation-recall.artifacts")
-            .join(uuid_part)
-            .is_file()
-    );
+    assert!(store.verify_spilled_artifact(uuid_part).is_ok());
 
     let obj = spilled
         .output

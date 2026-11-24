@@ -1010,19 +1010,33 @@ async fn test_mc09_hot_and_cold_micro_compaction_on_all_three_wire_protocols() {
             .await
             .unwrap();
 
-        // Age persisted last_call timestamp by 6 minutes in the saved session record.
-        let rec_path = cold_store
-            .path()
-            .join("sessions")
-            .join(format!("{}.json", cold_id.as_str()));
-        let mut saved_json: Value =
-            serde_json::from_slice(&std::fs::read(&rec_path).unwrap()).unwrap();
-        let prev_ts = saved_json["usage"]["last_call"]["timestamp_ms"]
+        // Age persisted last_call timestamp by 6 minutes in SQLite tars.db.
+        let conn = rusqlite::Connection::open(cold_store.path().join("tars.db")).unwrap();
+        let usage_json: String = conn
+            .query_row(
+                "SELECT usage_json FROM sessions WHERE session_id = ?1",
+                rusqlite::params![cold_id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut usage_val: Value = serde_json::from_str(&usage_json).unwrap();
+        let prev_ts = usage_val["last_call"]["timestamp_ms"]
             .as_u64()
             .expect("persisted last_call timestamp_ms");
-        saved_json["usage"]["last_call"]["timestamp_ms"] =
+        usage_val["last_call"]["timestamp_ms"] =
             serde_json::json!(prev_ts.saturating_sub(6 * 60 * 1_000));
-        std::fs::write(&rec_path, serde_json::to_vec(&saved_json).unwrap()).unwrap();
+        let aged_usage = serde_json::to_string(&usage_val).unwrap();
+        conn.execute(
+            "UPDATE sessions SET usage_json = ?1 WHERE session_id = ?2",
+            rusqlite::params![&aged_usage, cold_id.as_str()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE agents SET usage_json = ?1 WHERE session_id = ?2 AND agent_id = ?2",
+            rusqlite::params![&aged_usage, cold_id.as_str()],
+        )
+        .unwrap();
+        drop(conn);
 
         let reopened = cold_host.open(cold_id).await.unwrap();
         let cold_turn = reopened

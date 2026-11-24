@@ -38,9 +38,9 @@ pub(super) async fn initialize(
         let saved_context = record.as_ref().map(|record| record.context.clone());
         let id = entry.target.conversation_id.as_str().to_owned();
         saving::io(host, move || {
-            crate::compact::history::cleanup_records(store.directory(), &id, &history)?;
+            crate::compact::history::cleanup_records(store.root(), &id, &history)?;
             crate::compact::history::cleanup_artifacts(
-                store.directory(),
+                store.root(),
                 &id,
                 &history,
                 saved_context.as_ref(),
@@ -473,11 +473,7 @@ async fn assembled(
         None => crate::skills::SkillRegistry::new(),
     };
     let base = crate::assembly::SessionResources::new(host.tool_resources.clone())
-        .with_storage(
-            host.store
-                .as_ref()
-                .map(|store| store.directory().to_path_buf()),
-        )
+        .with_storage(host.store.as_ref().map(|store| store.root().to_path_buf()))
         .with_compaction(history, auto_compact, compact_threshold)
         .with_usage(usage)
         .with_skills(Arc::new(std::sync::RwLock::new(registry)))

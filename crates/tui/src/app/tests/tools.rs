@@ -303,14 +303,20 @@ async fn save_blocked_after_real_tools_exports_and_retries_original_material_wit
     app.event(Event::Paste("Find recovery path".into()));
     app.event(key(KeyCode::Enter));
     until(&mut app, |_| fixture.requests.lock().unwrap().len() == 3).await;
-    let record = app
-        .options
-        .store
-        .join("sessions")
-        .join(format!("{}.json", app.entries[0].id()));
-    let held = dir.path().join("held.json");
-    std::fs::rename(&record, &held).unwrap();
-    std::fs::create_dir(&record).unwrap();
+    // Corrupt policy_json in tars.db so the pre-write read fails with SaveBlocked.
+    let conn = rusqlite::Connection::open(app.options.store.join("tars.db")).unwrap();
+    let orig_policy: String = conn
+        .query_row(
+            "SELECT policy_json FROM sessions WHERE session_id = ?1",
+            rusqlite::params![app.entries[0].id()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "UPDATE sessions SET policy_json = 'corrupt' WHERE session_id = ?1",
+        rusqlite::params![app.entries[0].id()],
+    )
+    .unwrap();
     fixture.finish();
     until(&mut app, |a| {
         a.entries[0].execution == "Completed"
@@ -354,8 +360,12 @@ async fn save_blocked_after_real_tools_exports_and_retries_original_material_wit
             .count(),
         2
     );
-    std::fs::remove_dir(&record).unwrap();
-    std::fs::rename(held, &record).unwrap();
+    conn.execute(
+        "UPDATE sessions SET policy_json = ?1 WHERE session_id = ?2",
+        rusqlite::params![orig_policy, app.entries[0].id()],
+    )
+    .unwrap();
+    drop(conn);
     app.event(ctrl('r'));
     until(&mut app, |a| {
         matches!(
@@ -498,15 +508,14 @@ async fn test_be17_tui_opens_with_zero_artifact_reads_and_tools_expands_on_deman
     }
     app2.event(key(KeyCode::Esc));
 
-    // 3. Delete the .artifacts/<id> file and press F6 again: degrades to preview + cannot be read
-    let art_dir = dir
-        .path()
-        .join("store")
-        .join("sessions")
-        .join(format!("{session_id}.artifacts"));
-    for entry in std::fs::read_dir(&art_dir).unwrap() {
-        std::fs::remove_file(entry.unwrap().path()).unwrap();
-    }
+    // 3. Delete the spilled artifact row from SQLite and press F6 again: degrades to preview + cannot be read
+    let conn = rusqlite::Connection::open(dir.path().join("store").join("tars.db")).unwrap();
+    conn.execute(
+        "DELETE FROM artifacts WHERE session_id = ?1 AND agent_id = ?1",
+        rusqlite::params![&session_id],
+    )
+    .unwrap();
+    drop(conn);
 
     app2.event(key(KeyCode::F(6)));
     until(&mut app2, |a| a.entries[idx].artifact_reads == 2).await;

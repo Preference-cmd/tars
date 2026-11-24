@@ -73,15 +73,8 @@ async fn managed_preview_arrives_before_terminal_and_only_final_output_is_saved(
     ));
     assert_eq!(observed.load(Ordering::SeqCst), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let path = root
-        .path()
-        .join("sessions")
-        .join(format!("{}.json", id.as_str()));
-    assert!(
-        !std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("temporary preview")
-    );
+    let saved = serde_json::to_string(&saved_record(root.path(), id.as_str())).unwrap();
+    assert!(!saved.contains("temporary preview"));
     release.notify_one();
     finished(&session, &receipt.work).await;
     session.wait_saved().await.unwrap();
@@ -89,7 +82,7 @@ async fn managed_preview_arrives_before_terminal_and_only_final_output_is_saved(
         recv(&mut progress).await.update,
         ProgressUpdate::ModelOutputReady
     );
-    let saved = std::fs::read_to_string(&path).unwrap();
+    let saved = serde_json::to_string(&saved_record(root.path(), id.as_str())).unwrap();
     assert!(saved.contains("authoritative saved output"));
     assert!(!saved.contains("temporary preview"));
     host.close(&session.target(), ClosePolicy::Save)
@@ -133,15 +126,8 @@ async fn managed_cancelled_failed_and_eof_streams_save_no_partial_model_text() {
             matches!(session.observe(&receipt.work).unwrap().state,WorkState::Finished(result) if matches!(&*result,WorkResult::Run(causa::runtime::TurnResult::Interrupted{..})))
         );
         assert_eq!(session.read_materials().unwrap().context.blocks().len(), 1);
-        assert!(
-            !std::fs::read_to_string(
-                root.path()
-                    .join("sessions")
-                    .join(format!("{}.json", id.as_str()))
-            )
-            .unwrap()
-            .contains("partial-preview")
-        );
+        let saved = serde_json::to_string(&saved_record(root.path(), id.as_str())).unwrap();
+        assert!(!saved.contains("partial-preview"));
         assert!(matches!(
             progress.try_recv(),
             Err(broadcast::error::TryRecvError::Empty)

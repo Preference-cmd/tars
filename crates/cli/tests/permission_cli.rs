@@ -740,14 +740,16 @@ fn session_lifecycle_full_access_reverts_to_ask_on_reopen() {
     );
     assert!(workspace.join("fa.txt").exists());
 
-    let records: Vec<_> = fs::read_dir(store.join("sessions"))
+    let perm_mode: Option<String> = {
+        let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+        conn.query_row(
+            "SELECT permission_mode FROM sessions WHERE session_id = ?1",
+            rusqlite::params![&id],
+            |row| row.get(0),
+        )
         .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
-        .collect();
-    assert_eq!(records.len(), 1);
-    let record_content = fs::read_to_string(records[0].path()).unwrap();
-    assert!(record_content.contains("\"permission_mode\":\"full-access\""));
+    };
+    assert_eq!(perm_mode.as_deref(), Some("full-access"));
 
     // Reopen without flags: full-access reverts to ask, so the write is rejected.
     let child2 = Command::new(env!("CARGO_BIN_EXE_tars"))
@@ -790,7 +792,6 @@ fn session_lifecycle_full_access_reverts_to_ask_on_reopen() {
 
 #[test]
 fn session_run_mode_change_save_failure_does_not_submit_and_exits_code_1() {
-    use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
     fs::create_dir_all(&workspace).unwrap();
@@ -828,21 +829,12 @@ fn session_run_mode_change_save_failure_does_not_submit_and_exits_code_1() {
     let rep: Value = serde_json::from_slice(&out.stdout).unwrap();
     let id = rep["conversation_id"].as_str().unwrap().to_owned();
 
-    let sessions_dir = store.join("sessions");
-    struct Restore(std::path::PathBuf);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
-        }
-    }
-    let _restore = Restore(sessions_dir.clone());
-    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let probe = sessions_dir.join("probe-write");
-    if std::fs::write(&probe, "").is_ok() {
-        let _ = std::fs::remove_file(probe);
-        eprintln!("filesystem permissions are bypassed; save-failure fixture unavailable");
-        return;
-    }
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER test_block_save BEFORE UPDATE ON sessions
+         BEGIN SELECT RAISE(ABORT, 'injected save failure'); END;",
+    )
+    .unwrap();
 
     // The mode change needs a save; both text and JSON must exit 1 without
     // submitting the input.
@@ -908,23 +900,35 @@ fn session_run_mode_change_save_failure_does_not_submit_and_exits_code_1() {
     // Fixture should NOT have received any model requests (input was not submitted)
     assert_eq!(fixture.requests.lock().unwrap().len(), 0);
 
-    drop(_restore);
-    std::fs::set_permissions(&sessions_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    conn.execute_batch("DROP TRIGGER test_block_save;").unwrap();
 
-    let record_path = sessions_dir.join(format!("{id}.json"));
-    let record_str = std::fs::read_to_string(&record_path).expect("read session record file");
-    let record_val: Value = serde_json::from_str(&record_str).expect("parse session record json");
-
-    assert_eq!(record_val["format"], "tars-session-v2.4");
-    assert!(record_val["definition"].get("permission_mode").is_none());
-    assert!(record_val.get("usage").is_none());
+    let (policy_json, def_json, perm_mode, usage_json): (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    ) = conn
+        .query_row(
+            "SELECT s.policy_json, a.definition_json, s.permission_mode, s.usage_json
+             FROM sessions s
+             JOIN agents a ON s.session_id = a.session_id AND s.entry_agent_id = a.agent_id
+             WHERE s.session_id = ?1",
+            rusqlite::params![&id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    let policy_val: Value = serde_json::from_str(&policy_json).unwrap();
+    let def_val: Value = serde_json::from_str(&def_json).unwrap();
+    assert_eq!(policy_val["format"], "tars-session-v2.4");
+    assert!(def_val.get("permission_mode").is_none());
+    assert!(usage_json.is_none());
     // DiscardLocal must drop accept-edits; Ask stays implicit in the record.
     assert!(
-        record_val.get("permission_mode").is_none(),
+        perm_mode.is_none(),
         "record must omit permission_mode when current mode is creation mode (ask)"
     );
     assert_ne!(
-        record_val.get("permission_mode").and_then(Value::as_str),
+        perm_mode.as_deref(),
         Some("accept-edits"),
         "DiscardLocal must not leave accept-edits in record"
     );

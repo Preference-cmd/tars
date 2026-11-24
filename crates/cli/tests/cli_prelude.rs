@@ -230,9 +230,20 @@ api_key_env = "TARS_PRELUDE_KEY"
     );
     let id = created["conversation_id"].as_str().unwrap();
 
-    let record_bytes =
-        fs::read(dir.path().join("store/sessions").join(format!("{id}.json"))).unwrap();
-    let record: Value = serde_json::from_slice(&record_bytes).unwrap();
+    let record: Value = {
+        let conn = rusqlite::Connection::open(dir.path().join("store/tars.db")).unwrap();
+        let (def_json, ctx_json): (String, String) = conn
+            .query_row(
+                "SELECT definition_json, context_json FROM agents WHERE session_id = ?1 AND agent_id = ?1",
+                rusqlite::params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        json!({
+            "definition": serde_json::from_str::<Value>(&def_json).unwrap(),
+            "context": serde_json::from_str::<Value>(&ctx_json).unwrap(),
+        })
+    };
     assert_eq!(
         record["definition"]["prelude"]["static_custom"],
         "CLI_STATIC_FROM_FILE"
@@ -301,10 +312,20 @@ api_key_env = "TARS_PRELUDE_KEY"
             .unwrap(),
     );
     let id2 = no_skills_created["conversation_id"].as_str().unwrap();
-    let record2: Value = serde_json::from_slice(
-        &fs::read(no_skills_store.join("sessions").join(format!("{id2}.json"))).unwrap(),
-    )
-    .unwrap();
+    let record2: Value = {
+        let conn = rusqlite::Connection::open(no_skills_store.join("tars.db")).unwrap();
+        let (def_json, ctx_json): (String, String) = conn
+            .query_row(
+                "SELECT definition_json, context_json FROM agents WHERE session_id = ?1 AND agent_id = ?1",
+                rusqlite::params![id2],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        json!({
+            "definition": serde_json::from_str::<Value>(&def_json).unwrap(),
+            "context": serde_json::from_str::<Value>(&ctx_json).unwrap(),
+        })
+    };
     assert_eq!(record2["definition"]["prelude"]["skills_enabled"], false);
     assert_eq!(
         record2["definition"]["prelude"]["static_custom"],
@@ -474,8 +495,18 @@ fn session_show_reports_prelude_and_skills_summary_without_credentials() {
             .unwrap(),
     );
     let id = created["conversation_id"].as_str().unwrap();
-    let record_path = store.join("sessions").join(format!("{id}.json"));
-    let before_bytes = fs::read(&record_path).unwrap();
+    let before_bytes: (i64, String, String, String) = {
+        let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+        conn.query_row(
+            "SELECT s.revision, s.last_commit_id, a.definition_json, a.context_json
+             FROM sessions s
+             JOIN agents a ON s.session_id = a.session_id AND s.entry_agent_id = a.agent_id
+             WHERE s.session_id = ?1",
+            rusqlite::params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+    };
 
     // Run `session show` WITHOUT setting TARS_PRELUDE_KEY!
     let show_json = json_out(
@@ -529,8 +560,20 @@ fn session_show_reports_prelude_and_skills_summary_without_credentials() {
         "{text}"
     );
 
-    // Record file is strictly untouched.
-    assert_eq!(fs::read(&record_path).unwrap(), before_bytes);
+    // Record in SQLite is strictly untouched.
+    let after_bytes: (i64, String, String, String) = {
+        let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+        conn.query_row(
+            "SELECT s.revision, s.last_commit_id, a.definition_json, a.context_json
+             FROM sessions s
+             JOIN agents a ON s.session_id = a.session_id AND s.entry_agent_id = a.agent_id
+             WHERE s.session_id = ?1",
+            rusqlite::params![id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(after_bytes, before_bytes);
 
     // Also verify `session show` with inline dynamic_custom, no static_custom, and --no-skills.
     let created_inline = json_out(

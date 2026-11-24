@@ -275,10 +275,8 @@ async fn repair_ui_waiting_panel_dismissal_does_not_cancel_the_original_work() {
         .unwrap();
 }
 
-#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repair_ui_save_failure_keeps_applied_materials_and_draft_then_retries_same_commit() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let mut app = app(dir.path());
     incomplete(&mut app, Provider::Anthropic, "http://127.0.0.1:1/unused").await;
@@ -286,18 +284,12 @@ async fn repair_ui_save_failure_keeps_applied_materials_and_draft_then_retries_s
     app.event(Event::Paste("keep after repair".into()));
     inspect(&mut app).await;
     plan(&mut app).await;
-    let sessions = dir.path().join("store/sessions");
-    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let probe = sessions.join("permission-probe");
-    if std::fs::write(&probe, "").is_ok() {
-        std::fs::remove_file(probe).unwrap();
-        std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
-        app.host
-            .close(&session.target(), ClosePolicy::Save)
-            .await
-            .unwrap();
-        return;
-    }
+    let conn = rusqlite::Connection::open(dir.path().join("store/tars.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER test_block_save BEFORE UPDATE ON sessions
+         BEGIN SELECT RAISE(ABORT, 'injected save failure'); END;",
+    )
+    .unwrap();
     advance_past_repair_window(&mut app);
     app.event(key(KeyCode::Enter));
     until(&mut app, |app| {
@@ -312,21 +304,20 @@ async fn repair_ui_save_failure_keeps_applied_materials_and_draft_then_retries_s
     };
     assert_eq!(app.entries[0].editor.lines(), &["keep after repair"]);
     assert!(session.inspect_repair(None).unwrap().diagnosis.is_ready());
-    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700)).unwrap();
+    conn.execute_batch("DROP TRIGGER test_block_save;").unwrap();
     app.event(ctrl('r'));
     until(&mut app, |app| {
         app.entries[0].busy.is_none() && app.entries[0].status.contains("saved r2")
     })
     .await;
-    let record: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(sessions.join(format!(
-            "{}.json",
-            session.target().conversation_id().as_str()
-        )))
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(record["last_commit_id"], commit);
+    let saved_commit: String = conn
+        .query_row(
+            "SELECT last_commit_id FROM sessions WHERE session_id = ?1",
+            rusqlite::params![session.target().conversation_id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(saved_commit, commit);
     assert_eq!(app.entries[0].execution, "Original execution label");
     assert_eq!(app.entries[0].editor.lines(), &["keep after repair"]);
     app.host

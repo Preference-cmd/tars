@@ -40,3 +40,6 @@ regex = "1"
 # (`run_code`). Default features (`std`) are disabled to prevent rquickjs from
 # printing promise interrupt errors directly to stdout.
 rquickjs = { version = "0.14.0", default-features = false, features = ["futures"] }
+# Local-first embedded SQLite v3 store for sessions, multi-agent state,
+# event mailbox, compaction history, spilled artifacts, and workspace trust.
+rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }

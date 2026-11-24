@@ -234,12 +234,19 @@ async fn discard_reports_unresolved_initial_confirmation_without_claiming_rollba
         .err()
         .expect("initial blocked");
     let target = host.lookup(prepared.conversation_id()).unwrap().target;
-    let file = root
-        .path()
-        .join("sessions")
-        .join(format!("{}.json", prepared.conversation_id().as_str()));
-    let committed = std::fs::read(&file).unwrap();
-    std::fs::write(&file, b"corrupt interference").unwrap();
+    let conn = crate::store::schema::open_read_write(&root.path().join("tars.db")).unwrap();
+    let orig_policy: String = conn
+        .query_row(
+            "SELECT policy_json FROM sessions WHERE session_id = ?1",
+            rusqlite::params![prepared.conversation_id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "UPDATE sessions SET policy_json = 'corrupt interference' WHERE session_id = ?1",
+        rusqlite::params![prepared.conversation_id().as_str()],
+    )
+    .unwrap();
     let outcome = host
         .close(&target, ClosePolicy::DiscardLocal)
         .await
@@ -252,8 +259,20 @@ async fn discard_reports_unresolved_initial_confirmation_without_claiming_rollba
         })
     ));
     assert!(matches!(outcome.save, SaveStatus::SaveBlocked { .. }));
-    assert_eq!(std::fs::read(&file).unwrap(), b"corrupt interference");
-    std::fs::write(&file, committed).unwrap();
+    let current_policy: String = conn
+        .query_row(
+            "SELECT policy_json FROM sessions WHERE session_id = ?1",
+            rusqlite::params![prepared.conversation_id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(current_policy, "corrupt interference");
+    conn.execute(
+        "UPDATE sessions SET policy_json = ?1 WHERE session_id = ?2",
+        rusqlite::params![orig_policy, prepared.conversation_id().as_str()],
+    )
+    .unwrap();
+    drop(conn);
     let reopened = host.open(prepared.conversation_id().clone()).await.unwrap();
     host.close(&reopened.target(), ClosePolicy::Save)
         .await
@@ -463,12 +482,19 @@ async fn corrupt_open_releases_slot_without_overwrite_and_retries_after_explicit
         .unwrap();
     let original = session.target();
     host.close(&original, ClosePolicy::Save).await.unwrap();
-    let path = root
-        .path()
-        .join("sessions")
-        .join(format!("{}.json", original.conversation_id().as_str()));
-    let valid_record = std::fs::read(&path).unwrap();
-    std::fs::write(&path, b"invalid fixture JSON").unwrap();
+    let conn = crate::store::schema::open_read_write(&root.path().join("tars.db")).unwrap();
+    let valid_context: String = conn
+        .query_row(
+            "SELECT context_json FROM agents WHERE session_id = ?1 AND agent_id = ?1",
+            rusqlite::params![original.conversation_id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "UPDATE agents SET context_json = 'invalid fixture JSON' WHERE session_id = ?1 AND agent_id = ?1",
+        rusqlite::params![original.conversation_id().as_str()],
+    )
+    .unwrap();
     *host.inner.assemble.lock().unwrap() = Some(Arc::new(|_, _, _| {
         panic!("corrupt record must fail before assembly")
     }));
@@ -477,13 +503,25 @@ async fn corrupt_open_releases_slot_without_overwrite_and_retries_after_explicit
         Err(ApplicationError::Store(_))
     ));
     assert!(host.lookup(original.conversation_id()).is_none());
-    assert_eq!(std::fs::read(&path).unwrap(), b"invalid fixture JSON");
+    let after_context: String = conn
+        .query_row(
+            "SELECT context_json FROM agents WHERE session_id = ?1 AND agent_id = ?1",
+            rusqlite::params![original.conversation_id().as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(after_context, "invalid fixture JSON");
     let writer = crate::store::SessionStore::new(root.path().into())
         .acquire_writer(original.conversation_id().as_str())
         .unwrap();
     assert!(writer.read_latest().is_err());
     drop(writer);
-    std::fs::write(&path, valid_record).unwrap();
+    conn.execute(
+        "UPDATE agents SET context_json = ?1 WHERE session_id = ?2 AND agent_id = ?2",
+        rusqlite::params![valid_context, original.conversation_id().as_str()],
+    )
+    .unwrap();
+    drop(conn);
     normal_fixture(&host);
     let reopened = host.open(original.conversation_id().clone()).await.unwrap();
     assert_ne!(reopened.target(), original);

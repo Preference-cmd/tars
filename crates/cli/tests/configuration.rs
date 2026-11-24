@@ -22,6 +22,97 @@ fn json(output: Output) -> Value {
     assert!(output.status.success(), "{output:?}");
     serde_json::from_slice(&output.stdout).unwrap()
 }
+fn read_db_record(store: &Path, id: &str) -> Value {
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    struct DbRow {
+        revision: i64,
+        last_commit_id: String,
+        policy_json: String,
+        title: Option<String>,
+        permission_mode: Option<String>,
+        auto_compact: Option<i64>,
+        compact_threshold: Option<i64>,
+        usage_json: Option<String>,
+        updated_at_ms: i64,
+        def_json: String,
+        ctx_json: String,
+        history_json: String,
+    }
+    let DbRow {
+        revision,
+        last_commit_id,
+        policy_json,
+        title,
+        permission_mode,
+        auto_compact,
+        compact_threshold,
+        usage_json,
+        updated_at_ms,
+        def_json,
+        ctx_json,
+        history_json,
+    } = conn
+        .query_row(
+            "SELECT
+                s.revision, s.last_commit_id, s.policy_json, s.title, s.permission_mode,
+                s.auto_compact, s.compact_threshold, s.usage_json, s.updated_at_ms,
+                a.definition_json, a.context_json, a.history_index_json
+             FROM sessions s
+             JOIN agents a ON s.session_id = a.session_id AND s.entry_agent_id = a.agent_id
+             WHERE s.session_id = ?1",
+            rusqlite::params![id],
+            |row| {
+                Ok(DbRow {
+                    revision: row.get(0)?,
+                    last_commit_id: row.get(1)?,
+                    policy_json: row.get(2)?,
+                    title: row.get(3)?,
+                    permission_mode: row.get(4)?,
+                    auto_compact: row.get(5)?,
+                    compact_threshold: row.get(6)?,
+                    usage_json: row.get(7)?,
+                    updated_at_ms: row.get(8)?,
+                    def_json: row.get(9)?,
+                    ctx_json: row.get(10)?,
+                    history_json: row.get(11)?,
+                })
+            },
+        )
+        .unwrap();
+    let policy: Value = serde_json::from_str(&policy_json).unwrap();
+    let mut obj = serde_json::Map::new();
+    obj.insert("format".into(), policy["format"].clone());
+    obj.insert("conversation_id".into(), serde_json::json!(id));
+    obj.insert("revision".into(), serde_json::json!(revision));
+    obj.insert("last_commit_id".into(), serde_json::json!(last_commit_id));
+    obj.insert(
+        "definition".into(),
+        serde_json::from_str(&def_json).unwrap(),
+    );
+    obj.insert("context".into(), serde_json::from_str(&ctx_json).unwrap());
+    if let Some(t) = title {
+        obj.insert("title".into(), serde_json::json!(t));
+    }
+    obj.insert("updated_at_ms".into(), serde_json::json!(updated_at_ms));
+    if let Some(m) = permission_mode {
+        obj.insert("permission_mode".into(), serde_json::json!(m));
+    }
+    if let Some(a) = auto_compact {
+        obj.insert("auto_compact".into(), serde_json::json!(a != 0));
+    }
+    if let Some(ct) = compact_threshold {
+        obj.insert("compact_threshold".into(), serde_json::json!(ct));
+    }
+    let history: Vec<Value> = serde_json::from_str(&history_json).unwrap();
+    if !history.is_empty() {
+        obj.insert("history".into(), Value::Array(history));
+    }
+    if let Some(u) = usage_json {
+        obj.insert("usage".into(), serde_json::from_str(&u).unwrap());
+    }
+    Value::Object(obj)
+}
+
 #[test]
 fn explicit_config_and_overrides_share_paths_and_do_not_mutate_saved_definitions() {
     let dir = tempfile::tempdir().unwrap();
@@ -36,11 +127,8 @@ fn explicit_config_and_overrides_share_paths_and_do_not_mutate_saved_definitions
             .unwrap(),
     );
     let id = created["conversation_id"].as_str().unwrap();
-    let record_path = dir
-        .path()
-        .join("configured-data/sessions")
-        .join(format!("{id}.json"));
-    let before = std::fs::read_to_string(&record_path).unwrap();
+    let configured_store = dir.path().join("configured-data");
+    let before = serde_json::to_string(&read_db_record(&configured_store, id)).unwrap();
     assert!(before.contains("saved-model"));
     assert!(!before.contains("fixture-only"));
     let other = json(
@@ -72,7 +160,10 @@ fn explicit_config_and_overrides_share_paths_and_do_not_mutate_saved_definitions
         config().replace("saved-model", "changed-global-model"),
     )
     .unwrap();
-    assert_eq!(std::fs::read_to_string(record_path).unwrap(), before);
+    assert_eq!(
+        serde_json::to_string(&read_db_record(&configured_store, id)).unwrap(),
+        before
+    );
     let explicit_store = dir.path().join("explicit-data");
     let listed = json(
         cli(dir.path())
@@ -98,14 +189,10 @@ fn discovery_precedence_disabled_and_invalid_config_are_observable() {
             .output()
             .unwrap(),
     );
-    assert!(
-        global
-            .join("configured-data/sessions")
-            .join(format!(
-                "{}.json",
-                default["conversation_id"].as_str().unwrap()
-            ))
-            .exists()
+    assert!(global.join("configured-data/tars.db").exists());
+    let _ = read_db_record(
+        &global.join("configured-data"),
+        default["conversation_id"].as_str().unwrap(),
     );
     let fallback_home = dir.path().join("fallback-home");
     let dot_tars = fallback_home.join(".tars");
@@ -120,14 +207,10 @@ fn discovery_precedence_disabled_and_invalid_config_are_observable() {
             .output()
             .unwrap(),
     );
-    assert!(
-        dot_tars
-            .join("configured-data/sessions")
-            .join(format!(
-                "{}.json",
-                fallback["conversation_id"].as_str().unwrap()
-            ))
-            .exists()
+    assert!(dot_tars.join("configured-data/tars.db").exists());
+    let _ = read_db_record(
+        &dot_tars.join("configured-data"),
+        fallback["conversation_id"].as_str().unwrap(),
     );
     let env_path = dir.path().join("environment.toml");
     std::fs::write(&env_path, config().replace("saved-model", "env-model")).unwrap();
@@ -138,11 +221,11 @@ fn discovery_precedence_disabled_and_invalid_config_are_observable() {
             .output()
             .unwrap(),
     );
-    let record = std::fs::read_to_string(dir.path().join("configured-data/sessions").join(
-        format!("{}.json", environment["conversation_id"].as_str().unwrap()),
-    ))
-    .unwrap();
-    assert!(record.contains("env-model"));
+    let record = read_db_record(
+        &dir.path().join("configured-data"),
+        environment["conversation_id"].as_str().unwrap(),
+    );
+    assert_eq!(record["definition"]["model"], "env-model");
     let missing = dir.path().join("missing.toml");
     let output = cli(dir.path())
         .env("TARS_CONFIG", missing)
@@ -205,11 +288,10 @@ fn workspace_selection_is_explicit_resolved_and_frozen_with_empty_override() {
         first["tools"],
         serde_json::json!(["read_file", "search_text"])
     );
-    let record = dir.path().join("configured-data/sessions").join(format!(
-        "{}.json",
-        created["conversation_id"].as_str().unwrap()
-    ));
-    let frozen = std::fs::read(&record).unwrap();
+    let frozen = read_db_record(
+        &dir.path().join("configured-data"),
+        created["conversation_id"].as_str().unwrap(),
+    );
     let disabled = json(
         cli(dir.path())
             .args(["session", "create", "--config"])
@@ -233,7 +315,13 @@ fn workspace_selection_is_explicit_resolved_and_frozen_with_empty_override() {
         .find(|item| item["conversation_id"] == disabled["conversation_id"])
         .unwrap();
     assert_eq!(second["definition"]["tools"], serde_json::json!([]));
-    assert_eq!(std::fs::read(record).unwrap(), frozen);
+    assert_eq!(
+        read_db_record(
+            &dir.path().join("configured-data"),
+            created["conversation_id"].as_str().unwrap(),
+        ),
+        frozen
+    );
     // A workspace on its own never grants a tool capability.
     let store = dir.path().join("explicit");
     json(
@@ -300,22 +388,25 @@ fn legacy_record_has_an_offline_non_overwriting_material_export_path() {
             .unwrap(),
     );
     let id = created["conversation_id"].as_str().unwrap();
-    let record = store.join("sessions").join(format!("{id}.json"));
-    let mut value: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    let mut value = read_db_record(&store, id);
     value["format"] = serde_json::json!("tars-session-v1");
     for key in ["workspace_root", "tools", "tool_limits"] {
         value["definition"].as_object_mut().unwrap().remove(key);
     }
+    let record = dir.path().join(format!("{id}-v1.json"));
     std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
     let original = std::fs::read(&record).unwrap();
-    let reopened = cli(dir.path())
-        .args(["session", "run", id, "--no-config", "--store"])
-        .arg(&store)
-        .args(["--input", "continue", "--json"])
+    let import_store = dir.path().join("import-store");
+    let imported = cli(dir.path())
+        .args(["session", "import-legacy", "--no-config", "--record"])
+        .arg(&record)
+        .arg("--store")
+        .arg(&import_store)
+        .arg("--json")
         .output()
         .unwrap();
-    assert_eq!(reopened.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&reopened.stdout).contains("unsupported session format"));
+    assert_eq!(imported.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&imported.stdout).contains("unsupported session format"));
     let exported = dir.path().join("export.json");
     let result = cli(dir.path())
         .env("TARS_CONFIG", dir.path().join("missing.toml"))
@@ -375,20 +466,23 @@ fn v2_record_is_refused_with_the_export_path_and_left_unchanged() {
             .unwrap(),
     );
     let id = created["conversation_id"].as_str().unwrap();
-    let record = store.join("sessions").join(format!("{id}.json"));
-    let mut value: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    let mut value = read_db_record(&store, id);
     assert_eq!(value["format"], "tars-session-v2.4");
     value["format"] = serde_json::json!("tars-session-v2");
+    let record = dir.path().join(format!("{id}-v2.json"));
     std::fs::write(&record, serde_json::to_vec(&value).unwrap()).unwrap();
     let original = std::fs::read(&record).unwrap();
-    let reopened = cli(dir.path())
-        .args(["session", "run", id, "--no-config", "--store"])
-        .arg(&store)
-        .args(["--input", "continue", "--json"])
+    let import_store = dir.path().join("import-store");
+    let imported = cli(dir.path())
+        .args(["session", "import-legacy", "--no-config", "--record"])
+        .arg(&record)
+        .arg("--store")
+        .arg(&import_store)
+        .arg("--json")
         .output()
         .unwrap();
-    assert_eq!(reopened.status.code(), Some(1));
-    let stdout = String::from_utf8_lossy(&reopened.stdout);
+    assert_eq!(imported.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&imported.stdout);
     assert!(
         stdout.contains("unsupported session format: tars-session-v2;"),
         "{stdout}"
@@ -460,9 +554,8 @@ max_edit_segments = 16
     let created = json(create_output);
     let id = created["conversation_id"].as_str().unwrap();
 
-    let record_path = dir.path().join("store/sessions").join(format!("{id}.json"));
-    let record_bytes = std::fs::read(&record_path).unwrap();
-    let record_str = String::from_utf8_lossy(&record_bytes);
+    let stored = read_db_record(&dir.path().join("store"), id);
+    let record_str = serde_json::to_string(&stored).unwrap();
 
     assert!(
         !record_str.contains(secret_val),
@@ -473,11 +566,13 @@ max_edit_segments = 16
         "record must contain credential variable name reference"
     );
 
+    let snapshot_record = dir.path().join(format!("{id}-snapshot.json"));
+    std::fs::write(&snapshot_record, serde_json::to_vec(&stored).unwrap()).unwrap();
     let exported = dir.path().join("exported.json");
     let export_res = cli(dir.path())
         .env(secret_env, secret_val)
         .args(["session", "export-materials", "--record"])
-        .arg(&record_path)
+        .arg(&snapshot_record)
         .arg("--output")
         .arg(&exported)
         .output()
@@ -611,12 +706,8 @@ fn mcp_json() -> &'static str {
 }"#
 }
 
-fn session_record(dir: &Path, id: &str) -> (std::path::PathBuf, Value) {
-    let path = dir.join("store/sessions").join(format!("{id}.json"));
-    (
-        path.clone(),
-        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap(),
-    )
+fn session_record(dir: &Path, id: &str) -> Value {
+    read_db_record(&dir.join("store"), id)
 }
 
 #[tokio::test]
@@ -644,7 +735,7 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
     // Preset selection freezes the git server only.
     let preset = create(&[]);
     let preset_id = preset["conversation_id"].as_str().unwrap();
-    let (preset_record, preset_json) = session_record(dir.path(), preset_id);
+    let preset_json = session_record(dir.path(), preset_id);
     let servers = preset_json["definition"]["mcp_servers"].as_array().unwrap();
     assert_eq!(servers.len(), 1);
     let git = &servers[0];
@@ -671,14 +762,14 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
     assert!(git.get("headers").is_none());
     assert!(git.get("env_vars").is_none());
     assert!(git.get("bearer_token_env_var").is_none());
-    let preset_bytes = std::fs::read_to_string(&preset_record).unwrap();
+    let preset_bytes = serde_json::to_string(&preset_json).unwrap();
     assert!(!preset_bytes.contains(secret));
     assert!(!preset_bytes.contains(token_env));
 
     // Explicit --mcp replaces the preset and keeps only variable names.
     let explicit = create(&["--mcp", "git,docs"]);
     let explicit_id = explicit["conversation_id"].as_str().unwrap();
-    let (explicit_record, explicit_json) = session_record(dir.path(), explicit_id);
+    let explicit_json = session_record(dir.path(), explicit_id);
     let servers = explicit_json["definition"]["mcp_servers"]
         .as_array()
         .unwrap();
@@ -698,7 +789,7 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
     assert_eq!(servers[1]["tools"]["search"]["approval"], "approve");
     assert!(servers[1].get("enabled_tools").is_none());
     assert!(servers[1].get("bearer_token_env_var").is_none());
-    let explicit_bytes = std::fs::read_to_string(&explicit_record).unwrap();
+    let explicit_bytes = serde_json::to_string(&explicit_json).unwrap();
     assert!(explicit_bytes.contains(token_env));
     assert!(!explicit_bytes.contains(secret));
 
@@ -764,20 +855,26 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
     let entries_after_delete = host.list().await.unwrap();
     assert_eq!(entries_after_delete.len(), 3);
     let cleared_id = cleared["conversation_id"].as_str().unwrap();
-    let (cleared_record, cleared_json) = session_record(dir.path(), cleared_id);
+    let cleared_json = session_record(dir.path(), cleared_id);
     assert!(cleared_json["definition"].get("mcp_servers").is_none());
     assert!(
-        !std::fs::read_to_string(cleared_record)
+        !serde_json::to_string(&cleared_json)
             .unwrap()
             .contains("mcp_servers")
     );
 
     // Materials export contains no definition or credential value.
+    let explicit_snapshot = dir.path().join("explicit-snapshot.json");
+    std::fs::write(
+        &explicit_snapshot,
+        serde_json::to_vec(&explicit_json).unwrap(),
+    )
+    .unwrap();
     let exported = dir.path().join("exported.json");
     let export = cli(dir.path())
         .env(token_env, secret)
         .args(["session", "export-materials", "--record"])
-        .arg(&explicit_record)
+        .arg(&explicit_snapshot)
         .arg("--output")
         .arg(&exported)
         .output()
@@ -792,17 +889,28 @@ async fn wm10_and_wm11_mcp_snapshot_selection_and_credential_reference_survive_s
 async fn wm10_record_without_mcp_servers_reads_as_empty_and_ask() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store");
-    let sessions = store.join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
+    let legacy_dir = dir.path().join("legacy");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
     let id = "018f0c4e-0000-7000-8000-000000000001";
     let commit = "018f0c4e-0000-7000-8000-000000000002";
-    let record_path = sessions.join(format!("{id}.json"));
+    let record_path = legacy_dir.join(format!("{id}.json"));
     // A fixed record written before MCP snapshots and initial modes existed.
     let raw = format!(
         r#"{{"format":"tars-session-v2.4","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","updated_at_ms":1000,"definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
     );
     std::fs::write(&record_path, raw.as_bytes()).unwrap();
     let original = std::fs::read(&record_path).unwrap();
+
+    let import_out = cli(dir.path())
+        .args(["session", "import-legacy", "--no-config", "--record"])
+        .arg(&record_path)
+        .arg("--store")
+        .arg(&store)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(import_out.status.success(), "{import_out:?}");
+    assert_eq!(std::fs::read(&record_path).unwrap(), original);
 
     let listing = json(
         cli(dir.path())
@@ -968,15 +1076,24 @@ fn wm11_mcp_selection_is_documented_in_cli_help() {
 async fn wm10_stage_g_snapshot_conversion_to_current_format() {
     let dir = tempfile::tempdir().unwrap();
     let store = dir.path().join("store");
-    let sessions = store.join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
+    let legacy_dir = dir.path().join("legacy");
+    std::fs::create_dir_all(&legacy_dir).unwrap();
     let id = "018f0c4e-0000-7000-8000-000000000009";
     let commit = "018f0c4e-0000-7000-8000-00000000000a";
-    let record_path = sessions.join(format!("{id}.json"));
+    let record_path = legacy_dir.join(format!("{id}.json"));
     let raw = format!(
         r#"{{"format":"tars-session-v2.4","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","updated_at_ms":1000,"definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"mcp_servers":[{{"id":"git","command":"uvx","env":{{"LOG_LEVEL":"warn"}},"env_vars":["GIT_AUTHOR_NAME"],"startup_timeout_sec":12,"tool_timeout_sec":120,"approval":"auto","tools":{{"git_status":{{"approval":"auto"}}}},"required":false}},{{"id":"docs","url":"https://example.invalid/mcp","bearer_token_env_var":"DOCS_MCP_TOKEN","startup_timeout_sec":10,"tool_timeout_sec":60,"approval":"prompt","required":false}}],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
     );
     std::fs::write(&record_path, raw.as_bytes()).unwrap();
+
+    let import_out = cli(dir.path())
+        .args(["session", "import-legacy", "--no-config", "--record"])
+        .arg(&record_path)
+        .arg("--store")
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(import_out.status.success(), "{import_out:?}");
 
     let host = tars_core::application::SessionHost::new(Some(store));
     let entries = host.list().await.unwrap();

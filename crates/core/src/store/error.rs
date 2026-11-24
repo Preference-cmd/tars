@@ -95,6 +95,23 @@ pub enum StoreError {
     /// Store writer coordination was poisoned.
     #[error("store writer coordination was poisoned")]
     Poisoned,
+    /// The SQLite store schema version is newer than this binary supports.
+    #[error("unsupported store schema version {found}; supported version is {supported}")]
+    UnsupportedSchemaVersion {
+        /// Schema `user_version` found in the database.
+        found: u32,
+        /// Schema `user_version` supported by this build.
+        supported: u32,
+    },
+    /// A SQLite operation failed.
+    #[error("SQLite store failed: {0}")]
+    Sqlite(#[source] Arc<rusqlite::Error>),
+    /// Stored database metadata violated structural invariants.
+    #[error("invalid store database state: {0}")]
+    InvalidDatabase(String),
+    /// A session with this identity already exists in the store.
+    #[error("session already exists: {0}")]
+    AlreadyExists(String),
     /// An I/O stage failed; replacement-stage and later failures need confirmation.
     #[error("commit failed at {stage:?}: {source}")]
     CommitIo {
@@ -114,5 +131,10 @@ impl From<io::Error> for StoreError {
 impl From<serde_json::Error> for StoreError {
     fn from(source: serde_json::Error) -> Self {
         Self::Json(Arc::new(source))
+    }
+}
+impl From<rusqlite::Error> for StoreError {
+    fn from(source: rusqlite::Error) -> Self {
+        Self::Sqlite(Arc::new(source))
     }
 }

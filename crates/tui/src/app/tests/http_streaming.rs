@@ -192,11 +192,14 @@ async fn chunk(socket: &mut TcpStream, text: &str) -> bool {
             .is_ok()
 }
 
-fn record(app: &crate::app::App, index: usize) -> std::path::PathBuf {
-    app.options
-        .store
-        .join("sessions")
-        .join(format!("{}.json", app.entries[index].id()))
+fn saved_context_text(app: &crate::app::App, index: usize) -> String {
+    let conn = rusqlite::Connection::open(app.options.store.join("tars.db")).unwrap();
+    conn.query_row(
+        "SELECT context_json FROM agents WHERE session_id = ?1 AND agent_id = ?1",
+        rusqlite::params![app.entries[index].id()],
+        |row| row.get(0),
+    )
+    .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -220,11 +223,7 @@ async fn all_three_real_http_gateways_show_text_before_terminal_and_save_authori
         assert_eq!(app.entries[0].execution, "Running");
         assert!(app.entries[0].preview.invocation.is_some());
         assert!(!app.entries[0].transcript.text.contains(preview));
-        assert!(
-            !std::fs::read_to_string(record(&app, 0))
-                .unwrap()
-                .contains(preview)
-        );
+        assert!(!saved_context_text(&app, 0).contains(preview));
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|frame| render::draw(frame, &app)).unwrap();
         let screen = terminal
@@ -252,9 +251,7 @@ async fn all_three_real_http_gateways_show_text_before_terminal_and_save_authori
         assert!(app.entries[0].preview.text.is_empty());
         assert!(app.entries[0].preview.invocation.is_none());
         assert!(app.entries[0].progress.is_none());
-        let saved: Value =
-            serde_json::from_slice(&std::fs::read(record(&app, 0)).unwrap()).unwrap();
-        let material = saved["context"].to_string();
+        let material = saved_context_text(&app, 0);
         assert!(material.contains(final_text));
         if provider == "openai-responses" {
             assert!(!material.contains(preview));
@@ -377,7 +374,7 @@ async fn visible_partial_text_is_cleared_after_error_eof_or_cancellation_and_nev
             .read_materials()
             .unwrap();
         assert_eq!(snapshot.context.blocks().len(), 4);
-        let saved = std::fs::read_to_string(record(&app, 0)).unwrap();
+        let saved = saved_context_text(&app, 0);
         assert!(saved.contains("accepted input"));
         assert!(!saved.contains("must not persist"));
         server.assert_request("openai-chat");
@@ -459,10 +456,19 @@ async fn final_snapshot_survives_save_blocked_and_export_without_retaining_previ
         a.entries[0].preview.text.contains("temporary never export")
     })
     .await;
-    let path = record(&app, 0);
-    let held = app.options.store.join("held.json");
-    std::fs::rename(&path, &held).unwrap();
-    std::fs::create_dir(&path).unwrap();
+    let conn = rusqlite::Connection::open(app.options.store.join("tars.db")).unwrap();
+    let orig_policy: String = conn
+        .query_row(
+            "SELECT policy_json FROM sessions WHERE session_id = ?1",
+            rusqlite::params![app.entries[0].id()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "UPDATE sessions SET policy_json = 'corrupt' WHERE session_id = ?1",
+        rusqlite::params![app.entries[0].id()],
+    )
+    .unwrap();
     server.release();
     until(&mut app, |a| {
         a.entries[0].execution == "Completed"
@@ -494,8 +500,12 @@ async fn final_snapshot_survives_save_blocked_and_export_without_retaining_previ
     assert!(material.contains("input survives"));
     assert!(material.contains("final export material"));
     assert!(!material.contains("temporary never export"));
-    std::fs::remove_dir(&path).unwrap();
-    std::fs::rename(&held, &path).unwrap();
+    conn.execute(
+        "UPDATE sessions SET policy_json = ?1 WHERE session_id = ?2",
+        rusqlite::params![orig_policy, app.entries[0].id()],
+    )
+    .unwrap();
+    drop(conn);
     app.event(ctrl('r'));
     until(&mut app, |a| {
         matches!(

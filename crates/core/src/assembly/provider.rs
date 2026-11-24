@@ -365,7 +365,7 @@ pub(crate) fn assemble(
     // prompt is not the conversation's next request.
     let gateway: Arc<dyn ModelGateway> =
         Arc::new(UsageTrackingGateway::new(conversation_retry, usage.clone()));
-    let compaction = CompactionRuntime::new(
+    let compaction = CompactionRuntime::new_strict(
         definition,
         &conversation_id,
         persistent

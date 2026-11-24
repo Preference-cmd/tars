@@ -792,22 +792,25 @@ async fn us08_format_v2_1_rejection_of_v2_and_material_export() {
         .await
         .unwrap();
 
-    // Verify record on disk contains "format":"tars-session-v2.4"
-    let record_file = store_path.join("sessions").join(format!("{id}.json"));
-    let content = std::fs::read_to_string(&record_file).unwrap();
-    assert!(content.contains(r#""format":"tars-session-v2.4""#));
+    // Verify saved record uses "format":"tars-session-v2.4"
+    let record_json = super::support::saved_record(&store_path, &id);
+    assert_eq!(record_json["format"], "tars-session-v2.4");
 
-    // A v2 record fails to open with UnsupportedFormat
+    // A legacy v2 JSON record fails to import with UnsupportedFormat, and exports materials cleanly
     let v2_id = uuid::Uuid::now_v7().to_string();
     let v2_commit = uuid::Uuid::now_v7().to_string();
-    let v2_record_path = store_path.join("sessions").join(format!("{v2_id}.json"));
+    let v2_record_path = store_path.join(format!("{v2_id}-legacy.json"));
     let v2_json = format!(
         r#"{{"format":"tars-session-v2","conversation_id":"{v2_id}","revision":1,"last_commit_id":"{v2_commit}","definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"PATH"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
     );
     std::fs::write(&v2_record_path, v2_json.as_bytes()).unwrap();
 
-    let open_err = host.open(v2_id.as_str().into()).await.err().unwrap();
-    match open_err {
+    let import_err = host
+        .import_legacy_record(&v2_record_path)
+        .await
+        .err()
+        .unwrap();
+    match import_err {
         ApplicationError::Store(ref err) => match &**err {
             crate::store::StoreError::UnsupportedFormat(fmt) => {
                 assert_eq!(fmt, "tars-session-v2");
@@ -817,11 +820,13 @@ async fn us08_format_v2_1_rejection_of_v2_and_material_export() {
         other => panic!("expected ApplicationError::Store, got {other:?}"),
     }
 
-    // export-materials of a v2 and v2.1 record yields Context
+    // export-materials of a v2 and v2.4 JSON record yields Context
     let v2_ctx = crate::material::load_session_materials(&v2_record_path).unwrap();
     assert!(v2_ctx.blocks().is_empty());
 
-    let v2_1_ctx = crate::material::load_session_materials(&record_file).unwrap();
+    let v2_4_record_path = store_path.join(format!("{id}-legacy-v2_4.json"));
+    std::fs::write(&v2_4_record_path, serde_json::to_vec(&record_json).unwrap()).unwrap();
+    let v2_1_ctx = crate::material::load_session_materials(&v2_4_record_path).unwrap();
     assert!(v2_1_ctx.blocks().is_empty());
 
     // Session created from imported materials starts with zero usage

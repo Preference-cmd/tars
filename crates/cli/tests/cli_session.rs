@@ -293,9 +293,96 @@ fn report(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|_| panic!("{output:?}"))
 }
 fn record(store: &Path, id: &str) -> Value {
-    let bytes = fs::read(store.join("sessions").join(format!("{id}.json"))).unwrap();
-    assert!(!String::from_utf8_lossy(&bytes).contains(KEY));
-    serde_json::from_slice(&bytes).unwrap()
+    struct DbRow {
+        revision: i64,
+        last_commit_id: String,
+        policy_json: String,
+        title: Option<String>,
+        permission_mode: Option<String>,
+        auto_compact: Option<i64>,
+        compact_threshold: Option<i64>,
+        usage_json: Option<String>,
+        updated_at_ms: i64,
+        def_json: String,
+        ctx_json: String,
+        history_json: String,
+    }
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    let row = conn
+        .query_row(
+            "SELECT
+                s.revision,
+                s.last_commit_id,
+                s.policy_json,
+                s.title,
+                s.permission_mode,
+                s.auto_compact,
+                s.compact_threshold,
+                s.usage_json,
+                s.updated_at_ms,
+                a.definition_json,
+                a.context_json,
+                a.history_index_json
+             FROM sessions s
+             JOIN agents a
+               ON s.session_id = a.session_id
+              AND s.entry_agent_id = a.agent_id
+             WHERE s.session_id = ?1",
+            rusqlite::params![id],
+            |row| {
+                Ok(DbRow {
+                    revision: row.get(0)?,
+                    last_commit_id: row.get(1)?,
+                    policy_json: row.get(2)?,
+                    title: row.get(3)?,
+                    permission_mode: row.get(4)?,
+                    auto_compact: row.get(5)?,
+                    compact_threshold: row.get(6)?,
+                    usage_json: row.get(7)?,
+                    updated_at_ms: row.get(8)?,
+                    def_json: row.get(9)?,
+                    ctx_json: row.get(10)?,
+                    history_json: row.get(11)?,
+                })
+            },
+        )
+        .unwrap();
+    assert!(!row.def_json.contains(KEY) && !row.ctx_json.contains(KEY));
+    let policy: Value = serde_json::from_str(&row.policy_json).unwrap();
+    let mut obj = serde_json::Map::new();
+    obj.insert("format".into(), policy["format"].clone());
+    obj.insert("conversation_id".into(), json!(id));
+    obj.insert("revision".into(), json!(row.revision));
+    obj.insert("last_commit_id".into(), json!(row.last_commit_id));
+    obj.insert(
+        "definition".into(),
+        serde_json::from_str(&row.def_json).unwrap(),
+    );
+    obj.insert(
+        "context".into(),
+        serde_json::from_str(&row.ctx_json).unwrap(),
+    );
+    if let Some(title) = row.title {
+        obj.insert("title".into(), json!(title));
+    }
+    obj.insert("updated_at_ms".into(), json!(row.updated_at_ms));
+    if let Some(mode) = row.permission_mode {
+        obj.insert("permission_mode".into(), json!(mode));
+    }
+    if let Some(auto) = row.auto_compact {
+        obj.insert("auto_compact".into(), json!(auto != 0));
+    }
+    if let Some(thresh) = row.compact_threshold {
+        obj.insert("compact_threshold".into(), json!(thresh));
+    }
+    let history: Vec<Value> = serde_json::from_str(&row.history_json).unwrap();
+    if !history.is_empty() {
+        obj.insert("history".into(), Value::Array(history));
+    }
+    if let Some(usage) = row.usage_json {
+        obj.insert("usage".into(), serde_json::from_str(&usage).unwrap());
+    }
+    Value::Object(obj)
 }
 fn body(request: &str) -> Value {
     serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
@@ -385,18 +472,20 @@ fn list_keeps_good_record_and_reports_corruption_without_counting_pending_files(
     let store = folder.path().join("store");
     let id = create(&store, "http://127.0.0.1:1/unused", "10");
     let bad = "00000000-0000-0000-0000-000000000001";
-    fs::write(
-        store.join("sessions").join(format!("{bad}.json")),
-        b"broken JSON",
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    conn.execute(
+        "INSERT INTO sessions (session_id, revision, last_commit_id, policy_json, entry_agent_id, created_at_ms, updated_at_ms)
+         VALUES (?1, 1, ?1, '{\"format\":\"tars-session-v2.4\"}', ?1, 1000, 1000)",
+        rusqlite::params![bad],
     )
     .unwrap();
-    fs::write(
-        store
-            .join("sessions")
-            .join(format!(".{id}.pending-half.json")),
-        b"half JSON",
+    conn.execute(
+        "INSERT INTO agents (session_id, agent_id, name, preset_name, interaction, definition_json, material_revision, context_json, history_index_json, created_at_ms, updated_at_ms)
+         VALUES (?1, ?1, 'main', NULL, 'reusable', '{}', 1, 'broken JSON', '[]', 1000, 1000)",
+        rusqlite::params![bad],
     )
     .unwrap();
+    drop(conn);
     let output = command(&store, "list").output().unwrap();
     assert_eq!(output.status.code(), Some(1));
     let listing = report(&output);
@@ -531,15 +620,11 @@ fn ctrl_c_still_saves_materials_and_closes_before_process_exit() {
     assert_eq!(report(&listed)["sessions"][0]["active"], false);
 }
 
-// Renaming the store while the live process still holds handles works only on
-// Unix; Windows rejects the rename and the save failure is never reached.
-#[cfg(unix)]
 #[test]
 fn completed_work_save_failure_exports_actual_recovery_and_reports_export_failure_separately() {
     for export_succeeds in [true, false] {
         let folder = tempfile::tempdir().unwrap();
         let store = folder.path().join("store");
-        let backup = folder.path().join("store-before-loss");
         let fixture = Fixture::new(1);
         let id = create(&store, &fixture.endpoint, "10");
         let baseline = record(&store, &id);
@@ -557,9 +642,21 @@ fn completed_work_save_failure_exports_actual_recovery_and_reports_export_failur
                 .arg(&recovery),
         );
         fixture.request();
-        // No other owner is installed at the old path. The live Writer now
-        // points at a missing record/directory and cannot confirm its baseline.
-        fs::rename(&store, &backup).unwrap();
+        // Corrupt policy_json in tars.db so both pre-write read and DiscardLocal
+        // confirmation fail with StoreError without losing the baseline row.
+        let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+        let orig_policy: String = conn
+            .query_row(
+                "SELECT policy_json FROM sessions WHERE session_id = ?1",
+                rusqlite::params![&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "UPDATE sessions SET policy_json = 'corrupt' WHERE session_id = ?1",
+            rusqlite::params![&id],
+        )
+        .unwrap();
         fixture.answer("completed but save failed");
         let output = finished(child);
         assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -579,8 +676,13 @@ fn completed_work_save_failure_exports_actual_recovery_and_reports_export_failur
         assert!(close["pending_revision"].is_null());
         assert!(close["confirmation_error"].as_str().is_some());
         assert!(String::from_utf8_lossy(&output.stderr).contains("unconfirmed"));
-        assert_eq!(record(&backup, &id), baseline); // No fabricated successful save or rollback.
-        assert!(!store.exists());
+        conn.execute(
+            "UPDATE sessions SET policy_json = ?1 WHERE session_id = ?2",
+            rusqlite::params![orig_policy, &id],
+        )
+        .unwrap();
+        drop(conn);
+        assert_eq!(record(&store, &id), baseline); // No fabricated successful save or rollback.
         if export_succeeds {
             assert!(result["recovery_error"].is_null());
             let path = Path::new(result["recovery_file"].as_str().unwrap());
@@ -683,15 +785,8 @@ fn second_sigint_abandons_a_blocked_save_and_exports_importable_recovery() {
             .arg(&recovery),
     ));
     fixture.request();
-    let record_path = store.join("sessions").join(format!("{id}.json"));
-    std::fs::remove_file(&record_path).unwrap();
-    assert!(
-        Command::new("mkfifo")
-            .arg(&record_path)
-            .status()
-            .unwrap()
-            .success()
-    );
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
     fixture.answer("blocked but returned answer");
     interrupt_until_prompt(&child, &stderr);
     assert!(
@@ -700,6 +795,8 @@ fn second_sigint_abandons_a_blocked_save_and_exports_importable_recovery() {
     );
     interrupt(&child);
     let output = finished(child);
+    let _ = conn.execute_batch("ROLLBACK;");
+    drop(conn);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let result = report(&output);
     assert_eq!(result["save_wait_abandoned"], true);
@@ -748,37 +845,17 @@ fn one_sigint_during_a_blocked_save_waits_and_normal_completion_creates_no_recov
             .arg(&recovery),
     ));
     fixture.request();
-    let record_path = store.join("sessions").join(format!("{id}.json"));
-    let original = std::fs::read(&record_path).unwrap();
-    std::fs::remove_file(&record_path).unwrap();
-    assert!(
-        Command::new("mkfifo")
-            .arg(&record_path)
-            .status()
-            .unwrap()
-            .success()
-    );
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
     fixture.answer("normally saved answer");
     interrupt_until_prompt(&child, &stderr);
     assert!(
         child.try_wait().unwrap().is_none(),
         "one SIGINT must not exit"
     );
-    // Unblock the save only after the prompt proves the wait is live. The
-    // writer thread is bounded so a broken fixture fails instead of hanging.
-    let (done_tx, done_rx) = mpsc::channel();
-    let fifo_path = record_path.clone();
-    std::thread::spawn(move || {
-        let mut fifo = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&fifo_path)
-            .unwrap();
-        fifo.write_all(&original).unwrap();
-        let _ = done_tx.send(());
-    });
-    done_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("blocked save reader did not accept the baseline record");
+    // Release SQLite's write lock only after the prompt proves the wait is live.
+    conn.execute_batch("ROLLBACK;").unwrap();
+    drop(conn);
 
     let output = finished(child);
     assert!(output.status.success(), "{output:?}");
@@ -885,9 +962,9 @@ fn create_initial_save_failure_exports_recovery_to_the_selected_directory() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let value = report(&output);
-    assert_eq!(value["status"], "not_started");
-    assert_eq!(value["error"], "initial session save failed");
-    assert_eq!(value["recovery_importable"], true);
+    assert_eq!(value["status"], "not_started", "{value}");
+    assert_eq!(value["error"], "initial session save failed", "{value}");
+    assert_eq!(value["recovery_importable"], true, "{value}");
     let path = Path::new(value["recovery_file"].as_str().unwrap());
     assert_eq!(path.parent().unwrap(), recovery);
     let restored = tars_core::material::load(path).unwrap();
@@ -948,4 +1025,220 @@ fn session_run_reports_required_mcp_assembly_failure_with_server_and_hint() {
     assert!(stderr.contains("needed"), "{stderr}");
     assert!(stderr.contains("mcp.json"), "{stderr}");
     assert!(!stderr.contains("work failed"), "{stderr}");
+}
+
+#[test]
+fn cli_import_legacy_imports_v2_4_history_artifacts_and_rejects_duplicates_or_missing_files() {
+    let folder = tempfile::tempdir().unwrap();
+    let legacy_dir = folder.path().join("legacy");
+    fs::create_dir_all(&legacy_dir).unwrap();
+
+    let conv_id = "0190b000-0000-7000-8000-000000000101";
+    let commit_id = "0190b000-0000-7000-8000-000000000102";
+    let hist_id = "0190b000-0000-7000-8000-000000000103";
+    let art_uuid = "0190b000-0000-7000-8000-000000000104";
+    let art_id = format!("artifact:{art_uuid}");
+
+    let call_id = causa::runtime::new_block_id();
+    let res_id = causa::runtime::new_block_id();
+    let mut out = causa::kernel::ToolOutput::new(json!("spilled preview"));
+    out.artifact = Some(causa::kernel::ArtifactRef::new(
+        art_id.clone(),
+        18,
+        causa::kernel::ArtifactKind::FullOutput,
+        true,
+    ));
+    let orig_call = causa::kernel::ContextBlock::new(
+        call_id,
+        causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "read_file",
+            json!({}),
+        )),
+        causa::kernel::BlockMeta::default(),
+    );
+    let orig_res = causa::kernel::ContextBlock::new(
+        res_id,
+        causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            out,
+        )),
+        causa::kernel::BlockMeta::default(),
+    );
+    let brief_block = causa::kernel::ContextBlock::new(
+        causa::runtime::new_block_id(),
+        causa::kernel::BlockContent::text(causa::kernel::Role::User, "imported brief"),
+        causa::kernel::BlockMeta::from_source(tars_core::compact::SUMMARY_SOURCE),
+    );
+    let user_block = causa::kernel::ContextBlock::new(
+        causa::runtime::new_block_id(),
+        causa::kernel::BlockContent::text(causa::kernel::Role::User, "follow up"),
+        causa::kernel::BlockMeta::default(),
+    );
+
+    let history_doc = json!({
+        "format": "tars-history-v1.2",
+        "conversation_id": conv_id,
+        "record_id": hist_id,
+        "created_at_ms": 500,
+        "trigger": "auto",
+        "kind": "summarize",
+        "estimate_before": 1000,
+        "estimate_after": 100,
+        "replacements": [{
+            "range": { "start": 0, "end": 2 },
+            "originals": [orig_call, orig_res],
+            "inserted_ids": [brief_block.id()],
+        }],
+    });
+    let legacy_json = json!({
+        "format": "tars-session-v2.4",
+        "conversation_id": conv_id,
+        "revision": 4,
+        "last_commit_id": commit_id,
+        "title": "Imported Session",
+        "updated_at_ms": 123456,
+        "permission_mode": "accept-edits",
+        "definition": {
+            "provider": "openai-chat",
+            "model": "legacy-model",
+            "endpoint": null,
+            "credential": { "environment": "TARS_TEST_KEY" },
+            "work_timeout_secs": null,
+            "retained_work_capacity": 16,
+            "max_model_rounds": 8,
+            "max_tool_calls": 0,
+            "workspace_root": null,
+            "tools": [],
+            "tool_limits": {
+                "max_concurrent_operations": 4,
+                "call_timeout_secs": 10,
+                "max_output_bytes": 65536,
+                "max_directory_entries": 200,
+                "max_file_scan_bytes": 2097152,
+                "max_search_files": 1000,
+                "max_search_depth": 32,
+                "max_search_scan_bytes": 8388608,
+                "max_search_matches": 200
+            }
+        },
+        "context": { "blocks": [brief_block, user_block] },
+        "history": [{
+            "record_id": hist_id,
+            "created_at_ms": 500,
+            "trigger": "auto",
+            "kind": "summarize",
+            "removed_block_count": 2,
+            "inserted_block_ids": [brief_block.id()]
+        }]
+    });
+
+    let legacy_record_path = legacy_dir.join(format!("{conv_id}.json"));
+    let legacy_history_dir = legacy_dir.join(format!("{conv_id}.history"));
+    let legacy_artifacts_dir = legacy_dir.join(format!("{conv_id}.artifacts"));
+    fs::create_dir_all(&legacy_history_dir).unwrap();
+    fs::create_dir_all(&legacy_artifacts_dir).unwrap();
+    let legacy_hist_path = legacy_history_dir.join(format!("{hist_id}.json"));
+    let legacy_art_path = legacy_artifacts_dir.join(art_uuid);
+    let record_bytes = serde_json::to_vec(&legacy_json).unwrap();
+    let hist_bytes = serde_json::to_vec(&history_doc).unwrap();
+    let art_bytes = b"full artifact data";
+    fs::write(&legacy_record_path, &record_bytes).unwrap();
+    fs::write(&legacy_hist_path, &hist_bytes).unwrap();
+    fs::write(&legacy_art_path, art_bytes).unwrap();
+
+    // Missing artifact file fails closed before touching target store.
+    fs::remove_file(&legacy_art_path).unwrap();
+    let broken_store = folder.path().join("broken-store");
+    let fail_out = tars_bin()
+        .args(["session", "import-legacy", "--no-config", "--record"])
+        .arg(&legacy_record_path)
+        .arg("--store")
+        .arg(&broken_store)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(fail_out.status.code(), Some(1), "{fail_out:?}");
+    assert!(!broken_store.join("tars.db").exists());
+
+    // Restore artifact and import cleanly.
+    fs::write(&legacy_art_path, art_bytes).unwrap();
+    let store = folder.path().join("store");
+    let ok_out = tars_bin()
+        .args(["session", "import-legacy", "--no-config", "--record"])
+        .arg(&legacy_record_path)
+        .arg("--store")
+        .arg(&store)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(ok_out.status.success(), "{ok_out:?}");
+    let rep = report(&ok_out);
+    assert_eq!(rep["status"], "imported");
+    assert_eq!(rep["conversation_id"], conv_id);
+    assert_eq!(rep["revision"], 4);
+    assert_eq!(rep["block_count"], 2);
+    assert_eq!(rep["history_records"], 1);
+    assert_eq!(rep["artifacts"], 1);
+
+    // Source files remain byte-for-byte untouched.
+    assert_eq!(fs::read(&legacy_record_path).unwrap(), record_bytes);
+    assert_eq!(fs::read(&legacy_hist_path).unwrap(), hist_bytes);
+    assert_eq!(fs::read(&legacy_art_path).unwrap(), art_bytes);
+
+    // Duplicate import is refused cleanly.
+    let dup_out = tars_bin()
+        .args(["session", "import-legacy", "--no-config", "--record"])
+        .arg(&legacy_record_path)
+        .arg("--store")
+        .arg(&store)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(dup_out.status.code(), Some(1), "{dup_out:?}");
+
+    // Show & history commands read the imported SQLite session accurately.
+    let show_out = tars_bin()
+        .args(["session", "show", conv_id, "--no-config", "--store"])
+        .arg(&store)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(show_out.status.success(), "{show_out:?}");
+    let shown = report(&show_out);
+    assert_eq!(shown["revision"], 4);
+    assert_eq!(shown["history_records"], 1);
+    assert_eq!(shown["title"], "Imported Session");
+
+    let hist_out = tars_bin()
+        .args(["session", "history", conv_id, "--no-config", "--store"])
+        .arg(&store)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(hist_out.status.success(), "{hist_out:?}");
+    let hist_stdout = String::from_utf8(hist_out.stdout).unwrap();
+    assert!(hist_stdout.contains(&art_id), "{hist_stdout}");
+
+    let stored = record(&store, conv_id);
+    assert_eq!(stored["permission_mode"], "accept-edits");
+}
+
+#[test]
+fn cli_help_lists_import_legacy_and_session_import_legacy_help_succeeds() {
+    let top_help = tars_bin().args(["--help"]).output().unwrap();
+    assert!(top_help.status.success(), "{top_help:?}");
+    let top_stdout = String::from_utf8(top_help.stdout).unwrap();
+    assert!(top_stdout.contains("import-legacy"), "{top_stdout}");
+
+    for flag in ["--help", "-h"] {
+        let sub_help = tars_bin()
+            .args(["session", "import-legacy", flag])
+            .output()
+            .unwrap();
+        assert!(sub_help.status.success(), "{sub_help:?}");
+        let sub_stdout = String::from_utf8(sub_help.stdout).unwrap();
+        assert!(sub_stdout.contains("import-legacy"), "{sub_stdout}");
+        assert!(sub_stdout.contains("--record"), "{sub_stdout}");
+    }
 }

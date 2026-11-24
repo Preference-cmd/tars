@@ -1057,12 +1057,17 @@ fn mc04_be24_sealed_stripping_and_format_enums() {
         "stripped reply keeps its text"
     );
 
-    let record_file = dir
-        .path()
-        .join(format!("{conv_id}.history"))
-        .join(format!("{}.json", entry.record_id));
-    let record_json: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(record_file).unwrap()).unwrap();
+    let doc_json: String = crate::store::schema::open_read_only(&dir.path().join("tars.db"))
+        .unwrap()
+        .unwrap()
+        .query_row(
+            "SELECT document_json FROM history_records
+                 WHERE session_id = ?1 AND agent_id = ?1 AND record_id = ?2",
+            rusqlite::params![&conv_id, &entry.record_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let record_json: serde_json::Value = serde_json::from_str(&doc_json).unwrap();
     assert_eq!(record_json["format"], HISTORY_FORMAT);
     assert_eq!(record_json["kind"], "micro-compact");
 }
@@ -1585,12 +1590,8 @@ fn mc05_deleted_micro_compact_record_reports_unreadable_without_divider() {
     let stub1_id = context.blocks()[3].id();
     let stub2_id = context.blocks()[6].id();
 
-    // Delete the MicroCompact record file on disk so expansion hits an unreadable record.
-    let record_path = dir
-        .path()
-        .join(format!("{conv_id}.history"))
-        .join(format!("{}.json", mc_entry.record_id));
-    std::fs::remove_file(&record_path).unwrap();
+    // Delete the MicroCompact record row from SQLite so expansion hits an unreadable record.
+    store.remove(&mc_entry.record_id);
 
     let mut cursor = ExpansionCursor::new(context.blocks(), store.entries());
     let mut rewrite_marks = 0usize;

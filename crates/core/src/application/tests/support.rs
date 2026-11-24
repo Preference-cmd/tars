@@ -481,13 +481,128 @@ fn summary_output(text: &str) -> causa::kernel::ModelOutput {
     output
 }
 
-/// Read the saved record JSON of one conversation from a store root.
-pub(super) fn saved_record(root: &std::path::Path, id: &str) -> serde_json::Value {
-    let path = root.join("sessions").join(format!("{id}.json"));
-    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+/// Read the saved record JSON of one conversation from SQLite `<root>/tars.db`.
+pub(crate) fn saved_record(root: &std::path::Path, id: &str) -> serde_json::Value {
+    let record = crate::store::SessionStore::new(root.into())
+        .read_saved(id)
+        .unwrap()
+        .expect("saved session record in tars.db");
+    serde_json::to_value(record).unwrap()
 }
 
-/// History directory of one conversation under a store root.
-pub(super) fn history_dir(root: &std::path::Path, id: &str) -> std::path::PathBuf {
-    root.join("sessions").join(format!("{id}.history"))
+/// Open `<root>/tars.db` read-write for white-box test inspection/mutation.
+pub(crate) fn open_db(root: &std::path::Path) -> rusqlite::Connection {
+    crate::store::schema::open_read_write(&root.join("tars.db")).unwrap()
+}
+
+/// Toggle a SQLite trigger that rejects inserts into `history_records`.
+pub(crate) fn set_history_write_blocked(root: &std::path::Path, blocked: bool) {
+    let conn = open_db(root);
+    if blocked {
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS test_block_history_insert
+             BEFORE INSERT ON history_records
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected history write failure');
+             END;",
+        )
+        .unwrap();
+    } else {
+        conn.execute_batch("DROP TRIGGER IF EXISTS test_block_history_insert;")
+            .unwrap();
+    }
+}
+
+/// Count `history_records` rows for `(session_id, session_id)`.
+pub(crate) fn history_row_count(root: &std::path::Path, id: &str) -> usize {
+    if !root.join("tars.db").exists() {
+        return 0;
+    }
+    let conn = open_db(root);
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM history_records WHERE session_id = ?1 AND agent_id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    usize::try_from(count).unwrap()
+}
+
+/// Insert an unreferenced stray row into `history_records`.
+pub(crate) fn insert_stray_history_row(root: &std::path::Path, id: &str, stray_id: &str) {
+    let conn = open_db(root);
+    conn.execute(
+        "INSERT INTO history_records (session_id, agent_id, record_id, seq, kind, summary_json, document_json)
+         VALUES (?1, ?1, ?2, 99, 'summarize', '{}', '{}')",
+        rusqlite::params![id, stray_id],
+    )
+    .unwrap();
+}
+
+/// Replace an existing `artifacts` row with an oversized zero blob (> 64 MiB).
+pub(crate) fn set_artifact_oversized(root: &std::path::Path, id: &str, artifact_id: &str) {
+    let conn = open_db(root);
+    let oversized_len = (crate::compact::history::MAX_ARTIFACT_BYTES + 1) as i64;
+    conn.execute(
+        "INSERT OR REPLACE INTO artifacts (session_id, agent_id, artifact_id, content)
+         VALUES (?1, ?1, ?2, zeroblob(?3))",
+        rusqlite::params![id, artifact_id, oversized_len],
+    )
+    .unwrap();
+}
+
+/// Check whether a `history_records` row exists for `(session_id, record_id)`.
+pub(crate) fn history_record_exists(root: &std::path::Path, id: &str, record_id: &str) -> bool {
+    let conn = open_db(root);
+    conn.query_row(
+        "SELECT 1 FROM history_records WHERE session_id = ?1 AND agent_id = ?1 AND record_id = ?2",
+        rusqlite::params![id, record_id],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// Delete one `history_records` row by `(session_id, record_id)`.
+pub(crate) fn delete_history_record_row(root: &std::path::Path, id: &str, record_id: &str) {
+    let conn = open_db(root);
+    conn.execute(
+        "DELETE FROM history_records WHERE session_id = ?1 AND agent_id = ?1 AND record_id = ?2",
+        rusqlite::params![id, record_id],
+    )
+    .unwrap();
+}
+
+/// Check whether a spilled `artifacts` row exists for `(session_id, artifact_id)`.
+pub(crate) fn artifact_row_exists(root: &std::path::Path, id: &str, artifact_id: &str) -> bool {
+    let conn = open_db(root);
+    conn.query_row(
+        "SELECT 1 FROM artifacts WHERE session_id = ?1 AND agent_id = ?1 AND artifact_id = ?2",
+        rusqlite::params![id, artifact_id],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+/// Delete one spilled `artifacts` row by `(session_id, artifact_id)`.
+pub(crate) fn delete_artifact_row(root: &std::path::Path, id: &str, artifact_id: &str) {
+    let conn = open_db(root);
+    conn.execute(
+        "DELETE FROM artifacts WHERE session_id = ?1 AND agent_id = ?1 AND artifact_id = ?2",
+        rusqlite::params![id, artifact_id],
+    )
+    .unwrap();
+}
+
+/// Count spilled `artifacts` rows for `id`.
+pub(crate) fn artifact_row_count(root: &std::path::Path, id: &str) -> usize {
+    let conn = open_db(root);
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM artifacts WHERE session_id = ?1 AND agent_id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    usize::try_from(count).unwrap()
 }

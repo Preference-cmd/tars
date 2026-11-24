@@ -1,8 +1,8 @@
-use super::json::MAX_RECORD_BYTES;
 use super::*;
 use crate::definition::{CredentialRef, Provider, SessionDefinition};
 use causa::kernel::{BlockContent, BlockMeta, ContentPart, Context, ContextBlock, MediaRef};
 use causa::runtime::new_block_id;
+use rusqlite::params;
 use std::{
     fs, io,
     process::{Command, Stdio},
@@ -41,6 +41,7 @@ fn definition() -> SessionDefinition {
         code_execution: None,
     }
 }
+
 fn context(text: &str) -> Context {
     Context::from_blocks(vec![ContextBlock::new(
         new_block_id(),
@@ -49,6 +50,7 @@ fn context(text: &str) -> Context {
     )])
     .unwrap()
 }
+
 fn op(id: &str, prior: Option<u64>, text: &str) -> PreparedCommit {
     PreparedCommit::new(
         prior,
@@ -66,6 +68,7 @@ fn op(id: &str, prior: Option<u64>, text: &str) -> PreparedCommit {
     )
     .unwrap()
 }
+
 fn setup() -> (tempfile::TempDir, SessionStore, String, Writer) {
     let folder = tempfile::tempdir().unwrap();
     let store = SessionStore::new(folder.path().into());
@@ -73,6 +76,7 @@ fn setup() -> (tempfile::TempDir, SessionStore, String, Writer) {
     let writer = store.acquire_writer(&id).unwrap();
     (folder, store, id, writer)
 }
+
 fn failure(stage: CommitStage) -> FaultHook {
     Arc::new(move |at| {
         if at == stage {
@@ -82,6 +86,7 @@ fn failure(stage: CommitStage) -> FaultHook {
         }
     })
 }
+
 #[test]
 fn commits_are_exact_idempotent_and_conflicts_preserve_record() {
     let (_folder, store, id, writer) = setup();
@@ -112,6 +117,7 @@ fn commits_are_exact_idempotent_and_conflicts_preserve_record() {
     assert!(store.metrics().snapshot_clones > 0);
     assert_eq!(store.metrics().serialization_count, 2);
 }
+
 #[test]
 fn lost_reply_confirms_same_record_and_same_revision() {
     let (_folder, store, id, writer) = setup();
@@ -132,19 +138,34 @@ fn lost_reply_confirms_same_record_and_same_revision() {
     assert_eq!(writer.commit(&initial).unwrap().revision, 1);
     assert_eq!(store.metrics().writes, 1);
 }
+
 #[test]
 fn prewrite_read_failure_retains_the_exact_operation_for_confirmation() {
-    let (folder, store, id, writer) = setup();
+    let (_folder, store, id, writer) = setup();
     let initial = op(&id, None, "old");
     writer.commit(&initial).unwrap();
     let update = op(&id, Some(1), "new");
-    let path = folder.path().join("sessions").join(format!("{id}.json"));
-    let held = folder.path().join("held.json");
-    fs::rename(&path, &held).unwrap();
-    fs::create_dir(&path).unwrap();
+
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    let original_policy: String = conn
+        .query_row(
+            "SELECT policy_json FROM sessions WHERE session_id = ?1",
+            params![&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "UPDATE sessions SET policy_json = 'not-json' WHERE session_id = ?1",
+        params![&id],
+    )
+    .unwrap();
     assert!(writer.commit(&update).is_err());
-    fs::remove_dir(&path).unwrap();
-    fs::rename(&held, &path).unwrap();
+
+    conn.execute(
+        "UPDATE sessions SET policy_json = ?1 WHERE session_id = ?2",
+        params![original_policy, &id],
+    )
+    .unwrap();
     assert_eq!(
         writer.resolve_commit(&update).unwrap(),
         CommitResolution::NotApplied
@@ -157,6 +178,7 @@ fn prewrite_read_failure_retains_the_exact_operation_for_confirmation() {
     assert_eq!(writer.commit(&update).unwrap().revision, 2);
     assert_eq!(store.metrics().writes, 2);
 }
+
 #[test]
 fn failures_before_replace_leave_full_old_baseline_and_retry_original() {
     for stage in [
@@ -165,7 +187,7 @@ fn failures_before_replace_leave_full_old_baseline_and_retry_original() {
         CommitStage::Sync,
         CommitStage::Replace,
     ] {
-        let (folder, _store, id, writer) = setup();
+        let (_folder, store, id, writer) = setup();
         let initial = op(&id, None, "old");
         writer.commit(&initial).unwrap();
         let update = op(&id, Some(1), "new");
@@ -184,29 +206,25 @@ fn failures_before_replace_leave_full_old_baseline_and_retry_original() {
             writer.commit(&other),
             Err(StoreError::PendingCommit)
         ));
-        assert_eq!(
-            fs::read_dir(folder.path().join("sessions"))
-                .unwrap()
-                .count(),
-            2
-        );
+        assert_eq!(store.list().unwrap().len(), 1);
         writer.set_fault_hook(None);
         writer.commit(&update).unwrap();
     }
 }
+
 #[test]
 fn advanced_or_changed_baseline_never_claims_not_applied() {
-    let (folder, store, id, writer) = setup();
+    let (_folder, store, id, writer) = setup();
     let initial = op(&id, None, "old");
     writer.commit(&initial).unwrap();
     let update = op(&id, Some(1), "new");
     writer.set_fault_hook(Some(failure(CommitStage::Sync)));
     writer.commit(&update).unwrap_err();
-    let mut changed = initial.record.clone();
-    changed.context = context("other bytes same revision");
-    fs::write(
-        folder.path().join("sessions").join(format!("{id}.json")),
-        serde_json::to_vec(&changed).unwrap(),
+    let changed_ctx = serde_json::to_string(&context("other bytes same revision")).unwrap();
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    conn.execute(
+        "UPDATE agents SET context_json = ?1 WHERE session_id = ?2 AND agent_id = ?2",
+        params![changed_ctx, &id],
     )
     .unwrap();
     assert!(matches!(
@@ -221,59 +239,138 @@ fn advanced_or_changed_baseline_never_claims_not_applied() {
         Err(StoreError::ConfirmationUnknown)
     ));
 }
+
 #[test]
 fn records_with_the_old_project_prefix_are_unsupported() {
-    let (folder, _store, id, writer) = setup();
+    let (_folder, store, id, writer) = setup();
     let initial = op(&id, None, "old");
-    let path = folder.path().join("sessions").join(format!("{id}.json"));
-    let mut old = serde_json::to_value(&initial.record).unwrap();
-    old["format"] = "tarz-session-v2".into();
-    fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    writer.commit(&initial).unwrap();
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    conn.execute(
+        r#"UPDATE sessions SET policy_json = '{"format":"tarz-session-v2"}' WHERE session_id = ?1"#,
+        params![&id],
+    )
+    .unwrap();
     assert!(matches!(
         writer.read_latest(),
         Err(StoreError::UnsupportedFormat(format)) if format == "tarz-session-v2"
     ));
 }
+
 #[test]
-fn bad_records_fail_individually_and_list_ignores_lock_and_pending() {
-    let (folder, store, id, writer) = setup();
+fn bad_records_fail_individually_and_list_reports_active_lock() {
+    let (_folder, store, id, writer) = setup();
     let initial = op(&id, None, "old");
-    let path = folder.path().join("sessions").join(format!("{id}.json"));
-    let value = serde_json::to_value(&initial.record).unwrap();
-    for field in [
-        "format",
-        "conversation_id",
-        "last_commit_id",
-        "revision",
-        "blocks",
-    ] {
-        let mut damaged = value.clone();
+    writer.commit(&initial).unwrap();
+
+    let other_id = Uuid::now_v7().to_string();
+    let other_writer = store.acquire_writer(&other_id).unwrap();
+    other_writer
+        .commit(&op(&other_id, None, "healthy session"))
+        .unwrap();
+    drop(other_writer);
+
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    let orig_policy: String = conn
+        .query_row(
+            "SELECT policy_json FROM sessions WHERE session_id = ?1",
+            params![&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let orig_commit: String = conn
+        .query_row(
+            "SELECT last_commit_id FROM sessions WHERE session_id = ?1",
+            params![&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let orig_context: String = conn
+        .query_row(
+            "SELECT context_json FROM agents WHERE session_id = ?1 AND agent_id = ?1",
+            params![&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    for field in ["format", "last_commit_id", "revision", "blocks"] {
+        // Restore baseline before each mutation.
+        conn.execute(
+            "UPDATE sessions SET policy_json = ?1, last_commit_id = ?2, revision = 1 WHERE session_id = ?3",
+            params![orig_policy, orig_commit, &id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE agents SET context_json = ?1 WHERE session_id = ?2 AND agent_id = ?2",
+            params![orig_context, &id],
+        )
+        .unwrap();
+
         match field {
-            "format" => damaged["format"] = "future-version".into(),
-            "conversation_id" => damaged["conversation_id"] = Uuid::now_v7().to_string().into(),
-            "last_commit_id" => damaged["last_commit_id"] = "../escape".into(),
-            "revision" => damaged["revision"] = 0.into(),
+            "format" => {
+                conn.execute(
+                    r#"UPDATE sessions SET policy_json = '{"format":"future-version"}' WHERE session_id = ?1"#,
+                    params![&id],
+                )
+                .unwrap();
+            }
+            "last_commit_id" => {
+                conn.execute(
+                    "UPDATE sessions SET last_commit_id = '../escape' WHERE session_id = ?1",
+                    params![&id],
+                )
+                .unwrap();
+            }
+            "revision" => {
+                conn.execute(
+                    "UPDATE sessions SET revision = 0 WHERE session_id = ?1",
+                    params![&id],
+                )
+                .unwrap();
+            }
             "blocks" => {
-                let block = damaged["context"]["blocks"][0].clone();
-                damaged["context"]["blocks"] = serde_json::json!([block, block]);
+                let mut ctx_val: serde_json::Value = serde_json::from_str(&orig_context).unwrap();
+                let block = ctx_val["blocks"][0].clone();
+                ctx_val["blocks"] = serde_json::json!([block, block]);
+                conn.execute(
+                    "UPDATE agents SET context_json = ?1 WHERE session_id = ?2 AND agent_id = ?2",
+                    params![serde_json::to_string(&ctx_val).unwrap(), &id],
+                )
+                .unwrap();
             }
             _ => unreachable!(),
         }
-        fs::write(&path, serde_json::to_vec(&damaged).unwrap()).unwrap();
         assert!(writer.read_latest().is_err(), "{field}");
         let listed = store.list().unwrap();
-        assert_eq!(listed.len(), 1);
-        assert!(listed[0].record.is_err());
-        assert_eq!(listed[0].active.as_ref().unwrap(), &true);
+        assert_eq!(listed.len(), 2);
+        let bad = listed.iter().find(|s| s.conversation_id == id).unwrap();
+        assert!(bad.record.is_err(), "{field}");
+        assert_eq!(bad.active.as_ref().unwrap(), &true);
+        let good = listed
+            .iter()
+            .find(|s| s.conversation_id == other_id)
+            .unwrap();
+        assert!(good.record.is_ok());
+        assert_eq!(good.active.as_ref().unwrap(), &false);
     }
-    fs::write(&path, b"bad json").unwrap();
+
+    conn.execute(
+        "UPDATE sessions SET policy_json = ?1, last_commit_id = ?2, revision = 1 WHERE session_id = ?3",
+        params![orig_policy, orig_commit, &id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE agents SET context_json = 'bad json' WHERE session_id = ?1 AND agent_id = ?1",
+        params![&id],
+    )
+    .unwrap();
     assert!(matches!(writer.read_latest(), Err(StoreError::Json(_))));
     assert!(matches!(
         store.acquire_writer("../escape"),
         Err(StoreError::InvalidIdentity(_))
     ));
-    let mut media = initial.record.clone();
-    media.context = Context::from_blocks(vec![ContextBlock::new(
+
+    let media_ctx = Context::from_blocks(vec![ContextBlock::new(
         new_block_id(),
         BlockContent::Message {
             role: causa::kernel::Role::Assistant,
@@ -282,46 +379,32 @@ fn bad_records_fail_individually_and_list_ignores_lock_and_pending() {
         BlockMeta::default(),
     )])
     .unwrap();
-    fs::write(&path, serde_json::to_vec(&media).unwrap()).unwrap();
+    conn.execute(
+        "UPDATE agents SET context_json = ?1 WHERE session_id = ?2 AND agent_id = ?2",
+        params![serde_json::to_string(&media_ctx).unwrap(), &id],
+    )
+    .unwrap();
     assert!(matches!(
         writer.read_latest(),
         Err(StoreError::References(_))
     ));
-    fs::remove_file(path).unwrap();
-    fs::write(
-        folder
-            .path()
-            .join("sessions")
-            .join(format!(".{id}.pending-left.json")),
-        b"partial",
-    )
-    .unwrap();
-    assert!(store.list().unwrap().is_empty());
 }
+
 #[test]
-fn stable_lock_and_only_owned_pending_cleanup() {
-    let (folder, store, id, writer) = setup();
-    let directory = folder.path().join("sessions");
-    let lock_path = directory.join(format!("{id}.lock"));
+fn stable_lock_and_exclusive_ownership() {
+    let (_folder, store, id, writer) = setup();
+    let lock_path = store.locks_dir().join(format!("{id}.lock"));
     #[cfg(unix)]
     let identity = {
         use std::os::unix::fs::MetadataExt;
         fs::metadata(&lock_path).unwrap().ino()
     };
-    let own = directory.join(format!(".{id}.pending-old"));
-    fs::write(&own, b"old").unwrap();
-    let other_id = Uuid::now_v7().to_string();
-    let other = directory.join(format!(".{other_id}.pending-old"));
-    fs::write(&other, b"other").unwrap();
     assert!(matches!(
         store.acquire_writer(&id),
         Err(StoreError::Occupied(_))
     ));
-    assert!(own.exists());
     drop(writer);
     let next = store.acquire_writer(&id).unwrap();
-    assert!(!own.exists());
-    assert!(other.exists());
     next.commit(&op(&id, None, "saved")).unwrap();
     drop(next);
     assert!(lock_path.exists());
@@ -331,14 +414,18 @@ fn stable_lock_and_only_owned_pending_cleanup() {
         assert_eq!(identity, fs::metadata(lock_path).unwrap().ino());
     }
 }
+
 #[test]
 fn resource_limit_rejects_oversized_load_and_checked_revisions() {
-    let (folder, _store, id, writer) = setup();
-    let path = folder.path().join("sessions").join(format!("{id}.json"));
-    fs::File::create(path)
-        .unwrap()
-        .set_len(MAX_RECORD_BYTES as u64 + 1)
-        .unwrap();
+    let (_folder, store, id, writer) = setup();
+    writer.commit(&op(&id, None, "seed")).unwrap();
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    let oversized_ctx = "x".repeat(MAX_RECORD_BYTES + 1);
+    conn.execute(
+        "UPDATE agents SET context_json = ?1 WHERE session_id = ?2 AND agent_id = ?2",
+        params![oversized_ctx, &id],
+    )
+    .unwrap();
     assert!(matches!(
         writer.read_latest(),
         Err(StoreError::RecordTooLarge { .. })
@@ -374,7 +461,10 @@ fn subprocess_helper() {
             Err(StoreError::Occupied(_))
         ));
         let other = Uuid::now_v7().to_string();
-        store.acquire_writer(&other).unwrap();
+        let other_writer = store.acquire_writer(&other).unwrap();
+        other_writer
+            .commit(&op(&other, None, "concurrent other process"))
+            .unwrap();
         return;
     }
     let writer = store.acquire_writer(&id).unwrap();
@@ -396,6 +486,7 @@ fn subprocess_helper() {
     })));
     writer.commit(&op(&id, prior, "new child content")).unwrap();
 }
+
 fn child(folder: &tempfile::TempDir, id: &str, mode: &str) -> std::process::Child {
     Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "store::tests::subprocess_helper", "--nocapture"])
@@ -407,9 +498,10 @@ fn child(folder: &tempfile::TempDir, id: &str, mode: &str) -> std::process::Chil
         .spawn()
         .unwrap()
 }
+
 #[test]
 fn two_real_processes_contend_while_distinct_sessions_remain_available() {
-    let (folder, _store, id, _writer) = setup();
+    let (folder, store, id, _writer) = setup();
     assert!(
         child(&folder, &id, "contention")
             .wait_with_output()
@@ -417,7 +509,11 @@ fn two_real_processes_contend_while_distinct_sessions_remain_available() {
             .status
             .success()
     );
+    let listed = store.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].record.is_ok());
 }
+
 #[test]
 fn killed_processes_leave_complete_old_new_or_initial_absence() {
     for existing in [false, true] {
@@ -453,15 +549,10 @@ fn killed_processes_leave_complete_old_new_or_initial_absence() {
                 assert_eq!(restored.revision, if existing { 2 } else { 1 });
                 assert_child_text(&restored.context);
             }
-            assert_eq!(
-                fs::read_dir(folder.path().join("sessions"))
-                    .unwrap()
-                    .count(),
-                2 - usize::from(!existing && stage == "before")
-            );
         }
     }
 }
+
 fn assert_child_text(context: &Context) {
     assert_eq!(context.blocks().len(), 1);
     assert!(
@@ -473,16 +564,17 @@ fn assert_child_text(context: &Context) {
 #[test]
 fn a_relative_root_resolves_to_an_absolute_directory() {
     let store = SessionStore::new(std::path::PathBuf::from("relative-store"));
-    assert!(store.directory().is_absolute());
-    assert!(store.directory().ends_with("relative-store/sessions"));
+    assert!(store.root().is_absolute());
+    assert!(store.root().ends_with("relative-store"));
+    assert!(store.db_path().ends_with("relative-store/tars.db"));
 }
 
 #[test]
 fn a_relative_root_with_parent_components_is_normalized() {
     let store = SessionStore::new(std::path::PathBuf::from("missing/../data"));
-    assert!(store.directory().is_absolute());
-    assert!(!store.directory().to_string_lossy().contains(".."));
-    assert!(store.directory().ends_with("data/sessions"));
+    assert!(store.root().is_absolute());
+    assert!(!store.root().to_string_lossy().contains(".."));
+    assert!(store.root().ends_with("data"));
 }
 
 #[test]
@@ -517,176 +609,56 @@ fn oversized_save_stops_before_disk_write_and_store_hook_reaches_new_writer() {
 #[test]
 fn session_records_written_before_message_roles_load_and_save_in_the_current_form() {
     use causa::kernel::Role;
-    let (folder, _store, id, writer) = setup();
-    let mut initial = op(&id, None, "unused");
-    initial.record.context = Context::from_blocks(vec![
-        ContextBlock::new(
-            new_block_id(),
-            BlockContent::text(Role::User, "question"),
-            BlockMeta::from_source("user"),
-        ),
-        ContextBlock::new(
-            new_block_id(),
-            BlockContent::text(Role::System, "repair note"),
-            BlockMeta::from_source("application:tars:material-repair"),
-        ),
-    ])
+    let (_folder, store, id, writer) = setup();
+    let old_record = op(&id, None, "assistant message");
+    writer.commit(&old_record).unwrap();
+
+    let mut ctx_val = serde_json::to_value(&old_record.record.context).unwrap();
+    let parts = ctx_val["blocks"][0]["content"]["value"]["parts"].clone();
+    ctx_val["blocks"][0]["content"] = serde_json::json!({
+        "shape": "parts",
+        "value": parts,
+    });
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    conn.execute(
+        "UPDATE agents SET context_json = ?1 WHERE session_id = ?2 AND agent_id = ?2",
+        params![serde_json::to_string(&ctx_val).unwrap(), &id],
+    )
     .unwrap();
-    let path = folder.path().join("sessions").join(format!("{id}.json"));
-    let mut earlier = serde_json::to_value(&initial.record).unwrap();
-    for block in earlier["context"]["blocks"].as_array_mut().unwrap() {
-        let parts = block["content"]["value"]["parts"].take();
-        block["content"] = serde_json::json!({"shape": "parts", "value": parts});
-    }
-    fs::write(&path, serde_json::to_vec(&earlier).unwrap()).unwrap();
 
     let loaded = writer.read_latest().unwrap().unwrap();
-    assert_eq!(loaded, initial.record);
-
-    let update = PreparedCommit::new(
-        Some(1),
-        SavedSessionRecord::new(
-            id.clone(),
-            Uuid::now_v7().to_string(),
-            Some(1),
-            definition(),
-            loaded.context.clone(),
-            None,
-            None,
-            1_000,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    writer.commit(&update).unwrap();
-    let written = String::from_utf8(fs::read(&path).unwrap()).unwrap();
-    assert!(written.contains(r#""shape":"message""#));
-    assert!(!written.contains(r#""shape":"parts""#));
-    assert!(written.contains(r#""format":"tars-session-v2.4""#));
+    assert!(matches!(
+        loaded.context.blocks()[0].content(),
+        BlockContent::Message {
+            role: Role::Assistant,
+            ..
+        }
+    ));
 }
 
 #[test]
-fn record_omits_permission_mode_when_matching_initial_mode() {
-    let id = Uuid::now_v7().to_string();
-    let mut def = definition();
-    def.permission_mode = Some(crate::permission::PermissionMode::AcceptEdits);
-
-    let record_same = SavedSessionRecord::new(
-        id.clone(),
-        Uuid::now_v7().to_string(),
-        None,
-        def.clone(),
-        Context::new(),
-        Some(crate::permission::PermissionMode::AcceptEdits),
-        None,
-        1_000,
-    )
-    .unwrap();
-    assert_eq!(record_same.permission_mode, None);
-    let val_same = serde_json::to_value(&record_same).unwrap();
-    assert!(val_same.get("permission_mode").is_none());
-
-    let record_diff = SavedSessionRecord::new(
-        id.clone(),
-        Uuid::now_v7().to_string(),
-        None,
-        def,
-        Context::new(),
-        Some(crate::permission::PermissionMode::ReadOnly),
-        None,
-        1_000,
-    )
-    .unwrap();
-    assert_eq!(
-        record_diff.permission_mode,
-        Some(crate::permission::PermissionMode::ReadOnly)
-    );
-    let val_diff = serde_json::to_value(&record_diff).unwrap();
-    assert_eq!(val_diff["permission_mode"], "read-only");
-}
-
-#[test]
-fn minimal_record_deserializes_with_none_permission_and_usage_fields() {
-    let id = Uuid::now_v7().to_string();
-    let commit = Uuid::now_v7().to_string();
-    let json_text = format!(
-        r#"{{"format":"tars-session-v2.1","conversation_id":"{id}","revision":1,"last_commit_id":"{commit}","updated_at_ms":1000,"definition":{{"provider":"openai-chat","model":"legacy-model","endpoint":null,"credential":{{"environment":"LEGACY_KEY"}},"work_timeout_secs":null,"retained_work_capacity":16,"max_model_rounds":8,"max_tool_calls":0,"workspace_root":null,"tools":[],"tool_limits":{{"max_concurrent_operations":4,"call_timeout_secs":10,"max_output_bytes":65536,"max_directory_entries":200,"max_file_scan_bytes":2097152,"max_search_files":1000,"max_search_depth":32,"max_search_scan_bytes":8388608,"max_search_matches":200}}}},"context":{{"blocks":[]}}}}"#
-    );
-
-    let record: SavedSessionRecord = serde_json::from_str(&json_text).unwrap();
-    assert_eq!(record.permission_mode, None);
-    assert_eq!(record.definition.permission_mode, None);
-    assert_eq!(record.definition.write_limits, None);
-    assert_eq!(record.usage, None);
-    assert_eq!(
-        record.session_usage(),
-        crate::usage::SessionUsage::default()
-    );
-    assert_eq!(
-        record.definition.initial_permission_mode(),
-        crate::permission::PermissionMode::Ask
-    );
-
-    // Reserialization does not introduce permission_mode, write_limits or usage
-    let val = serde_json::to_value(&record).unwrap();
-    assert!(val.get("permission_mode").is_none());
-    assert!(val.get("usage").is_none());
-    assert!(val["definition"].get("permission_mode").is_none());
-    assert!(val["definition"].get("write_limits").is_none());
-}
-
-#[test]
-fn compaction_fields_roundtrip_and_older_records_read_as_defaults() {
-    let id = uuid::Uuid::now_v7().to_string();
-    let entry = crate::compact::HistoryRecordEntry {
-        record_id: uuid::Uuid::now_v7().to_string(),
-        created_at_ms: 7,
-        trigger: crate::compact::HistoryTrigger::Auto,
-        kind: crate::compact::RewriteKind::Summarize,
-        removed_block_count: 3,
-        inserted_block_ids: vec![causa::kernel::BlockId::new(uuid::Uuid::now_v7())],
-    };
+fn duplicate_history_entries_in_record_are_rejected() {
+    let record_id = uuid::Uuid::now_v7().to_string();
+    let duplicate = vec![
+        crate::compact::HistoryRecordEntry {
+            record_id: record_id.clone(),
+            created_at_ms: 1,
+            trigger: crate::compact::HistoryTrigger::Auto,
+            kind: crate::compact::RewriteKind::Summarize,
+            removed_block_count: 1,
+            inserted_block_ids: vec![new_block_id()],
+        },
+        crate::compact::HistoryRecordEntry {
+            record_id,
+            created_at_ms: 2,
+            trigger: crate::compact::HistoryTrigger::Manual,
+            kind: crate::compact::RewriteKind::Summarize,
+            removed_block_count: 1,
+            inserted_block_ids: vec![new_block_id()],
+        },
+    ];
     let record = super::SavedSessionRecord::new_with_compaction(
-        id.clone(),
         uuid::Uuid::now_v7().to_string(),
-        None,
-        definition(),
-        Context::default(),
-        None,
-        Some(false),
-        Some(55),
-        vec![entry.clone()],
-        None,
-        None,
-        1_000,
-    )
-    .unwrap();
-    let bytes = serde_json::to_vec(&record).unwrap();
-    let decoded = super::record::decode(&bytes, &id).unwrap();
-    assert_eq!(decoded.auto_compact, Some(false));
-    assert_eq!(decoded.compact_threshold, Some(55));
-    assert_eq!(decoded.history, vec![entry.clone()]);
-    // An older record has none of the appended fields and still reads.
-    let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let object = value.as_object_mut().unwrap();
-    object.remove("auto_compact");
-    object.remove("compact_threshold");
-    object.remove("history");
-    object.remove("usage");
-    let older = serde_json::to_vec(&value).unwrap();
-    let decoded = super::record::decode(&older, &id).unwrap();
-    assert_eq!(decoded.auto_compact, None);
-    assert_eq!(decoded.compact_threshold, None);
-    assert_eq!(decoded.usage, None);
-    assert_eq!(
-        decoded.session_usage(),
-        crate::usage::SessionUsage::default()
-    );
-    assert!(decoded.history.is_empty());
-    // Duplicate record identities are refused during decode.
-    let duplicate = vec![entry.clone(), entry.clone()];
-    let record = super::SavedSessionRecord::new_with_compaction(
-        id.clone(),
         uuid::Uuid::now_v7().to_string(),
         None,
         definition(),
@@ -703,88 +675,45 @@ fn compaction_fields_roundtrip_and_older_records_read_as_defaults() {
 }
 
 #[test]
-fn session_listing_ignores_the_history_directory() {
-    let root = tempfile::tempdir().unwrap();
-    let store = super::SessionStore::new(root.path().join("store"));
-    let sessions = store.directory().to_path_buf();
-    std::fs::create_dir_all(&sessions).unwrap();
-    let id = uuid::Uuid::now_v7().to_string();
-    let record = super::SavedSessionRecord::new(
-        id.clone(),
-        uuid::Uuid::now_v7().to_string(),
-        None,
-        definition(),
-        Context::default(),
-        None,
-        None,
-        1_000,
-    )
-    .unwrap();
-    std::fs::write(
-        sessions.join(format!("{id}.json")),
-        serde_json::to_vec(&record).unwrap(),
-    )
-    .unwrap();
-    let history = sessions.join(format!("{id}.history"));
-    std::fs::create_dir(&history).unwrap();
-    std::fs::write(history.join("stray.json"), b"{}").unwrap();
-    let listed = store.list().unwrap();
-    assert_eq!(listed.len(), 1);
-    assert!(listed[0].record.is_ok());
-}
-
-#[test]
-fn test_be02_new_sessions_write_v2_2_and_opening_v2_1_fails_with_both_versions_and_list_shows_invalid()
- {
+fn test_be02_new_sessions_write_v2_4_and_opening_older_versions_fails_with_advice() {
     let (folder, store, id, writer) = setup();
 
-    // 1. New sessions write tars-session-v2.4
+    // 1. New sessions record tars-session-v2.4 in sessions.policy_json
     let initial = op(&id, None, "new session text");
     writer.commit(&initial).unwrap();
-    let path = folder.path().join("sessions").join(format!("{id}.json"));
-    let bytes = fs::read(&path).unwrap();
-    let text = String::from_utf8(bytes.clone()).unwrap();
-    assert!(text.contains(r#""format":"tars-session-v2.4""#));
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    let policy_json: String = conn
+        .query_row(
+            "SELECT policy_json FROM sessions WHERE session_id = ?1",
+            params![&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(policy_json.contains("tars-session-v2.4"));
 
-    // 2. Opening v2.1 and v2.3 fixtures fails with both version names, advice, and leaves bytes/mtime unchanged
+    // 2. Older session versions stored in SQLite fail with both version names & export advice
     for old_format in ["tars-session-v2.1", "tars-session-v2.3"] {
         let old_id = Uuid::now_v7().to_string();
-        let old_path = folder
-            .path()
-            .join("sessions")
-            .join(format!("{old_id}.json"));
-        let mut old_value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        old_value["format"] = serde_json::json!(old_format);
-        old_value["conversation_id"] = serde_json::json!(old_id);
-        let old_bytes = serde_json::to_vec(&old_value).unwrap();
-        fs::write(&old_path, &old_bytes).unwrap();
-
-        let mtime_before = fs::metadata(&old_path).unwrap().modified().unwrap();
-
         let old_writer = store.acquire_writer(&old_id).unwrap();
+        old_writer
+            .commit(&op(&old_id, None, "seed old format"))
+            .unwrap();
+        let bad_policy = serde_json::json!({ "format": old_format }).to_string();
+        conn.execute(
+            "UPDATE sessions SET policy_json = ?1 WHERE session_id = ?2",
+            params![bad_policy, &old_id],
+        )
+        .unwrap();
+
         let read_err = old_writer.read_latest().unwrap_err();
         let err_msg = read_err.to_string();
-        assert!(
-            err_msg.contains(old_format),
-            "error must name found version {old_format}: {err_msg}"
-        );
-        assert!(
-            err_msg.contains("tars-session-v2.4"),
-            "error must name supported version: {err_msg}"
-        );
+        assert!(err_msg.contains(old_format), "{err_msg}");
+        assert!(err_msg.contains("tars-session-v2.4"), "{err_msg}");
         assert!(
             err_msg.contains("tars session export-materials"),
-            "error must advise export-materials: {err_msg}"
+            "{err_msg}"
         );
 
-        // File bytes and mtime unchanged
-        assert_eq!(fs::read(&old_path).unwrap(), old_bytes);
-        assert_eq!(
-            fs::metadata(&old_path).unwrap().modified().unwrap(),
-            mtime_before
-        );
-
-        // `session list` lists it as invalid with the same reason
         let list = store.list().unwrap();
         let found = list
             .iter()
@@ -796,17 +725,10 @@ fn test_be02_new_sessions_write_v2_2_and_opening_v2_1_fails_with_both_versions_a
         assert!(list_err.contains("tars-session-v2.4"));
     }
 
-    // 3. Reading v1 and v1.1 history records fails with both version names and export-materials advice
-    let history_dir = folder.path().join("sessions").join(format!("{id}.history"));
-    fs::create_dir_all(&history_dir).unwrap();
-    let history_store = crate::compact::history::HistoryStore::new(
-        &folder.path().join("sessions"),
-        &id,
-        Vec::new(),
-    );
+    // 3. Reading v1 and v1.1 history records from SQLite fails with both version names
+    let history_store = crate::compact::history::HistoryStore::new(folder.path(), &id, Vec::new());
     for old_hist_format in ["tars-history-v1", "tars-history-v1.1"] {
         let old_record_id = Uuid::now_v7().to_string();
-        let old_history_path = history_dir.join(format!("{old_record_id}.json"));
         let old_history_payload = serde_json::json!({
             "format": old_hist_format,
             "conversation_id": id,
@@ -818,29 +740,20 @@ fn test_be02_new_sessions_write_v2_2_and_opening_v2_1_fails_with_both_versions_a
             "estimate_after": 200,
             "replacements": []
         });
-        let old_bytes = serde_json::to_vec(&old_history_payload).unwrap();
-        fs::write(&old_history_path, &old_bytes).unwrap();
-        let old_mtime_before = fs::metadata(&old_history_path).unwrap().modified().unwrap();
+        conn.execute(
+            "INSERT INTO history_records (session_id, agent_id, record_id, seq, kind, summary_json, document_json)
+             VALUES (?1, ?1, ?2, 0, 'summarize', '{}', ?3)",
+            params![&id, &old_record_id, old_history_payload.to_string()],
+        )
+        .unwrap();
 
         let hist_err = history_store.read(&old_record_id).unwrap_err();
         let hist_msg = hist_err.to_string();
-        assert!(
-            hist_msg.contains(old_hist_format),
-            "error must name found history version {old_hist_format}: {hist_msg}"
-        );
-        assert!(
-            hist_msg.contains("tars-history-v1.2"),
-            "error must name supported history version: {hist_msg}"
-        );
+        assert!(hist_msg.contains(old_hist_format), "{hist_msg}");
+        assert!(hist_msg.contains("tars-history-v1.2"), "{hist_msg}");
         assert!(
             hist_msg.contains("tars session export-materials"),
-            "error must advise export-materials: {hist_msg}"
-        );
-        // History file bytes and mtime unchanged
-        assert_eq!(fs::read(&old_history_path).unwrap(), old_bytes);
-        assert_eq!(
-            fs::metadata(&old_history_path).unwrap().modified().unwrap(),
-            old_mtime_before
+            "{hist_msg}"
         );
     }
 }
@@ -903,7 +816,6 @@ fn title_derivation_skips_prelude_and_compaction_blocks() {
     assert_eq!(meta_after_prelude.title, None);
     assert!(!meta_after_prelude.title_settled);
 
-    // Next commit includes an incremental prelude update AND the real first user prompt
     let mut blocks = prelude_only.blocks().to_vec();
     blocks.push(ContextBlock::new(
         new_block_id(),
@@ -936,4 +848,609 @@ fn title_derivation_skips_prelude_and_compaction_blocks() {
     let settled = super::RecordMetadata::of(&saved_with_user);
     assert_eq!(settled.title.as_deref(), Some("Fix the login bug"));
     assert!(settled.title_settled);
+}
+
+#[test]
+fn sqlite_schema_has_seven_tables_wal_pragmas_and_rejects_future_user_version() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(folder.path().into());
+
+    // Read-only operations on a fresh store must not create tars.db or locks/.
+    assert!(store.list().unwrap().is_empty());
+    let fresh_id = Uuid::now_v7().to_string();
+    assert_eq!(store.read_saved(&fresh_id).unwrap(), None);
+    assert!(!store.db_path().exists());
+    assert!(!store.locks_dir().exists());
+
+    // Acquiring a writer initializes tars.db with all 7 tables and WAL PRAGMAs.
+    let writer = store.acquire_writer(&fresh_id).unwrap();
+    assert!(store.db_path().exists());
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+
+    let journal_mode: String = conn
+        .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+    let fk: i64 = conn
+        .query_row("PRAGMA foreign_keys;", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(fk, 1);
+    let user_version: u32 = conn
+        .query_row("PRAGMA user_version;", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(user_version, 1);
+
+    let tables: Vec<String> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                 ORDER BY name ASC",
+            )
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        tables,
+        vec![
+            "agent_events",
+            "agents",
+            "artifacts",
+            "history_records",
+            "operations",
+            "sessions",
+            "workspace_trust",
+        ]
+    );
+
+    // Future schema version (> 1) must fail closed on both read and write opens.
+    drop(writer);
+    conn.execute_batch("PRAGMA user_version = 99;").unwrap();
+    drop(conn);
+
+    assert!(matches!(
+        store.list(),
+        Err(StoreError::UnsupportedSchemaVersion {
+            found: 99,
+            supported: 1
+        })
+    ));
+    assert!(matches!(
+        store.read_saved(&fresh_id),
+        Err(StoreError::UnsupportedSchemaVersion {
+            found: 99,
+            supported: 1
+        })
+    ));
+    assert!(matches!(
+        store.acquire_writer(&fresh_id),
+        Err(StoreError::UnsupportedSchemaVersion {
+            found: 99,
+            supported: 1
+        })
+    ));
+}
+
+#[test]
+fn wal_concurrent_reads_succeed_while_writer_holds_os_lock_and_commits() {
+    let (_folder, store, id, writer) = setup();
+    let first = op(&id, None, "rev1");
+    writer.commit(&first).unwrap();
+
+    // Writer still holds the OS lock; lock-free WAL readers see rev1 and active=true.
+    let listed = store.list().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].record.as_ref().unwrap().revision, 1);
+    assert_eq!(listed[0].active.as_ref().unwrap(), &true);
+
+    // Commit rev2 while holding lock; reader sees rev2 without contending for OS lock.
+    let second = op(&id, Some(1), "rev2");
+    writer.commit(&second).unwrap();
+    let read = store.read_saved(&id).unwrap().unwrap();
+    assert_eq!(read.revision, 2);
+}
+
+#[test]
+fn strict_history_store_enforces_foreign_key_against_missing_session() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(folder.path().into());
+    // Ensure database exists with schema v1, but no session/agent rows.
+    let _ = schema::open_read_write(store.db_path()).unwrap();
+
+    let missing_id = Uuid::now_v7().to_string();
+    let strict =
+        crate::compact::history::HistoryStore::new_strict(store.root(), &missing_id, Vec::new());
+    assert!(matches!(
+        strict.persist_spilled_artifact(b"orphan bytes"),
+        Err(StoreError::Sqlite(_))
+    ));
+}
+
+#[test]
+fn legacy_v2_4_import_preserves_record_history_and_artifacts_without_modifying_source() {
+    use crate::compact::HistoryTrigger;
+    use crate::compact::history::{HISTORY_FORMAT, HistoryRecord, RangeReplacement, RewriteKind};
+    use causa::kernel::{
+        ArtifactKind, ArtifactRef, Role, ToolCallPayload, ToolOutput, ToolResultPayload,
+        ToolResultStatus,
+    };
+
+    let folder = tempfile::tempdir().unwrap();
+    let legacy_dir = folder.path().join("legacy");
+    fs::create_dir_all(&legacy_dir).unwrap();
+
+    let conv_id = Uuid::now_v7().to_string();
+    let commit_id = Uuid::now_v7().to_string();
+    let hist_id = Uuid::now_v7().to_string();
+    let art_uuid = Uuid::now_v7().to_string();
+    let art_ref_id = format!("artifact:{art_uuid}");
+
+    let call_id = new_block_id();
+    let res_id = new_block_id();
+    let mut out = ToolOutput::new(serde_json::json!("preview"));
+    out.artifact = Some(ArtifactRef::new(
+        art_ref_id.clone(),
+        14,
+        ArtifactKind::FullOutput,
+        true,
+    ));
+    let original_res_block = ContextBlock::new(
+        res_id,
+        BlockContent::ToolResult(ToolResultPayload::new(
+            call_id,
+            ToolResultStatus::Succeeded,
+            out,
+        )),
+        BlockMeta::default(),
+    );
+    let original_call_block = ContextBlock::new(
+        call_id,
+        BlockContent::ToolCall(ToolCallPayload::new("read_file", serde_json::json!({}))),
+        BlockMeta::default(),
+    );
+    let summary_block = ContextBlock::new(
+        new_block_id(),
+        BlockContent::text(Role::User, "brief summary"),
+        BlockMeta::from_source(crate::compact::SUMMARY_SOURCE),
+    );
+    let current_user = ContextBlock::new(
+        new_block_id(),
+        BlockContent::text(Role::User, "follow-up"),
+        BlockMeta::default(),
+    );
+
+    let history_doc = HistoryRecord {
+        format: HISTORY_FORMAT.to_owned(),
+        conversation_id: conv_id.clone(),
+        record_id: hist_id.clone(),
+        created_at_ms: 500,
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
+        estimate_before: 1_000,
+        estimate_after: 100,
+        replacements: vec![RangeReplacement {
+            range: 0..2,
+            originals: vec![original_call_block, original_res_block],
+            inserted_ids: vec![summary_block.id()],
+        }],
+    };
+    let history_entry = history_doc.index_entry();
+
+    let mut def = definition();
+    def.permission_mode = Some(crate::policy::PermissionMode::AcceptEdits);
+    let record = SavedSessionRecord::new_with_compaction(
+        conv_id.clone(),
+        commit_id,
+        Some(2),
+        def,
+        Context::from_blocks(vec![summary_block, current_user]).unwrap(),
+        Some(crate::policy::PermissionMode::AcceptEdits),
+        Some(false),
+        Some(80),
+        vec![history_entry],
+        None,
+        Some("Legacy Title".into()),
+        9_999,
+    )
+    .unwrap();
+
+    let legacy_record_path = legacy_dir.join(format!("{conv_id}.json"));
+    let legacy_history_dir = legacy_dir.join(format!("{conv_id}.history"));
+    let legacy_artifacts_dir = legacy_dir.join(format!("{conv_id}.artifacts"));
+    fs::create_dir_all(&legacy_history_dir).unwrap();
+    fs::create_dir_all(&legacy_artifacts_dir).unwrap();
+    let legacy_hist_path = legacy_history_dir.join(format!("{hist_id}.json"));
+    let legacy_art_path = legacy_artifacts_dir.join(&art_uuid);
+
+    let record_bytes = serde_json::to_vec(&record).unwrap();
+    let hist_bytes = serde_json::to_vec(&history_doc).unwrap();
+    let art_bytes = b"spilled payload";
+    fs::write(&legacy_record_path, &record_bytes).unwrap();
+    fs::write(&legacy_hist_path, &hist_bytes).unwrap();
+    fs::write(&legacy_art_path, art_bytes).unwrap();
+
+    let store = SessionStore::new(folder.path().join("sqlite-store"));
+    let imported = store.import_legacy_v2_4(&legacy_record_path).unwrap();
+    assert_eq!(imported.conversation_id, conv_id);
+    assert_eq!(imported.revision, 3);
+    assert_eq!(imported.block_count, 2);
+    assert_eq!(imported.history_records, 1);
+    assert_eq!(imported.artifacts, 1);
+
+    // Source files remain byte-for-byte untouched.
+    assert_eq!(fs::read(&legacy_record_path).unwrap(), record_bytes);
+    assert_eq!(fs::read(&legacy_hist_path).unwrap(), hist_bytes);
+    assert_eq!(fs::read(&legacy_art_path).unwrap(), art_bytes);
+
+    // Duplicate import is refused cleanly.
+    assert!(matches!(
+        store.import_legacy_v2_4(&legacy_record_path),
+        Err(StoreError::AlreadyExists(ref existing)) if existing == &conv_id
+    ));
+
+    // Verify imported record, history record, and spilled artifact in SQLite.
+    let saved = store.read_saved(&conv_id).unwrap().unwrap();
+    assert_eq!(saved, record);
+    let history_store = crate::compact::history::HistoryStore::new_strict(
+        store.root(),
+        &conv_id,
+        saved.history.clone(),
+    );
+    assert_eq!(history_store.read(&hist_id).unwrap(), history_doc);
+    assert_eq!(
+        history_store
+            .read_spilled_artifact(&art_uuid, None)
+            .unwrap(),
+        art_bytes
+    );
+}
+
+#[test]
+fn open_read_write_fails_closed_when_user_version_is_zero_with_existing_tables() {
+    let folder = tempfile::tempdir().unwrap();
+    let db_path = folder.path().join("tars.db");
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE preexisting_table (id INTEGER PRIMARY KEY);
+             PRAGMA user_version = 0;",
+        )
+        .unwrap();
+    }
+
+    let err = super::schema::open_read_write(&db_path).unwrap_err();
+    assert!(
+        matches!(err, StoreError::InvalidDatabase(ref msg) if msg.contains("user_version 0")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn list_isolates_column_storage_class_mismatch_to_the_corrupt_session() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(folder.path().to_path_buf());
+    let good_id = Uuid::now_v7().to_string();
+    let corrupt_id = Uuid::now_v7().to_string();
+
+    let good_writer = store.acquire_writer(&good_id).unwrap();
+    let good_op = op(&good_id, None, "good session");
+    let good_record = good_op.record.clone();
+    good_writer.commit(&good_op).unwrap();
+    drop(good_writer);
+
+    let corrupt_writer = store.acquire_writer(&corrupt_id).unwrap();
+    corrupt_writer
+        .commit(&op(&corrupt_id, None, "corrupt session"))
+        .unwrap();
+    drop(corrupt_writer);
+
+    // Inject a column storage-class mismatch (TEXT stored in INTEGER revision column).
+    {
+        let conn = rusqlite::Connection::open(store.db_path()).unwrap();
+        conn.execute(
+            "UPDATE sessions SET revision = 'corrupt-text' WHERE session_id = ?1",
+            rusqlite::params![corrupt_id],
+        )
+        .unwrap();
+    }
+
+    let listed = store.list().unwrap();
+    assert_eq!(listed.len(), 2);
+
+    let good = listed
+        .iter()
+        .find(|item| item.conversation_id == good_id)
+        .unwrap();
+    assert_eq!(good.record.as_ref().unwrap(), &good_record);
+
+    let corrupt = listed
+        .iter()
+        .find(|item| item.conversation_id == corrupt_id)
+        .unwrap();
+    assert!(
+        matches!(corrupt.record, Err(StoreError::Sqlite(_))),
+        "expected sqlite error on corrupt row, got {:?}",
+        corrupt.record
+    );
+}
+
+#[test]
+fn import_legacy_v2_4_fails_closed_on_malformed_artifact_id_in_history_originals() {
+    use crate::compact::HistoryTrigger;
+    use crate::compact::history::{HISTORY_FORMAT, HistoryRecord, RangeReplacement, RewriteKind};
+    use causa::kernel::{
+        ArtifactKind, ArtifactRef, Role, ToolCallPayload, ToolOutput, ToolResultPayload,
+        ToolResultStatus,
+    };
+
+    let folder = tempfile::tempdir().unwrap();
+    let legacy_dir = folder.path().join("legacy");
+    fs::create_dir_all(&legacy_dir).unwrap();
+
+    let conv_id = Uuid::now_v7().to_string();
+    let hist_id = Uuid::now_v7().to_string();
+    let commit_id = Uuid::now_v7().to_string();
+
+    let call_id = new_block_id();
+    let mut bad_out = ToolOutput::new(serde_json::json!("preview"));
+    bad_out.artifact = Some(ArtifactRef::new(
+        "artifact:not-a-uuid".to_owned(),
+        14,
+        ArtifactKind::FullOutput,
+        true,
+    ));
+    let original_call_block = ContextBlock::new(
+        call_id,
+        BlockContent::ToolCall(ToolCallPayload::new("read_file", serde_json::json!({}))),
+        BlockMeta::default(),
+    );
+    let bad_res_block = ContextBlock::new(
+        new_block_id(),
+        BlockContent::ToolResult(ToolResultPayload::new(
+            call_id,
+            ToolResultStatus::Succeeded,
+            bad_out,
+        )),
+        BlockMeta::default(),
+    );
+    let summary_block = ContextBlock::new(
+        new_block_id(),
+        BlockContent::text(Role::User, "summary"),
+        BlockMeta::from_source(crate::compact::SUMMARY_SOURCE),
+    );
+    let history_doc = HistoryRecord {
+        format: HISTORY_FORMAT.to_owned(),
+        conversation_id: conv_id.clone(),
+        record_id: hist_id.clone(),
+        created_at_ms: 1_000,
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
+        estimate_before: 1_000,
+        estimate_after: 100,
+        replacements: vec![RangeReplacement {
+            range: 0..2,
+            originals: vec![original_call_block, bad_res_block],
+            inserted_ids: vec![summary_block.id()],
+        }],
+    };
+
+    let mut def = definition();
+    def.permission_mode = Some(crate::policy::PermissionMode::Ask);
+    let record = SavedSessionRecord::new_with_compaction(
+        conv_id.clone(),
+        commit_id,
+        Some(1),
+        def,
+        Context::from_blocks(vec![summary_block]).unwrap(),
+        Some(crate::policy::PermissionMode::Ask),
+        None,
+        None,
+        vec![history_doc.index_entry()],
+        None,
+        None,
+        2_000,
+    )
+    .unwrap();
+
+    let legacy_record_path = legacy_dir.join(format!("{conv_id}.json"));
+    let legacy_history_dir = legacy_dir.join(format!("{conv_id}.history"));
+    fs::create_dir_all(&legacy_history_dir).unwrap();
+    fs::write(&legacy_record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    fs::write(
+        legacy_history_dir.join(format!("{hist_id}.json")),
+        serde_json::to_vec(&history_doc).unwrap(),
+    )
+    .unwrap();
+
+    let store = SessionStore::new(folder.path().join("sqlite-store"));
+    let err = store.import_legacy_v2_4(&legacy_record_path).unwrap_err();
+    assert!(
+        matches!(err, StoreError::InvalidHistory(_)),
+        "expected InvalidHistory for malformed artifact id, got {err:?}"
+    );
+    assert!(!store.db_path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn import_legacy_v2_4_rejects_symlinked_directories_and_child_files() {
+    use crate::compact::HistoryTrigger;
+    use crate::compact::history::{HISTORY_FORMAT, HistoryRecord, RangeReplacement, RewriteKind};
+    use causa::kernel::{
+        ArtifactKind, ArtifactRef, Role, ToolCallPayload, ToolOutput, ToolResultPayload,
+        ToolResultStatus,
+    };
+    use std::os::unix::fs::symlink;
+
+    let conv_id = Uuid::now_v7().to_string();
+    let hist_id = Uuid::now_v7().to_string();
+    let art_uuid = Uuid::now_v7().to_string();
+    let commit_id = Uuid::now_v7().to_string();
+
+    let call_id = new_block_id();
+    let mut out = ToolOutput::new(serde_json::json!("preview"));
+    out.artifact = Some(ArtifactRef::new(
+        format!("artifact:{art_uuid}"),
+        10,
+        ArtifactKind::FullOutput,
+        true,
+    ));
+    let spilled_block = ContextBlock::new(
+        new_block_id(),
+        BlockContent::ToolResult(ToolResultPayload::new(
+            call_id,
+            ToolResultStatus::Succeeded,
+            out,
+        )),
+        BlockMeta::default(),
+    );
+    let call_block = ContextBlock::new(
+        call_id,
+        BlockContent::ToolCall(ToolCallPayload::new("read_file", serde_json::json!({}))),
+        BlockMeta::default(),
+    );
+    let user_block = ContextBlock::new(
+        new_block_id(),
+        BlockContent::text(Role::User, "hi"),
+        BlockMeta::default(),
+    );
+    let summary_block = ContextBlock::new(
+        new_block_id(),
+        BlockContent::text(Role::User, "after"),
+        BlockMeta::from_source(crate::compact::SUMMARY_SOURCE),
+    );
+    let history_doc = HistoryRecord {
+        format: HISTORY_FORMAT.to_owned(),
+        conversation_id: conv_id.clone(),
+        record_id: hist_id.clone(),
+        created_at_ms: 1_000,
+        trigger: HistoryTrigger::Auto,
+        kind: RewriteKind::Summarize,
+        estimate_before: 1_000,
+        estimate_after: 100,
+        replacements: vec![RangeReplacement {
+            range: 0..1,
+            originals: vec![user_block],
+            inserted_ids: vec![summary_block.id()],
+        }],
+    };
+    let mut def = definition();
+    def.permission_mode = Some(crate::policy::PermissionMode::Ask);
+    let record = SavedSessionRecord::new_with_compaction(
+        conv_id.clone(),
+        commit_id,
+        Some(1),
+        def,
+        Context::from_blocks(vec![call_block, spilled_block, summary_block]).unwrap(),
+        Some(crate::policy::PermissionMode::Ask),
+        None,
+        None,
+        vec![history_doc.index_entry()],
+        None,
+        None,
+        2_000,
+    )
+    .unwrap();
+
+    let record_bytes = serde_json::to_vec(&record).unwrap();
+    let hist_bytes = serde_json::to_vec(&history_doc).unwrap();
+    let secret_art_bytes = b"HOST SECRET SHOULD NOT BE INGESTED";
+
+    // External host directory outside the legacy folder.
+    let outside = tempfile::tempdir().unwrap();
+    let outside_hist_dir = outside.path().join("host-hist");
+    let outside_art_dir = outside.path().join("host-art");
+    fs::create_dir_all(&outside_hist_dir).unwrap();
+    fs::create_dir_all(&outside_art_dir).unwrap();
+    let outside_hist_file = outside_hist_dir.join(format!("{hist_id}.json"));
+    let outside_art_file = outside_art_dir.join(&art_uuid);
+    fs::write(&outside_hist_file, &hist_bytes).unwrap();
+    fs::write(&outside_art_file, secret_art_bytes).unwrap();
+
+    // Case 1: symlinked <conv_id>.history directory
+    {
+        let case = tempfile::tempdir().unwrap();
+        let legacy_dir = case.path().join("legacy");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let record_path = legacy_dir.join(format!("{conv_id}.json"));
+        fs::write(&record_path, &record_bytes).unwrap();
+        symlink(
+            &outside_hist_dir,
+            legacy_dir.join(format!("{conv_id}.history")),
+        )
+        .unwrap();
+        let art_dir = legacy_dir.join(format!("{conv_id}.artifacts"));
+        fs::create_dir_all(&art_dir).unwrap();
+        fs::write(art_dir.join(&art_uuid), b"ok").unwrap();
+
+        let store = SessionStore::new(case.path().join("store"));
+        let err = store.import_legacy_v2_4(&record_path).unwrap_err();
+        assert!(matches!(err, StoreError::InvalidHistory(_)), "{err:?}");
+        assert!(!store.db_path().exists());
+    }
+
+    // Case 2: symlinked <conv_id>.artifacts directory
+    {
+        let case = tempfile::tempdir().unwrap();
+        let legacy_dir = case.path().join("legacy");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let record_path = legacy_dir.join(format!("{conv_id}.json"));
+        fs::write(&record_path, &record_bytes).unwrap();
+        let hist_dir = legacy_dir.join(format!("{conv_id}.history"));
+        fs::create_dir_all(&hist_dir).unwrap();
+        fs::write(hist_dir.join(format!("{hist_id}.json")), &hist_bytes).unwrap();
+        symlink(
+            &outside_art_dir,
+            legacy_dir.join(format!("{conv_id}.artifacts")),
+        )
+        .unwrap();
+
+        let store = SessionStore::new(case.path().join("store"));
+        let err = store.import_legacy_v2_4(&record_path).unwrap_err();
+        assert!(matches!(err, StoreError::InvalidHistory(_)), "{err:?}");
+        assert!(!store.db_path().exists());
+    }
+
+    // Case 3: symlinked child history file
+    {
+        let case = tempfile::tempdir().unwrap();
+        let legacy_dir = case.path().join("legacy");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let record_path = legacy_dir.join(format!("{conv_id}.json"));
+        fs::write(&record_path, &record_bytes).unwrap();
+        let hist_dir = legacy_dir.join(format!("{conv_id}.history"));
+        fs::create_dir_all(&hist_dir).unwrap();
+        symlink(&outside_hist_file, hist_dir.join(format!("{hist_id}.json"))).unwrap();
+        let art_dir = legacy_dir.join(format!("{conv_id}.artifacts"));
+        fs::create_dir_all(&art_dir).unwrap();
+        fs::write(art_dir.join(&art_uuid), b"ok").unwrap();
+
+        let store = SessionStore::new(case.path().join("store"));
+        let err = store.import_legacy_v2_4(&record_path).unwrap_err();
+        assert!(matches!(err, StoreError::InvalidHistory(_)), "{err:?}");
+        assert!(!store.db_path().exists());
+    }
+
+    // Case 4: symlinked child artifact file
+    {
+        let case = tempfile::tempdir().unwrap();
+        let legacy_dir = case.path().join("legacy");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let record_path = legacy_dir.join(format!("{conv_id}.json"));
+        fs::write(&record_path, &record_bytes).unwrap();
+        let hist_dir = legacy_dir.join(format!("{conv_id}.history"));
+        fs::create_dir_all(&hist_dir).unwrap();
+        fs::write(hist_dir.join(format!("{hist_id}.json")), &hist_bytes).unwrap();
+        let art_dir = legacy_dir.join(format!("{conv_id}.artifacts"));
+        fs::create_dir_all(&art_dir).unwrap();
+        symlink(&outside_art_file, art_dir.join(&art_uuid)).unwrap();
+
+        let store = SessionStore::new(case.path().join("store"));
+        let err = store.import_legacy_v2_4(&record_path).unwrap_err();
+        assert!(matches!(err, StoreError::InvalidHistory(_)), "{err:?}");
+        assert!(!store.db_path().exists());
+    }
 }

@@ -1,5 +1,4 @@
 use serde_json::Value;
-use std::fs;
 use std::process::Command;
 
 #[allow(dead_code)]
@@ -89,10 +88,22 @@ fn test_be23_cli_session_list_ordering_and_fields() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
 
-    // Create an invalid session file
+    // Create an invalid session row in SQLite
     let bad_id = "00000000-0000-0000-0000-000000000002";
-    let bad_path = store.join("sessions").join(format!("{bad_id}.json"));
-    fs::write(&bad_path, b"not valid json").unwrap();
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    conn.execute(
+        "INSERT INTO sessions (session_id, revision, last_commit_id, policy_json, entry_agent_id, created_at_ms, updated_at_ms)
+         VALUES (?1, 1, ?1, '{\"format\":\"tars-session-v2.4\"}', ?1, 1000, 1000)",
+        rusqlite::params![bad_id],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO agents (session_id, agent_id, name, preset_name, interaction, definition_json, material_revision, context_json, history_index_json, created_at_ms, updated_at_ms)
+         VALUES (?1, ?1, 'main', NULL, 'reusable', '{}', 1, 'not valid json', '[]', 1000, 1000)",
+        rusqlite::params![bad_id],
+    )
+    .unwrap();
+    drop(conn);
 
     // 1. Test `session list --json`
     let output = tars_cmd()

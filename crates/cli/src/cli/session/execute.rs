@@ -131,6 +131,11 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 super::repair::run(store, id, apply, expected_revision, recovery_dir, json).await,
                 false,
             ),
+            SessionCommand::ImportLegacy {
+                record,
+                store,
+                json,
+            } => (import_legacy(record, store, json).await, false),
             SessionCommand::ExportMaterials { .. } => {
                 unreachable!("offline export handled before runtime")
             }
@@ -141,6 +146,30 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
         runtime.shutdown_background();
     }
     code
+}
+
+async fn import_legacy(record: PathBuf, store: PathBuf, json_output: bool) -> ExitCode {
+    let host = SessionHost::new(Some(store));
+    match host.import_legacy_record(&record).await {
+        Ok(summary) => {
+            if json_output {
+                output(&format!(
+                    "{}\n",
+                    json!({
+                        "status": "imported",
+                        "conversation_id": summary.conversation_id,
+                        "revision": summary.revision,
+                        "block_count": summary.block_count,
+                        "history_records": summary.history_records,
+                        "artifacts": summary.artifacts,
+                    })
+                ))
+            } else {
+                output(&format!("{}\n", summary.conversation_id))
+            }
+        }
+        Err(error) => early_failure(json_output, &application_error_message(&error)),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

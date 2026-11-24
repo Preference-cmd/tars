@@ -1,20 +1,24 @@
-//! Concrete local JSON session snapshots and activity-lifetime write ownership.
+//! SQLite v3 session snapshots, workspace trust, and activity-lifetime write ownership.
 //!
-//! The host retains an `Arc<Writer>` in every blocking operation. The lock file
-//! is stable and separate from the atomically replaced record; no public product
+//! The host retains an `Arc<Writer>` in every blocking operation. Each session
+//! uses a stable OS advisory lock file (`<store_root>/locks/<session_id>.lock`)
+//! separate from the WAL database (`<store_root>/tars.db`); no public product
 //! entry point exposes a writer. Local process interruption is covered, whereas
 //! power-loss directory durability and network filesystems are outside scope.
 
 mod error;
-mod json;
+mod legacy;
 mod record;
+pub(crate) mod schema;
+mod sqlite;
 mod trust;
 
 pub use error::{CommitStage, StoreError};
-pub(crate) use json::{CommitResolution, SessionStore, Writer};
+pub use legacy::LegacyImportSummary;
 pub(crate) use record::{PreparedCommit, RecordMetadata, SavedSessionRecord};
+pub(crate) use sqlite::{CommitResolution, MAX_RECORD_BYTES, SessionStore, Writer};
 
 #[cfg(test)]
-pub(crate) use json::{FaultAction, FaultHook};
+pub(crate) use sqlite::{FaultAction, FaultHook};
 #[cfg(test)]
 mod tests;

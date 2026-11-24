@@ -65,11 +65,7 @@ async fn auto_compaction_replaces_the_context_and_saves_one_record() {
         .as_str()
         .or_else(|| history[0]["id"].as_str())
         .unwrap();
-    assert!(
-        history_dir(store.path(), &id)
-            .join(format!("{record_id_value}.json"))
-            .exists()
-    );
+    assert!(history_record_exists(store.path(), &id, record_id_value));
     let document = session.read_history_record(record_id_value).unwrap();
     assert_eq!(
         document
@@ -136,11 +132,7 @@ async fn abandoned_summary_keeps_the_context_and_leaves_no_history() {
             }
         }
         assert!(abandoned >= 1, "abandonment is reported through progress");
-        let history = history_dir(store.path(), &id);
-        let files = std::fs::read_dir(&history)
-            .map(|entries| entries.count())
-            .unwrap_or(0);
-        assert_eq!(files, 0);
+        assert_eq!(history_row_count(store.path(), &id), 0);
         host.close(&session.target(), ClosePolicy::Save)
             .await
             .unwrap();
@@ -591,12 +583,7 @@ async fn cancelling_the_summary_leaves_the_context_and_history_untouched() {
         6,
         "cancellation returns the untouched material: the earlier blocks, the request and its tool declaration"
     );
-    assert_eq!(
-        std::fs::read_dir(history_dir(store.path(), &id))
-            .map(|entries| entries.count())
-            .unwrap_or(0),
-        0
-    );
+    assert_eq!(history_row_count(store.path(), &id), 0);
     host.close(&session.target(), ClosePolicy::Save)
         .await
         .unwrap();
@@ -618,8 +605,8 @@ async fn unwritable_history_abandons_the_compaction_and_keeps_the_round() {
         .await
         .unwrap();
     let id = session.target().conversation_id().as_str().to_owned();
-    // Block the history directory path with a file so create_dir_all fails.
-    std::fs::write(history_dir(store.path(), &id), b"not a directory").unwrap();
+    // Inject a SQLite trigger to block inserts into history_records.
+    set_history_write_blocked(store.path(), true);
     let receipt = session
         .submit(SubmitRequest {
             request_key: "first".into(),
@@ -640,7 +627,7 @@ async fn unwritable_history_abandons_the_compaction_and_keeps_the_round() {
         7,
         "the round still went out with the original material and its final answer"
     );
-    std::fs::remove_file(history_dir(store.path(), &id)).unwrap();
+    set_history_write_blocked(store.path(), false);
     host.close(&session.target(), ClosePolicy::Save)
         .await
         .unwrap();
@@ -676,8 +663,8 @@ async fn reopening_restores_settings_and_cleans_unreferenced_records() {
         .or_else(|| record["history"][0]["id"].as_str())
         .unwrap()
         .to_owned();
-    let stray = history_dir(store.path(), &id).join("stray.json");
-    std::fs::write(&stray, b"{}").unwrap();
+    let stray_id = uuid::Uuid::now_v7().to_string();
+    insert_stray_history_row(store.path(), &id, &stray_id);
     host.close(&session.target(), ClosePolicy::Save)
         .await
         .unwrap();
@@ -686,12 +673,11 @@ async fn reopening_restores_settings_and_cleans_unreferenced_records() {
         .open(session.target().conversation_id().clone())
         .await
         .unwrap();
-    assert!(!stray.exists(), "unreferenced records are removed on open");
     assert!(
-        history_dir(store.path(), &id)
-            .join(format!("{record_id_value}.json"))
-            .exists()
+        !history_record_exists(store.path(), &id, &stray_id),
+        "unreferenced records are removed on open"
     );
+    assert!(history_record_exists(store.path(), &id, &record_id_value));
     let settings = reopened.compaction_settings().unwrap();
     assert!(settings.auto_compact);
     assert_eq!(settings.compact_threshold, 70);
@@ -733,8 +719,7 @@ async fn reopening_restores_settings_and_cleans_unreferenced_records() {
         "the four summarized earlier blocks"
     );
     // A deleted referenced record is reported on read, not at open.
-    std::fs::remove_file(history_dir(store.path(), &id).join(format!("{record_id_value}.json")))
-        .unwrap();
+    delete_history_record_row(store.path(), &id, &record_id_value);
     host.close(&reopened.target(), ClosePolicy::Save)
         .await
         .unwrap();
@@ -1080,7 +1065,7 @@ async fn transient_sessions_have_no_compaction() {
     // the cleared entry instead of depending on scheduling.
     until(|| session.status().active_work.is_none()).await;
     assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 0);
-    assert!(!history_dir(store.path(), &id).exists());
+    assert_eq!(history_row_count(store.path(), &id), 0);
     assert!(session.artifacts().is_none());
     assert!(matches!(
         session.compact().await,
@@ -1428,10 +1413,9 @@ async fn test_be06_save_refused_for_deleted_record_file() {
 
     let stored_before = saved_record(store.path(), session.target().conversation_id().as_str());
 
-    // Now delete the record file
+    // Now delete the record row from SQLite
     let id = session.target().conversation_id().as_str().to_owned();
-    let rec_file = history_dir(store.path(), &id).join(format!("{record_id}.json"));
-    std::fs::remove_file(&rec_file).unwrap();
+    delete_history_record_row(store.path(), &id, &record_id);
 
     // Now trigger another save by appending another block
     let mut new_blocks = session.read_materials().unwrap().context.blocks().to_vec();
@@ -2164,15 +2148,10 @@ async fn test_be16_save_and_repair_accept_own_artifact_and_refuse_missing_unread
         .await
         .unwrap();
 
-    // Missing artifact file on s1: repair flags UnsupportedReference, submit refuses, save blocks.
+    // Missing artifact row on s1: repair flags UnsupportedReference, submit refuses, save blocks.
     let s1_id = s1.target().conversation_id().as_str().to_owned();
     let art_uuid = art_ref.id.strip_prefix("artifact:").unwrap();
-    let art_path = store
-        .path()
-        .join("sessions")
-        .join(format!("{s1_id}.artifacts"))
-        .join(art_uuid);
-    std::fs::remove_file(&art_path).unwrap();
+    delete_artifact_row(store.path(), &s1_id, art_uuid);
 
     let diag = s1.inspect_repair(None).unwrap().diagnosis;
     assert!(!diag.is_ready());
@@ -2190,23 +2169,11 @@ async fn test_be16_save_and_repair_accept_own_artifact_and_refuse_missing_unread
     let missing_err = s1.wait_saved().await.unwrap_err();
     assert!(matches!(missing_err, ApplicationError::SaveBlocked(_)));
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(&art_path, b"locked").unwrap();
-        let mut perms = std::fs::metadata(&art_path).unwrap().permissions();
-        perms.set_mode(0o000);
-        std::fs::set_permissions(&art_path, perms).unwrap();
-
-        if std::fs::File::open(&art_path).is_err() {
-            assert!(!s1.inspect_repair(None).unwrap().diagnosis.is_ready());
-            let retry_err = s1.retry_save().await.unwrap_err();
-            assert!(matches!(retry_err, ApplicationError::SaveBlocked(_)));
-        }
-        let mut restore = std::fs::metadata(&art_path).unwrap().permissions();
-        restore.set_mode(0o600);
-        std::fs::set_permissions(&art_path, restore).unwrap();
-    }
+    // Oversized artifact (> 64 MiB) is also refused on repair and save.
+    set_artifact_oversized(store.path(), &s1_id, art_uuid);
+    assert!(!s1.inspect_repair(None).unwrap().diagnosis.is_ready());
+    let retry_err = s1.retry_save().await.unwrap_err();
+    assert!(matches!(retry_err, ApplicationError::SaveBlocked(_)));
 
     host.close(&s1.target(), ClosePolicy::DiscardLocal)
         .await
@@ -2332,31 +2299,36 @@ async fn test_be16_reopen_under_write_lock_cleans_orphan_artifacts_and_keeps_con
         .unwrap();
 
     let id = session.target().conversation_id().clone();
-    let art_dir = store
-        .path()
-        .join("sessions")
-        .join(format!("{}.artifacts", id.as_str()));
-    let path_hist = art_dir.join(art_hist.id.strip_prefix("artifact:").unwrap());
-    let path_ctx = art_dir.join(art_ctx.id.strip_prefix("artifact:").unwrap());
-    let path_orphan = art_dir.join(art_orphan.id.strip_prefix("artifact:").unwrap());
-    assert!(path_hist.is_file());
-    assert!(path_ctx.is_file());
-    assert!(path_orphan.is_file());
+    let hist_uuid = art_hist.id.strip_prefix("artifact:").unwrap();
+    let ctx_uuid = art_ctx.id.strip_prefix("artifact:").unwrap();
+    let orphan_uuid = art_orphan.id.strip_prefix("artifact:").unwrap();
+    assert!(artifact_row_exists(store.path(), id.as_str(), hist_uuid));
+    assert!(artifact_row_exists(store.path(), id.as_str(), ctx_uuid));
+    assert!(artifact_row_exists(store.path(), id.as_str(), orphan_uuid));
 
     host.close(&session.target(), ClosePolicy::Save)
         .await
         .unwrap();
 
     // Reopen under write lock: orphan removed, Context + History references kept, 0 artifact reads.
-    let reopened = host.open(id).await.unwrap();
+    let reopened = host.open(id.clone()).await.unwrap();
     assert_eq!(
         reopened.artifact_reads(),
         0,
         "reopening a session must not read .artifacts/ files"
     );
-    assert!(path_hist.is_file(), "history-referenced artifact must stay");
-    assert!(path_ctx.is_file(), "context-referenced artifact must stay");
-    assert!(!path_orphan.exists(), "orphan artifact must be removed");
+    assert!(
+        artifact_row_exists(store.path(), id.as_str(), hist_uuid),
+        "history-referenced artifact must stay"
+    );
+    assert!(
+        artifact_row_exists(store.path(), id.as_str(), ctx_uuid),
+        "context-referenced artifact must stay"
+    );
+    assert!(
+        !artifact_row_exists(store.path(), id.as_str(), orphan_uuid),
+        "orphan artifact must be removed"
+    );
     host.close(&reopened.target(), ClosePolicy::DiscardLocal)
         .await
         .unwrap();
@@ -2768,12 +2740,7 @@ async fn test_be18_abandoned_compaction_and_auto_off_trim_frame_when_over_window
 
         let id = session.target().conversation_id().as_str().to_owned();
         assert!(session.history().is_empty());
-        assert_eq!(
-            std::fs::read_dir(history_dir(store.path(), &id))
-                .map(|entries| entries.count())
-                .unwrap_or(0),
-            0
-        );
+        assert_eq!(history_row_count(store.path(), &id), 0);
         // Context still has all 4 earlier + request + ToolChange(recall) + answer = 7 blocks.
         assert_eq!(session.read_materials().unwrap().context.blocks().len(), 7);
 
@@ -2819,8 +2786,8 @@ async fn test_be18_abandoned_compaction_and_auto_off_trim_frame_when_over_window
             .create(PreparedCreate::persistent(def, earlier_conversation()))
             .await
             .unwrap();
-        let id = session.target().conversation_id().as_str().to_owned();
-        std::fs::write(history_dir(store.path(), &id), b"not a directory").unwrap();
+        let _id = session.target().conversation_id().as_str().to_owned();
+        set_history_write_blocked(store.path(), true);
         let mut progress = session.subscribe_progress();
         let receipt = session
             .submit(SubmitRequest {
@@ -2849,7 +2816,7 @@ async fn test_be18_abandoned_compaction_and_auto_off_trim_frame_when_over_window
         }
         assert_eq!(trimmed_events, 1);
 
-        std::fs::remove_file(history_dir(store.path(), &id)).unwrap();
+        set_history_write_blocked(store.path(), false);
         host.close(&session.target(), ClosePolicy::Save)
             .await
             .unwrap();
@@ -3118,14 +3085,8 @@ async fn test_be19_transient_with_known_window_trims_without_history_or_artifact
     until(|| session.status().active_work.is_none()).await;
 
     assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 0);
-    assert!(!history_dir(store.path(), &id).exists());
-    assert!(
-        !store
-            .path()
-            .join("sessions")
-            .join(format!("{id}.artifacts"))
-            .exists()
-    );
+    assert_eq!(history_row_count(store.path(), &id), 0);
+    assert!(!store.path().join("tars.db").exists());
     assert!(session.artifacts().is_none());
     assert!(session.compaction_settings().is_none());
     // Full Context still holds all 4 earlier blocks + request + answer = 6 blocks.

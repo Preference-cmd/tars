@@ -203,12 +203,147 @@ fn report(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).unwrap_or_else(|_| panic!("{output:?}"))
 }
 
-fn record_path(store: &Path, id: &str) -> PathBuf {
-    store.join("sessions").join(format!("{id}.json"))
+fn record(store: &Path, id: &str) -> Value {
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    struct DbRow {
+        revision: i64,
+        last_commit_id: String,
+        policy_json: String,
+        title: Option<String>,
+        permission_mode: Option<String>,
+        auto_compact: Option<i64>,
+        compact_threshold: Option<i64>,
+        usage_json: Option<String>,
+        updated_at_ms: i64,
+        def_json: String,
+        ctx_json: String,
+        history_json: String,
+    }
+    let DbRow {
+        revision,
+        last_commit_id,
+        policy_json,
+        title,
+        permission_mode,
+        auto_compact,
+        compact_threshold,
+        usage_json,
+        updated_at_ms,
+        def_json,
+        ctx_json,
+        history_json,
+    } = conn
+        .query_row(
+            "SELECT
+                s.revision, s.last_commit_id, s.policy_json, s.title, s.permission_mode,
+                s.auto_compact, s.compact_threshold, s.usage_json, s.updated_at_ms,
+                a.definition_json, a.context_json, a.history_index_json
+             FROM sessions s
+             JOIN agents a ON s.session_id = a.session_id AND s.entry_agent_id = a.agent_id
+             WHERE s.session_id = ?1",
+            rusqlite::params![id],
+            |row| {
+                Ok(DbRow {
+                    revision: row.get(0)?,
+                    last_commit_id: row.get(1)?,
+                    policy_json: row.get(2)?,
+                    title: row.get(3)?,
+                    permission_mode: row.get(4)?,
+                    auto_compact: row.get(5)?,
+                    compact_threshold: row.get(6)?,
+                    usage_json: row.get(7)?,
+                    updated_at_ms: row.get(8)?,
+                    def_json: row.get(9)?,
+                    ctx_json: row.get(10)?,
+                    history_json: row.get(11)?,
+                })
+            },
+        )
+        .unwrap();
+    let policy: Value = serde_json::from_str(&policy_json).unwrap();
+    let mut obj = serde_json::Map::new();
+    obj.insert("format".into(), policy["format"].clone());
+    obj.insert("conversation_id".into(), json!(id));
+    obj.insert("revision".into(), json!(revision));
+    obj.insert("last_commit_id".into(), json!(last_commit_id));
+    obj.insert(
+        "definition".into(),
+        serde_json::from_str(&def_json).unwrap(),
+    );
+    obj.insert("context".into(), serde_json::from_str(&ctx_json).unwrap());
+    if let Some(t) = title {
+        obj.insert("title".into(), json!(t));
+    }
+    obj.insert("updated_at_ms".into(), json!(updated_at_ms));
+    if let Some(m) = permission_mode {
+        obj.insert("permission_mode".into(), json!(m));
+    }
+    if let Some(a) = auto_compact {
+        obj.insert("auto_compact".into(), json!(a != 0));
+    }
+    if let Some(ct) = compact_threshold {
+        obj.insert("compact_threshold".into(), json!(ct));
+    }
+    let history: Vec<Value> = serde_json::from_str(&history_json).unwrap();
+    if !history.is_empty() {
+        obj.insert("history".into(), Value::Array(history));
+    }
+    if let Some(u) = usage_json {
+        obj.insert("usage".into(), serde_json::from_str(&u).unwrap());
+    }
+    Value::Object(obj)
 }
 
-fn record(store: &Path, id: &str) -> Value {
-    serde_json::from_slice(&fs::read(record_path(store, id)).unwrap()).unwrap()
+fn write_context_to_db(store: &Path, id: &str, context: &Value) {
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    conn.execute(
+        "UPDATE agents SET context_json = ?1 WHERE session_id = ?2 AND agent_id = ?2",
+        rusqlite::params![serde_json::to_string(context).unwrap(), id],
+    )
+    .unwrap();
+}
+
+fn read_history_doc(store: &Path, id: &str, record_id: &str) -> Value {
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    let doc: String = conn
+        .query_row(
+            "SELECT document_json FROM history_records
+             WHERE session_id = ?1 AND agent_id = ?1 AND record_id = ?2",
+            rusqlite::params![id, record_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&doc).unwrap()
+}
+
+fn history_row_count(store: &Path, id: &str) -> usize {
+    let db_path = store.join("tars.db");
+    if !db_path.exists() {
+        return 0;
+    }
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM history_records WHERE session_id = ?1 AND agent_id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    usize::try_from(count).unwrap()
+}
+
+fn insert_artifact_row(store: &Path, id: &str, artifact_uuid: &str, content: &[u8]) {
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    conn.execute(
+        "INSERT INTO artifacts (session_id, agent_id, artifact_id, content) VALUES (?1, ?1, ?2, ?3)",
+        rusqlite::params![id, artifact_uuid, content],
+    )
+    .unwrap();
+}
+
+fn write_snapshot_json(store: &Path, id: &str, dest: &Path) {
+    let rec = record(store, id);
+    fs::write(dest, serde_json::to_vec(&rec).unwrap()).unwrap();
 }
 
 fn history_blocks(output: &Output) -> Vec<tars_core::compact::ExpandedBlock> {
@@ -585,10 +720,12 @@ fn export_and_import_carry_only_the_current_context_after_compaction() {
     let output = finished(child);
     assert!(output.status.success(), "{output:?}");
 
+    let snapshot = folder.path().join("snapshot.json");
+    write_snapshot_json(&store, &id, &snapshot);
     let exported = folder.path().join("exported.json");
     let export = cli()
         .args(["session", "export-materials", "--record"])
-        .arg(record_path(&store, &id))
+        .arg(&snapshot)
         .arg("--output")
         .arg(&exported)
         .output()
@@ -792,14 +929,14 @@ fn manual_compaction_reports_trigger_estimates_and_record_and_last_limits_histor
 
     // An unreadable record is reported in both output modes and fails the
     // command, while the readable record is still expanded.
-    fs::write(
-        store
-            .join("sessions")
-            .join(format!("{id}.history"))
-            .join(format!("{first_record}.json")),
-        b"not json",
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    conn.execute(
+        "UPDATE history_records SET document_json = 'not json'
+         WHERE session_id = ?1 AND agent_id = ?1 AND record_id = ?2",
+        rusqlite::params![&id, &first_record],
     )
     .unwrap();
+    drop(conn);
     let broken_json = cli()
         .args([
             "session",
@@ -875,7 +1012,7 @@ fn a_busy_session_is_refused_and_unpaired_materials_need_repair() {
         "http://127.0.0.1:1/unused",
         &["--load", input.to_str().unwrap()],
     );
-    let before = fs::read(record_path(&repair_store, &unpaired)).unwrap();
+    let before = record(&repair_store, &unpaired);
     let output = compact(&repair_store, &unpaired, true).output().unwrap();
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let value = report(&output);
@@ -889,16 +1026,8 @@ fn a_busy_session_is_refused_and_unpaired_materials_need_repair() {
         error.contains("inspect repair before sending new work"),
         "{error}"
     );
-    assert_eq!(
-        fs::read(record_path(&repair_store, &unpaired)).unwrap(),
-        before
-    );
-    assert!(
-        !repair_store
-            .join("sessions")
-            .join(format!("{unpaired}.history"))
-            .exists()
-    );
+    assert_eq!(record(&repair_store, &unpaired), before);
+    assert_eq!(history_row_count(&repair_store, &unpaired), 0);
     let human = compact(&repair_store, &unpaired, false).output().unwrap();
     assert_eq!(human.status.code(), Some(1), "{human:?}");
     assert!(
@@ -1040,15 +1169,18 @@ fn test_be05_cli_history_prints_expanded_conversation_and_deleting_record_exits_
         assert!(block_json.get("block").is_some());
     }
 
-    // 3. Deleting one record file reports it and exits 1 after printing what it could
+    // 3. Deleting one record row reports it and exits 1 after printing what it could
     let saved = record(&store, &id);
     let rec_id = saved["history"][0]["record_id"].as_str().unwrap();
-    let rec_path = store
-        .join("sessions")
-        .join(format!("{id}.history"))
-        .join(format!("{rec_id}.json"));
-    assert!(rec_path.exists());
-    fs::remove_file(&rec_path).unwrap();
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    let deleted = conn
+        .execute(
+            "DELETE FROM history_records WHERE session_id = ?1 AND agent_id = ?1 AND record_id = ?2",
+            rusqlite::params![&id, rec_id],
+        )
+        .unwrap();
+    assert_eq!(deleted, 1);
+    drop(conn);
 
     let broken = cli()
         .args([
@@ -1105,18 +1237,13 @@ fn test_be09_cli_export_materials_drops_own_reference_and_create_accepts() {
     let output = finished(child);
     assert!(output.status.success(), "{output:?}");
 
-    let rec_file = record_path(&store, &id);
-    let mut rec_json: Value = serde_json::from_slice(&fs::read(&rec_file).unwrap()).unwrap();
+    let mut rec_json = record(&store, &id);
     let record_id = rec_json["history"][0]["record_id"]
         .as_str()
         .unwrap()
         .to_owned();
 
-    let hist_file = store
-        .join("sessions")
-        .join(format!("{id}.history"))
-        .join(format!("{record_id}.json"));
-    let hist_json: Value = serde_json::from_slice(&fs::read(&hist_file).unwrap()).unwrap();
+    let hist_json = read_history_doc(&store, &id, &record_id);
     let orig_block_id = hist_json["replacements"][0]["originals"][0]["id"]
         .as_str()
         .unwrap()
@@ -1159,6 +1286,7 @@ fn test_be09_cli_export_materials_drops_own_reference_and_create_accepts() {
         .as_array_mut()
         .unwrap()
         .push(serde_json::to_value(&tool_res_block).unwrap());
+    let rec_file = folder.path().join("export-source.json");
     fs::write(&rec_file, serde_json::to_vec(&rec_json).unwrap()).unwrap();
 
     let exported = folder.path().join("exported.json");
@@ -1222,18 +1350,13 @@ fn test_be09_cli_recovery_export_drops_own_reference_and_is_importable() {
     let output = finished(child);
     assert!(output.status.success(), "{output:?}");
 
-    let rec_file = record_path(&store, &id);
-    let mut rec_json: Value = serde_json::from_slice(&fs::read(&rec_file).unwrap()).unwrap();
+    let mut rec_json = record(&store, &id);
     let record_id = rec_json["history"][0]["record_id"]
         .as_str()
         .unwrap()
         .to_owned();
 
-    let hist_file = store
-        .join("sessions")
-        .join(format!("{id}.history"))
-        .join(format!("{record_id}.json"));
-    let hist_json: Value = serde_json::from_slice(&fs::read(&hist_file).unwrap()).unwrap();
+    let hist_json = read_history_doc(&store, &id, &record_id);
     let orig_block_id = hist_json["replacements"][0]["originals"][0]["id"]
         .as_str()
         .unwrap()
@@ -1276,9 +1399,8 @@ fn test_be09_cli_recovery_export_drops_own_reference_and_is_importable() {
         .as_array_mut()
         .unwrap()
         .push(serde_json::to_value(&tool_res_block).unwrap());
-    fs::write(&rec_file, serde_json::to_vec(&rec_json).unwrap()).unwrap();
+    write_context_to_db(&store, &id, &rec_json["context"]);
 
-    let backup = folder.path().join("store-backup");
     let recovery_dir = folder.path().join("recovery");
     std::fs::create_dir_all(&recovery_dir).unwrap();
 
@@ -1286,7 +1408,13 @@ fn test_be09_cli_recovery_export_drops_own_reference_and_is_importable() {
     cmd.arg("--recovery-dir").arg(&recovery_dir);
     let child = spawn(cmd);
     fixture.request();
-    fs::rename(&store, &backup).unwrap();
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER test_block_save BEFORE UPDATE ON sessions
+         BEGIN SELECT RAISE(ABORT, 'injected save failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
     fixture.stream("completed turn");
     let run_output = finished(child);
 
@@ -1336,13 +1464,10 @@ fn test_be17_cli_session_history_marks_spilled_artifact_id_text_and_json() {
     let id = create(&store, &fixture.endpoint, &COMPACTING);
     seed(&fixture, &store, &id, "initial message");
 
-    let rec_file = record_path(&store, &id);
-    let mut rec_json: Value = serde_json::from_slice(&fs::read(&rec_file).unwrap()).unwrap();
+    let mut rec_json = record(&store, &id);
     let art_uuid = causa::runtime::new_block_id().0.to_string();
     let art_id = format!("artifact:{art_uuid}");
-    let art_dir = store.join("sessions").join(format!("{id}.artifacts"));
-    fs::create_dir_all(&art_dir).unwrap();
-    fs::write(art_dir.join(&art_uuid), b"full spilled output").unwrap();
+    insert_artifact_row(&store, &id, &art_uuid, b"full spilled output");
 
     let call_id = causa::runtime::new_block_id();
     let res_id = causa::runtime::new_block_id();
@@ -1376,7 +1501,7 @@ fn test_be17_cli_session_history_marks_spilled_artifact_id_text_and_json() {
     let blocks = rec_json["context"]["blocks"].as_array_mut().unwrap();
     blocks.push(serde_json::to_value(&call_block).unwrap());
     blocks.push(serde_json::to_value(&res_block).unwrap());
-    fs::write(&rec_file, serde_json::to_vec(&rec_json).unwrap()).unwrap();
+    write_context_to_db(&store, &id, &rec_json["context"]);
 
     // 1. Human text mode marks the spilled artifact id on the tool result line
     let text_out = cli()
@@ -1431,13 +1556,10 @@ fn test_be16_cli_export_materials_drops_spilled_artifact_and_imports() {
     let id = create(&store, &fixture.endpoint, &COMPACTING);
     seed(&fixture, &store, &id, "initial message");
 
-    let rec_file = record_path(&store, &id);
-    let mut rec_json: Value = serde_json::from_slice(&fs::read(&rec_file).unwrap()).unwrap();
+    let mut rec_json = record(&store, &id);
     let art_uuid = causa::runtime::new_block_id().0.to_string();
     let art_id = format!("artifact:{art_uuid}");
-    let art_dir = store.join("sessions").join(format!("{id}.artifacts"));
-    fs::create_dir_all(&art_dir).unwrap();
-    fs::write(art_dir.join(&art_uuid), b"full spilled output").unwrap();
+    insert_artifact_row(&store, &id, &art_uuid, b"full spilled output");
 
     let call_id = causa::runtime::new_block_id();
     let res_id = causa::runtime::new_block_id();
@@ -1471,6 +1593,7 @@ fn test_be16_cli_export_materials_drops_spilled_artifact_and_imports() {
     let blocks = rec_json["context"]["blocks"].as_array_mut().unwrap();
     blocks.push(serde_json::to_value(&call_block).unwrap());
     blocks.push(serde_json::to_value(&res_block).unwrap());
+    let rec_file = folder.path().join("spilled-source.json");
     fs::write(&rec_file, serde_json::to_vec(&rec_json).unwrap()).unwrap();
 
     let exported = folder.path().join("exported_spilled.json");
@@ -1592,8 +1715,7 @@ fn test_mc08_cli_session_history_and_show_with_micro_compact_and_missing_record(
         &["--context-window", "10000", "--auto-compact", "70"],
     );
 
-    let rec_file = record_path(&store, &id);
-    let mut rec_json: Value = serde_json::from_slice(&fs::read(&rec_file).unwrap()).unwrap();
+    let mut rec_json = record(&store, &id);
     let blocks = rec_json["context"]["blocks"].as_array_mut().unwrap();
     blocks.push(
         serde_json::to_value(causa::kernel::ContextBlock::text(
@@ -1641,7 +1763,7 @@ fn test_mc08_cli_session_history_and_show_with_micro_compact_and_missing_record(
         ))
         .unwrap(),
     );
-    fs::write(&rec_file, serde_json::to_vec(&rec_json).unwrap()).unwrap();
+    write_context_to_db(&store, &id, &rec_json["context"]);
 
     // Run one turn: hot-cache Path A micro-compacts without any summary model call.
     let child = spawn(run(&store, &id, "continue after reads"));
@@ -1737,14 +1859,14 @@ fn test_mc08_cli_session_history_and_show_with_micro_compact_and_missing_record(
     assert!(text.contains(&expected_artifact_id), "{text}");
     assert!(text.contains("MC08_ORIGINAL_TOOL_OUTPUT_0"), "{text}");
 
-    // 4. Deleting the MicroCompact record file reports on stderr and exits 1.
-    fs::remove_file(
-        store
-            .join("sessions")
-            .join(format!("{id}.history"))
-            .join(format!("{mc_record_id}.json")),
+    // 4. Deleting the MicroCompact record row reports on stderr and exits 1.
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    conn.execute(
+        "DELETE FROM history_records WHERE session_id = ?1 AND agent_id = ?1 AND record_id = ?2",
+        rusqlite::params![&id, &mc_record_id],
     )
     .unwrap();
+    drop(conn);
     let broken = cli()
         .args([
             "session",

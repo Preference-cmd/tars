@@ -615,9 +615,6 @@ return f.text;
         .await
         .unwrap();
     let conv_id = session.target().conversation_id().as_str().to_owned();
-    let artifacts_dir = store_dir
-        .join("sessions")
-        .join(format!("{conv_id}.artifacts"));
 
     // Work 1: inner read_file does not trigger OutputSpillProcessor.
     let obs1 = finish_work(&session, "w1").await;
@@ -631,12 +628,11 @@ return f.text;
         "got {:?}",
         res1.output.content
     );
-    let artifact_count_after_w1 = std::fs::read_dir(&artifacts_dir)
-        .map(|d| d.count())
-        .unwrap_or(0);
+    let artifact_count_after_w1 =
+        crate::application::tests::support::artifact_row_count(&store_dir, &conv_id);
     assert_eq!(
         artifact_count_after_w1, 0,
-        "inner read_file must not spill into .artifacts/"
+        "inner read_file must not spill into artifacts"
     );
 
     // Work 2: outer run_code output > SPILL_THRESHOLD_TOKENS spills cleanly and retains stats.

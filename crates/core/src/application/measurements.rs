@@ -199,9 +199,11 @@ async fn managed_resource_probe() {
         host.close(&view.target(), ClosePolicy::Save).await.unwrap();
     }
     let metrics = host.inner.store.as_ref().unwrap().metrics();
-    let disk_bytes: u64 = std::fs::read_dir(directory.path().join("sessions"))
+    let disk_bytes: u64 = std::fs::read_dir(directory.path())
         .unwrap()
-        .map(|entry| entry.unwrap().metadata().unwrap().len())
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+        .map(|entry| entry.metadata().unwrap().len())
         .sum();
     println!(
         "TARS_MEASUREMENT {}",
@@ -254,16 +256,15 @@ async fn active_capacity_refuses_before_assembly_or_store_side_effects() {
     assert!(
         !directory
             .path()
-            .join("sessions")
-            .join(format!("{}.json", id.as_str()))
+            .join("locks")
+            .join(format!("{}.lock", id.as_str()))
             .exists()
     );
     assert!(
-        !directory
-            .path()
-            .join("sessions")
-            .join(format!("{}.lock", id.as_str()))
-            .exists()
+        crate::store::SessionStore::new(directory.path().into())
+            .read_saved(id.as_str())
+            .unwrap()
+            .is_none()
     );
     assert_eq!(assemblies.load(Ordering::Relaxed), 32);
     assert_eq!(calls.load(Ordering::Relaxed), 0);

@@ -62,29 +62,73 @@ pub(crate) struct CompactionRuntime {
 }
 
 impl CompactionRuntime {
-    /// Build the per-session runtime, if this session can keep history.
-    ///
-    /// Compaction needs a history directory; without a store there is nowhere
-    /// to keep the replaced conversation, so no runtime is installed.
+    /// Build the per-session runtime for standalone compaction unit tests.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         definition: &SessionDefinition,
         conversation_id: &ConversationId,
-        sessions_directory: Option<&Path>,
+        store_root: Option<&Path>,
         history: Vec<HistoryRecordEntry>,
         current_auto_compact: Option<bool>,
         current_threshold: Option<u8>,
         gateway: Arc<dyn ModelGateway>,
         usage: Arc<UsageTracker>,
     ) -> Option<Arc<Self>> {
-        let sessions_directory = sessions_directory?;
+        let store_root = store_root?;
         let history = Arc::new(HistoryStore::new(
-            sessions_directory,
+            store_root,
             conversation_id.as_str(),
             history,
         ));
+        Some(Self::with_history(
+            definition,
+            history,
+            current_auto_compact,
+            current_threshold,
+            gateway,
+            usage,
+        ))
+    }
+
+    /// Build the per-session runtime with strict SQLite foreign-key enforcement.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_strict(
+        definition: &SessionDefinition,
+        conversation_id: &ConversationId,
+        store_root: Option<&Path>,
+        history: Vec<HistoryRecordEntry>,
+        current_auto_compact: Option<bool>,
+        current_threshold: Option<u8>,
+        gateway: Arc<dyn ModelGateway>,
+        usage: Arc<UsageTracker>,
+    ) -> Option<Arc<Self>> {
+        let store_root = store_root?;
+        let history = Arc::new(HistoryStore::new_strict(
+            store_root,
+            conversation_id.as_str(),
+            history,
+        ));
+        Some(Self::with_history(
+            definition,
+            history,
+            current_auto_compact,
+            current_threshold,
+            gateway,
+            usage,
+        ))
+    }
+
+    fn with_history(
+        definition: &SessionDefinition,
+        history: Arc<HistoryStore>,
+        current_auto_compact: Option<bool>,
+        current_threshold: Option<u8>,
+        gateway: Arc<dyn ModelGateway>,
+        usage: Arc<UsageTracker>,
+    ) -> Arc<Self> {
         let options = definition.run_options();
-        Some(Arc::new(Self {
+        Arc::new(Self {
             settings: Mutex::new(Settings {
                 auto_compact: current_auto_compact.unwrap_or(definition.auto_compact),
                 threshold: current_threshold.unwrap_or(definition.compact_threshold),
@@ -103,7 +147,7 @@ impl CompactionRuntime {
             gateway,
             model: options.model,
             generation: options.generation,
-        }))
+        })
     }
 
     /// Attach the session's usage hub so micro-compaction can read `last_call` timestamps.

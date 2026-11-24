@@ -324,8 +324,8 @@ pub(super) fn write_history_session(
     spans: &[causa::kernel::Context],
 ) -> String {
     let conversation_id = causa::runtime::new_block_id().0.to_string();
-    let sessions = store.join("sessions");
-    let history = sessions.join(format!("{conversation_id}.history"));
+    let legacy_dir = tempfile::tempdir().unwrap();
+    let history = legacy_dir.path().join(format!("{conversation_id}.history"));
     std::fs::create_dir_all(&history).unwrap();
     let brief = |position: usize| {
         causa::kernel::ContextBlock::new(
@@ -389,27 +389,31 @@ pub(super) fn write_history_session(
         "history": entries,
         "updated_at_ms": 1000u64,
     });
-    std::fs::create_dir_all(&sessions).unwrap();
-    std::fs::write(
-        sessions.join(format!("{conversation_id}.json")),
-        serde_json::to_vec(&record).unwrap(),
-    )
+    let record_path = legacy_dir.path().join(format!("{conversation_id}.json"));
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+
+    let store_path = store.to_path_buf();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let host = tars_core::application::SessionHost::new(Some(store_path));
+            host.import_legacy_record(&record_path).await.unwrap();
+        });
+    })
+    .join()
     .unwrap();
     conversation_id
 }
 
-/// Delete one record file by index, leaving the session record still listing it.
+/// Delete one history record row by index, leaving the session record still listing it.
 pub(super) fn delete_history_record(store: &std::path::Path, conversation_id: &str, index: usize) {
-    let sessions = store.join("sessions");
-    let record: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(sessions.join(format!("{conversation_id}.json"))).unwrap(),
-    )
-    .unwrap();
-    let record_id = record["history"][index]["record_id"].as_str().unwrap();
-    std::fs::remove_file(
-        sessions
-            .join(format!("{conversation_id}.history"))
-            .join(format!("{record_id}.json")),
+    let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
+    conn.execute(
+        "DELETE FROM history_records WHERE session_id = ?1 AND agent_id = ?1 AND seq = ?2",
+        rusqlite::params![conversation_id, i64::try_from(index).unwrap()],
     )
     .unwrap();
 }
