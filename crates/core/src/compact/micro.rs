@@ -7,9 +7,6 @@
 //! gates execution so it neither thrashes a warm prompt cache nor triggers right
 //! before an unavoidable LLM summary.
 
-// P1 introduces the micro-compaction planner ahead of P2 runtime/preparer wiring.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::HistoryTrigger;
 use super::estimate;
 use super::history::{PlannedReplacement, Rewrite, RewriteKind};

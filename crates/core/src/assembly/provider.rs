@@ -377,6 +377,9 @@ pub(crate) fn assemble(
         summary_gateway,
         usage.clone(),
     );
+    if let Some(runtime) = &compaction {
+        runtime.attach_usage_hub(usage_hub.clone());
+    }
     let transient_trim = (compaction.is_none())
         .then_some(definition.context_window)
         .flatten()

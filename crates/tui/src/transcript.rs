@@ -40,6 +40,7 @@ impl Transcript {
 
         let inserted = index
             .iter()
+            .filter(|entry| entry.kind != tars_core::compact::RewriteKind::MicroCompact)
             .flat_map(|entry| entry.inserted_block_ids.iter().copied())
             .collect::<std::collections::HashSet<_>>();
 
@@ -291,14 +292,14 @@ impl Transcript {
                     let preview_summary = tool_result_summary(&result.output.content);
                     let preview_json =
                         display(&serde_json::to_string_pretty(result).unwrap_or_default());
-                    let spilled = result
-                        .output
-                        .artifact
-                        .as_ref()
-                        .filter(|artifact| artifact.id.starts_with("artifact:"));
-                    if let Some(artifact) = spilled {
+                    if let Some(artifact) = &result.output.artifact {
+                        let kind_label = if artifact.id.starts_with("artifact:") {
+                            "spilled preview"
+                        } else {
+                            "cleared preview"
+                        };
                         text.push_str(&format!(
-                            "Tool result · {:?} · {} · spilled preview ({})\n{}\n/tools expands full output",
+                            "Tool result · {:?} · {} · {kind_label} ({})\n{}\n/tools expands full output",
                             result.status,
                             result.call_block_id.0,
                             display(&artifact.id),

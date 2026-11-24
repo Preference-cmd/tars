@@ -29,7 +29,7 @@ use super::history::{HistoryRecord, HistoryRecordEntry, RangeReplacement, Rewrit
 use crate::store::StoreError;
 use causa::kernel::{BlockId, ContextBlock};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 /// Provenance of one block in an expanded conversation.
@@ -162,6 +162,9 @@ pub struct ExpansionCursor {
     owners: HashMap<BlockId, Vec<usize>>,
     stack: Vec<Frame>,
     reached: Vec<bool>,
+    /// Live `MicroCompact` entries whose stubs remain in the current tail and
+    /// therefore must not be expanded or counted as unread when expanding a prefix.
+    live_skipped: Vec<bool>,
     supplied: Vec<bool>,
     /// Inserted blocks of each record expanded so far.
     consumed: Vec<usize>,
@@ -178,13 +181,48 @@ impl ExpansionCursor {
     ///
     /// `index` is the session's record index in creation order.
     pub fn new(blocks: &[ContextBlock], index: Vec<HistoryRecordEntry>) -> Self {
+        Self::init(blocks, index, None)
+    }
+
+    /// Start expanding a history `prefix`, newest first, while skipping live
+    /// [`RewriteKind::MicroCompact`] entries whose inserted blocks are still in
+    /// `live_tail_ids`.
+    ///
+    /// Ownership entries in `owners` are kept intact so any stubs of a
+    /// `MicroCompact` record that were swallowed by a later `Summarize` or
+    /// `Merge` still expand recursively.
+    pub fn new_for_prefix(
+        prefix: &[ContextBlock],
+        index: Vec<HistoryRecordEntry>,
+        live_tail_ids: &HashSet<BlockId>,
+    ) -> Self {
+        Self::init(prefix, index, Some(live_tail_ids))
+    }
+
+    fn init(
+        blocks: &[ContextBlock],
+        index: Vec<HistoryRecordEntry>,
+        live_tail_ids: Option<&HashSet<BlockId>>,
+    ) -> Self {
         let mut owners: HashMap<BlockId, Vec<usize>> = HashMap::new();
+        let count = index.len();
+        let mut reached = vec![false; count];
+        let mut live_skipped = vec![false; count];
         for (position, entry) in index.iter().enumerate() {
             for id in &entry.inserted_block_ids {
                 owners.entry(*id).or_default().push(position);
             }
+            if let Some(live_tail_ids) = live_tail_ids
+                && entry.kind == RewriteKind::MicroCompact
+                && entry
+                    .inserted_block_ids
+                    .iter()
+                    .any(|id| live_tail_ids.contains(id))
+            {
+                reached[position] = true;
+                live_skipped[position] = true;
+            }
         }
-        let count = index.len();
         Self {
             stack: vec![Frame {
                 items: blocks
@@ -197,7 +235,8 @@ impl ExpansionCursor {
             }],
             index,
             owners,
-            reached: vec![false; count],
+            reached,
+            live_skipped,
             supplied: vec![false; count],
             consumed: vec![0; count],
             mark_emitted: vec![false; count],
@@ -209,7 +248,9 @@ impl ExpansionCursor {
 
     /// Number of index entries whose record was not supplied.
     pub fn unread(&self) -> usize {
-        self.supplied.iter().filter(|supplied| !**supplied).count()
+        (0..self.index.len())
+            .filter(|&pos| !self.supplied[pos] && !self.live_skipped[pos])
+            .count()
     }
 
     /// The next step, newest first.
@@ -305,6 +346,9 @@ impl ExpansionCursor {
 
     /// Expand one run of `owner`, or wait for its record.
     fn start(&mut self, owner: usize, run: Option<Run>) {
+        if run.is_some() {
+            self.live_skipped[owner] = false;
+        }
         let Some(record) = self.records.get(&owner).cloned() else {
             self.waiting = Some(Waiting { owner, run });
             return;

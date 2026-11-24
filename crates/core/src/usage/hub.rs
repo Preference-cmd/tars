@@ -138,4 +138,13 @@ impl UsageHub {
             last_call: state.last_call,
         }
     }
+
+    /// Timestamp in Unix milliseconds of the most recent successful model call, if any.
+    pub(crate) fn last_call_at_unix_ms(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .expect("usage lock poisoned")
+            .last_call
+            .map(|call| call.at_unix_ms())
+    }
 }

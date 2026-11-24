@@ -3179,3 +3179,409 @@ async fn test_be19_transient_with_known_window_trims_without_history_or_artifact
         .await
         .unwrap();
 }
+
+fn read_tool_pair(path: &str, body_bytes: usize) -> (ContextBlock, ContextBlock) {
+    let call_id = BlockId::new(uuid::Uuid::now_v7());
+    let call = ContextBlock::new(
+        call_id,
+        BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "read_file",
+            serde_json::json!({ "path": path, "start_line": 1, "max_lines": 100 }),
+        )),
+        BlockMeta::default(),
+    );
+    let result = ContextBlock::new(
+        BlockId::new(uuid::Uuid::now_v7()),
+        BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            causa::kernel::ToolOutput::new(serde_json::json!({
+                "path": path,
+                "start_line": 1,
+                "end_line": 100,
+                "text": "r".repeat(body_bytes),
+            })),
+        )),
+        BlockMeta::default(),
+    );
+    (call, result)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mc06_path_a_hot_cache_micro_compacts_and_falls_back_when_gate_unmet() {
+    use crate::compact::{CompactionProgress, HistoryTrigger, RewriteKind};
+
+    // 1. Hot-cache Path A gate met: micro-compacts with 0 LLM summary calls.
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("unused brief".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+
+    let mut blocks = vec![ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::Role::User,
+        "initial request",
+    )];
+    for idx in 0..4 {
+        let (call, result) = read_tool_pair(&format!("src/file_{idx}.rs"), 4_800);
+        blocks.push(call);
+        blocks.push(result);
+    }
+    blocks.push(ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::Role::Assistant,
+        "read all four files",
+    ));
+    let session = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(Some(10_000)),
+            Context::from_blocks(blocks).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let mut progress = session.subscribe_progress();
+
+    let receipt = session
+        .submit(SubmitRequest {
+            request_key: "mc06-hot-pass".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&session, &receipt.work).await;
+    session.wait_saved().await.unwrap();
+
+    assert_eq!(
+        gateway.summary_calls.load(Ordering::SeqCst),
+        0,
+        "Path A micro-compaction must make 0 LLM summary calls"
+    );
+    assert_eq!(gateway.main_calls.load(Ordering::SeqCst), 1);
+
+    let history = session.history();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].kind, RewriteKind::MicroCompact);
+    assert_eq!(history[0].trigger, HistoryTrigger::Auto);
+
+    let mut micro_events = 0;
+    let mut started_or_finished = 0;
+    while let Ok(event) = progress.try_recv() {
+        if let crate::session::ProgressUpdate::Compaction(update) = &event.update {
+            match update {
+                CompactionProgress::MicroCompacted {
+                    trigger: HistoryTrigger::Auto,
+                    cleared_results,
+                    estimate_before,
+                    estimate_after,
+                    record,
+                } => {
+                    micro_events += 1;
+                    assert_eq!(*cleared_results, 4);
+                    assert!(estimate_after < estimate_before);
+                    assert_eq!(record, &history[0].record_id);
+                }
+                CompactionProgress::Started { .. } | CompactionProgress::Finished { .. } => {
+                    started_or_finished += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(micro_events, 1);
+    assert_eq!(started_or_finished, 0);
+
+    // Check stubs point to <record_id>/<orig_block_id> and read_artifact reads the original back.
+    let saved_blocks = session.read_materials().unwrap().context;
+    let stub_artifact_id = saved_blocks
+        .blocks()
+        .iter()
+        .find_map(|b| match b.content() {
+            BlockContent::ToolResult(r) => r.output.artifact.as_ref().map(|a| a.id.clone()),
+            _ => None,
+        })
+        .expect("micro-compacted stub carries artifact reference");
+    assert!(stub_artifact_id.starts_with(&format!("{}/", history[0].record_id)));
+    let recalled = session.read_artifact(&stub_artifact_id).unwrap();
+    assert!(recalled.contains(&"r".repeat(200)));
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // 2. Hot-cache Path A gate NOT met (small tool result followed by huge suffix):
+    //    0 MicroCompact records; falls back cleanly to LLM Summarize.
+    let store2 = tempfile::tempdir().unwrap();
+    let host2 = SessionHost::new(Some(store2.path().into()));
+    let gateway2 = scripted(SummaryBehavior::Text("Goal: fallback summary.".into()));
+    host2.set_test_gateway(as_gateway(&gateway2));
+
+    let (small_call, small_result) = read_tool_pair("src/small.rs", 2_800);
+    let fallback_blocks = vec![
+        ContextBlock::text(
+            BlockId::new(uuid::Uuid::now_v7()),
+            causa::kernel::Role::User,
+            "initial request",
+        ),
+        small_call,
+        small_result,
+        text_block(18_000),
+        ContextBlock::text(
+            BlockId::new(uuid::Uuid::now_v7()),
+            causa::kernel::Role::Assistant,
+            "earlier big answer",
+        ),
+    ];
+    let session2 = host2
+        .create(PreparedCreate::persistent(
+            compacting_definition(Some(10_000)),
+            Context::from_blocks(fallback_blocks).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let receipt2 = session2
+        .submit(SubmitRequest {
+            request_key: "mc06-hot-fallback".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&session2, &receipt2.work).await;
+    session2.wait_saved().await.unwrap();
+
+    assert_eq!(gateway2.summary_calls.load(Ordering::SeqCst), 1);
+    let history2 = session2.history();
+    assert_eq!(history2.len(), 1);
+    assert_eq!(history2[0].kind, RewriteKind::Summarize);
+    host2
+        .close(&session2.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mc06_path_b_cold_cache_in_session_and_reopen_with_counterexamples() {
+    use crate::compact::{CompactionProgress, HistoryTrigger, RewriteKind};
+    use std::sync::atomic::AtomicU64;
+
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("unused".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+
+    // Total ~6,500 tokens, well below window=20,000 trigger_line=14,000.
+    // Four tool results of ~1,500 tokens each (~6,000 total): the newest stays in
+    // the ~3,390-token retained tail while the older three (~4,500 tokens) sit in
+    // head_end..k, yielding >=4,000 tokens and >=25% savings once cache goes cold.
+    let mut initial_blocks = vec![ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::Role::User,
+        "initial",
+    )];
+    for idx in 0..4 {
+        let (call, res) = read_tool_pair(&format!("src/cold_{idx}.rs"), 4_500);
+        initial_blocks.push(call);
+        initial_blocks.push(res);
+    }
+    initial_blocks.push(ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::Role::Assistant,
+        "ack",
+    ));
+
+    let session = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(Some(20_000)),
+            Context::from_blocks(initial_blocks.clone()).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    // Warm-up turn establishes last_call timestamp in UsageHub.
+    let warm = session
+        .submit(SubmitRequest {
+            request_key: "warm".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&session, &warm.work).await;
+    session.wait_saved().await.unwrap();
+    assert!(session.history().is_empty());
+    let last_call_ms = session
+        .session_usage()
+        .unwrap()
+        .last_call
+        .expect("warm turn recorded last_call")
+        .at_unix_ms();
+
+    let clock_ms = Arc::new(AtomicU64::new(last_call_ms + 4 * 60 * 1_000));
+    let clock_clone = clock_ms.clone();
+    session.set_compaction_clock_for_test(Arc::new(move || clock_clone.load(Ordering::SeqCst)));
+
+    // Counterexample 1: < 5 minutes idle -> does NOT trigger cold micro-compaction.
+    let under_5m = session
+        .submit(SubmitRequest {
+            request_key: "under-5m".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&session, &under_5m.work).await;
+    session.wait_saved().await.unwrap();
+    assert!(
+        session.history().is_empty(),
+        "< 5 min idle must not micro-compact"
+    );
+
+    // Counterexample 2: >= 5 minutes idle with auto_compact=off -> does NOT trigger.
+    let last_call_ms = session
+        .session_usage()
+        .unwrap()
+        .last_call
+        .unwrap()
+        .at_unix_ms();
+    session.set_auto_compact(false).unwrap();
+    session.wait_saved().await.unwrap();
+    clock_ms.store(last_call_ms + 6 * 60 * 1_000, Ordering::SeqCst);
+    let auto_off = session
+        .submit(SubmitRequest {
+            request_key: "auto-off".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&session, &auto_off.work).await;
+    session.wait_saved().await.unwrap();
+    assert!(
+        session.history().is_empty(),
+        "auto_compact=off must not cold micro-compact"
+    );
+
+    // Positive Path B in-session: auto_compact=on & >= 5 minutes idle -> triggers MicroCompact!
+    let last_call_ms = session
+        .session_usage()
+        .unwrap()
+        .last_call
+        .unwrap()
+        .at_unix_ms();
+    session.set_auto_compact(true).unwrap();
+    session.wait_saved().await.unwrap();
+    clock_ms.store(last_call_ms + 6 * 60 * 1_000, Ordering::SeqCst);
+    let mut progress = session.subscribe_progress();
+    let cold_turn = session
+        .submit(SubmitRequest {
+            request_key: "cold-in-session".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&session, &cold_turn.work).await;
+    session.wait_saved().await.unwrap();
+
+    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 0);
+    let history = session.history();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].kind, RewriteKind::MicroCompact);
+    assert_eq!(history[0].trigger, HistoryTrigger::Auto);
+
+    let mut saw_micro = false;
+    while let Ok(event) = progress.try_recv() {
+        if matches!(
+            &event.update,
+            crate::session::ProgressUpdate::Compaction(CompactionProgress::MicroCompacted {
+                trigger: HistoryTrigger::Auto,
+                cleared_results,
+                ..
+            }) if *cleared_results >= 3
+        ) {
+            saw_micro = true;
+        }
+    }
+    assert!(saw_micro);
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // Positive Path B after close & reopen: persisted last_call is restored and >= 5m triggers.
+    let session_b = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(Some(20_000)),
+            Context::from_blocks(initial_blocks).unwrap(),
+        ))
+        .await
+        .unwrap();
+    let conv_id = session_b.target().conversation_id().clone();
+    let warm_b = session_b
+        .submit(SubmitRequest {
+            request_key: "warm-reopen".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&session_b, &warm_b.work).await;
+    session_b.wait_saved().await.unwrap();
+    let persisted_last_call = session_b
+        .session_usage()
+        .unwrap()
+        .last_call
+        .unwrap()
+        .at_unix_ms();
+    host.close(&session_b.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    let reopened = host.open(conv_id).await.unwrap();
+    let reopen_clock = persisted_last_call + 6 * 60 * 1_000;
+    reopened.set_compaction_clock_for_test(Arc::new(move || reopen_clock));
+    let after_reopen = reopened
+        .submit(SubmitRequest {
+            request_key: "cold-after-reopen".into(),
+            blocks: short_request(),
+        })
+        .unwrap();
+    finished(&reopened, &after_reopen.work).await;
+    reopened.wait_saved().await.unwrap();
+
+    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 0);
+    let reopened_history = reopened.history();
+    assert_eq!(reopened_history.len(), 1);
+    assert_eq!(reopened_history[0].kind, RewriteKind::MicroCompact);
+    host.close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mc06_manual_compact_is_never_intercepted_by_micro_compaction() {
+    use crate::compact::{HistoryTrigger, RewriteKind};
+
+    let store = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store.path().into()));
+    let gateway = scripted(SummaryBehavior::Text("Goal: manual brief.".into()));
+    host.set_test_gateway(as_gateway(&gateway));
+
+    let mut blocks = vec![ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::Role::User,
+        "initial",
+    )];
+    for idx in 0..4 {
+        let (call, result) = read_tool_pair(&format!("src/manual_{idx}.rs"), 4_800);
+        blocks.push(call);
+        blocks.push(result);
+    }
+    blocks.push(ContextBlock::text(
+        BlockId::new(uuid::Uuid::now_v7()),
+        causa::kernel::Role::Assistant,
+        "done reading",
+    ));
+    let session = host
+        .create(PreparedCreate::persistent(
+            compacting_definition(Some(10_000)),
+            Context::from_blocks(blocks).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let outcome = session.compact().await.unwrap();
+    assert_eq!(outcome.trigger, HistoryTrigger::Manual);
+    assert_eq!(outcome.record.kind, RewriteKind::Summarize);
+    assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 1);
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}

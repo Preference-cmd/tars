@@ -1194,3 +1194,252 @@ fn compaction_progress_trimmed_updates_entry_notice_and_survives_finish() {
         "Request frame temporarily trimmed: ~12k -> ~4k tokens"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mc07_tui_micro_compact_zero_reads_on_open_tools_on_demand_and_scroll_anchor() {
+    use causa::kernel::{
+        BlockContent, BlockMeta, Context, ContextBlock, Role, ToolCallPayload, ToolOutput,
+        ToolResultPayload, ToolResultStatus,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::new().await;
+    let mut def = history_definition(Some(10_000));
+    def.endpoint = Some(server.endpoint.clone());
+
+    let mut initial_blocks = vec![ContextBlock::text(
+        causa::runtime::new_block_id(),
+        Role::User,
+        "initial user prompt",
+    )];
+    let mut call_ids = Vec::new();
+    for idx in 0..4 {
+        let call_id = causa::runtime::new_block_id();
+        call_ids.push(call_id);
+        initial_blocks.push(ContextBlock::new(
+            call_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "read_file",
+                serde_json::json!({ "path": format!("src/mc07_{idx}.rs"), "start_line": 1, "max_lines": 100 }),
+            )),
+            BlockMeta::default(),
+        ));
+        initial_blocks.push(ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "path": format!("src/mc07_{idx}.rs"),
+                    "start_line": 1,
+                    "end_line": 100,
+                    "text": format!("MC07_ORIG_MARKER_{idx} {}", "z".repeat(4_800)),
+                })),
+            )),
+            BlockMeta::default(),
+        ));
+    }
+    initial_blocks.push(ContextBlock::text(
+        causa::runtime::new_block_id(),
+        Role::Assistant,
+        "earlier read summary\nMC07_ANCHOR_ROW\nfollowing row 1\nfollowing row 2",
+    ));
+
+    let mut app1 = app(dir.path());
+    app1.viewport_height = 20;
+    create_in_view(
+        &mut app1,
+        def,
+        Context::from_blocks(initial_blocks).unwrap(),
+    )
+    .await;
+    until(&mut app1, |a| a.entries[0].rows.is_some()).await;
+    let session_id = app1.entries[0].id().to_owned();
+
+    let anchor_row = {
+        let rows = app1.entries[0].rows.as_ref().unwrap();
+        rows.ranges
+            .iter()
+            .position(|r| rows.transcript.text[r.clone()].contains("MC07_ANCHOR_ROW"))
+            .expect("anchor row in initial transcript")
+    };
+    let pre_transcript = app1.entries[0].transcript.clone();
+    let pre_rows = crate::transcript::Rows::wrap(pre_transcript.clone(), app1.view_width);
+    let pre_version = app1.entries[0].material_version.clone();
+
+    // Submit a message -> triggers hot-cache Path A micro-compaction without an LLM summary call.
+    app1.event(Event::Paste("continue after reads".into()));
+    app1.event(ctrl('s'));
+
+    until(&mut app1, |_| server.requests.lock().unwrap().len() == 1).await;
+    server.release.add_permits(1);
+    until(&mut app1, |a| {
+        a.entries[0].execution == "Completed"
+            && a.entries[0].transcript.text.contains("你好")
+            && a.entries[0].rows.is_some()
+            && !a.entries[0].wrapping
+            && matches!(
+                a.entries[0].session.as_ref().unwrap().status().save,
+                SaveStatus::Saved { .. }
+            )
+    })
+    .await;
+
+    assert_eq!(
+        server.requests.lock().unwrap().len(),
+        1,
+        "live micro-compaction sends only 1 conversation request (0 LLM brief requests)"
+    );
+    assert!(
+        app1.entries[0]
+            .notice
+            .contains("Micro-compacted 4 tool results"),
+        "{}",
+        app1.entries[0].notice
+    );
+    assert!(
+        app1.entries[0].transcript.text.contains("cleared preview"),
+        "{}",
+        app1.entries[0].transcript.text
+    );
+    assert!(
+        !app1.entries[0]
+            .transcript
+            .text
+            .contains("MC07_ORIG_MARKER_0")
+    );
+    assert!(app1.entries[0].history_rows.is_none());
+
+    // Verify the live MaterialView -> Wrapping -> Message::Wrapped rebuild preserves
+    // the scroll anchor across pre-micro-compaction -> post-micro-compaction re-wrapping.
+    let session = app1.entries[0].session.as_ref().unwrap().clone();
+    assert_eq!(session.history().len(), 1);
+    let post_mc_view = crate::app::jobs::MaterialView::read(&session).unwrap();
+    assert!(post_mc_view.transcript.text.contains("cleared preview"));
+    let key1 = app1.entries[0].key.clone();
+    app1.entries[0].history.clear();
+    app1.entries[0]
+        .history
+        .refresh(vec![], vec![], &std::collections::HashSet::new(), &[]);
+    app1.entries[0].history_rows = None;
+    app1.entries[0].transcript = pre_transcript;
+    app1.entries[0].rows = Some(pre_rows);
+    app1.entries[0].material_version = pre_version;
+    app1.entries[0].requested_material_version = Some(post_mc_view.version.clone());
+    app1.entries[0].scroll = Some(anchor_row);
+
+    app1.complete(crate::app::jobs::Message::Materials(key1, Ok(post_mc_view)));
+    until(&mut app1, |a| {
+        a.entries[0].rows.is_some()
+            && !a.entries[0].wrapping
+            && a.entries[0]
+                .rows
+                .as_ref()
+                .is_some_and(|r| r.transcript.text.contains("cleared preview"))
+    })
+    .await;
+
+    let scrolled_row = app1.entries[0]
+        .scroll
+        .expect("scroll preserved on live rebuild");
+    let new_rows = app1.entries[0].rows.as_ref().unwrap();
+    assert!(new_rows.transcript.text.contains("cleared preview"));
+    assert_ne!(
+        scrolled_row, anchor_row,
+        "MC07_ANCHOR_ROW index must shift when earlier tool results collapse/rewrap"
+    );
+    assert!(
+        new_rows.transcript.text[new_rows.ranges[scrolled_row].clone()].contains("MC07_ANCHOR_ROW"),
+        "scroll anchor must remain pinned to MC07_ANCHOR_ROW (old={anchor_row}, new={scrolled_row})"
+    );
+
+    app1.event(ctrl('q'));
+    until(&mut app1, |a| a.done).await;
+
+    // Reopen in fresh TUI app: 0 history record reads and 0 artifact reads on open.
+    let mut app2 = app(dir.path());
+    app2.event(key(KeyCode::F(5)));
+    until(&mut app2, |a| !a.entries.is_empty()).await;
+    let idx = app2
+        .entries
+        .iter()
+        .position(|e| e.id() == session_id)
+        .expect("saved session listed");
+    app2.selected = idx;
+    app2.event(key(KeyCode::F(3)));
+    until(&mut app2, |a| {
+        a.entries[idx].session.is_some()
+            && a.entries[idx].material_version.is_some()
+            && a.entries[idx].rows.is_some()
+            && !a.entries[idx].wrapping
+    })
+    .await;
+
+    assert_eq!(app2.entries[idx].record_reads, 0);
+    assert_eq!(app2.entries[idx].artifact_reads, 0);
+    assert_eq!(app2.entries[idx].history.earlier(), 0);
+    assert!(!app2.entries[idx].history.has_earlier());
+    assert!(app2.entries[idx].history_rows.is_none());
+    for call_id in &call_ids {
+        assert_eq!(
+            app2.entries[idx]
+                .transcript
+                .text
+                .matches(&call_id.0.to_string())
+                .count(),
+            2,
+            "declaration + result for {} appear once in current transcript (never in history pane)",
+            call_id.0
+        );
+    }
+
+    // Press F6 (/tools): expands micro-compacted tool results on demand via <record_id>/<block_id>.
+    app2.event(key(KeyCode::F(6)));
+    until(&mut app2, |a| a.entries[idx].artifact_reads == 4).await;
+    if let Some(Panel::Info { lines, .. }) = &app2.panel {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Model sees cleared preview only")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("MC07_ORIG_MARKER_0")),
+            "{lines:?}"
+        );
+    } else {
+        panic!("tools panel missing");
+    }
+    app2.event(key(KeyCode::Esc));
+
+    // Delete the MicroCompact record file and press F6 again: degrades cleanly.
+    let history_dir = dir
+        .path()
+        .join("store")
+        .join("sessions")
+        .join(format!("{session_id}.history"));
+    for entry in std::fs::read_dir(&history_dir).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    app2.event(key(KeyCode::F(6)));
+    until(&mut app2, |a| a.entries[idx].artifact_reads == 8).await;
+    if let Some(Panel::Info { lines, .. }) = &app2.panel {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Full artifact cannot be read")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("showing model-facing preview")),
+            "{lines:?}"
+        );
+    } else {
+        panic!("tools panel missing on degraded fallback");
+    }
+    app2.event(key(KeyCode::Esc));
+    app2.event(ctrl('q'));
+    until(&mut app2, |a| a.done).await;
+}

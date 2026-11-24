@@ -297,6 +297,7 @@ async fn failed_material_read_retries_after_one_second_and_then_updates() {
             transcript: std::sync::Arc::new(transcript),
             history: Vec::new(),
             prefix: Vec::new(),
+            live_tail_ids: std::collections::HashSet::new(),
             records: Vec::new(),
         }),
     ));

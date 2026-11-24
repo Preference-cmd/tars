@@ -312,6 +312,7 @@ fn report_compaction_progress(progress: &tars_core::compact::CompactionProgress)
         }
         CompactionProgress::Started { .. }
         | CompactionProgress::Finished { .. }
+        | CompactionProgress::MicroCompacted { .. }
         | CompactionProgress::Abandoned { .. } => {}
     }
 }

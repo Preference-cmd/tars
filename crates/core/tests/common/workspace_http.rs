@@ -24,6 +24,8 @@ pub enum Reply {
     Answer,
     Call(String, Value),
     Calls(Vec<ScriptedToolCall>),
+    /// Inspect the incoming request for `recall id=<id>` and invoke `recall` on it.
+    RecallFirstCleared,
     /// A whole JSON reply, not a stream, as a compaction brief request expects.
     Summary(&'static str),
 }
@@ -47,7 +49,7 @@ fn body(provider: &str, reply: Reply, index: usize) -> String {
             "read_file".to_string(),
             json!({"path": path, "start_line": 1, "max_lines": 1}).to_string(),
         )],
-        Reply::Answer | Reply::Summary(_) => Vec::new(),
+        Reply::Answer | Reply::Summary(_) | Reply::RecallFirstCleared => Vec::new(),
         Reply::Call(name, args) => vec![(name, args.to_string())],
         Reply::Calls(calls) => calls
             .into_iter()
@@ -264,7 +266,26 @@ impl Fixture {
                         std::thread::sleep(Duration::from_millis(2));
                     }
                 }
-                let (content_type, body) = match reply {
+                let request_text = std::str::from_utf8(request).unwrap_or("");
+                let resolved_reply = match reply {
+                    Reply::RecallFirstCleared => {
+                        let marker = "recall id=";
+                        let start_idx = request_text
+                            .find(marker)
+                            .map(|pos| pos + marker.len())
+                            .expect("RecallFirstCleared expected recall id= in request");
+                        let rest = &request_text[start_idx..];
+                        let end_idx = rest
+                            .find(|ch: char| {
+                                ch == ']' || ch == '"' || ch == '\\' || ch.is_whitespace()
+                            })
+                            .unwrap_or(rest.len());
+                        let recall_id = &rest[..end_idx];
+                        Reply::Call("recall".to_owned(), json!({ "id": recall_id }))
+                    }
+                    other => other,
+                };
+                let (content_type, body) = match resolved_reply {
                     Reply::Summary(text) => ("application/json", summary_body(&provider, text)),
                     reply => ("text/event-stream", body(&provider, reply, index)),
                 };

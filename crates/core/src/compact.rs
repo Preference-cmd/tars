@@ -128,6 +128,20 @@ pub enum CompactionProgress {
         /// Identity of the rewrite record that holds the replaced material.
         record: String,
     },
+    /// Old or superseded tool results were folded into compact stubs without a
+    /// model call; the record's index entry is saved with the next save.
+    MicroCompacted {
+        /// What asked for this attempt.
+        trigger: HistoryTrigger,
+        /// Estimated request size before micro-compaction.
+        estimate_before: u64,
+        /// Estimated request size after micro-compaction.
+        estimate_after: u64,
+        /// Number of `ToolResult` blocks folded into stubs.
+        cleared_results: usize,
+        /// Identity of the rewrite record that holds the replaced material.
+        record: String,
+    },
     /// The attempt stopped without touching the Context.
     Abandoned {
         /// What asked for this attempt.

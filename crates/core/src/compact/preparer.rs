@@ -87,54 +87,95 @@ impl ContextPreparer for CompactionPreparer {
         let trigger = (!self.runtime.prefix_too_large_reported())
             .then(|| self.runtime.trigger_for(estimate_tokens))
             .flatten();
-        if let Some(trigger) = trigger
-            // An automatic summary rejected as `no_shrink` is not repeated
-            // while a brief of its size still could not shrink the Context;
-            // such rounds fall through to temporary trimming when needed.
-            && !(trigger == super::HistoryTrigger::Auto
+        if let Some(trigger) = trigger {
+            if let Some(plan) = self.runtime.plan_micro_compact_hot(context, trigger) {
+                let (estimate_before, estimate_after) =
+                    (plan.rewrite.estimate_before, plan.rewrite.estimate_after);
+                let cleared_results = plan.cleared_results;
+                match self.runtime.commit_rewrite(context, plan.rewrite) {
+                    Ok(entry) => {
+                        self.report(
+                            round,
+                            CompactionProgress::MicroCompacted {
+                                trigger,
+                                estimate_before,
+                                estimate_after,
+                                cleared_results,
+                                record: entry.record_id,
+                            },
+                        );
+                    }
+                    Err(reason) => {
+                        self.report(round, CompactionProgress::Abandoned { trigger, reason });
+                    }
+                }
+            } else if !(trigger == super::HistoryTrigger::Auto
                 && self.runtime.summary_cannot_shrink(context))
-        {
-            self.report(
-                round,
-                CompactionProgress::Started {
-                    trigger,
-                    estimate_before: estimate_tokens,
-                },
-            );
-            match self
-                .runtime
-                .plan(context, round.model, round.generation, trigger, control)
-                .await
             {
-                Ok(rewrite) => {
-                    let (estimate_before, estimate_after) =
-                        (rewrite.estimate_before, rewrite.estimate_after);
-                    match self.runtime.commit_rewrite(context, rewrite) {
-                        Ok(entry) => {
-                            self.report(
-                                round,
-                                CompactionProgress::Finished {
-                                    trigger,
-                                    estimate_before,
-                                    estimate_after,
-                                    record: entry.record_id,
-                                },
-                            );
-                            if self.runtime.needs_merge(context) {
-                                self.merge(context, round, control, trigger).await;
+                // An automatic summary rejected as `no_shrink` is not repeated
+                // while a brief of its size still could not shrink the Context;
+                // such rounds fall through to temporary trimming when needed.
+                self.report(
+                    round,
+                    CompactionProgress::Started {
+                        trigger,
+                        estimate_before: estimate_tokens,
+                    },
+                );
+                match self
+                    .runtime
+                    .plan(context, round.model, round.generation, trigger, control)
+                    .await
+                {
+                    Ok(rewrite) => {
+                        let (estimate_before, estimate_after) =
+                            (rewrite.estimate_before, rewrite.estimate_after);
+                        match self.runtime.commit_rewrite(context, rewrite) {
+                            Ok(entry) => {
+                                self.report(
+                                    round,
+                                    CompactionProgress::Finished {
+                                        trigger,
+                                        estimate_before,
+                                        estimate_after,
+                                        record: entry.record_id,
+                                    },
+                                );
+                                if self.runtime.needs_merge(context) {
+                                    self.merge(context, round, control, trigger).await;
+                                }
+                            }
+                            Err(reason) => {
+                                self.report(
+                                    round,
+                                    CompactionProgress::Abandoned { trigger, reason },
+                                );
                             }
                         }
-                        Err(reason) => {
-                            self.report(round, CompactionProgress::Abandoned { trigger, reason });
+                    }
+                    Err(reason) => {
+                        if reason == super::CompactionAbandon::PrefixTooLarge {
+                            self.runtime.note_prefix_too_large_reported();
                         }
+                        self.report(round, CompactionProgress::Abandoned { trigger, reason });
                     }
                 }
-                Err(reason) => {
-                    if reason == super::CompactionAbandon::PrefixTooLarge {
-                        self.runtime.note_prefix_too_large_reported();
-                    }
-                    self.report(round, CompactionProgress::Abandoned { trigger, reason });
-                }
+            }
+        } else if let Some(plan) = self.runtime.plan_micro_compact_cold(context) {
+            let (estimate_before, estimate_after) =
+                (plan.rewrite.estimate_before, plan.rewrite.estimate_after);
+            let cleared_results = plan.cleared_results;
+            if let Ok(entry) = self.runtime.commit_rewrite(context, plan.rewrite) {
+                self.report(
+                    round,
+                    CompactionProgress::MicroCompacted {
+                        trigger: super::HistoryTrigger::Auto,
+                        estimate_before,
+                        estimate_after,
+                        cleared_results,
+                        record: entry.record_id,
+                    },
+                );
             }
         }
         if let Some(loaded) = &self.loaded_skills {

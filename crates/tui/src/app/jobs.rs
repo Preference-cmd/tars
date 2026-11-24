@@ -15,6 +15,8 @@ pub(super) struct MaterialView {
     pub(super) history: Vec<HistoryRecordEntry>,
     /// The Context's leading blocks that a rewrite inserted.
     pub(super) prefix: Vec<causa::kernel::ContextBlock>,
+    /// IDs of blocks outside `history_range` (fixed prefix and current conversation).
+    pub(super) live_tail_ids: std::collections::HashSet<causa::kernel::BlockId>,
     /// Rewrite records known in memory.
     pub(super) records: Vec<Arc<HistoryRecord>>,
 }
@@ -26,13 +28,20 @@ impl MaterialView {
             .read_materials()
             .map_err(|error| error.to_string())?;
         let transcript = Transcript::from_materials(&snapshot.context, &snapshot.history);
-        let prefix = snapshot.context.blocks()[transcript.history_range.clone()].to_vec();
+        let blocks = snapshot.context.blocks();
+        let prefix = blocks[transcript.history_range.clone()].to_vec();
+        let live_tail_ids = blocks[..transcript.history_range.start]
+            .iter()
+            .chain(&blocks[transcript.history_range.end..])
+            .map(causa::kernel::ContextBlock::id)
+            .collect();
         let records = session.written_history_records();
         Ok(Self {
             version: snapshot.version,
             transcript: Arc::new(transcript),
             history: snapshot.history,
             prefix,
+            live_tail_ids,
             records,
         })
     }
@@ -392,10 +401,12 @@ impl App {
                             }
                             // A rewrite made live supplies its rewrite records in
                             // memory, so history is expanded without file reads.
-                            let rebuilt =
-                                entry
-                                    .history
-                                    .refresh(view.history, view.prefix, &view.records);
+                            let rebuilt = entry.history.refresh(
+                                view.history,
+                                view.prefix,
+                                &view.live_tail_ids,
+                                &view.records,
+                            );
                             if rebuilt {
                                 entry.capture_scroll_anchor();
                                 entry.history_anchor = None;
@@ -458,10 +469,12 @@ impl App {
                         Ok(reload) => {
                             let outcome = reload.outcome;
                             let view = reload.view;
-                            let rebuilt =
-                                entry
-                                    .history
-                                    .refresh(view.history, view.prefix, &view.records);
+                            let rebuilt = entry.history.refresh(
+                                view.history,
+                                view.prefix,
+                                &view.live_tail_ids,
+                                &view.records,
+                            );
                             if rebuilt {
                                 entry.capture_scroll_anchor();
                                 entry.history_anchor = None;

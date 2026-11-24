@@ -23,6 +23,54 @@ impl HistoryArtifacts {
     pub(crate) fn new(history: Arc<HistoryStore>) -> Self {
         Self { history }
     }
+
+    /// Read an artifact (`artifact:<id>` or `<record id>/<block id>`) synchronously.
+    pub(crate) fn read_blocking(
+        &self,
+        id: &str,
+        range: Option<Range<u64>>,
+    ) -> Result<Vec<u8>, crate::store::StoreError> {
+        if id.starts_with(ARTIFACT_ID_PREFIX) {
+            let artifact_id = parse_spilled_artifact_id(id).map_err(|reason| {
+                crate::store::StoreError::InvalidHistory(format!(
+                    "malformed artifact id {id}: {reason}"
+                ))
+            })?;
+            return self.history.read_spilled_artifact(artifact_id, range);
+        }
+
+        let (record_id, block_id) = parse_artifact_id(id).map_err(|reason| {
+            crate::store::StoreError::InvalidHistory(format!(
+                "malformed history artifact id {id}: {reason}"
+            ))
+        })?;
+        if !self.history.has_record(record_id) {
+            return Err(crate::store::StoreError::InvalidHistory(format!(
+                "history record {record_id} not in session index"
+            )));
+        }
+        let bytes = self
+            .history
+            .read_original_block_text(record_id, block_id)?
+            .into_bytes();
+
+        let len = bytes.len() as u64;
+        match range {
+            None => Ok(bytes),
+            Some(range) => {
+                if range.start > len || range.start > range.end {
+                    return Err(crate::store::StoreError::InvalidHistory(format!(
+                        "invalid byte range {}..{} for artifact length {len}",
+                        range.start, range.end
+                    )));
+                }
+                let clamped_end = range.end.min(len);
+                let start = usize::try_from(range.start).unwrap_or(usize::MAX);
+                let end = usize::try_from(clamped_end).unwrap_or(usize::MAX);
+                Ok(bytes[start..end].to_vec())
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -45,55 +93,11 @@ impl ArtifactStore for HistoryArtifacts {
     }
 
     async fn read(&self, id: &str, range: Option<Range<u64>>) -> Result<Vec<u8>, StoreError> {
-        if id.starts_with(ARTIFACT_ID_PREFIX) {
-            let artifact_id = parse_spilled_artifact_id(id)
-                .map_err(|reason| {
-                    StoreError::Read(format!("malformed artifact id {id}: {reason}"))
-                })?
-                .to_owned();
-            let history = self.history.clone();
-            return tokio::task::spawn_blocking(move || {
-                history.read_spilled_artifact(&artifact_id, range)
-            })
+        let artifacts = self.clone();
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || artifacts.read_blocking(&id, range))
             .await
             .map_err(|e| StoreError::Read(format!("storage task failed: {e}")))?
-            .map_err(|e| StoreError::Read(e.to_string()));
-        }
-
-        let (record_id, block_id) = parse_artifact_id(id).map_err(|reason| {
-            StoreError::Read(format!("malformed history artifact id {id}: {reason}"))
-        })?;
-        if !self.history.has_record(record_id) {
-            return Err(StoreError::Read(format!(
-                "history record {record_id} not in session index"
-            )));
-        }
-        let history = self.history.clone();
-        let record_id = record_id.to_owned();
-        let bytes = tokio::task::spawn_blocking(move || {
-            history.read_original_block_text(&record_id, block_id)
-        })
-        .await
-        .map_err(|e| StoreError::Read(format!("storage task failed: {e}")))?
-        .map_err(|e| StoreError::Read(e.to_string()))?
-        .into_bytes();
-
-        let len = bytes.len() as u64;
-        let slice = match range {
-            None => bytes,
-            Some(range) => {
-                if range.start > len || range.start > range.end {
-                    return Err(StoreError::Read(format!(
-                        "invalid byte range {}..{} for artifact length {len}",
-                        range.start, range.end
-                    )));
-                }
-                let clamped_end = range.end.min(len);
-                let start = usize::try_from(range.start).unwrap_or(usize::MAX);
-                let end = usize::try_from(clamped_end).unwrap_or(usize::MAX);
-                bytes[start..end].to_vec()
-            }
-        };
-        Ok(slice)
+            .map_err(|e| StoreError::Read(e.to_string()))
     }
 }

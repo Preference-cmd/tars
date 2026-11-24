@@ -13,12 +13,14 @@ use super::estimate::{self, UsageTracker};
 use super::history::{
     HistoryRecordEntry, HistoryStore, PlannedReplacement, Rewrite, RewriteError, RewriteKind,
 };
+use super::micro::{COLD_CACHE_IDLE_MS, MicroCompactGate, MicroCompactPlan};
 use super::summary::{self, SUMMARY_MAX_TOKENS};
 use super::trim::{ProtectedInputs, TrimResult, trim_frame};
 use super::{CompactionAbandon, HistoryTrigger};
 use super::{sealed, segment};
 use crate::definition::SessionDefinition;
 use crate::session::ConversationId;
+use crate::usage::UsageHub;
 use causa::kernel::{
     BlockContent, BlockId, CallControl, Context, ContextBlock, GenerationOptions, InvocationId,
     ModelGateway, ModelRef, ModelRequest, RoundId, TurnId,
@@ -26,11 +28,13 @@ use causa::kernel::{
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Share of the window a brief request is trimmed to when its material is
 /// over the whole window.
 const TRIM_TARGET_PERCENT: u64 = 70;
+
+type ClockFn = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 #[derive(Clone, Copy, Debug)]
 struct Settings {
@@ -46,6 +50,8 @@ pub(crate) struct CompactionRuntime {
     prompt_cache: bool,
     history: Option<Arc<HistoryStore>>,
     usage: Arc<UsageTracker>,
+    last_call_source: OnceLock<Arc<UsageHub>>,
+    clock: Mutex<ClockFn>,
     force: AtomicBool,
     current_work_inputs: ProtectedInputs,
     prefix_too_large_reported: AtomicBool,
@@ -88,6 +94,8 @@ impl CompactionRuntime {
             prompt_cache: definition.prompt_cache,
             history: Some(history),
             usage,
+            last_call_source: OnceLock::new(),
+            clock: Mutex::new(Arc::new(super::history::now_ms)),
             force: AtomicBool::new(false),
             current_work_inputs: ProtectedInputs::default(),
             prefix_too_large_reported: AtomicBool::new(false),
@@ -96,6 +104,44 @@ impl CompactionRuntime {
             model: options.model,
             generation: options.generation,
         }))
+    }
+
+    /// Attach the session's usage hub so micro-compaction can read `last_call` timestamps.
+    pub(crate) fn attach_usage_hub(&self, hub: Arc<UsageHub>) {
+        let _ = self.last_call_source.set(hub);
+    }
+
+    /// Timestamp in Unix milliseconds of the most recent successful model call, if any.
+    pub(crate) fn last_call_at_unix_ms(&self) -> Option<u64> {
+        self.last_call_source
+            .get()
+            .and_then(|hub| hub.last_call_at_unix_ms())
+    }
+
+    fn now_ms(&self) -> u64 {
+        let clock = self.clock.lock().expect("clock lock poisoned").clone();
+        clock()
+    }
+
+    fn is_cache_cold(&self) -> bool {
+        let Some(last_call_ms) = self.last_call_at_unix_ms() else {
+            return false;
+        };
+        self.now_ms().saturating_sub(last_call_ms) >= COLD_CACHE_IDLE_MS
+    }
+
+    /// Override the wall-clock source for deterministic tests.
+    #[cfg(test)]
+    pub(crate) fn set_clock(&self, clock: ClockFn) {
+        *self.clock.lock().expect("clock lock poisoned") = clock;
+    }
+
+    /// Builder-style clock override for unit tests.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn with_clock(self: Arc<Self>, clock: ClockFn) -> Arc<Self> {
+        self.set_clock(clock);
+        self
     }
 
     /// Current automatic switch and trigger percentage.
@@ -269,6 +315,60 @@ impl CompactionRuntime {
     /// Record the size seen by a preparation round; the next estimate starts here.
     pub(crate) fn note_prepare(&self, bytes: u64) {
         self.usage.note_prepare_bytes(bytes);
+    }
+
+    /// Plan a zero-LLM micro-compaction on Path A (`Auto` or `Passive` trigger).
+    pub(crate) fn plan_micro_compact_hot(
+        &self,
+        context: &Context,
+        trigger: HistoryTrigger,
+    ) -> Option<MicroCompactPlan> {
+        self.history.as_ref()?;
+        let window = self.window?;
+        let (_, threshold) = self.settings();
+        let trigger_line =
+            u64::try_from(u128::from(window) * u128::from(threshold) / 100).unwrap_or(u64::MAX);
+        let cache_is_cold = self.is_cache_cold();
+        let estimate_before = self.usage.estimate(estimate::context_bytes(context));
+        let current_inputs = self.current_work_inputs();
+        super::micro::plan(
+            context.blocks(),
+            Some(window),
+            threshold,
+            &current_inputs,
+            estimate_before,
+            trigger,
+            MicroCompactGate::Hot {
+                trigger_line,
+                window,
+                max_tokens: self.max_tokens,
+                cache_is_cold,
+            },
+        )
+    }
+
+    /// Plan an opportunistic cold-cache micro-compaction on Path B.
+    pub(crate) fn plan_micro_compact_cold(&self, context: &Context) -> Option<MicroCompactPlan> {
+        self.history.as_ref()?;
+        let window = self.window?;
+        let (auto_compact, threshold) = self.settings();
+        if !auto_compact || self.prefix_too_large_reported() {
+            return None;
+        }
+        let estimate_before = self.usage.estimate(estimate::context_bytes(context));
+        let current_inputs = self.current_work_inputs();
+        super::micro::plan(
+            context.blocks(),
+            Some(window),
+            threshold,
+            &current_inputs,
+            estimate_before,
+            HistoryTrigger::Auto,
+            MicroCompactGate::Cold {
+                last_call_at_ms: self.last_call_at_unix_ms(),
+                now_ms: self.now_ms(),
+            },
+        )
     }
 
     /// Plan one summary of the oldest material after the head.

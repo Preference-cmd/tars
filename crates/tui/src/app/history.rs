@@ -9,8 +9,8 @@
 //! rebuilds from the new history run and replays known records synchronously.
 
 use crate::transcript::Transcript;
-use causa::kernel::ContextBlock;
-use std::collections::HashMap;
+use causa::kernel::{BlockId, ContextBlock};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tars_core::compact::{
     BlockStatus, ExpansionCursor, ExpansionStep, HistoryRecord, HistoryRecordEntry, HistoryTrigger,
@@ -85,7 +85,7 @@ impl HistoryView {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.known == 0
+        self.known == 0 || (self.finished && self.pieces.is_empty())
     }
 
     /// Number of listed records not read yet.
@@ -210,6 +210,7 @@ impl HistoryView {
         &mut self,
         index: Vec<HistoryRecordEntry>,
         prefix: Vec<ContextBlock>,
+        live_tail_ids: &HashSet<BlockId>,
         records: &[Arc<HistoryRecord>],
     ) -> bool {
         for record in records {
@@ -221,7 +222,11 @@ impl HistoryView {
             return false;
         }
         self.opened = true;
-        self.cursor = Some(ExpansionCursor::new(&prefix, index.clone()));
+        self.cursor = Some(ExpansionCursor::new_for_prefix(
+            &prefix,
+            index.clone(),
+            live_tail_ids,
+        ));
         self.pieces.clear();
         self.loading = None;
         self.finished = false;
@@ -292,7 +297,7 @@ impl HistoryView {
 
     /// Rows of the loaded history part of the conversation, oldest first.
     pub(crate) fn display(&mut self) -> Option<Arc<Transcript>> {
-        if self.known == 0 {
+        if self.known == 0 || (self.finished && self.pieces.is_empty()) {
             return None;
         }
         if self.display_stale || self.display.is_none() {
@@ -578,7 +583,12 @@ mod tests {
     fn open_reads_no_record_and_loads_newest_first_on_demand() {
         let chain = chain();
         let mut view = HistoryView::new();
-        view.refresh(index(&chain.records), chain.prefix.clone(), &[]);
+        view.refresh(
+            index(&chain.records),
+            chain.prefix.clone(),
+            &HashSet::new(),
+            &[],
+        );
         assert_eq!(view.earlier(), 2);
         assert!(!view.loading());
         assert!(text(&mut view).contains("↑ 2 earlier records"));
@@ -615,7 +625,7 @@ mod tests {
         assert!(view.next_read(true).is_none());
 
         // A same-length refresh keeps what was loaded.
-        view.refresh(index(&chain.records), chain.prefix, &[]);
+        view.refresh(index(&chain.records), chain.prefix, &HashSet::new(), &[]);
         assert!(text(&mut view).contains("old words"));
     }
 
@@ -626,10 +636,11 @@ mod tests {
         // Opened after the older compaction only.
         let older = index(&chain.records[..1]);
         let brief_a = chain.records[1].replacements[0].originals[0].clone();
-        view.refresh(older, vec![brief_a], &[]);
+        view.refresh(older, vec![brief_a], &HashSet::new(), &[]);
         view.refresh(
             index(&chain.records),
             chain.prefix,
+            &HashSet::new(),
             &[Arc::new(chain.records[1].clone())],
         );
         let shown = text(&mut view);
@@ -649,11 +660,12 @@ mod tests {
     fn a_live_compaction_with_no_older_records_finishes_history() {
         let chain = chain();
         let mut view = HistoryView::new();
-        view.refresh(vec![], vec![], &[]);
+        view.refresh(vec![], vec![], &HashSet::new(), &[]);
         let brief_b = chain.prefix[0].clone();
         view.refresh(
             index(&chain.records[1..]),
             vec![brief_b],
+            &HashSet::new(),
             &[Arc::new(chain.records[1].clone())],
         );
         assert_eq!(view.earlier(), 0);
@@ -665,7 +677,7 @@ mod tests {
     fn an_unreadable_record_is_marked_and_older_loading_continues() {
         let chain = chain();
         let mut view = HistoryView::new();
-        view.refresh(index(&chain.records), chain.prefix, &[]);
+        view.refresh(index(&chain.records), chain.prefix, &HashSet::new(), &[]);
         let read = view.next_read(true).unwrap();
         assert_eq!(read.record, NEWER);
         view.mark_unreadable(&read.record, "missing".into());
@@ -688,7 +700,7 @@ mod tests {
     fn a_late_read_for_a_cancelled_read_is_supplied_and_not_read_again() {
         let chain = chain();
         let mut view = HistoryView::new();
-        view.refresh(index(&chain.records), chain.prefix, &[]);
+        view.refresh(index(&chain.records), chain.prefix, &HashSet::new(), &[]);
         let read = view.next_read(true).unwrap();
         assert_eq!(read.record, NEWER);
         view.cancel_read();
@@ -720,14 +732,24 @@ mod tests {
             }],
         };
         let mut view = HistoryView::new();
-        view.refresh(index(&chain.records), chain.prefix.clone(), &[]);
+        view.refresh(
+            index(&chain.records),
+            chain.prefix.clone(),
+            &HashSet::new(),
+            &[],
+        );
         let read = view.next_read(true).unwrap();
         assert_eq!(read.record, NEWER);
 
         // A new compaction lands before the read completes: index expands to 3.
         chain.records.push(rec3.clone());
         chain.prefix = vec![brief_c];
-        view.refresh(index(&chain.records), chain.prefix.clone(), &[]);
+        view.refresh(
+            index(&chain.records),
+            chain.prefix.clone(),
+            &HashSet::new(),
+            &[],
+        );
 
         // The late read arrives for NEWER.
         view.insert_loaded(chain.records[1].clone());
@@ -825,7 +847,7 @@ mod tests {
         assert!(transcript.text.contains("UNIQUE_TAIL"));
 
         let mut view = HistoryView::new();
-        view.refresh(index_vec, prefix, &[Arc::new(record)]);
+        view.refresh(index_vec, prefix, &HashSet::new(), &[Arc::new(record)]);
         let history_text = text(&mut view);
         assert!(history_text.contains("UNIQUE_EARLIER"));
         assert!(history_text.contains("UNIQUE_ASSISTANT_REPLY"));
@@ -885,7 +907,7 @@ mod tests {
 
         // History expands successfully:
         let mut view = HistoryView::new();
-        view.refresh(index_vec, prefix, &[Arc::new(record)]);
+        view.refresh(index_vec, prefix, &HashSet::new(), &[Arc::new(record)]);
         let history_text = text(&mut view);
         assert!(history_text.contains("OLD_CONVERSATION_UNIQUE"));
 
@@ -1031,5 +1053,340 @@ mod tests {
         entry.capture_scroll_anchor();
         assert!(entry.history_anchor.is_none());
         assert!(entry.scroll_anchor.is_some());
+    }
+
+    #[test]
+    fn live_micro_compact_is_skipped_by_prefix_view_and_expands_once_summarized() {
+        use causa::kernel::{
+            BlockContent, Context, ToolCallPayload, ToolOutput, ToolResultPayload, ToolResultStatus,
+        };
+
+        let call_id = causa::runtime::new_block_id();
+        let orig_res_id = causa::runtime::new_block_id();
+        let stub_id = causa::runtime::new_block_id();
+        let call_block = ContextBlock::new(
+            call_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "read_file",
+                serde_json::json!({"path": "src/live.rs"}),
+            )),
+            Default::default(),
+        );
+        let orig_res = ContextBlock::new(
+            orig_res_id,
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "path": "src/live.rs",
+                    "text": "ORIGINAL_MICRO_TEXT",
+                })),
+            )),
+            Default::default(),
+        );
+        let stub_res = ContextBlock::new(
+            stub_id,
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::Value::String(
+                    "[cleared tool_result: read_file]".into(),
+                )),
+            )),
+            Default::default(),
+        );
+        let mc_id = "0190a000-0000-7000-8000-000000000071";
+        let mc_record = HistoryRecord {
+            format: "tars-history-v1.2".into(),
+            conversation_id: "conversation".into(),
+            record_id: mc_id.into(),
+            created_at_ms: 1,
+            trigger: HistoryTrigger::Auto,
+            kind: RewriteKind::MicroCompact,
+            estimate_before: 10_000,
+            estimate_after: 2_000,
+            replacements: vec![RangeReplacement {
+                range: 1..2,
+                originals: vec![orig_res],
+                inserted_ids: vec![stub_id],
+            }],
+        };
+
+        // 1. Live MicroCompact only (no Summarize): history_range is empty, 0 reads, empty view.
+        let tail_user = block("tail question");
+        let context_only_mc = Context::from_blocks(vec![
+            call_block.clone(),
+            stub_res.clone(),
+            tail_user.clone(),
+        ])
+        .unwrap();
+        let mc_index = index(std::slice::from_ref(&mc_record));
+        let transcript = Transcript::from_materials(&context_only_mc, &mc_index);
+        assert!(transcript.history_range.is_empty());
+        assert!(transcript.text.contains("cleared tool_result"));
+        let live_tail_ids: HashSet<BlockId> = context_only_mc
+            .blocks()
+            .iter()
+            .map(ContextBlock::id)
+            .collect();
+
+        let mut view = HistoryView::new();
+        view.refresh(mc_index.clone(), vec![], &live_tail_ids, &[]);
+        assert_eq!(view.earlier(), 0);
+        assert!(!view.has_earlier());
+        assert!(view.next_read(true).is_none());
+        assert!(view.is_empty());
+        assert!(view.display().is_none());
+
+        // 2. Older Summarize + live MicroCompact: earlier() counts only Summarize (1, not 2).
+        let brief_a = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, "brief A"),
+            causa::kernel::BlockMeta::from_source(tars_core::compact::SUMMARY_SOURCE),
+        );
+        let sum_record = HistoryRecord {
+            format: "tars-history-v1.2".into(),
+            conversation_id: "conversation".into(),
+            record_id: OLDER.into(),
+            created_at_ms: 1,
+            trigger: HistoryTrigger::Auto,
+            kind: RewriteKind::Summarize,
+            estimate_before: 12_000,
+            estimate_after: 4_000,
+            replacements: vec![RangeReplacement {
+                range: 0..1,
+                originals: vec![block("OLDER_SUMMARIZED_TEXT")],
+                inserted_ids: vec![brief_a.id()],
+            }],
+        };
+        let two_index = index(&[sum_record.clone(), mc_record.clone()]);
+        let ctx_two = Context::from_blocks(vec![
+            brief_a.clone(),
+            call_block.clone(),
+            stub_res.clone(),
+            tail_user.clone(),
+        ])
+        .unwrap();
+        let tr_two = Transcript::from_materials(&ctx_two, &two_index);
+        assert_eq!(tr_two.history_range, 0..1);
+        let prefix_two = ctx_two.blocks()[tr_two.history_range.clone()].to_vec();
+        let tail_two: HashSet<BlockId> = ctx_two.blocks()[tr_two.history_range.end..]
+            .iter()
+            .map(ContextBlock::id)
+            .collect();
+
+        let mut view2 = HistoryView::new();
+        view2.refresh(two_index, prefix_two, &tail_two, &[]);
+        assert_eq!(view2.earlier(), 1);
+        let read = view2.next_read(true).unwrap();
+        assert_eq!(read.record, OLDER);
+        view2.insert_loaded(sum_record);
+        assert!(!view2.has_earlier());
+        assert!(view2.next_read(true).is_none());
+        let shown2 = text(&mut view2);
+        assert!(shown2.contains("OLDER_SUMMARIZED_TEXT"));
+        assert!(!shown2.contains("ORIGINAL_MICRO_TEXT"));
+
+        // 3. Later Summarize swallows stub_res: recursive expansion crosses Summarize -> MicroCompact.
+        let brief_b = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, "brief B"),
+            causa::kernel::BlockMeta::from_source(tars_core::compact::SUMMARY_SOURCE),
+        );
+        let later_sum = HistoryRecord {
+            format: "tars-history-v1.2".into(),
+            conversation_id: "conversation".into(),
+            record_id: NEWER.into(),
+            created_at_ms: 2,
+            trigger: HistoryTrigger::Auto,
+            kind: RewriteKind::Summarize,
+            estimate_before: 14_000,
+            estimate_after: 4_000,
+            replacements: vec![RangeReplacement {
+                range: 0..2,
+                originals: vec![call_block, stub_res],
+                inserted_ids: vec![brief_b.id()],
+            }],
+        };
+        let nested_index = index(&[mc_record.clone(), later_sum.clone()]);
+        let ctx_nested = Context::from_blocks(vec![brief_b, tail_user]).unwrap();
+        let tr_nested = Transcript::from_materials(&ctx_nested, &nested_index);
+        let prefix_nested = ctx_nested.blocks()[tr_nested.history_range.clone()].to_vec();
+        let tail_nested: HashSet<BlockId> = ctx_nested.blocks()[tr_nested.history_range.end..]
+            .iter()
+            .map(ContextBlock::id)
+            .collect();
+
+        let mut view3 = HistoryView::new();
+        view3.refresh(nested_index, prefix_nested, &tail_nested, &[]);
+        assert_eq!(view3.earlier(), 2);
+        let first = view3.next_read(true).unwrap();
+        assert_eq!(first.record, NEWER);
+        view3.insert_loaded(later_sum);
+        let second = view3.next_read(true).unwrap();
+        assert_eq!(second.record, mc_id);
+        view3.insert_loaded(mc_record);
+        let shown3 = text(&mut view3);
+        assert!(shown3.contains("ORIGINAL_MICRO_TEXT"), "{shown3}");
+        assert_eq!(shown3.matches("Compacted (").count(), 1);
+    }
+
+    #[test]
+    fn partially_swallowed_micro_compact_expands_swallowed_stub_without_duplicating_live_stub() {
+        use causa::kernel::{
+            BlockContent, Context, ToolCallPayload, ToolOutput, ToolResultPayload, ToolResultStatus,
+        };
+
+        let call_a_id = causa::runtime::new_block_id();
+        let orig_a_id = causa::runtime::new_block_id();
+        let stub_a_id = causa::runtime::new_block_id();
+        let call_a = ContextBlock::new(
+            call_a_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "read_file",
+                serde_json::json!({"path": "src/a.rs"}),
+            )),
+            Default::default(),
+        );
+        let orig_a = ContextBlock::new(
+            orig_a_id,
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_a_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "path": "src/a.rs",
+                    "text": "ORIGINAL_PARTIAL_A",
+                })),
+            )),
+            Default::default(),
+        );
+        let stub_a = ContextBlock::new(
+            stub_a_id,
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_a_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::Value::String("[cleared tool_result: a]".into())),
+            )),
+            Default::default(),
+        );
+
+        let call_b_id = causa::runtime::new_block_id();
+        let orig_b_id = causa::runtime::new_block_id();
+        let stub_b_id = causa::runtime::new_block_id();
+        let call_b = ContextBlock::new(
+            call_b_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "read_file",
+                serde_json::json!({"path": "src/b.rs"}),
+            )),
+            Default::default(),
+        );
+        let orig_b = ContextBlock::new(
+            orig_b_id,
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_b_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "path": "src/b.rs",
+                    "text": "ORIGINAL_PARTIAL_B",
+                })),
+            )),
+            Default::default(),
+        );
+        let stub_b = ContextBlock::new(
+            stub_b_id,
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_b_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::Value::String("[cleared tool_result: b]".into())),
+            )),
+            Default::default(),
+        );
+
+        let mc_id = "0190a000-0000-7000-8000-000000000072";
+        let mc_record = HistoryRecord {
+            format: "tars-history-v1.2".into(),
+            conversation_id: "conversation".into(),
+            record_id: mc_id.into(),
+            created_at_ms: 1,
+            trigger: HistoryTrigger::Auto,
+            kind: RewriteKind::MicroCompact,
+            estimate_before: 12_000,
+            estimate_after: 3_000,
+            replacements: vec![
+                RangeReplacement {
+                    range: 1..2,
+                    originals: vec![orig_a],
+                    inserted_ids: vec![stub_a_id],
+                },
+                RangeReplacement {
+                    range: 3..4,
+                    originals: vec![orig_b],
+                    inserted_ids: vec![stub_b_id],
+                },
+            ],
+        };
+
+        // Later Summarize swallows call_a + stub_a into brief_b while call_b + stub_b stay live.
+        let brief_b = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, "brief B"),
+            causa::kernel::BlockMeta::from_source(tars_core::compact::SUMMARY_SOURCE),
+        );
+        let sum_record = HistoryRecord {
+            format: "tars-history-v1.2".into(),
+            conversation_id: "conversation".into(),
+            record_id: NEWER.into(),
+            created_at_ms: 2,
+            trigger: HistoryTrigger::Auto,
+            kind: RewriteKind::Summarize,
+            estimate_before: 14_000,
+            estimate_after: 4_000,
+            replacements: vec![RangeReplacement {
+                range: 0..2,
+                originals: vec![call_a, stub_a],
+                inserted_ids: vec![brief_b.id()],
+            }],
+        };
+
+        let tail_user = block("tail question");
+        let context =
+            Context::from_blocks(vec![brief_b, call_b.clone(), stub_b.clone(), tail_user]).unwrap();
+        let full_index = index(&[mc_record.clone(), sum_record.clone()]);
+        let transcript = Transcript::from_materials(&context, &full_index);
+        assert_eq!(transcript.history_range, 0..1);
+        assert_eq!(
+            transcript.text.matches("[cleared tool_result: b]").count(),
+            1
+        );
+        assert!(!transcript.text.contains("ORIGINAL_PARTIAL_A"));
+        assert!(!transcript.text.contains("ORIGINAL_PARTIAL_B"));
+
+        let prefix = context.blocks()[transcript.history_range.clone()].to_vec();
+        let live_tail_ids: HashSet<BlockId> = context.blocks()[transcript.history_range.end..]
+            .iter()
+            .map(ContextBlock::id)
+            .collect();
+
+        let mut view = HistoryView::new();
+        view.refresh(full_index, prefix, &live_tail_ids, &[]);
+        // Before Summarize is loaded, only Summarize counts as unread.
+        assert_eq!(view.earlier(), 1);
+        let first = view.next_read(true).unwrap();
+        assert_eq!(first.record, NEWER);
+
+        // Once Summarize loads and hits stub_a, live_skipped is cleared for mc_id.
+        view.insert_loaded(sum_record);
+        assert_eq!(view.earlier(), 1);
+        let second = view.next_read(true).unwrap();
+        assert_eq!(second.record, mc_id);
+
+        view.insert_loaded(mc_record);
+        assert_eq!(view.earlier(), 0);
+        assert!(!view.has_earlier());
+        let shown = text(&mut view);
+        assert!(shown.contains("ORIGINAL_PARTIAL_A"), "{shown}");
+        assert!(!shown.contains("ORIGINAL_PARTIAL_B"), "{shown}");
+        assert!(!shown.contains("[cleared tool_result: b]"), "{shown}");
     }
 }

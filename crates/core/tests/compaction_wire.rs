@@ -800,3 +800,271 @@ async fn round_zero_large_work_input_preserves_prior_turn_prefix_on_wire() {
         assert_eq!(final_blocks[4].id(), u2_id, "{name}");
     }
 }
+
+fn read_tool_pair(path: &str, body_bytes: usize, marker: &str) -> (ContextBlock, ContextBlock) {
+    let call_id = causa::runtime::new_block_id();
+    let call = ContextBlock::new(
+        call_id,
+        BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+            "read_file",
+            serde_json::json!({ "path": path, "start_line": 1, "max_lines": 100 }),
+        )),
+        BlockMeta::default(),
+    );
+    let result = ContextBlock::new(
+        causa::runtime::new_block_id(),
+        BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+            call_id,
+            causa::kernel::ToolResultStatus::Succeeded,
+            causa::kernel::ToolOutput::new(serde_json::json!({
+                "path": path,
+                "start_line": 1,
+                "end_line": 100,
+                "text": format!("{marker} {}", "m".repeat(body_bytes)),
+            })),
+        )),
+        BlockMeta::default(),
+    );
+    (call, result)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_mc09_hot_and_cold_micro_compaction_on_all_three_wire_protocols() {
+    for (name, provider) in PROTOCOLS {
+        // 1. Hot-cache micro-compaction -> recall -> subsequent Summarize across all 3 protocols.
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(
+            name,
+            vec![
+                Reply::RecallFirstCleared,
+                Reply::Answer,
+                Reply::Summary(BRIEF),
+                Reply::Answer,
+            ],
+            None,
+        );
+
+        let mut def = definition(provider, &fixture.endpoint, root.path());
+        def.context_window = Some(10_000);
+        def.compact_threshold = 70;
+        def.max_tokens = (provider == Provider::Anthropic).then_some(1024);
+
+        let sys = block(
+            Role::System,
+            "You are the micro-compaction wire fixture.".into(),
+        );
+        let mut blocks = vec![sys, block(Role::User, "read four files".into())];
+        for idx in 0..4 {
+            let (call, result) = read_tool_pair(
+                &format!("src/wire_{idx}.rs"),
+                4_800,
+                &format!("MC09_HOT_ORIGINAL_{idx}"),
+            );
+            blocks.push(call);
+            blocks.push(result);
+        }
+        blocks.push(block(Role::Assistant, "done reading".into()));
+
+        let store = tempfile::tempdir().unwrap();
+        let host = SessionHost::new(Some(store.path().to_owned()));
+        let session = host
+            .create(PreparedCreate::persistent(
+                def,
+                Context::from_blocks(blocks).unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let turn1 = session
+            .submit(SubmitRequest {
+                request_key: "mc09-hot-turn".into(),
+                blocks: vec![text_input("Recall the first read output and answer.")],
+            })
+            .unwrap()
+            .work;
+        let obs1 = session.wait(&turn1, Duration::from_secs(20)).await.unwrap();
+        assert!(
+            matches!(obs1.state, WorkState::Finished(_)),
+            "{name}: {obs1:?}"
+        );
+        session.wait_saved().await.unwrap();
+
+        assert_eq!(
+            session.history().len(),
+            1,
+            "{name}: Turn 1 micro-compacted once"
+        );
+        assert_eq!(
+            session.history()[0].kind,
+            RewriteKind::MicroCompact,
+            "{name}"
+        );
+
+        // Turn 2: large user message pushes over threshold -> falls back to Summarize.
+        let turn2 = session
+            .submit(SubmitRequest {
+                request_key: "mc09-hot-summarize-turn".into(),
+                blocks: vec![text_input(format!("Summarize now {}", "s".repeat(22_000)))],
+            })
+            .unwrap()
+            .work;
+        let obs2 = session.wait(&turn2, Duration::from_secs(20)).await.unwrap();
+        assert!(
+            matches!(obs2.state, WorkState::Finished(_)),
+            "{name}: {obs2:?}"
+        );
+        session.wait_saved().await.unwrap();
+
+        let history = session.history();
+        assert_eq!(history.len(), 2, "{name}: MicroCompact then Summarize");
+        assert_eq!(history[0].kind, RewriteKind::MicroCompact, "{name}");
+        assert_eq!(history[1].kind, RewriteKind::Summarize, "{name}");
+
+        let bodies: Vec<Value> = fixture
+            .raw_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|raw| serde_json::from_slice(raw).unwrap())
+            .collect();
+        assert_eq!(
+            bodies.len(),
+            4,
+            "{name}: Turn 1 R0 (micro-compacted), Turn 1 R1 (after recall), Turn 2 brief, Turn 2 R0"
+        );
+        let r0_str = bodies[0].to_string();
+        assert!(r0_str.contains("[cleared tool_result:"), "{name}: {r0_str}");
+        assert!(r0_str.contains("recall id="), "{name}: {r0_str}");
+        assert!(!r0_str.contains("MC09_HOT_ORIGINAL_0"), "{name}: {r0_str}");
+        assert!(
+            bodies[1].to_string().contains("MC09_HOT_ORIGINAL_0"),
+            "{name}: recall returned original output"
+        );
+        assert!(
+            bodies[2]
+                .to_string()
+                .contains("Prepare a continuation brief"),
+            "{name}: Turn 2 ran Summarize brief"
+        );
+        assert!(
+            bodies[3].to_string().contains(BRIEF),
+            "{name}: Turn 2 R0 sent brief"
+        );
+        host.close(&session.target(), tars_core::application::ClosePolicy::Save)
+            .await
+            .unwrap();
+
+        // 2. Cold-cache micro-compaction after simulated >= 5 min idle gap across all 3 protocols.
+        let cold_root = tempfile::tempdir().unwrap();
+        let cold_fixture = Fixture::new(name, vec![Reply::Answer, Reply::Answer], None);
+        let mut cold_def = definition(provider, &cold_fixture.endpoint, cold_root.path());
+        cold_def.context_window = Some(20_000);
+        cold_def.compact_threshold = 70;
+        cold_def.max_tokens = (provider == Provider::Anthropic).then_some(1024);
+
+        let mut cold_blocks = vec![
+            block(Role::System, "You are the cold-cache wire fixture.".into()),
+            block(Role::User, "read cold files".into()),
+        ];
+        for idx in 0..4 {
+            let (call, res) = read_tool_pair(
+                &format!("src/cold_{idx}.rs"),
+                4_500,
+                &format!("MC09_COLD_ORIGINAL_{idx}"),
+            );
+            cold_blocks.push(call);
+            cold_blocks.push(res);
+        }
+        cold_blocks.push(block(Role::Assistant, "cold reads done".into()));
+
+        let cold_store = tempfile::tempdir().unwrap();
+        let cold_host = SessionHost::new(Some(cold_store.path().to_owned()));
+        let cold_session = cold_host
+            .create(PreparedCreate::persistent(
+                cold_def,
+                Context::from_blocks(cold_blocks).unwrap(),
+            ))
+            .await
+            .unwrap();
+        let cold_id = cold_session.target().conversation_id().clone();
+
+        let warm = cold_session
+            .submit(SubmitRequest {
+                request_key: "mc09-warm".into(),
+                blocks: vec![text_input("warm call")],
+            })
+            .unwrap()
+            .work;
+        let warm_obs = cold_session
+            .wait(&warm, Duration::from_secs(20))
+            .await
+            .unwrap();
+        assert!(matches!(warm_obs.state, WorkState::Finished(_)), "{name}");
+        cold_session.wait_saved().await.unwrap();
+        assert!(cold_session.history().is_empty(), "{name}");
+        cold_host
+            .close(
+                &cold_session.target(),
+                tars_core::application::ClosePolicy::Save,
+            )
+            .await
+            .unwrap();
+
+        // Age persisted last_call timestamp by 6 minutes in the saved session record.
+        let rec_path = cold_store
+            .path()
+            .join("sessions")
+            .join(format!("{}.json", cold_id.as_str()));
+        let mut saved_json: Value =
+            serde_json::from_slice(&std::fs::read(&rec_path).unwrap()).unwrap();
+        let prev_ts = saved_json["usage"]["last_call"]["timestamp_ms"]
+            .as_u64()
+            .expect("persisted last_call timestamp_ms");
+        saved_json["usage"]["last_call"]["timestamp_ms"] =
+            serde_json::json!(prev_ts.saturating_sub(6 * 60 * 1_000));
+        std::fs::write(&rec_path, serde_json::to_vec(&saved_json).unwrap()).unwrap();
+
+        let reopened = cold_host.open(cold_id).await.unwrap();
+        let cold_turn = reopened
+            .submit(SubmitRequest {
+                request_key: "mc09-cold".into(),
+                blocks: vec![text_input("cold resume")],
+            })
+            .unwrap()
+            .work;
+        let cold_obs = reopened
+            .wait(&cold_turn, Duration::from_secs(20))
+            .await
+            .unwrap();
+        assert!(matches!(cold_obs.state, WorkState::Finished(_)), "{name}");
+        reopened.wait_saved().await.unwrap();
+
+        let reopened_history = reopened.history();
+        assert_eq!(reopened_history.len(), 1, "{name}");
+        assert_eq!(
+            reopened_history[0].kind,
+            RewriteKind::MicroCompact,
+            "{name}"
+        );
+
+        let cold_bodies: Vec<Value> = cold_fixture
+            .raw_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|raw| serde_json::from_slice(raw).unwrap())
+            .collect();
+        assert_eq!(cold_bodies.len(), 2, "{name}: warm + cold (0 brief calls)");
+        let cold_req_str = cold_bodies[1].to_string();
+        assert!(cold_req_str.contains("[cleared tool_result:"), "{name}");
+        assert!(!cold_req_str.contains("MC09_COLD_ORIGINAL_0"), "{name}");
+
+        cold_host
+            .close(
+                &reopened.target(),
+                tars_core::application::ClosePolicy::Save,
+            )
+            .await
+            .unwrap();
+    }
+}

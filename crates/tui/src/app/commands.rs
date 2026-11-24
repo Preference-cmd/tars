@@ -621,9 +621,14 @@ impl App {
                     match artifact {
                         Some(spilled) => {
                             reads += 1;
-                            match session.read_spilled_artifact(&spilled.artifact_id) {
+                            let model_note = if spilled.artifact_id.starts_with("artifact:") {
+                                "Model sees spilled preview only"
+                            } else {
+                                "Model sees cleared preview only"
+                            };
+                            match session.read_artifact(&spilled.artifact_id) {
                                 Ok(full_text) => lines.push(format!(
-                                    "Result for {} · {:?} · {}\nModel sees spilled preview only · full output from {} ({} bytes):\n{}\n\nModel-facing preview:\n{}",
+                                    "Result for {} · {:?} · {}\n{model_note} · full output from {} ({} bytes):\n{}\n\nModel-facing preview:\n{}",
                                     spilled.call_block_id.0,
                                     spilled.status,
                                     crate::transcript::display(&spilled.artifact_id),

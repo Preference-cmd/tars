@@ -87,6 +87,23 @@ impl Entry {
                     super::history::estimate_label(*estimate_after),
                 );
             }
+            CompactionProgress::MicroCompacted {
+                estimate_before,
+                estimate_after,
+                cleared_results,
+                ..
+            } => {
+                let unit = if *cleared_results == 1 {
+                    "result"
+                } else {
+                    "results"
+                };
+                self.notice = format!(
+                    "Micro-compacted {cleared_results} tool {unit}: {} → {} tokens",
+                    super::history::estimate_label(*estimate_before),
+                    super::history::estimate_label(*estimate_after),
+                );
+            }
             CompactionProgress::Abandoned {
                 reason: CompactionAbandon::PrefixTooLarge,
                 ..

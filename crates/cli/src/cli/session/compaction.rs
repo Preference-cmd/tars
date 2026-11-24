@@ -164,10 +164,10 @@ pub(super) async fn history(
                 for block in &expansion.blocks {
                     let mut value = serde_json::to_value(block).map_err(io::Error::other)?;
                     if let BlockContent::ToolResult(result) = block.block.content()
-                        && let Some(artifact) = &result.output.artifact
+                        && let Some(artifact_id) = history_tool_result_artifact_id(block, result)
                         && let Some(object) = value.as_object_mut()
                     {
-                        object.insert("artifact_id".into(), json!(artifact.id));
+                        object.insert("artifact_id".into(), json!(artifact_id));
                     }
                     serde_json::to_writer(&mut out, &value).map_err(io::Error::other)?;
                     writeln!(out)?;
@@ -244,11 +244,8 @@ fn write_expanded_block(out: &mut dyn Write, expanded: &ExpandedBlock) -> io::Re
             )?;
         }
         BlockContent::ToolResult(result) => {
-            let artifact = result
-                .output
-                .artifact
-                .as_ref()
-                .map(|a| format!(" · {}", display(&a.id)))
+            let artifact = history_tool_result_artifact_id(expanded, result)
+                .map(|id| format!(" · {}", display(&id)))
                 .unwrap_or_default();
             writeln!(
                 out,
@@ -264,6 +261,19 @@ fn write_expanded_block(out: &mut dyn Write, expanded: &ExpandedBlock) -> io::Re
         BlockContent::ToolChange(_) => {}
     }
     Ok(())
+}
+
+fn history_tool_result_artifact_id(
+    expanded: &ExpandedBlock,
+    result: &causa::kernel::ToolResultPayload,
+) -> Option<String> {
+    if let Some(artifact) = &result.output.artifact {
+        return Some(artifact.id.clone());
+    }
+    if let tars_core::compact::BlockStatus::MicroCompacted(record_id) = &expanded.status {
+        return Some(format!("{record_id}/{}", expanded.block.id().0));
+    }
+    None
 }
 
 fn role_label(role: Role) -> &'static str {

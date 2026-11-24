@@ -889,6 +889,42 @@ impl ManagedSession {
         })
     }
 
+    /// Read the UTF-8 text of one tool-output artifact (`artifact:<id>` or
+    /// `<record id>/<block id>`) for display.
+    pub fn read_artifact(&self, id: &str) -> Result<String, ApplicationError> {
+        let artifacts = {
+            let state = self.entry.lock();
+            if state.lifecycle == Lifecycle::Closed {
+                return Err(ApplicationError::Closed);
+            }
+            let runtime = state
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.compaction())
+                .ok_or(ApplicationError::CompactionUnavailable)?;
+            runtime
+                .artifacts()
+                .ok_or(ApplicationError::CompactionUnavailable)?
+        };
+        let bytes = artifacts
+            .read_blocking(id, None)
+            .map_err(|error| ApplicationError::Store(Arc::new(error)))?;
+        String::from_utf8(bytes).map_err(|_| {
+            ApplicationError::Store(Arc::new(crate::store::StoreError::InvalidHistory(format!(
+                "artifact {id} is not valid UTF-8 text"
+            ))))
+        })
+    }
+
+    /// Override the compaction runtime's wall-clock source for deterministic tests.
+    #[cfg(test)]
+    pub(crate) fn set_compaction_clock_for_test(&self, clock: Arc<dyn Fn() -> u64 + Send + Sync>) {
+        let state = self.entry.lock();
+        if let Some(runtime) = state.owner.as_ref().and_then(|owner| owner.compaction()) {
+            runtime.set_clock(clock);
+        }
+    }
+
     /// History rewrite records written by this session in this process.
     pub fn written_history_records(&self) -> Vec<Arc<crate::compact::HistoryRecord>> {
         let state = self.entry.lock();

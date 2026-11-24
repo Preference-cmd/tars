@@ -1580,3 +1580,191 @@ fn test_be19_cli_transient_run_with_window_trims_over_window_request_and_reports
         "expected trim notice on stderr, got: {stderr}"
     );
 }
+
+#[test]
+fn test_mc08_cli_session_history_and_show_with_micro_compact_and_missing_record() {
+    let folder = tempfile::tempdir().unwrap();
+    let store = folder.path().join("store");
+    let fixture = Fixture::new(1);
+    let id = create(
+        &store,
+        &fixture.endpoint,
+        &["--context-window", "10000", "--auto-compact", "70"],
+    );
+
+    let rec_file = record_path(&store, &id);
+    let mut rec_json: Value = serde_json::from_slice(&fs::read(&rec_file).unwrap()).unwrap();
+    let blocks = rec_json["context"]["blocks"].as_array_mut().unwrap();
+    blocks.push(
+        serde_json::to_value(causa::kernel::ContextBlock::text(
+            causa::runtime::new_block_id(),
+            causa::kernel::Role::User,
+            "read four files",
+        ))
+        .unwrap(),
+    );
+    let mut orig_result_ids = Vec::new();
+    for idx in 0..4 {
+        let call_id = causa::runtime::new_block_id();
+        let res_id = causa::runtime::new_block_id();
+        orig_result_ids.push(res_id);
+        let call_block = causa::kernel::ContextBlock::new(
+            call_id,
+            causa::kernel::BlockContent::ToolCall(causa::kernel::ToolCallPayload::new(
+                "read_file",
+                json!({ "path": format!("src/mc08_{idx}.rs"), "start_line": 1, "max_lines": 100 }),
+            )),
+            causa::kernel::BlockMeta::default(),
+        );
+        let res_block = causa::kernel::ContextBlock::new(
+            res_id,
+            causa::kernel::BlockContent::ToolResult(causa::kernel::ToolResultPayload::new(
+                call_id,
+                causa::kernel::ToolResultStatus::Succeeded,
+                causa::kernel::ToolOutput::new(json!({
+                    "path": format!("src/mc08_{idx}.rs"),
+                    "start_line": 1,
+                    "end_line": 100,
+                    "text": format!("MC08_ORIGINAL_TOOL_OUTPUT_{idx} {}", "m".repeat(4_800)),
+                })),
+            )),
+            causa::kernel::BlockMeta::default(),
+        );
+        blocks.push(serde_json::to_value(&call_block).unwrap());
+        blocks.push(serde_json::to_value(&res_block).unwrap());
+    }
+    blocks.push(
+        serde_json::to_value(causa::kernel::ContextBlock::text(
+            causa::runtime::new_block_id(),
+            causa::kernel::Role::Assistant,
+            "done reading files",
+        ))
+        .unwrap(),
+    );
+    fs::write(&rec_file, serde_json::to_vec(&rec_json).unwrap()).unwrap();
+
+    // Run one turn: hot-cache Path A micro-compacts without any summary model call.
+    let child = spawn(run(&store, &id, "continue after reads"));
+    let req = fixture.request();
+    assert!(!req.to_string().contains("Prepare a continuation brief"));
+    fixture.stream("done after micro-compact");
+    let run_out = finished(child);
+    assert!(run_out.status.success(), "{run_out:?}");
+    let run_stderr = String::from_utf8_lossy(&run_out.stderr);
+    assert!(
+        !run_stderr.contains("Micro-compacted"),
+        "CLI stderr stays quiet for MicroCompacted: {run_stderr}"
+    );
+
+    let saved = record(&store, &id);
+    let history = saved["history"].as_array().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["kind"], "micro-compact");
+    let mc_record_id = history[0]["record_id"].as_str().unwrap().to_owned();
+    let expected_artifact_id = format!("{mc_record_id}/{}", orig_result_ids[0].0);
+
+    // 1. `session show` counts the MicroCompact rewrite record.
+    let show_json = cli()
+        .args(["session", "show", &id, "--no-config", "--json", "--store"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(show_json.status.success(), "{show_json:?}");
+    assert_eq!(report(&show_json)["history_records"], 1);
+    let show_text = cli()
+        .args(["session", "show", &id, "--no-config", "--store"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(show_text.status.success(), "{show_text:?}");
+    assert!(String::from_utf8_lossy(&show_text.stdout).contains("1 history record(s)"));
+
+    // 2. `session history --json` expands originals with micro_compacted status & artifact_id.
+    let hist_json = cli()
+        .args([
+            "session",
+            "history",
+            &id,
+            "--no-config",
+            "--json",
+            "--store",
+        ])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(hist_json.status.success(), "{hist_json:?}");
+    let expanded = history_blocks(&hist_json);
+    assert!(
+        expanded
+            .iter()
+            .any(|b| b.status
+                == tars_core::compact::BlockStatus::MicroCompacted(mc_record_id.clone())),
+        "{expanded:?}"
+    );
+    let json_lines: Vec<Value> = String::from_utf8(hist_json.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(
+        json_lines.iter().any(|v| {
+            v.get("status").and_then(Value::as_str) == Some("micro_compacted")
+                && v.get("record_id").and_then(Value::as_str) == Some(mc_record_id.as_str())
+                && v.get("artifact_id").and_then(Value::as_str)
+                    == Some(expected_artifact_id.as_str())
+        }),
+        "JSON history must include micro_compacted status, record_id and artifact_id: {json_lines:?}"
+    );
+    assert!(
+        json_lines
+            .iter()
+            .any(|v| v.to_string().contains("MC08_ORIGINAL_TOOL_OUTPUT_0")),
+        "expanded JSON must restore original output"
+    );
+
+    // 3. `session history` text mode renders micro-compacted (<id>), artifact id, and full original.
+    let hist_text = cli()
+        .args(["session", "history", &id, "--no-config", "--store"])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert!(hist_text.status.success(), "{hist_text:?}");
+    let text = String::from_utf8_lossy(&hist_text.stdout);
+    assert!(
+        text.contains(&format!("[tool result · micro-compacted ({mc_record_id})]")),
+        "{text}"
+    );
+    assert!(text.contains(&expected_artifact_id), "{text}");
+    assert!(text.contains("MC08_ORIGINAL_TOOL_OUTPUT_0"), "{text}");
+
+    // 4. Deleting the MicroCompact record file reports on stderr and exits 1.
+    fs::remove_file(
+        store
+            .join("sessions")
+            .join(format!("{id}.history"))
+            .join(format!("{mc_record_id}.json")),
+    )
+    .unwrap();
+    let broken = cli()
+        .args([
+            "session",
+            "history",
+            &id,
+            "--no-config",
+            "--json",
+            "--store",
+        ])
+        .arg(&store)
+        .output()
+        .unwrap();
+    assert_eq!(broken.status.code(), Some(1), "{broken:?}");
+    let stderr = String::from_utf8_lossy(&broken.stderr);
+    assert!(stderr.contains(&mc_record_id), "{stderr}");
+    let broken_blocks = history_blocks(&broken);
+    assert!(
+        broken_blocks
+            .iter()
+            .any(|b| b.status == tars_core::compact::BlockStatus::Unreadable(mc_record_id.clone())),
+        "{broken_blocks:?}"
+    );
+}
