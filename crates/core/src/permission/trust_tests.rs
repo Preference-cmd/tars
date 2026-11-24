@@ -714,11 +714,11 @@ decision = "allow"
             .await
             .unwrap();
 
-        // Saved record must remain tars-session-v2.3 without session_rules, and user rules untouched.
+        // Saved record must remain tars-session-v2.4 without session_rules, and user rules untouched.
         let record_path = store.join("sessions").join(format!("{}.json", id.as_str()));
         let record_json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&record_path).unwrap()).unwrap();
-        assert_eq!(record_json["format"], "tars-session-v2.3");
+        assert_eq!(record_json["format"], "tars-session-v2.4");
         assert!(record_json.get("session_rules").is_none());
         assert!(!user_rules.exists());
         assert!(!workspace.join(".tars/permissions.toml").exists());

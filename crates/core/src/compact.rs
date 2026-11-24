@@ -10,7 +10,7 @@
 //!
 //! The pieces are deliberately split:
 //!
-//! - `history` owns the `tars-history-v1.1` rewrite files and the index stored in
+//! - `history` owns the `tars-history-v1.2` rewrite files and the index stored in
 //!   the session record.
 //! - `expansion` expands the current Context into the full conversation.
 //! - `estimate` turns a Context into a conservative token estimate and wraps
@@ -35,6 +35,7 @@ pub(crate) mod block_text;
 pub(crate) mod estimate;
 pub(crate) mod expansion;
 pub(crate) mod history;
+pub(crate) mod micro;
 pub(crate) mod preparer;
 pub(crate) mod recall;
 pub(crate) mod runtime;

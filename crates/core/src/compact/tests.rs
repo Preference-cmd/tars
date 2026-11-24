@@ -23,6 +23,7 @@ use std::time::Duration;
 
 mod brief_reply;
 mod merge;
+mod micro;
 mod partial;
 mod prelude_fold;
 mod skill_protection;
@@ -1135,7 +1136,7 @@ fn test_be01_shared_commit_path_v1_1_format_multi_range_and_abandonment() {
         .join(format!("{record_id}.json"));
     let file_json: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&file_path).unwrap()).unwrap();
-    assert_eq!(file_json["format"], "tars-history-v1.1");
+    assert_eq!(file_json["format"], "tars-history-v1.2");
     assert_eq!(file_json["kind"], "summarize");
     assert_eq!(file_json["record_id"], record_id.as_str());
     let replacements = file_json["replacements"].as_array().unwrap();

@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Wire format of one history rewrite record document.
-pub(crate) const HISTORY_FORMAT: &str = "tars-history-v1.1";
+pub(crate) const HISTORY_FORMAT: &str = "tars-history-v1.2";
 /// One rewrite document is bounded like one session record.
 pub(crate) const MAX_HISTORY_BYTES: usize = 64 * 1024 * 1024;
 /// Prefix identifying spilled tool output artifact references.
@@ -46,6 +46,8 @@ pub enum RewriteKind {
     Summarize,
     /// Several earlier briefs merged into one.
     Merge,
+    /// Old or superseded tool results folded into compact stubs in place.
+    MicroCompact,
 }
 
 impl RewriteKind {
@@ -54,6 +56,7 @@ impl RewriteKind {
         match self {
             Self::Summarize => "summarize",
             Self::Merge => "merge",
+            Self::MicroCompact => "micro-compact",
         }
     }
 }
@@ -174,11 +177,11 @@ pub(crate) enum RewriteError {
     Rejected(String),
 }
 
-/// One rewrite record as written to its own file (`tars-history-v1.1`).
+/// One rewrite record as written to its own file (`tars-history-v1.2`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryRecord {
-    /// `tars-history-v1.1`.
+    /// `tars-history-v1.2`.
     pub format: String,
     /// Owning conversation identity.
     pub conversation_id: String,
@@ -188,7 +191,7 @@ pub struct HistoryRecord {
     pub created_at_ms: u64,
     /// What triggered this rewrite.
     pub trigger: HistoryTrigger,
-    /// What kind of rewrite was performed (`summarize`, `merge`).
+    /// What kind of rewrite was performed (`summarize`, `merge`, `micro-compact`).
     pub kind: RewriteKind,
     /// Estimated request size before the replacement.
     pub estimate_before: u64,
@@ -270,7 +273,7 @@ pub struct HistoryRecordEntry {
     pub created_at_ms: u64,
     /// What triggered the rewrite.
     pub trigger: HistoryTrigger,
-    /// The kind of rewrite (`summarize`, `merge`).
+    /// The kind of rewrite (`summarize`, `merge`, `micro-compact`).
     pub kind: RewriteKind,
     /// Number of blocks removed by this rewrite.
     pub removed_block_count: usize,

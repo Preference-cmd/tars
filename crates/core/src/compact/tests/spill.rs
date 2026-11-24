@@ -380,7 +380,7 @@ async fn test_be16_after_processor_degrades_on_persist_failure_without_failing_b
 #[test]
 fn test_be16_elide_kind_is_rejected_on_decode() {
     let raw = serde_json::json!({
-        "format": "tars-history-v1.1",
+        "format": "tars-history-v1.2",
         "conversation_id": uuid::Uuid::now_v7().to_string(),
         "record_id": uuid::Uuid::now_v7().to_string(),
         "created_at_ms": 1,

@@ -40,6 +40,8 @@ pub enum BlockStatus {
     Original,
     /// A block removed by a summarize or merge rewrite (record id).
     Summarized(String),
+    /// A block folded in place by a micro-compact rewrite (record id).
+    MicroCompacted(String),
     /// A block inserted by a rewrite whose record cannot be read (record id).
     ///
     /// The inserted block itself is shown in place of the originals.
@@ -51,6 +53,7 @@ impl std::fmt::Display for BlockStatus {
         match self {
             Self::Original => write!(f, "original"),
             Self::Summarized(id) => write!(f, "summarized ({id})"),
+            Self::MicroCompacted(id) => write!(f, "micro-compacted ({id})"),
             Self::Unreadable(id) => write!(f, "unreadable ({id})"),
         }
     }
@@ -59,7 +62,7 @@ impl std::fmt::Display for BlockStatus {
 /// One block in an expanded conversation with its provenance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExpandedBlock {
-    /// Whether this block is original, summarized or from an unreadable record.
+    /// Whether this block is original, summarized, micro-compacted or from an unreadable record.
     #[serde(flatten)]
     pub status: BlockStatus,
     /// The block content and metadata.
@@ -321,13 +324,14 @@ impl ExpansionCursor {
                 })
                 .collect(),
             Ok(record) => {
-                let mark = (!self.mark_emitted[owner]).then(|| RewriteMark {
-                    record_id: record_id.clone(),
-                    trigger: record.trigger,
-                    kind: record.kind,
-                    estimate_before: record.estimate_before,
-                    estimate_after: record.estimate_after,
-                });
+                let mark = (!self.mark_emitted[owner] && record.kind != RewriteKind::MicroCompact)
+                    .then(|| RewriteMark {
+                        record_id: record_id.clone(),
+                        trigger: record.trigger,
+                        kind: record.kind,
+                        estimate_before: record.estimate_before,
+                        estimate_after: record.estimate_after,
+                    });
                 match run {
                     Some(run) => self.match_run(owner, &record, &run, mark),
                     // Put-back blocks stand elsewhere in the conversation;
@@ -356,6 +360,7 @@ impl ExpansionCursor {
         };
         let status = match self.index[owner].kind {
             RewriteKind::Summarize | RewriteKind::Merge => BlockStatus::Summarized(record_id),
+            RewriteKind::MicroCompact => BlockStatus::MicroCompacted(record_id),
         };
         self.stack.push(Frame {
             items,

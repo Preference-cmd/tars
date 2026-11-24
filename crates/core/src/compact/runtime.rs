@@ -354,45 +354,19 @@ impl CompactionRuntime {
         &self,
         blocks: &[ContextBlock],
     ) -> Result<SummaryInterval, CompactionAbandon> {
-        if has_unpaired_tools(blocks) {
-            return Err(CompactionAbandon::UnpairedMaterials);
-        }
-        let head_end = segment::head_end(blocks);
         let (_, threshold) = self.settings();
-        let fixed_prefix = segment::fixed_prefix_estimate(blocks);
-        let budget = segment::retained_tail_budget(self.window, threshold, fixed_prefix)
-            .map_err(|_| CompactionAbandon::PrefixTooLarge)?;
         let current_inputs = self.current_work_inputs();
-        let k = sealed::tail_start_outside_open_loop(
-            blocks,
-            segment::tail_start(blocks, head_end, budget),
-        );
-        let k = trim_trailing_work_inputs(blocks, head_end, k, &current_inputs);
-        let work_inputs = segment::protected_positions(blocks, head_end, k, &current_inputs);
-        let request_in_progress = !work_inputs.is_empty();
-        let skill_budget = segment::skill_protection_budget(self.window, threshold, fixed_prefix);
-        let (skill_protected, promoted_skills) =
-            plan_skill_protection(blocks, head_end, k, skill_budget);
-        let mut protected = work_inputs;
-        protected.extend(skill_protected);
-        protected.sort_unstable();
-        protected.dedup();
+        let interval = compute_interval_bounds(blocks, self.window, threshold, &current_inputs)?;
         // Protected blocks stay and declarations are only folded, so an
         // interval of nothing else has nothing to summarize.
-        let summarizable = (head_end..k).any(|index| {
-            !protected.contains(&index)
+        let summarizable = (interval.head_end..interval.k).any(|index| {
+            !interval.protected.contains(&index)
                 && !matches!(blocks[index].content(), BlockContent::ToolChange(_))
         });
         if !summarizable {
             return Err(CompactionAbandon::NoShrink);
         }
-        Ok(SummaryInterval {
-            head_end,
-            k,
-            protected,
-            request_in_progress,
-            promoted_skills,
-        })
+        Ok(interval)
     }
 
     /// Whether the brief chain is due to be merged after a summary.
@@ -609,14 +583,51 @@ impl CompactionRuntime {
     }
 }
 
-/// Where a summary cuts: the end of the head, the tail start `k`, the
-/// protected positions between them, and promoted `load_skill` blocks.
-struct SummaryInterval {
-    head_end: usize,
-    k: usize,
-    protected: Vec<usize>,
-    request_in_progress: bool,
-    promoted_skills: Vec<(usize, ContextBlock)>,
+/// Where a summary or micro-compaction cuts: the end of the head, the tail
+/// start `k`, the protected positions between them, and promoted `load_skill`
+/// blocks.
+pub(super) struct SummaryInterval {
+    pub(super) head_end: usize,
+    pub(super) k: usize,
+    pub(super) protected: Vec<usize>,
+    pub(super) request_in_progress: bool,
+    pub(super) promoted_skills: Vec<(usize, ContextBlock)>,
+}
+
+/// Compute `head_end..k` and the protected positions inside it using the exact
+/// boundary rules shared by `Summarize` and `MicroCompact`.
+pub(super) fn compute_interval_bounds(
+    blocks: &[ContextBlock],
+    window: Option<u64>,
+    threshold: u8,
+    current_inputs: &HashSet<BlockId>,
+) -> Result<SummaryInterval, CompactionAbandon> {
+    if has_unpaired_tools(blocks) {
+        return Err(CompactionAbandon::UnpairedMaterials);
+    }
+    let head_end = segment::head_end(blocks);
+    let fixed_prefix = segment::fixed_prefix_estimate(blocks);
+    let budget = segment::retained_tail_budget(window, threshold, fixed_prefix)
+        .map_err(|_| CompactionAbandon::PrefixTooLarge)?;
+    let k =
+        sealed::tail_start_outside_open_loop(blocks, segment::tail_start(blocks, head_end, budget));
+    let k = trim_trailing_work_inputs(blocks, head_end, k, current_inputs);
+    let work_inputs = segment::protected_positions(blocks, head_end, k, current_inputs);
+    let request_in_progress = !work_inputs.is_empty();
+    let skill_budget = segment::skill_protection_budget(window, threshold, fixed_prefix);
+    let (skill_protected, promoted_skills) =
+        plan_skill_protection(blocks, head_end, k, skill_budget);
+    let mut protected = work_inputs;
+    protected.extend(skill_protected);
+    protected.sort_unstable();
+    protected.dedup();
+    Ok(SummaryInterval {
+        head_end,
+        k,
+        protected,
+        request_in_progress,
+        promoted_skills,
+    })
 }
 
 enum SkillOccurrenceKind {

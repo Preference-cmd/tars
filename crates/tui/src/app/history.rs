@@ -516,7 +516,7 @@ mod tests {
         let record =
             |id: &str, trigger, before, originals: Vec<ContextBlock>, inserted: &ContextBlock| {
                 HistoryRecord {
-                    format: "tars-history-v1.1".into(),
+                    format: "tars-history-v1.2".into(),
                     conversation_id: "conversation".into(),
                     record_id: id.into(),
                     created_at_ms: 1,
@@ -705,7 +705,7 @@ mod tests {
         let mut chain = chain();
         let brief_c = block("brief C");
         let rec3 = HistoryRecord {
-            format: "tars-history-v1.1".into(),
+            format: "tars-history-v1.2".into(),
             conversation_id: "conversation".into(),
             record_id: NEWEST.into(),
             created_at_ms: 2,
@@ -792,7 +792,7 @@ mod tests {
             Default::default(),
         );
         let record = HistoryRecord {
-            format: "tars-history-v1.1".into(),
+            format: "tars-history-v1.2".into(),
             conversation_id: "conversation".into(),
             record_id: "0190a000-0000-7000-8000-000000000099".into(),
             created_at_ms: 1,
@@ -859,7 +859,7 @@ mod tests {
         );
         let brief = block("brief text");
         let record = HistoryRecord {
-            format: "tars-history-v1.1".into(),
+            format: "tars-history-v1.2".into(),
             conversation_id: "conversation".into(),
             record_id: "0190a000-0000-7000-8000-000000000088".into(),
             created_at_ms: 1,

@@ -562,7 +562,7 @@ fn session_records_written_before_message_roles_load_and_save_in_the_current_for
     let written = String::from_utf8(fs::read(&path).unwrap()).unwrap();
     assert!(written.contains(r#""shape":"message""#));
     assert!(!written.contains(r#""shape":"parts""#));
-    assert!(written.contains(r#""format":"tars-session-v2.3""#));
+    assert!(written.contains(r#""format":"tars-session-v2.4""#));
 }
 
 #[test]
@@ -738,108 +738,111 @@ fn test_be02_new_sessions_write_v2_2_and_opening_v2_1_fails_with_both_versions_a
  {
     let (folder, store, id, writer) = setup();
 
-    // 1. New sessions write tars-session-v2.3
+    // 1. New sessions write tars-session-v2.4
     let initial = op(&id, None, "new session text");
     writer.commit(&initial).unwrap();
     let path = folder.path().join("sessions").join(format!("{id}.json"));
     let bytes = fs::read(&path).unwrap();
     let text = String::from_utf8(bytes.clone()).unwrap();
-    assert!(text.contains(r#""format":"tars-session-v2.3""#));
+    assert!(text.contains(r#""format":"tars-session-v2.4""#));
 
-    // 2. Opening v2.1 fixture fails with both version names, advice, and leaves bytes/mtime unchanged
-    let v2_1_id = Uuid::now_v7().to_string();
-    let v2_1_path = folder
-        .path()
-        .join("sessions")
-        .join(format!("{v2_1_id}.json"));
-    let mut v2_1_value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    v2_1_value["format"] = serde_json::json!("tars-session-v2.1");
-    v2_1_value["conversation_id"] = serde_json::json!(v2_1_id);
-    let v2_1_bytes = serde_json::to_vec(&v2_1_value).unwrap();
-    fs::write(&v2_1_path, &v2_1_bytes).unwrap();
+    // 2. Opening v2.1 and v2.3 fixtures fails with both version names, advice, and leaves bytes/mtime unchanged
+    for old_format in ["tars-session-v2.1", "tars-session-v2.3"] {
+        let old_id = Uuid::now_v7().to_string();
+        let old_path = folder
+            .path()
+            .join("sessions")
+            .join(format!("{old_id}.json"));
+        let mut old_value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        old_value["format"] = serde_json::json!(old_format);
+        old_value["conversation_id"] = serde_json::json!(old_id);
+        let old_bytes = serde_json::to_vec(&old_value).unwrap();
+        fs::write(&old_path, &old_bytes).unwrap();
 
-    let mtime_before = fs::metadata(&v2_1_path).unwrap().modified().unwrap();
+        let mtime_before = fs::metadata(&old_path).unwrap().modified().unwrap();
 
-    let v2_1_writer = store.acquire_writer(&v2_1_id).unwrap();
-    let read_err = v2_1_writer.read_latest().unwrap_err();
-    let err_msg = read_err.to_string();
-    assert!(
-        err_msg.contains("tars-session-v2.1"),
-        "error must name found version: {err_msg}"
-    );
-    assert!(
-        err_msg.contains("tars-session-v2.3"),
-        "error must name supported version: {err_msg}"
-    );
-    assert!(
-        err_msg.contains("tars session export-materials"),
-        "error must advise export-materials: {err_msg}"
-    );
+        let old_writer = store.acquire_writer(&old_id).unwrap();
+        let read_err = old_writer.read_latest().unwrap_err();
+        let err_msg = read_err.to_string();
+        assert!(
+            err_msg.contains(old_format),
+            "error must name found version {old_format}: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("tars-session-v2.4"),
+            "error must name supported version: {err_msg}"
+        );
+        assert!(
+            err_msg.contains("tars session export-materials"),
+            "error must advise export-materials: {err_msg}"
+        );
 
-    // File bytes and mtime unchanged
-    assert_eq!(fs::read(&v2_1_path).unwrap(), v2_1_bytes);
-    assert_eq!(
-        fs::metadata(&v2_1_path).unwrap().modified().unwrap(),
-        mtime_before
-    );
+        // File bytes and mtime unchanged
+        assert_eq!(fs::read(&old_path).unwrap(), old_bytes);
+        assert_eq!(
+            fs::metadata(&old_path).unwrap().modified().unwrap(),
+            mtime_before
+        );
 
-    // `session list` lists it as invalid with the same reason
-    let list = store.list().unwrap();
-    let found = list
-        .iter()
-        .find(|item| item.conversation_id == v2_1_id)
-        .expect("v2.1 session in listing");
-    assert!(found.record.is_err());
-    let list_err = found.record.as_ref().unwrap_err().to_string();
-    assert!(list_err.contains("tars-session-v2.1"));
-    assert!(list_err.contains("tars-session-v2.3"));
+        // `session list` lists it as invalid with the same reason
+        let list = store.list().unwrap();
+        let found = list
+            .iter()
+            .find(|item| item.conversation_id == old_id)
+            .expect("old session in listing");
+        assert!(found.record.is_err());
+        let list_err = found.record.as_ref().unwrap_err().to_string();
+        assert!(list_err.contains(old_format));
+        assert!(list_err.contains("tars-session-v2.4"));
+    }
 
-    // 3. Reading a v1 history record fails with both version names and export-materials advice
+    // 3. Reading v1 and v1.1 history records fails with both version names and export-materials advice
     let history_dir = folder.path().join("sessions").join(format!("{id}.history"));
     fs::create_dir_all(&history_dir).unwrap();
-    let v1_record_id = Uuid::now_v7().to_string();
-    let v1_history_path = history_dir.join(format!("{v1_record_id}.json"));
-    let v1_history_payload = serde_json::json!({
-        "format": "tars-history-v1",
-        "conversation_id": id,
-        "record_id_value": v1_record_id,
-        "created_at_ms": 12345678,
-        "trigger": "auto",
-        "estimate_before": 1000,
-        "estimate_after": 200,
-        "replaced_context": {
-            "blocks": []
-        }
-    });
-    let v1_bytes = serde_json::to_vec(&v1_history_payload).unwrap();
-    fs::write(&v1_history_path, &v1_bytes).unwrap();
-    let v1_mtime_before = fs::metadata(&v1_history_path).unwrap().modified().unwrap();
-
     let history_store = crate::compact::history::HistoryStore::new(
         &folder.path().join("sessions"),
         &id,
         Vec::new(),
     );
-    let hist_err = history_store.read(&v1_record_id).unwrap_err();
-    let hist_msg = hist_err.to_string();
-    assert!(
-        hist_msg.contains("tars-history-v1"),
-        "error must name found history version: {hist_msg}"
-    );
-    assert!(
-        hist_msg.contains("tars-history-v1.1"),
-        "error must name supported history version: {hist_msg}"
-    );
-    assert!(
-        hist_msg.contains("tars session export-materials"),
-        "error must advise export-materials: {hist_msg}"
-    );
-    // History file bytes and mtime unchanged
-    assert_eq!(fs::read(&v1_history_path).unwrap(), v1_bytes);
-    assert_eq!(
-        fs::metadata(&v1_history_path).unwrap().modified().unwrap(),
-        v1_mtime_before
-    );
+    for old_hist_format in ["tars-history-v1", "tars-history-v1.1"] {
+        let old_record_id = Uuid::now_v7().to_string();
+        let old_history_path = history_dir.join(format!("{old_record_id}.json"));
+        let old_history_payload = serde_json::json!({
+            "format": old_hist_format,
+            "conversation_id": id,
+            "record_id": old_record_id,
+            "created_at_ms": 12345678,
+            "trigger": "auto",
+            "kind": "summarize",
+            "estimate_before": 1000,
+            "estimate_after": 200,
+            "replacements": []
+        });
+        let old_bytes = serde_json::to_vec(&old_history_payload).unwrap();
+        fs::write(&old_history_path, &old_bytes).unwrap();
+        let old_mtime_before = fs::metadata(&old_history_path).unwrap().modified().unwrap();
+
+        let hist_err = history_store.read(&old_record_id).unwrap_err();
+        let hist_msg = hist_err.to_string();
+        assert!(
+            hist_msg.contains(old_hist_format),
+            "error must name found history version {old_hist_format}: {hist_msg}"
+        );
+        assert!(
+            hist_msg.contains("tars-history-v1.2"),
+            "error must name supported history version: {hist_msg}"
+        );
+        assert!(
+            hist_msg.contains("tars session export-materials"),
+            "error must advise export-materials: {hist_msg}"
+        );
+        // History file bytes and mtime unchanged
+        assert_eq!(fs::read(&old_history_path).unwrap(), old_bytes);
+        assert_eq!(
+            fs::metadata(&old_history_path).unwrap().modified().unwrap(),
+            old_mtime_before
+        );
+    }
 }
 
 #[test]

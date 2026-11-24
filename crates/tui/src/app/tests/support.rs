@@ -355,7 +355,7 @@ pub(super) fn write_history_session(
             "inserted_block_ids": [inserted.id()],
         }));
         let document = serde_json::json!({
-            "format": "tars-history-v1.1",
+            "format": "tars-history-v1.2",
             "conversation_id": conversation_id,
             "record_id": record_id,
             "created_at_ms": 1u64,
@@ -380,7 +380,7 @@ pub(super) fn write_history_session(
     blocks.extend(current.blocks().iter().cloned());
     let context = causa::kernel::Context::from_blocks(blocks).unwrap();
     let record = serde_json::json!({
-        "format": "tars-session-v2.3",
+        "format": "tars-session-v2.4",
         "conversation_id": conversation_id,
         "revision": 1u64,
         "last_commit_id": causa::runtime::new_block_id().0.to_string(),
