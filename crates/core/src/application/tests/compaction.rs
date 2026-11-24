@@ -52,13 +52,13 @@ async fn auto_compaction_replaces_the_context_and_saves_one_record() {
     assert_eq!(history.len(), 1);
     assert_eq!(history[0]["trigger"], "auto");
     let blocks = record["context"]["blocks"].as_array().unwrap();
-    // The folded tool declaration and the brief, then the work's request,
-    // kept with its own id, and the model's final answer.
+    // The brief, then the work's request and its trailing tool declaration
+    // kept in the retained tail, and the model's final answer.
     assert_eq!(blocks.len(), 4, "{blocks:?}");
-    assert_eq!(blocks[0]["content"]["shape"], "tool_change");
-    assert_eq!(blocks[1]["meta"]["source"], "tars:compaction");
-    assert_eq!(blocks[1]["content"]["value"]["role"], "user");
-    assert_eq!(blocks[2]["id"], request[0].id().0.to_string());
+    assert_eq!(blocks[0]["meta"]["source"], "tars:compaction");
+    assert_eq!(blocks[0]["content"]["value"]["role"], "user");
+    assert_eq!(blocks[1]["id"], request[0].id().0.to_string());
+    assert_eq!(blocks[2]["content"]["shape"], "tool_change");
     assert_eq!(blocks[3]["content"]["value"]["role"], "assistant");
 
     let record_id_value = history[0]["record_id"]
@@ -77,11 +77,10 @@ async fn auto_compaction_replaces_the_context_and_saves_one_record() {
             .iter()
             .flat_map(|r| &r.originals)
             .count(),
-        6,
-        "the earlier four blocks, then the request and the declaration after it"
+        4,
+        "the earlier four blocks; round-0 request and declaration stay in the tail"
     );
-    // The request was put back, so the index counts five removed blocks.
-    assert_eq!(history[0]["removed_block_count"], 5);
+    assert_eq!(history[0]["removed_block_count"], 4);
     assert_eq!(document.trigger, crate::compact::HistoryTrigger::Auto);
     assert_eq!(session.history().len(), 1);
 
@@ -246,13 +245,13 @@ async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_afte
     assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 1);
     let after_first = session.read_materials().unwrap().context;
     let after_first = after_first.blocks();
-    // [tool declaration, S1, first request, first answer]
+    // [S1, first request, tool declaration, first answer]
     assert_eq!(after_first.len(), 4);
-    let brief_one = after_first[1].clone();
+    let brief_one = after_first[0].clone();
     assert_eq!(brief_one.meta().source.as_deref(), Some(SUMMARY_SOURCE));
-    assert_eq!(after_first[2].id(), first_id);
+    assert_eq!(after_first[1].id(), first_id);
+    let first_declaration = after_first[2].id();
     let first_answer = after_first[3].id();
-    let first_declaration = after_first[0].id();
 
     let second = vec![text_block(3_000)];
     let second_id = second[0].id();
@@ -266,8 +265,8 @@ async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_afte
     session.wait_saved().await.unwrap();
     assert_eq!(gateway.summary_calls.load(Ordering::SeqCst), 2);
 
-    // The second request is the normal material followed by the
-    // instruction: the first brief comes along as background, unchanged.
+    // The second request is the normal material up to `second` followed by
+    // the instruction: the first brief comes along as background, unchanged.
     let request: Vec<BlockId> = {
         let inputs = gateway.summary_inputs.lock().unwrap();
         assert_eq!(inputs.len(), 2);
@@ -280,13 +279,7 @@ async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_afte
     };
     assert_eq!(
         request[..request.len() - 1],
-        [
-            first_declaration,
-            brief_one.id(),
-            first_id,
-            first_answer,
-            second_id
-        ]
+        [brief_one.id(), first_id, first_declaration, first_answer,]
     );
 
     let context = session.read_materials().unwrap().context;
@@ -294,10 +287,10 @@ async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_afte
     assert_eq!(
         blocks.len(),
         5,
-        "[declaration, S1, S2, second request, answer]"
+        "[S1, declaration, S2, second request, answer]"
     );
-    assert_eq!(blocks[0].id(), first_declaration);
-    assert_eq!(blocks[1], brief_one, "the first brief is never rewritten");
+    assert_eq!(blocks[0], brief_one, "the first brief is never rewritten");
+    assert!(matches!(blocks[1].content(), BlockContent::ToolChange(_)));
     assert_eq!(blocks[2].meta().source.as_deref(), Some(SUMMARY_SOURCE));
     assert_ne!(blocks[2].id(), brief_one.id());
     assert_eq!(blocks[3].id(), second_id);
@@ -313,10 +306,10 @@ async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_afte
         .collect();
     assert_eq!(
         originals,
-        [first_id, first_answer, second_id],
-        "the first work and the protected request it put back; never the head"
+        [first_id, first_declaration, first_answer],
+        "the first work and its declaration; never the head or round-0 second request"
     );
-    assert_eq!(history[1].removed_block_count, 2);
+    assert_eq!(history[1].removed_block_count, 3);
 
     // Expansion puts every original back in order, each marked by the
     // record that removed it.
@@ -333,8 +326,9 @@ async fn test_be11_a_second_compaction_keeps_the_first_brief_and_summarizes_afte
         seeded.iter().map(|id| (*id, one.clone())).collect();
     expected.push((first_id, two.clone()));
     assert_eq!(&shown[..5], &expected[..]);
-    // The first work's tool declaration sat after its request.
-    assert_eq!(shown[5].1, one);
+    // The first work's tool declaration sat after its request and was
+    // summarized in the second compaction.
+    assert_eq!(shown[5], (first_declaration, two.clone()));
     assert!(matches!(
         expanded.blocks[5].block.content(),
         causa::kernel::BlockContent::ToolChange(_)
@@ -518,12 +512,12 @@ async fn over_limit_material_is_trimmed_for_the_summary_but_kept_in_history() {
         "the summary request drops material until it fits"
     );
     let sent: Vec<BlockId> = material.iter().map(ContextBlock::id).collect();
-    for dropped in &earlier_ids[..3] {
+    for dropped in &earlier_ids[..2] {
         assert!(!sent.contains(dropped), "the earliest messages are dropped");
     }
     assert!(
-        sent.contains(&request_id),
-        "the protected request is always sent"
+        !sent.contains(&request_id),
+        "the round-0 request stays in the retained tail and is excluded from the brief request"
     );
 
     let id = session.target().conversation_id().as_str().to_owned();
@@ -543,8 +537,8 @@ async fn over_limit_material_is_trimmed_for_the_summary_but_kept_in_history() {
         .collect();
     assert_eq!(
         originals.len(),
-        6,
-        "the earlier material, the request and its tool declaration"
+        4,
+        "the earlier material; round-0 request and its tool declaration stay in the tail"
     );
     for kept in &earlier_ids {
         assert!(
@@ -717,9 +711,9 @@ async fn reopening_restores_settings_and_cleans_unreferenced_records() {
             block.status == crate::compact::BlockStatus::Summarized(record_id_value.clone())
         })
         .count();
-    // The four earlier blocks and the first tool declaration were
-    // summarized; the request was protected and still stands as it was.
-    assert_eq!(summarized, 5);
+    // The four earlier blocks were summarized; the round-0 request and the
+    // tool declaration after it stayed in the retained tail.
+    assert_eq!(summarized, 4);
     let kept: Vec<_> = expanded
         .blocks
         .iter()
@@ -735,8 +729,8 @@ async fn reopening_restores_settings_and_cleans_unreferenced_records() {
             .iter()
             .flat_map(|r| &r.originals)
             .count(),
-        6,
-        "the summarized blocks and the protected request it put back"
+        4,
+        "the four summarized earlier blocks"
     );
     // A deleted referenced record is reported on read, not at open.
     std::fs::remove_file(history_dir(store.path(), &id).join(format!("{record_id_value}.json")))

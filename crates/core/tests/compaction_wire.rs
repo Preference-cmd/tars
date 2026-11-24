@@ -643,3 +643,160 @@ async fn test_be25_the_system_prompt_and_tools_render_the_same_after_a_merge() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn round_zero_large_work_input_preserves_prior_turn_prefix_on_wire() {
+    const LARGE_U2_MARKER: &str = "round-two-large-input-marker";
+    for (name, provider) in PROTOCOLS {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(
+            name,
+            vec![
+                Reply::Answer,         // Turn 1 round 0
+                Reply::Summary(BRIEF), // Turn 2 round 0 compaction brief
+                Reply::Answer,         // Turn 2 round 0 conversation
+            ],
+            None,
+        );
+        let sys0 = block(Role::System, "You are the compaction wire fixture.".into());
+        let sys1 = block(Role::System, "Project rules: answer in one line.".into());
+        let earlier_u = block(Role::User, "earlier question ".repeat(620));
+        let earlier_a = block(Role::Assistant, "earlier answer".into());
+
+        let store = tempfile::tempdir().unwrap();
+        let host = SessionHost::new(Some(store.path().to_owned()));
+        let session = host
+            .create(PreparedCreate::persistent(
+                definition(provider, &fixture.endpoint, root.path()),
+                Context::from_blocks(vec![sys0.clone(), sys1.clone(), earlier_u, earlier_a])
+                    .unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        // Turn 1: stays below the 6,000-token trigger line, no compaction.
+        let turn1 = session
+            .submit(SubmitRequest {
+                request_key: "turn-1".into(),
+                blocks: vec![text_input("Turn 1 short question.")],
+            })
+            .unwrap()
+            .work;
+        let obs1 = session.wait(&turn1, Duration::from_secs(20)).await.unwrap();
+        assert!(matches!(obs1.state, WorkState::Finished(_)), "{name}");
+        session.wait_saved().await.unwrap();
+        assert!(
+            session.history().is_empty(),
+            "{name}: turn 1 must not compact"
+        );
+
+        // Turn 2 Round 0: large U2 (> retained_tail_budget ~1,400 tokens) crosses the trigger line.
+        let large_u2_text = format!("{LARGE_U2_MARKER} {}", "x".repeat(8_000));
+        let u2 = text_input(&large_u2_text);
+        let u2_id = u2.id();
+        let turn2 = session
+            .submit(SubmitRequest {
+                request_key: "turn-2".into(),
+                blocks: vec![u2],
+            })
+            .unwrap()
+            .work;
+        let obs2 = session.wait(&turn2, Duration::from_secs(20)).await.unwrap();
+        assert!(matches!(obs2.state, WorkState::Finished(_)), "{name}");
+        session.wait_saved().await.unwrap();
+
+        let bodies: Vec<Value> = fixture
+            .raw_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|raw| serde_json::from_slice(raw).unwrap())
+            .collect();
+        assert_eq!(
+            bodies.len(),
+            3,
+            "{name}: turn 1, brief request, turn 2 conversation"
+        );
+
+        let turn1_body = &bodies[0];
+        let brief_body = &bodies[1];
+        let turn2_body = &bodies[2];
+
+        // Brief request matches Turn 1 conversation request + Turn 1 reply, with NO U2 anywhere.
+        let brief_serialized = brief_body.to_string();
+        assert!(
+            !brief_serialized.contains(LARGE_U2_MARKER),
+            "{name}: brief request must not contain U2"
+        );
+        assert!(
+            !brief_serialized.contains("request still in progress"),
+            "{name}: round-0 brief instruction must not claim request in progress"
+        );
+        assert_eq!(
+            system_prompt(provider, brief_body),
+            system_prompt(provider, turn1_body),
+            "{name}: brief system prompt matches Turn 1"
+        );
+        assert_eq!(
+            without_cache_control(brief_body["tools"].clone()),
+            without_cache_control(turn1_body["tools"].clone()),
+            "{name}: brief tools match Turn 1"
+        );
+
+        let turn1_items = items(provider, turn1_body);
+        let brief_items = without_instruction(items(provider, brief_body));
+        assert_eq!(
+            brief_items.len(),
+            turn1_items.len() + 1,
+            "{name}: Turn 1 items plus Turn 1 assistant reply"
+        );
+        assert_eq!(
+            brief_items[..turn1_items.len()],
+            turn1_items[..],
+            "{name}: brief prefix matches Turn 1 request items byte-for-byte"
+        );
+        assert!(
+            brief_items
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("checked workspace"),
+            "{name}: brief ends with Turn 1 assistant reply"
+        );
+
+        // Turn 2 conversation request carries [brief, U2] and succeeds.
+        let turn2_serialized = turn2_body.to_string();
+        let brief_pos = turn2_serialized.find(BRIEF).expect("brief in turn 2");
+        let u2_pos = turn2_serialized
+            .find(LARGE_U2_MARKER)
+            .expect("U2 in turn 2");
+        assert!(
+            brief_pos < u2_pos,
+            "{name}: brief precedes U2 in Turn 2 request"
+        );
+        assert!(
+            !turn2_serialized.contains("earlier question"),
+            "{name}: earlier question compacted away"
+        );
+
+        // U2 keeps its original BlockId in the final Context.
+        let final_context = session.read_materials().unwrap().context;
+        let final_blocks = final_context.blocks();
+        assert!(
+            final_blocks.iter().any(|b| b.id() == u2_id),
+            "{name}: U2 keeps its original BlockId"
+        );
+        assert_eq!(final_blocks.len(), 6, "{name}: {final_blocks:?}");
+        assert_eq!(&final_blocks[..2], &[sys0, sys1], "{name}");
+        assert!(
+            matches!(final_blocks[2].content(), BlockContent::ToolChange(_)),
+            "{name}"
+        );
+        assert_eq!(
+            final_blocks[3].meta().source.as_deref(),
+            Some(SUMMARY_SOURCE),
+            "{name}"
+        );
+        assert_eq!(final_blocks[4].id(), u2_id, "{name}");
+    }
+}

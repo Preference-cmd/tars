@@ -60,16 +60,20 @@ pub(super) fn brief(body: &str) -> ContextBlock {
     summary::summary_block(summary::new_block_id(), body)
 }
 
-/// A runtime over a fresh history directory whose summaries answer text.
-pub(super) fn runtime(
+type SummaryInputs = Arc<std::sync::Mutex<Vec<Vec<ContextBlock>>>>;
+
+/// A runtime over a fresh history directory whose summaries answer text,
+/// also exposing the brief request inputs recorded by the gateway.
+pub(super) fn runtime_with_inputs(
     directory: &std::path::Path,
     window: Option<u64>,
-) -> (Arc<CompactionRuntime>, Arc<AtomicUsize>) {
+) -> (Arc<CompactionRuntime>, Arc<AtomicUsize>, SummaryInputs) {
     let summary_calls = Arc::new(AtomicUsize::new(0));
+    let summary_inputs = Arc::new(std::sync::Mutex::new(Vec::new()));
     let gateway = Arc::new(ToolThenDone {
         main_calls: AtomicUsize::new(0),
         summary_calls: summary_calls.clone(),
-        summary_inputs: Arc::new(std::sync::Mutex::new(Vec::new())),
+        summary_inputs: summary_inputs.clone(),
         tool_call_first: false,
         cache_read_tokens: None,
     }) as Arc<dyn ModelGateway>;
@@ -84,6 +88,15 @@ pub(super) fn runtime(
         Arc::new(UsageTracker::default()),
     )
     .unwrap();
+    (runtime, summary_calls, summary_inputs)
+}
+
+/// A runtime over a fresh history directory whose summaries answer text.
+pub(super) fn runtime(
+    directory: &std::path::Path,
+    window: Option<u64>,
+) -> (Arc<CompactionRuntime>, Arc<AtomicUsize>) {
+    let (runtime, summary_calls, _) = runtime_with_inputs(directory, window);
     (runtime, summary_calls)
 }
 
@@ -407,7 +420,7 @@ async fn test_be28_a_fixed_prefix_over_half_the_line_sends_no_brief_request() {
 #[tokio::test]
 async fn test_be12_the_request_in_progress_is_put_back_after_the_brief_in_the_same_record() {
     let directory = tempfile::tempdir().unwrap();
-    let (runtime, _) = runtime(directory.path(), Some(10_000));
+    let (runtime, _, summary_inputs) = runtime_with_inputs(directory.path(), Some(10_000));
     let request = user(&"request in progress ".repeat(100));
     let lookup = call("alpha");
     let lookup_result = result(&lookup, &"r".repeat(9_000));
@@ -422,6 +435,16 @@ async fn test_be12_the_request_in_progress_is_put_back_after_the_brief_in_the_sa
     runtime.set_current_work_inputs(std::slice::from_ref(&request));
     let mut context = Context::from_blocks(blocks.clone()).unwrap();
     let rewrite = plan(&runtime, &context).await.unwrap();
+    let brief_request = summary_inputs.lock().unwrap()[0].clone();
+    assert!(
+        brief_request.iter().any(|b| b.id() == request.id()),
+        "mid-work brief request still carries the request in progress"
+    );
+    let instruction_text = serde_json::to_string(brief_request.last().unwrap()).unwrap();
+    assert!(
+        instruction_text.contains("request still in progress"),
+        "mid-work brief instruction notes the request in progress"
+    );
     // Two ranges around the request, in one rewrite.
     assert_eq!(
         rewrite
@@ -671,4 +694,242 @@ async fn a_brief_request_is_trimmed_only_when_its_material_is_over_the_window() 
         request.iter().all(|block| block.id() != blocks[0].id()),
         "{request:?}"
     );
+}
+
+#[tokio::test]
+async fn round_zero_large_single_work_input_is_excluded_from_brief_and_kept_verbatim() {
+    let directory = tempfile::tempdir().unwrap();
+    let (runtime, summary_calls, summary_inputs) =
+        runtime_with_inputs(directory.path(), Some(10_000));
+    let sys = system("You are the fixture assistant.");
+    let old_u = user(&"earlier question ".repeat(250));
+    let old_a = assistant(&"earlier answer ".repeat(250));
+    // Larger than retained_tail_budget (~1,740 tokens on a 10,000-token window at 70%).
+    let large_u = user(&"round zero large request ".repeat(400));
+    let blocks = vec![sys.clone(), old_u.clone(), old_a.clone(), large_u.clone()];
+    runtime.set_current_work_inputs(std::slice::from_ref(&large_u));
+
+    let mut context = Context::from_blocks(blocks).unwrap();
+    let rewrite = plan(&runtime, &context).await.unwrap();
+    assert_eq!(summary_calls.load(Ordering::SeqCst), 1);
+
+    // Single range covering only old_u..large_u (1..3), not 2 ranges.
+    assert_eq!(
+        rewrite
+            .replacements
+            .iter()
+            .map(|r| r.range.clone())
+            .collect::<Vec<_>>(),
+        vec![1..3]
+    );
+
+    let brief_request = summary_inputs.lock().unwrap()[0].clone();
+    assert!(
+        brief_request.iter().all(|b| b.id() != large_u.id()),
+        "brief request must not include round-0 U"
+    );
+    let brief_serialized = serde_json::to_string(&brief_request).unwrap();
+    assert!(!brief_serialized.contains("round zero large request"));
+    assert!(brief_request.iter().any(|b| b.id() == old_u.id()));
+    assert!(brief_request.iter().any(|b| b.id() == old_a.id()));
+    let instruction_serialized = serde_json::to_string(brief_request.last().unwrap()).unwrap();
+    assert!(!instruction_serialized.contains("request still in progress"));
+
+    let entry = runtime.commit_rewrite(&mut context, rewrite).unwrap();
+    let record = runtime.history().unwrap().read(&entry.record_id).unwrap();
+    let originals: Vec<BlockId> = record
+        .replacements
+        .iter()
+        .flat_map(|r| ids(&r.originals))
+        .collect();
+    assert_eq!(originals, ids(&[old_u, old_a]));
+    assert!(!originals.contains(&large_u.id()));
+
+    let after = context.blocks();
+    assert_eq!(after.len(), 3);
+    assert_eq!(after[0], sys);
+    assert!(segment::is_brief(&after[1]));
+    assert_eq!(
+        after[2], large_u,
+        "U stays verbatim at the end with original BlockId"
+    );
+}
+
+#[tokio::test]
+async fn round_zero_multi_block_work_inputs_and_trailing_tool_change_clamp_before_u() {
+    // 1. Multi-block [U_a, U_b]
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, _, summary_inputs) = runtime_with_inputs(directory.path(), Some(10_000));
+        let sys = system("You are the fixture assistant.");
+        let old_u = user(&"earlier question ".repeat(250));
+        let old_a = assistant(&"earlier answer ".repeat(250));
+        let u_a = user(&"part a ".repeat(900));
+        let u_b = user(&"part b ".repeat(900));
+        let blocks = vec![
+            sys.clone(),
+            old_u.clone(),
+            old_a.clone(),
+            u_a.clone(),
+            u_b.clone(),
+        ];
+        runtime.set_current_work_inputs(&[u_a.clone(), u_b.clone()]);
+
+        let mut context = Context::from_blocks(blocks).unwrap();
+        let rewrite = plan(&runtime, &context).await.unwrap();
+        assert_eq!(
+            rewrite
+                .replacements
+                .iter()
+                .map(|r| r.range.clone())
+                .collect::<Vec<_>>(),
+            vec![1..3]
+        );
+        let brief_request = summary_inputs.lock().unwrap()[0].clone();
+        assert!(
+            brief_request
+                .iter()
+                .all(|b| b.id() != u_a.id() && b.id() != u_b.id())
+        );
+
+        runtime.commit_rewrite(&mut context, rewrite).unwrap();
+        let after = context.blocks();
+        assert_eq!(after.len(), 4);
+        assert_eq!(after[0], sys);
+        assert!(segment::is_brief(&after[1]));
+        assert_eq!(after[2], u_a);
+        assert_eq!(after[3], u_b);
+    }
+
+    // 2. Large U followed by trailing ToolChange (e.g. appended by Causa before prepare)
+    {
+        let directory = tempfile::tempdir().unwrap();
+        let (runtime, _, summary_inputs) = runtime_with_inputs(directory.path(), Some(10_000));
+        let sys = system("You are the fixture assistant.");
+        let old_u = user(&"earlier question ".repeat(250));
+        let old_a = assistant(&"earlier answer ".repeat(250));
+        let large_u = user(&"large input before tc ".repeat(400));
+        let tc = tool_change("alpha");
+        let blocks = vec![
+            sys.clone(),
+            old_u.clone(),
+            old_a.clone(),
+            large_u.clone(),
+            tc.clone(),
+        ];
+        runtime.set_current_work_inputs(std::slice::from_ref(&large_u));
+
+        let mut context = Context::from_blocks(blocks).unwrap();
+        let rewrite = plan(&runtime, &context).await.unwrap();
+        assert_eq!(
+            rewrite
+                .replacements
+                .iter()
+                .map(|r| r.range.clone())
+                .collect::<Vec<_>>(),
+            vec![1..3]
+        );
+        let brief_request = summary_inputs.lock().unwrap()[0].clone();
+        assert!(
+            brief_request
+                .iter()
+                .all(|b| b.id() != large_u.id() && b.id() != tc.id()),
+            "brief request omits both U and trailing ToolChange"
+        );
+
+        runtime.commit_rewrite(&mut context, rewrite).unwrap();
+        let after = context.blocks();
+        assert_eq!(after.len(), 4);
+        assert_eq!(after[0], sys);
+        assert!(segment::is_brief(&after[1]));
+        assert_eq!(after[2], large_u);
+        assert_eq!(after[3], tc, "trailing ToolChange stays after U verbatim");
+    }
+}
+
+#[tokio::test]
+async fn round_zero_large_work_input_does_not_trigger_brief_request_trimming() {
+    let directory = tempfile::tempdir().unwrap();
+    // 3,000-token window: old_material is ~2,420 tokens (<= 3,000), large_u is ~1,000 tokens (> 520 budget),
+    // so old_material + large_u is ~3,420 tokens (> 3,000 window).
+    let (runtime, _, summary_inputs) = runtime_with_inputs(directory.path(), Some(3_000));
+    let sys = system("You are the fixture assistant.");
+    let old_u = user(&"e".repeat(3_600));
+    let old_a = assistant(&"a".repeat(3_600));
+    let large_u = user(&"u".repeat(3_000));
+    let blocks = vec![sys.clone(), old_u.clone(), old_a.clone(), large_u.clone()];
+    runtime.set_current_work_inputs(std::slice::from_ref(&large_u));
+
+    let context = Context::from_blocks(blocks).unwrap();
+    plan(&runtime, &context).await.unwrap();
+    let brief_request = summary_inputs.lock().unwrap()[0].clone();
+    assert_eq!(
+        ids(&brief_request[..3]),
+        ids(&[sys, old_u, old_a]),
+        "old_material must not be trimmed when U is excluded from blocks[..k]"
+    );
+    assert_eq!(brief_request.len(), 4, "head + old_material + instruction");
+    assert!(brief_request.iter().all(|b| b.id() != large_u.id()));
+}
+
+#[tokio::test]
+async fn round_zero_only_head_and_work_input_returns_no_shrink_with_zero_brief_calls() {
+    let directory = tempfile::tempdir().unwrap();
+    let (runtime, summary_calls, _) = runtime_with_inputs(directory.path(), Some(10_000));
+    let sys = system("You are the fixture assistant.");
+    let large_u = user(&"only input ".repeat(900));
+    runtime.set_current_work_inputs(std::slice::from_ref(&large_u));
+
+    let context = Context::from_blocks(vec![sys.clone(), large_u.clone()]).unwrap();
+    assert_eq!(
+        plan(&runtime, &context).await.unwrap_err(),
+        CompactionAbandon::NoShrink
+    );
+    assert_eq!(summary_calls.load(Ordering::SeqCst), 0);
+
+    // Also when a leading ToolChange sits in the head and a trailing ToolChange sits after U.
+    let trailing_tc = tool_change("beta");
+    let context_with_tc =
+        Context::from_blocks(vec![sys, tool_change("alpha"), large_u, trailing_tc]).unwrap();
+    assert_eq!(
+        plan(&runtime, &context_with_tc).await.unwrap_err(),
+        CompactionAbandon::NoShrink
+    );
+    assert_eq!(summary_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn non_work_trailing_tool_change_does_not_move_cut_point() {
+    let directory = tempfile::tempdir().unwrap();
+    let (runtime, _, summary_inputs) = runtime_with_inputs(directory.path(), Some(10_000));
+    let sys = system("You are the fixture assistant.");
+    let old_u = user(&"earlier question ".repeat(250));
+    // Assistant message exceeding retained_tail_budget followed by a ToolChange
+    // (neither is in current_work_inputs).
+    let old_a = assistant(&"earlier answer ".repeat(600));
+    let tc = tool_change("alpha");
+    let blocks = vec![sys.clone(), old_u.clone(), old_a.clone(), tc.clone()];
+    // Unrelated work-input ID (or empty) must not pull k back past tc.
+    runtime.set_current_work_inputs(std::slice::from_ref(&old_u));
+
+    let mut context = Context::from_blocks(blocks).unwrap();
+    let rewrite = plan(&runtime, &context).await.unwrap();
+    // k stays at blocks.len() == 4, so the interval is 1..4 (with old_u protected at 1).
+    assert_eq!(
+        rewrite
+            .replacements
+            .iter()
+            .map(|r| r.range.clone())
+            .collect::<Vec<_>>(),
+        vec![1..4]
+    );
+    let brief_request = summary_inputs.lock().unwrap()[0].clone();
+    assert!(brief_request.iter().any(|b| b.id() == tc.id()));
+
+    runtime.commit_rewrite(&mut context, rewrite).unwrap();
+    let after = context.blocks();
+    // tc was inside 1..4 and folded into the declaration before the brief, not left after old_u.
+    assert!(matches!(after[1].content(), BlockContent::ToolChange(_)));
+    assert!(segment::is_brief(&after[2]));
+    assert_eq!(after[3], old_u);
 }

@@ -415,7 +415,8 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_record() {
     let fixture = Fixture::new(3);
     let id = create(&store, &fixture.endpoint, &COMPACTING);
     seed(&fixture, &store, &id, &"x".repeat(3_000));
-    let child = spawn(run(&store, &id, &crossing_input()));
+    let crossing = crossing_input();
+    let child = spawn(run(&store, &id, &crossing));
     let summary_request = fixture.request();
     assert!(
         summary_request
@@ -424,6 +425,10 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_record() {
         "the first request must be the summary call: {summary_request}"
     );
     assert!(summary_request.to_string().contains("xxxxxxxxxx"));
+    assert!(
+        !summary_request.to_string().contains(&crossing),
+        "round-0 current input must be excluded from the brief request"
+    );
     fixture.summary("Goal: finish the compaction fixture. Next steps: report the result.");
     let round = fixture.request();
     assert!(!round.to_string().contains("Prepare a continuation brief"));
@@ -443,10 +448,12 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_record() {
     let history = saved["history"].as_array().unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0]["trigger"], "auto");
-    // The seeded request, its tool declaration and answer; the current
-    // request is put back, not removed.
+    // The seeded request, its tool declaration and answer; the round-0
+    // current request stays untouched in the retained tail.
     assert_eq!(history[0]["removed_block_count"], 3);
-    let summary_block = history[0]["inserted_block_ids"][1].clone();
+    let inserted = history[0]["inserted_block_ids"].as_array().unwrap();
+    assert_eq!(inserted.len(), 2);
+    let summary_block = inserted[1].clone();
     let blocks = saved["context"]["blocks"].as_array().unwrap();
     assert_eq!(blocks.len(), 6);
     assert_eq!(blocks[0]["meta"]["source"], "tars:prelude:base");
@@ -455,7 +462,7 @@ fn small_context_window_compacts_automatically_and_keeps_a_history_record() {
     assert_eq!(blocks[3]["meta"]["source"], "tars:compaction");
     assert_eq!(blocks[3]["id"], summary_block);
     assert_eq!(blocks[4]["content"]["value"]["role"], "user");
-    assert_eq!(history[0]["inserted_block_ids"][2], blocks[4]["id"]);
+    assert!(!inserted.contains(&blocks[4]["id"]));
     assert_eq!(blocks[5]["content"]["value"]["role"], "assistant");
 
     let history_output = cli()
@@ -1065,20 +1072,22 @@ fn test_be05_cli_history_prints_expanded_conversation_and_deleting_record_exits_
         .filter(|l| !l.trim().is_empty())
         .collect();
     // The inserted blocks of the missing record stand in for its originals:
-    // the declaration, the brief and the request it put back. Without the
-    // record nothing tells the put-back block from a new one.
+    // the declaration and the brief. The untouched round-0 request and
+    // assistant reply remain original.
     assert_eq!(broken_lines.len(), 6, "{broken_lines:?}");
     for line in &broken_lines[..2] {
         let block: Value = serde_json::from_str(line).unwrap();
         assert_eq!(block["status"], "original");
     }
-    for line in &broken_lines[2..5] {
+    for line in &broken_lines[2..4] {
         let block: Value = serde_json::from_str(line).unwrap();
         assert_eq!(block["status"], "unreadable");
         assert_eq!(block["record_id"], rec_id);
     }
-    let last: Value = serde_json::from_str(broken_lines[5]).unwrap();
-    assert_eq!(last["status"], "original");
+    for line in &broken_lines[4..6] {
+        let block: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(block["status"], "original");
+    }
 }
 
 #[test]

@@ -362,12 +362,13 @@ impl CompactionRuntime {
         let fixed_prefix = segment::fixed_prefix_estimate(blocks);
         let budget = segment::retained_tail_budget(self.window, threshold, fixed_prefix)
             .map_err(|_| CompactionAbandon::PrefixTooLarge)?;
+        let current_inputs = self.current_work_inputs();
         let k = sealed::tail_start_outside_open_loop(
             blocks,
             segment::tail_start(blocks, head_end, budget),
         );
-        let work_inputs =
-            segment::protected_positions(blocks, head_end, k, &self.current_work_inputs());
+        let k = trim_trailing_work_inputs(blocks, head_end, k, &current_inputs);
+        let work_inputs = segment::protected_positions(blocks, head_end, k, &current_inputs);
         let request_in_progress = !work_inputs.is_empty();
         let skill_budget = segment::skill_protection_budget(self.window, threshold, fixed_prefix);
         let (skill_protected, promoted_skills) =
@@ -899,4 +900,40 @@ fn has_unpaired_tools(blocks: &[causa::kernel::ContextBlock]) -> bool {
         })
         .collect::<std::collections::HashSet<_>>();
     !calls.is_subset(&answered)
+}
+
+/// Clamp `k` before any trailing current-work inputs (and any trailing
+/// `ToolChange` appended right after them before the first model round).
+///
+/// When a work submits a large input `U` on Round 0 before the model has seen
+/// `U`, `segment::tail_start` can push `k` past `U` to `blocks.len()`. Keeping
+/// `U` in the retained tail `blocks[k..]` excludes the uncached `U` from the
+/// brief request and keeps it verbatim after the brief.
+fn trim_trailing_work_inputs(
+    blocks: &[ContextBlock],
+    head_end: usize,
+    k: usize,
+    current_inputs: &HashSet<BlockId>,
+) -> usize {
+    if current_inputs.is_empty() {
+        return k;
+    }
+    let mut cursor = k;
+    let mut saw_work_input = false;
+    while cursor > head_end {
+        let block = &blocks[cursor - 1];
+        if current_inputs.contains(&block.id()) {
+            saw_work_input = true;
+            cursor -= 1;
+        } else if !saw_work_input && matches!(block.content(), BlockContent::ToolChange(_)) {
+            cursor -= 1;
+        } else {
+            break;
+        }
+    }
+    if saw_work_input && (cursor == head_end || segment::is_cut_point(blocks, cursor)) {
+        cursor
+    } else {
+        k
+    }
 }
