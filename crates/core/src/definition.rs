@@ -3,12 +3,17 @@
 mod code_execution;
 mod command;
 mod mcp;
+mod narrowing;
 mod types;
 mod workspace;
 
 pub use code_execution::CodeExecutionSettings;
 pub use command::{CommandNetwork, CommandSettings};
 pub use mcp::{McpApproval, McpServerConfig, McpToolSetting};
+pub use narrowing::{
+    ChildModelOverride, ChildNarrowingRequest, NarrowingError, check_permission_mode_narrowing,
+    narrow_child_definition, permission_mode_rank,
+};
 pub use workspace::{BuiltinTool, WorkspaceTool, WorkspaceToolLimits, WriteToolLimits};
 
 #[cfg(test)]

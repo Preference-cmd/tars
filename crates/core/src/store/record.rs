@@ -246,6 +246,7 @@ fn first_user_parts(context: &Context) -> Option<&[causa::kernel::ContentPart]> 
             source.starts_with(crate::prelude::PRELUDE_SOURCE_PREFIX)
                 || source == crate::compact::SUMMARY_SOURCE
                 || source == crate::skills::SKILL_SOURCE
+                || source == crate::events::TASK_NOTIFICATION_SOURCE
         }) {
             return None;
         }
@@ -572,7 +573,7 @@ impl WireSessionUsage {
     }
 
     /// Reject a last-call time this platform cannot represent.
-    fn validate(&self) -> Result<(), StoreError> {
+    pub(super) fn validate(&self) -> Result<(), StoreError> {
         match self.last_call {
             Some(last) if crate::usage::from_unix_millis(last.timestamp_ms).is_none() => {
                 Err(StoreError::InvalidUsage(format!(

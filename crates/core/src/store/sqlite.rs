@@ -57,7 +57,7 @@ pub(crate) struct StoreMetrics {
 #[derive(Clone)]
 pub(crate) struct SessionStore {
     root: PathBuf,
-    db_path: PathBuf,
+    pub(super) db_path: PathBuf,
     locks_dir: PathBuf,
     counters: Arc<Counters>,
     #[cfg(test)]
@@ -237,9 +237,17 @@ impl SessionStore {
 
 // The outer Option distinguishes an unread baseline from confirmed absence.
 #[derive(Default)]
-struct WriterState {
-    baseline: Option<Option<SavedSessionRecord>>,
-    pending: Option<(PreparedCommit, Option<SavedSessionRecord>)>,
+pub(super) struct WriterState {
+    pub(super) baseline: Option<Option<SavedSessionRecord>>,
+    pub(super) pending: Option<(PreparedCommit, Option<SavedSessionRecord>)>,
+    pub(super) pending_admit: Option<(
+        super::AdmitOperationRequest,
+        Option<super::AdmitOperationOutcome>,
+    )>,
+    pub(super) pending_outbox: Option<(
+        super::OutboxCommitRequest,
+        Option<super::OutboxCommitResult>,
+    )>,
 }
 
 /// Exclusive per-session writer holding the OS advisory lock and a SQLite connection.
@@ -288,6 +296,31 @@ impl Writer {
         record.as_ref().map(|r| self.clone_record(r))
     }
 
+    pub(super) fn session_id(&self) -> &str {
+        &self.id
+    }
+
+    pub(super) fn lock_state_and_conn(
+        &self,
+    ) -> Result<
+        (
+            std::sync::MutexGuard<'_, WriterState>,
+            std::sync::MutexGuard<'_, Connection>,
+        ),
+        StoreError,
+    > {
+        let state = self.state.lock().map_err(|_| StoreError::Poisoned)?;
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok((state, conn))
+    }
+
+    pub(super) fn record_write_bytes(&self, bytes: usize) {
+        self.counters
+            .bytes_written
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+        self.counters.writes.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub(super) fn with_connection<T>(
         &self,
         f: impl FnOnce(&Connection) -> Result<T, StoreError>,
@@ -313,6 +346,9 @@ impl Writer {
         operation.validate(&self.id)?;
         let mut state = self.state.lock().map_err(|_| StoreError::Poisoned)?;
         let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        if state.pending_admit.is_some() || state.pending_outbox.is_some() {
+            return Err(StoreError::PendingCommit);
+        }
         let latest = match read_session_record(&conn, &self.id) {
             Ok(latest) => latest,
             Err(error) => {
@@ -412,6 +448,9 @@ impl Writer {
         operation.validate(&self.id)?;
         let mut state = self.state.lock().map_err(|_| StoreError::Poisoned)?;
         let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        if state.pending_admit.is_some() || state.pending_outbox.is_some() {
+            return Err(StoreError::PendingCommit);
+        }
         let latest = read_session_record(&conn, &self.id)?;
         if let Some(current) = &latest
             && current.last_commit_id == operation.record.last_commit_id
@@ -451,7 +490,7 @@ impl Writer {
         *self.hook.lock().unwrap() = hook;
     }
 
-    fn hit(&self, stage: CommitStage) -> Result<(), StoreError> {
+    pub(super) fn hit(&self, stage: CommitStage) -> Result<(), StoreError> {
         #[cfg(test)]
         {
             let hook = self.hook.lock().unwrap().clone();

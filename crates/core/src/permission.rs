@@ -10,8 +10,8 @@ pub use crate::policy::{
     RuleScope, RuleSource, ToolPermissionClass, WriteAction, escape_untrusted_text,
 };
 pub use approval::{
-    ApprovalDecision, ApprovalReceiver, ApprovalReply, ApprovalRequest, ApprovalSubject,
-    CommandTarget, command_body,
+    ApprovalDecision, ApprovalOrigin, ApprovalReceiver, ApprovalReply, ApprovalRequest,
+    ApprovalSubject, CommandTarget, command_body,
 };
 pub use rules::{
     CommandRule, CommandRuleSet, RuleDecision, RuleMatch, parse_command, suggest_command_prefixes,

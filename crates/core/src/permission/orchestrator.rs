@@ -5,7 +5,8 @@
 //! and conditional staging commit in a single `before` processor.
 
 use super::approval::{
-    ApprovalDecision, ApprovalReply, ApprovalRequest, ApprovalSubject, CommandTarget,
+    ApprovalDecision, ApprovalOrigin, ApprovalReply, ApprovalRequest, ApprovalSubject,
+    CommandTarget,
 };
 use super::rules::{
     CommandRuleSet, EvaluatedPermission, apply_command_rule, suggest_command_prefixes,
@@ -156,6 +157,7 @@ fn build_approval_subject(
 /// preparation, live mode/rule re-evaluation, approval flows, and attachment commits.
 pub(crate) struct ToolPolicyProcessor {
     work: WorkRef,
+    origin: ApprovalOrigin,
     reporter: ToolReporter,
     permissions: Arc<PermissionHub>,
     #[cfg(test)]
@@ -168,13 +170,21 @@ impl ToolPolicyProcessor {
         reporter: ToolReporter,
         permissions: Arc<PermissionHub>,
     ) -> Self {
+        let origin = ApprovalOrigin::for_work(&work);
         Self {
             work,
+            origin,
             reporter,
             permissions,
             #[cfg(test)]
             after_prepare_hook: None,
         }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn with_origin(mut self, origin: ApprovalOrigin) -> Self {
+        self.origin = origin;
+        self
     }
 
     #[cfg(test)]
@@ -478,6 +488,9 @@ impl ToolBatchProcessor for ToolPolicyProcessor {
                     let (reply_tx, reply_rx) = oneshot::channel();
                     let request = ApprovalRequest {
                         work: self.work.clone(),
+                        agent_id: self.origin.agent_id.clone(),
+                        agent_name: self.origin.agent_name.clone(),
+                        operation_id: self.origin.operation_id.clone(),
                         call_block_id,
                         tool_name,
                         mode,
@@ -707,5 +720,112 @@ async fn wait_for_control_stop(control: &CallControl) {
         }
     } else {
         cancel.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use causa::kernel::{
+        CancellationToken, RoundId, ToolCallContext, ToolCallPayload, ToolDefinition,
+        ToolDescription, TurnId,
+    };
+
+    struct MockWriteTool;
+
+    #[async_trait]
+    impl ManagedTool for MockWriteTool {
+        fn classify(&self, _arguments: &serde_json::Value) -> ToolCallIntent {
+            ToolCallIntent {
+                class: ToolPermissionClass::BuiltinWrite,
+                command_subject: None,
+            }
+        }
+
+        fn approval_preview(
+            &self,
+            _call: &ToolCallContext,
+            _prepared: &PreparedCall,
+        ) -> Option<ApprovalPreview> {
+            Some(ApprovalPreview::FileWrite {
+                path: "notes.txt".into(),
+                action: crate::policy::WriteAction::Created,
+                diff: "+hello\n".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn with_origin_populates_approval_request_and_aborts_cleanly_on_cancellation() {
+        let turn_id = TurnId::new(uuid::Uuid::now_v7().to_string());
+        let work = WorkRef {
+            conversation_id: "01900000-0000-7000-8000-000000000001".into(),
+            turn_id: turn_id.clone(),
+        };
+        let origin = ApprovalOrigin::new(
+            "01900000-0000-7000-8000-000000000002",
+            "explore",
+            "01900000-0000-7000-8000-000000000003",
+        );
+
+        let reporter = ToolReporter::new(work.clone(), tokio::sync::broadcast::channel(32).0);
+        let perm_hub = Arc::new(PermissionHub::new(PermissionMode::Ask));
+        let mut rx = perm_hub.connect_approvals();
+        let processor = ToolPolicyProcessor::new(work, reporter, perm_hub).with_origin(origin);
+
+        let managed: Arc<dyn ManagedTool> = Arc::new(MockWriteTool);
+        let bound_tools = [ToolDescription::new(ToolDefinition::new(
+            "mock_write",
+            "mock write",
+            serde_json::json!({"type": "object"}),
+        ))
+        .with_meta(managed)];
+
+        // Case 1: origin fields are populated on ApprovalRequest
+        let call_id = BlockId::new(uuid::Uuid::now_v7());
+        let call = ToolCallContext::new(
+            call_id,
+            ToolCallPayload::new("mock_write", serde_json::json!({})),
+        );
+        let mut batch = ToolBatch::new(vec![call]).unwrap();
+        let declaration_order = [call_id];
+        let control = CallControl::new(CancellationToken::new(), None);
+        let ctx = ProcessorContext::new(&turn_id, RoundId(0), &declaration_order, &control)
+            .with_tools(&bound_tools);
+
+        let approve_task = tokio::spawn(async move {
+            let req = rx.recv().await.expect("approval request received");
+            assert_eq!(req.agent_id, "01900000-0000-7000-8000-000000000002");
+            assert_eq!(req.agent_name, "explore");
+            assert_eq!(req.operation_id, "01900000-0000-7000-8000-000000000003");
+            req.reply.send(ApprovalDecision::Allow).unwrap();
+            rx
+        });
+
+        processor.process(&mut batch, &ctx).await.unwrap();
+        let mut rx = approve_task.await.unwrap();
+
+        // Case 2: cancellation aborts pending approval wait cleanly
+        let call_id2 = BlockId::new(uuid::Uuid::now_v7());
+        let call2 = ToolCallContext::new(
+            call_id2,
+            ToolCallPayload::new("mock_write", serde_json::json!({})),
+        );
+        let mut batch2 = ToolBatch::new(vec![call2]).unwrap();
+        let declaration_order2 = [call_id2];
+        let token = CancellationToken::new();
+        let control2 = CallControl::new(token.clone(), None);
+        let ctx2 = ProcessorContext::new(&turn_id, RoundId(1), &declaration_order2, &control2)
+            .with_tools(&bound_tools);
+
+        let cancel_task = tokio::spawn(async move {
+            let _held_req = rx.recv().await.expect("second approval request received");
+            token.cancel();
+            rx
+        });
+
+        processor.process(&mut batch2, &ctx2).await.unwrap();
+        let _rx = cancel_task.await.unwrap();
+        assert!(batch2.results().is_empty());
     }
 }

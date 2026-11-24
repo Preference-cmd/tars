@@ -14,8 +14,12 @@ use super::CompactionProgress;
 use super::estimate::{self, UsageTracker};
 use super::runtime::CompactionRuntime;
 use super::trim::{ProtectedInputs, trim_frame};
+use crate::events::{InboxDrainHandle, TASK_NOTIFICATION_SOURCE};
 use crate::session::ToolReporter;
-use causa::kernel::{CallControl, Context, ContextFrame, ContextPreparer, PrepareError, RoundInfo};
+use causa::kernel::{
+    BlockContent, BlockId, BlockMeta, CallControl, Context, ContextBlock, ContextFrame,
+    ContextPreparer, EditError, PrepareError, Role, RoundInfo,
+};
 use std::sync::Arc;
 
 /// One work's compaction decision point for persistent sessions.
@@ -23,6 +27,7 @@ pub(crate) struct CompactionPreparer {
     runtime: Arc<CompactionRuntime>,
     reporter: ToolReporter,
     loaded_skills: Option<Arc<crate::skills::LoadedSkillsState>>,
+    inbox: Option<Arc<InboxDrainHandle>>,
 }
 
 impl CompactionPreparer {
@@ -32,6 +37,7 @@ impl CompactionPreparer {
             runtime,
             reporter,
             loaded_skills: None,
+            inbox: None,
         }
     }
 
@@ -42,6 +48,14 @@ impl CompactionPreparer {
         loaded_skills: Arc<crate::skills::LoadedSkillsState>,
     ) -> Self {
         self.loaded_skills = Some(loaded_skills);
+        self
+    }
+
+    /// Attach the per-work inbox drain handle so queued task notifications
+    /// are appended strictly after compaction evaluation.
+    #[allow(dead_code)]
+    pub(crate) fn with_inbox(mut self, inbox: Arc<InboxDrainHandle>) -> Self {
+        self.inbox = Some(inbox);
         self
     }
 
@@ -181,6 +195,7 @@ impl ContextPreparer for CompactionPreparer {
         if let Some(loaded) = &self.loaded_skills {
             loaded.sync_from_context(context.blocks());
         }
+        append_inbox_notification(context, self.inbox.as_deref())?;
         Ok(self.finish_frame(context, round))
     }
 }
@@ -193,6 +208,7 @@ pub(crate) struct TransientTrimPreparer {
     protected: Arc<ProtectedInputs>,
     reporter: ToolReporter,
     loaded_skills: Option<Arc<crate::skills::LoadedSkillsState>>,
+    inbox: Option<Arc<InboxDrainHandle>>,
 }
 
 impl TransientTrimPreparer {
@@ -212,6 +228,7 @@ impl TransientTrimPreparer {
             protected,
             reporter,
             loaded_skills: None,
+            inbox: None,
         }
     }
 
@@ -222,6 +239,14 @@ impl TransientTrimPreparer {
         loaded_skills: Arc<crate::skills::LoadedSkillsState>,
     ) -> Self {
         self.loaded_skills = Some(loaded_skills);
+        self
+    }
+
+    /// Attach the per-work inbox drain handle so queued task notifications
+    /// are appended before frame trimming.
+    #[allow(dead_code)]
+    pub(crate) fn with_inbox(mut self, inbox: Arc<InboxDrainHandle>) -> Self {
+        self.inbox = Some(inbox);
         self
     }
 }
@@ -237,6 +262,7 @@ impl ContextPreparer for TransientTrimPreparer {
         if let Some(loaded) = &self.loaded_skills {
             loaded.sync_from_context(context.blocks());
         }
+        append_inbox_notification(context, self.inbox.as_deref())?;
         let bytes = estimate::context_bytes(context);
         let estimate_tokens = self.usage.estimate(bytes);
         let protected = self.protected.snapshot();
@@ -309,5 +335,29 @@ impl CompactionPreparer {
             Err(reason) => CompactionProgress::Abandoned { trigger, reason },
         };
         self.report(round, progress);
+    }
+}
+
+fn append_inbox_notification(
+    context: &mut Context,
+    inbox: Option<&InboxDrainHandle>,
+) -> Result<(), PrepareError> {
+    let Some(inbox) = inbox else {
+        return Ok(());
+    };
+    let Some(notification) = inbox.drain_notification() else {
+        return Ok(());
+    };
+    loop {
+        let block = ContextBlock::new(
+            BlockId::new(uuid::Uuid::now_v7()),
+            BlockContent::text(Role::User, notification.clone()),
+            BlockMeta::from_source(TASK_NOTIFICATION_SOURCE),
+        );
+        match context.edit().append([block]).commit() {
+            Ok(()) => return Ok(()),
+            Err(failure) if matches!(failure.reason, EditError::DuplicateBlockId(_)) => continue,
+            Err(failure) => return Err(PrepareError::new(failure.reason.to_string())),
+        }
     }
 }

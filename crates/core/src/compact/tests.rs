@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 mod brief_reply;
+mod inbox_injection;
 mod merge;
 mod micro;
 mod partial;

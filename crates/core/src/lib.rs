@@ -10,6 +10,7 @@ pub(crate) mod assembly;
 pub mod compact;
 pub mod config;
 pub mod definition;
+pub mod events;
 pub mod external_tools;
 pub mod material;
 mod mcp;

@@ -181,10 +181,51 @@ impl ApprovalReply {
     }
 }
 
+/// Origin metadata identifying the agent and operation that initiated an approval request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApprovalOrigin {
+    /// Canonical identifier of the agent requesting confirmation.
+    pub agent_id: String,
+    /// Display name of the agent requesting confirmation.
+    pub agent_name: String,
+    /// Canonical identifier of the operation requesting confirmation.
+    pub operation_id: String,
+}
+
+impl ApprovalOrigin {
+    /// Construct an explicit approval origin.
+    pub fn new(
+        agent_id: impl Into<String>,
+        agent_name: impl Into<String>,
+        operation_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            agent_name: agent_name.into(),
+            operation_id: operation_id.into(),
+        }
+    }
+
+    /// Derive default origin metadata from a single-agent [`WorkRef`].
+    pub fn for_work(work: &WorkRef) -> Self {
+        Self {
+            agent_id: work.conversation_id.as_str().to_owned(),
+            agent_name: "main".to_owned(),
+            operation_id: work.turn_id.0.clone(),
+        }
+    }
+}
+
 /// An approval request generated when a tool call requires confirmation.
 pub struct ApprovalRequest {
     /// Work reference that declared the tool call.
     pub work: WorkRef,
+    /// Canonical identifier of the agent requesting confirmation.
+    pub agent_id: String,
+    /// Display name of the agent requesting confirmation.
+    pub agent_name: String,
+    /// Canonical identifier of the operation requesting confirmation.
+    pub operation_id: String,
     /// Identity of the tool call declaration.
     pub call_block_id: BlockId,
     /// Name of the tool being called.
