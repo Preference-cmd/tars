@@ -1641,6 +1641,43 @@ impl ManagedSession {
         self.coordinator()?.cancel_agent(operation_id).await
     }
 
+    /// Cooperatively cancel an active child operation (`operation_id`) and suppress its idle wakeup.
+    ///
+    /// Returns `Ok(true)` if the operation was active and cancelled, `Ok(false)` if the operation
+    /// exists in this session but is already terminal, or `Err(ApplicationError::...)` if the
+    /// session is closed/invalid or the operation ID is unknown.
+    pub async fn cancel_agent_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<bool, ApplicationError> {
+        let coord = {
+            let state = self.entry.lock();
+            if state.lifecycle == Lifecycle::Closed {
+                return Err(ApplicationError::Closed);
+            }
+            if state.lifecycle == Lifecycle::Closing {
+                return Err(ApplicationError::Closing);
+            }
+            if state.owner.is_none() {
+                return Err(ApplicationError::InstanceGone);
+            }
+            self.entry
+                .coordinator
+                .get()
+                .cloned()
+                .ok_or(ApplicationError::InstanceGone)?
+        };
+        coord
+            .cancel_operation(operation_id)
+            .await
+            .map_err(|err| match err {
+                CoordinatorError::Application(app_err) => app_err,
+                CoordinatorError::UnknownOperation(id) => ApplicationError::UnknownOperation(id),
+                CoordinatorError::Store(store_err) => ApplicationError::Store(store_err),
+                other => ApplicationError::Faulted(other.to_string()),
+            })
+    }
+
     /// Read idle materials for a specific agent scoped by `agent_id`.
     pub fn read_agent_materials(
         &self,

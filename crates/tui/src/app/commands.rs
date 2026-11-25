@@ -235,8 +235,10 @@ impl App {
             "help" => self.panel = Some(Panel::Info {
                 title: "Keyboard shortcuts".into(), scroll: 0,
                 lines: ["Enter / Ctrl-S   Send input", "Ctrl-J / Alt-Enter   New line",
+                    "↑ / ↓   Prompt history (at top/bottom line)",
+                    "Tab   Complete /command or @workspace/path",
                     "Shift-Tab   Cycle mode (ask -> accept-edits -> read-only)",
-                    "/agents [name|id|main]   List session agents and switch transcript view",
+                    "/agents [name|id|main]   List session agents (x cancels running, Enter switches)",
                     "/mode [name]   Show or change the permission mode",
                     "/rules [list | remove <N> | clear]   Show active rules or manage session rules",
                     "/auto_compact [on|off|PERCENT]   Compaction switch and threshold",
@@ -765,6 +767,49 @@ impl App {
                             self.panel = None;
                             self.switch_viewed_agent(&agent_id);
                             return;
+                        }
+                    }
+                    KeyCode::Char('x' | 'X')
+                        if key.kind == KeyEventKind::Press
+                            && !key.modifiers.intersects(
+                                crossterm::event::KeyModifiers::CONTROL
+                                    | crossterm::event::KeyModifiers::ALT,
+                            ) =>
+                    {
+                        if let Some(agent) = agents.get(*selected).cloned() {
+                            let entry_id =
+                                self.entries.get(self.selected).map(|e| e.id().to_owned());
+                            if entry_id.as_deref() == Some(agent.agent_id.as_str()) {
+                                self.panel = None;
+                                self.cancel_or_report_idle(&agent.name);
+                                return;
+                            }
+                            if let Some(op_id) = agent.active_operation_id.clone() {
+                                if let Some(entry) = self.entries.get(self.selected)
+                                    && let Some(session) = entry.session.clone()
+                                {
+                                    let key = entry.key.clone();
+                                    let agent_name = agent.name.clone();
+                                    if self.capacity() {
+                                        self.spawn_job(
+                                            Some(key.clone()),
+                                            super::jobs::JobKind::CancelAgentOperation,
+                                            async move {
+                                                let result =
+                                                    session.cancel_agent_operation(&op_id).await;
+                                                super::jobs::Message::AgentOperationCancelled(
+                                                    key, agent_name, result,
+                                                )
+                                            },
+                                        );
+                                    }
+                                }
+                            } else if let Some(entry) = self.entries.get_mut(self.selected) {
+                                entry.notice = format!(
+                                    "Agent {} has no running operation",
+                                    tars_core::permission::escape_untrusted_text(&agent.name)
+                                );
+                            }
                         }
                     }
                     _ => {}

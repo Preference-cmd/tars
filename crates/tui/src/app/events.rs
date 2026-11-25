@@ -68,6 +68,11 @@ impl App {
             self.view_height = height;
             self.refresh_size_flags();
             self.viewport_height = render::conversation_height(height, width, self);
+            if let Some(entry) = self.entries.get_mut(self.selected)
+                && entry.preview.is_active()
+            {
+                entry.preview.layout(self.view_width);
+            }
             if let Some(super::Panel::Info { lines, scroll, .. }) = &mut self.panel {
                 *scroll = (*scroll).min(
                     crate::transcript::detail_rows(lines, self.view_width)
@@ -111,6 +116,7 @@ impl App {
                     }
                 } else if entry.approval_queue.is_empty() {
                     input::paste(&mut entry.editor, text, true);
+                    entry.reset_history_cursor();
                 }
             }
             return;
@@ -332,6 +338,10 @@ impl App {
             self.cycle_permission_mode();
             return;
         }
+        if key.kind == KeyEventKind::Press && key.code == KeyCode::Tab && key.modifiers.is_empty() {
+            self.complete_input();
+            return;
+        }
         if key.kind == KeyEventKind::Press
             && (key.code == KeyCode::F(1)
                 || (key.code == KeyCode::Char('/')
@@ -351,6 +361,7 @@ impl App {
             {
                 if let Some(entry) = self.entries.get_mut(self.selected) {
                     entry.editor.insert_newline();
+                    entry.reset_history_cursor();
                 }
             } else if key.kind == KeyEventKind::Press {
                 self.submit();
@@ -360,6 +371,7 @@ impl App {
         if input::control(key, 'j') {
             if let Some(entry) = self.entries.get_mut(self.selected) {
                 entry.editor.insert_newline();
+                entry.reset_history_cursor();
             }
             return;
         }
@@ -426,9 +438,34 @@ impl App {
                         }
                     }
                 }
+                KeyCode::Up if key.modifiers.is_empty() => {
+                    if let Some(entry) = self.entries.get_mut(self.selected)
+                        && !entry.step_history_up()
+                    {
+                        input::edit(&mut entry.editor, key);
+                    }
+                }
+                KeyCode::Down if key.modifiers.is_empty() => {
+                    if let Some(entry) = self.entries.get_mut(self.selected)
+                        && !entry.step_history_down()
+                    {
+                        input::edit(&mut entry.editor, key);
+                    }
+                }
                 _ => {
                     if let Some(entry) = self.entries.get_mut(self.selected) {
                         input::edit(&mut entry.editor, key);
+                        if !matches!(
+                            key.code,
+                            KeyCode::Left
+                                | KeyCode::Right
+                                | KeyCode::Up
+                                | KeyCode::Down
+                                | KeyCode::Home
+                                | KeyCode::End
+                        ) {
+                            entry.reset_history_cursor();
+                        }
                     }
                 }
             }

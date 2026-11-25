@@ -70,6 +70,24 @@ pub enum ProgressUpdate {
         /// The original fragment exceeded this observation's text bound.
         truncated: bool,
     },
+    /// Borrowed model reasoning delta copied into a bounded, temporary preview.
+    Reasoning {
+        /// At most 16 KiB of the incoming fragment, cut at a UTF-8 boundary.
+        delta: String,
+        /// The original fragment exceeded this observation's text bound.
+        truncated: bool,
+    },
+    /// Borrowed streaming tool-call name or arguments delta copied into a bounded, temporary preview.
+    ToolCallDelta {
+        /// Zero-based tool-call slot within the current model round.
+        call_index: usize,
+        /// At most 256 bytes of the incoming tool name fragment, cut at a UTF-8 boundary.
+        name_delta: Option<String>,
+        /// At most 16 KiB of the incoming arguments fragment, cut at a UTF-8 boundary.
+        arguments_delta: Option<String>,
+        /// Either `name_delta` or `arguments_delta` exceeded its observation bound.
+        truncated: bool,
+    },
     /// Complete output accepted by Causa, before material conversion/commit.
     /// This is not a successful work result or a save confirmation.
     ModelOutputReady,

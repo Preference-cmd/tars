@@ -138,6 +138,7 @@ impl App {
         if text.trim().is_empty() {
             return;
         }
+        let history_entry = text.clone();
         let request = SubmitRequest {
             request_key: new_block_id().0.to_string(),
             blocks: vec![tars_core::application::text_input(text)],
@@ -157,6 +158,7 @@ impl App {
             }
             Ok(receipt) => {
                 entry.editor = input::editor();
+                entry.push_input_history(&history_entry);
                 entry.work = Some(receipt.work.clone());
                 entry.bind_progress(progress);
                 entry.execution = "Running".into();
@@ -247,7 +249,8 @@ impl App {
                     session.cancel_all_active();
                     entry.notice = "Cancellation requested for active background tasks".into();
                 }
-            } else if session.active_finite_background_tasks() > 0 {
+            } else if session.active_finite_background_tasks() > 0 || session.has_active_execution()
+            {
                 session.cancel_all_active();
                 entry.notice = "Cancellation requested for active background tasks".into();
             } else if let Some(work) = &entry.work {
@@ -255,6 +258,56 @@ impl App {
                     Ok(()) => "Cancellation requested; waiting for actual result".into(),
                     Err(e) => e.to_string(),
                 };
+            }
+        }
+    }
+
+    pub(super) fn cancel_or_report_idle(&mut self, agent_name: &str) {
+        let has_active = self.entries.get(self.selected).is_some_and(|entry| {
+            entry.busy == Some("submitting")
+                || entry
+                    .session
+                    .as_ref()
+                    .is_some_and(ManagedSession::has_active_execution)
+        });
+        if has_active {
+            self.cancel();
+        } else if let Some(entry) = self.entries.get_mut(self.selected) {
+            entry.notice = format!(
+                "Agent {} has no running operation",
+                tars_core::permission::escape_untrusted_text(agent_name)
+            );
+        }
+    }
+
+    pub(super) fn complete_input(&mut self) {
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            return;
+        };
+        if entry.viewed_agent_id.is_some() {
+            return;
+        }
+        let workspace_root = entry
+            .session
+            .as_ref()
+            .and_then(|session| session.definition().workspace_root);
+        match input::complete_editor(&mut entry.editor, workspace_root.as_deref()) {
+            input::CompleteResult::None => {}
+            input::CompleteResult::Modified { notice } => {
+                entry.reset_history_cursor();
+                if let Some(notice) = notice {
+                    entry.notice = notice;
+                } else if entry.notice.starts_with("Commands: ")
+                    || entry.notice.starts_with("Paths: ")
+                    || entry.notice.starts_with("No matching ")
+                    || entry.notice.starts_with("No workspace ")
+                    || entry.notice.starts_with("Invalid workspace ")
+                {
+                    entry.notice.clear();
+                }
+            }
+            input::CompleteResult::Notice(notice) => {
+                entry.notice = notice;
             }
         }
     }

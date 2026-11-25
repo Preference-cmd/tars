@@ -157,6 +157,8 @@ async fn session_progress_precedes_terminal_and_preserves_original_observer() {
     let receipt = handle.submit(request("once")).unwrap();
     let started = recv(&mut progress).await;
     let text = recv(&mut progress).await;
+    let reasoning = recv(&mut progress).await;
+    let tool_delta = recv(&mut progress).await;
     assert_eq!(started.work, receipt.work);
     assert_eq!(started.invocation_id.turn_id, receipt.work.turn_id);
     assert_eq!(started.update, ProgressUpdate::ModelStarted);
@@ -165,6 +167,22 @@ async fn session_progress_precedes_terminal_and_preserves_original_observer() {
         text.update,
         ProgressUpdate::Text {
             delta: "temporary text".into(),
+            truncated: false
+        }
+    );
+    assert_eq!(
+        reasoning.update,
+        ProgressUpdate::Reasoning {
+            delta: "private reasoning".into(),
+            truncated: false
+        }
+    );
+    assert_eq!(
+        tool_delta.update,
+        ProgressUpdate::ToolCallDelta {
+            call_index: 0,
+            name_delta: None,
+            arguments_delta: Some("private arguments".into()),
             truncated: false
         }
     );
@@ -195,6 +213,8 @@ async fn session_progress_precedes_terminal_and_preserves_original_observer() {
         .unwrap();
     assert!(material.contains("authoritative saved output"));
     assert!(!material.contains("temporary text"));
+    assert!(!material.contains("private reasoning"));
+    assert!(!material.contains("private arguments"));
     let mut late = handle.subscribe_progress();
     assert!(matches!(
         late.try_recv(),
@@ -467,12 +487,137 @@ async fn model_progress_tracks_each_invocation_in_a_multi_round_work() {
             ProgressUpdate::ModelStarted => started.push(item.invocation_id.round_id.0),
             ProgressUpdate::ModelOutputReady => output_rounds.push(item.invocation_id.round_id.0),
             ProgressUpdate::Text { .. } => text_rounds.push(item.invocation_id.round_id.0),
-            ProgressUpdate::Tool(_) | ProgressUpdate::Compaction(_) => {}
+            ProgressUpdate::Reasoning { .. }
+            | ProgressUpdate::ToolCallDelta { .. }
+            | ProgressUpdate::Tool(_)
+            | ProgressUpdate::Compaction(_) => {}
         }
     }
     assert_eq!(started, [0, 1]);
     assert_eq!(text_rounds, [0, 1]);
     assert_eq!(output_rounds, [0, 1]);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn reasoning_and_tool_call_delta_bound_utf8_and_skip_empty() {
+    let long_reasoning = format!("{}🦀extra", "r".repeat(16 * 1024 - 1));
+    let long_name = format!("{}🦀extra", "n".repeat(255));
+    let long_args = format!("{}🦀extra", "a".repeat(16 * 1024 - 1));
+    let release = Arc::new(Notify::new());
+    let mut owner = session(
+        ScriptGateway {
+            deltas: vec![
+                StreamDelta::ReasoningDelta {
+                    delta: String::new(),
+                },
+                StreamDelta::ReasoningDelta {
+                    delta: long_reasoning,
+                },
+                StreamDelta::ToolCallDelta {
+                    call_index: 2,
+                    provider_call_id: None,
+                    name_delta: Some(String::new()),
+                    arguments_delta: None,
+                },
+                StreamDelta::ToolCallDelta {
+                    call_index: 2,
+                    provider_call_id: None,
+                    name_delta: None,
+                    arguments_delta: Some(String::new()),
+                },
+                StreamDelta::ToolCallDelta {
+                    call_index: 2,
+                    provider_call_id: Some("call_2".into()),
+                    name_delta: Some(long_name),
+                    arguments_delta: Some(long_args),
+                },
+            ],
+            ending: Ending::Complete,
+            release: Some(release.clone()),
+            calls: Arc::new(AtomicUsize::new(0)),
+        },
+        None,
+    );
+    let handle = owner.handle();
+    let mut progress = handle.subscribe_progress();
+    let receipt = handle.submit(request("bounded-reasoning-tool")).unwrap();
+    assert_eq!(
+        recv(&mut progress).await.update,
+        ProgressUpdate::ModelStarted
+    );
+    match &recv(&mut progress).await.update {
+        ProgressUpdate::Reasoning { delta, truncated } => {
+            assert_eq!(delta.len(), 16 * 1024 - 1);
+            assert!(*truncated);
+        }
+        other => panic!("expected reasoning, got {other:?}"),
+    }
+    match &recv(&mut progress).await.update {
+        ProgressUpdate::ToolCallDelta {
+            call_index,
+            name_delta,
+            arguments_delta,
+            truncated,
+        } => {
+            assert_eq!(*call_index, 2);
+            assert_eq!(name_delta.as_ref().unwrap().len(), 255);
+            assert_eq!(arguments_delta.as_ref().unwrap().len(), 16 * 1024 - 1);
+            assert!(*truncated);
+        }
+        other => panic!("expected tool call delta, got {other:?}"),
+    }
+    assert!(matches!(
+        progress.try_recv(),
+        Err(broadcast::error::TryRecvError::Empty)
+    ));
+    release.notify_one();
+    assert!(matches!(
+        handle
+            .wait(&receipt.work, Duration::from_secs(3))
+            .await
+            .unwrap()
+            .state,
+        WorkState::Finished(_)
+    ));
+    owner.shutdown().await;
+}
+
+#[tokio::test]
+async fn unsubscribed_reasoning_and_tool_call_deltas_retain_nothing() {
+    let observed = Arc::new(AtomicUsize::new(0));
+    let count = observed.clone();
+    let mut owner = session(
+        ScriptGateway {
+            deltas: vec![
+                StreamDelta::ReasoningDelta {
+                    delta: "r".repeat(1024),
+                },
+                StreamDelta::ToolCallDelta {
+                    call_index: 0,
+                    provider_call_id: None,
+                    name_delta: Some("read_file".into()),
+                    arguments_delta: Some("{\"path\":\"src/lib.rs\"}".into()),
+                },
+            ],
+            ending: Ending::Complete,
+            release: None,
+            calls: Arc::new(AtomicUsize::new(0)),
+        },
+        Some(Arc::new(move |event| {
+            if matches!(event, RunEvent::ModelDelta { .. }) {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+        })),
+    );
+    let handle = owner.handle();
+    let receipt = handle.submit(request("unobserved-rt")).unwrap();
+    handle
+        .wait(&receipt.work, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(observed.load(Ordering::SeqCst), 2);
+    assert_eq!(owner.shared.progress.len(), 0);
     owner.shutdown().await;
 }

@@ -99,6 +99,7 @@ pub(super) enum Message {
     Retried(Key, Result<SaveStatus, ApplicationError>),
     Exported(Key, Result<(String, bool), String>),
     Closed(Key, Result<CloseOutcome, ApplicationError>),
+    AgentOperationCancelled(Key, String, Result<bool, ApplicationError>),
     /// The startup sandbox check finished.
     StartupSandbox(super::startup::SandboxCheck),
     /// The startup tool check (or its re-resolve after an installation) finished.
@@ -125,6 +126,7 @@ pub(super) enum JobKind {
     ToolArtifacts,
     Compact,
     Wrapping,
+    CancelAgentOperation,
     Repair(causa::kernel::BlockId),
     /// One of the two startup checks.
     Startup,
@@ -644,6 +646,16 @@ impl App {
             Message::StartupSandbox(check) => self.startup_sandbox(check),
             Message::StartupTools(check) => self.startup_tools(check),
             Message::StartupInstalled(result) => self.startup_installed(result),
+            Message::AgentOperationCancelled(key, agent_name, result) => {
+                if let Some(entry) = self.entry_mut(&key) {
+                    let escaped = tars_core::permission::escape_untrusted_text(&agent_name);
+                    entry.notice = match result {
+                        Ok(true) => format!("Cancelled running operation for agent {escaped}"),
+                        Ok(false) => format!("Agent {escaped} has no running operation"),
+                        Err(error) => format!("Failed to cancel agent {escaped}: {error}"),
+                    };
+                }
+            }
             Message::Closed(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     entry.busy = None;
@@ -673,6 +685,7 @@ impl App {
                             entry.clear_history();
                             entry.tools = super::tool_progress::ToolView::default();
                             entry.editor = crate::input::editor();
+                            entry.reset_history_cursor();
                             entry.status = "Closed; F3 to reopen".into();
                             entry.notice = close_label(outcome);
                         }
@@ -743,7 +756,7 @@ impl App {
                             entry.history.cancel_read();
                             entry.notice = message.clone();
                         }
-                        JobKind::ToolArtifacts => {
+                        JobKind::ToolArtifacts | JobKind::CancelAgentOperation => {
                             entry.notice = message.clone();
                         }
                         JobKind::Compact => {

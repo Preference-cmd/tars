@@ -172,7 +172,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
                 );
             }
             frame.render_widget(
-                Paragraph::new("↑↓ select · Enter switch view · Esc return")
+                Paragraph::new("↑↓ select · Enter switch view · x cancel running · Esc return")
                     .style(Style::default().fg(MUTED)),
                 regions[2],
             );

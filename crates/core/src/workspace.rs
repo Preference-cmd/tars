@@ -8,7 +8,7 @@ mod write;
 
 #[cfg(unix)]
 pub(crate) use access::{EntryKind, map_errno};
-pub use access::{Workspace, WorkspaceError};
+pub use access::{Workspace, WorkspaceError, WorkspacePathCandidate, complete_workspace_paths};
 #[cfg_attr(not(unix), allow(unused_imports))]
 pub(crate) use write::AtomicWriteError;
 pub use write::{FileIdentity, FileVersion};

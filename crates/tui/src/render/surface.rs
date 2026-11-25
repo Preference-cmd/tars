@@ -263,12 +263,12 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             } else if show_live_root {
                 let offset = index - committed;
                 let text = entry.preview.line(offset);
-                let style = if offset == 0 {
-                    Style::default().fg(MUTED)
-                } else if offset == 1 && entry.preview.warning().is_some() {
-                    Style::default().fg(Color::Yellow)
-                } else {
-                    Style::default()
+                let style = match entry.preview.line_kind(offset) {
+                    crate::preview::PreviewLineKind::Label
+                    | crate::preview::PreviewLineKind::Reasoning => Style::default().fg(MUTED),
+                    crate::preview::PreviewLineKind::Warning => Style::default().fg(Color::Yellow),
+                    crate::preview::PreviewLineKind::ToolDraft => Style::default().fg(Color::Cyan),
+                    crate::preview::PreviewLineKind::Body => Style::default(),
                 };
                 lines.push(Line::styled(text, style));
             }

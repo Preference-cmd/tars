@@ -6,6 +6,15 @@ use tokio::sync::broadcast;
 
 pub(super) const PROGRESS_CAPACITY: usize = 128;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
+const MAX_TOOL_NAME_BYTES: usize = 256;
+
+fn bound_utf8(text: &str, max_bytes: usize) -> (String, bool) {
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_owned(), end < text.len())
+}
 
 pub(super) fn observer(
     sender: broadcast::Sender<Arc<WorkProgress>>,
@@ -32,15 +41,60 @@ pub(super) fn observer(
                 delta: StreamDelta::TextDelta { delta },
                 ..
             } => {
-                let mut end = delta.len().min(MAX_TEXT_BYTES);
-                while !delta.is_char_boundary(end) {
-                    end -= 1;
+                let (delta, truncated) = bound_utf8(delta, MAX_TEXT_BYTES);
+                (*invocation_id, ProgressUpdate::Text { delta, truncated })
+            }
+            RunEvent::ModelDelta {
+                invocation_id,
+                delta: StreamDelta::ReasoningDelta { delta },
+                ..
+            } => {
+                if delta.is_empty() {
+                    return;
                 }
+                let (delta, truncated) = bound_utf8(delta, MAX_TEXT_BYTES);
                 (
                     *invocation_id,
-                    ProgressUpdate::Text {
-                        delta: delta[..end].to_owned(),
-                        truncated: end < delta.len(),
+                    ProgressUpdate::Reasoning { delta, truncated },
+                )
+            }
+            RunEvent::ModelDelta {
+                invocation_id,
+                delta:
+                    StreamDelta::ToolCallDelta {
+                        call_index,
+                        name_delta,
+                        arguments_delta,
+                        ..
+                    },
+                ..
+            } => {
+                let name = name_delta.as_deref().filter(|s| !s.is_empty());
+                let arguments = arguments_delta.as_deref().filter(|s| !s.is_empty());
+                if name.is_none() && arguments.is_none() {
+                    return;
+                }
+                let (name_delta, name_truncated) = match name {
+                    Some(text) => {
+                        let (bounded, truncated) = bound_utf8(text, MAX_TOOL_NAME_BYTES);
+                        (Some(bounded), truncated)
+                    }
+                    None => (None, false),
+                };
+                let (arguments_delta, arguments_truncated) = match arguments {
+                    Some(text) => {
+                        let (bounded, truncated) = bound_utf8(text, MAX_TEXT_BYTES);
+                        (Some(bounded), truncated)
+                    }
+                    None => (None, false),
+                };
+                (
+                    *invocation_id,
+                    ProgressUpdate::ToolCallDelta {
+                        call_index: *call_index,
+                        name_delta,
+                        arguments_delta,
+                        truncated: name_truncated || arguments_truncated,
                     },
                 )
             }

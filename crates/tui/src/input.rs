@@ -10,7 +10,9 @@ use tars_core::{
     permission::PermissionMode,
 };
 
+mod complete;
 mod graphemes;
+pub(crate) use complete::{CompleteResult, complete_editor, set_editor_text};
 pub(crate) use graphemes::edit;
 
 pub(crate) fn editor() -> TextArea<'static> {

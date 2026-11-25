@@ -21,6 +21,7 @@ mod approval;
 mod code_execution;
 mod command;
 mod compaction;
+mod ergonomics;
 mod history;
 mod multi_agent;
 mod prompt_cache;

@@ -27,7 +27,7 @@ mod store;
 pub mod time;
 pub(crate) mod tools;
 pub mod usage;
-pub(crate) mod workspace;
+pub mod workspace;
 
 pub use mcp::{McpServerStatus, McpSkippedTool, McpStartError};
 pub use time::{created_at_from_id, format_timestamp_utc};

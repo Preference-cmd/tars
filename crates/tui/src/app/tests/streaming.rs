@@ -603,3 +603,166 @@ fn warning_headers_share_scroll_geometry_and_pages_never_skip_body_rows() {
     }
     assert!(last_end >= app.entries[0].conversation_len());
 }
+
+#[test]
+fn reasoning_streams_up_to_six_rows_and_collapses_when_body_or_ready_arrives() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    app.view_width = render::transcript_width(80);
+    let (entry, sender) = entry("r1", app.view_width, 128);
+    app.entries.push(entry);
+
+    sender
+        .send(event(&work("r1"), 0, ProgressUpdate::ModelStarted))
+        .unwrap();
+    let lines: String = (0..10).map(|i| format!("thought line {i}\n")).collect();
+    sender
+        .send(event(
+            &work("r1"),
+            0,
+            ProgressUpdate::Reasoning {
+                delta: lines,
+                truncated: false,
+            },
+        ))
+        .unwrap();
+    app.poll_progress();
+
+    let rendered = screen(&app, 80, 24);
+    assert!(
+        rendered.contains("💭") && rendered.contains("Thinking…"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("thought line 9"), "{rendered}");
+    assert!(rendered.contains("thought line 4"), "{rendered}");
+    assert!(!rendered.contains("thought line 3"), "{rendered}");
+
+    // Body arrival collapses reasoning to one compact count line.
+    sender
+        .send(event(&work("r1"), 0, text("final body")))
+        .unwrap();
+    app.poll_progress();
+    let rendered = screen(&app, 80, 24);
+    assert!(
+        rendered.contains("💭") && rendered.contains("Thinking ("),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("thought line 9"), "{rendered}");
+    assert!(rendered.contains("final body"), "{rendered}");
+
+    // ModelOutputReady switches label to Thought (N chars).
+    sender
+        .send(event(&work("r1"), 0, ProgressUpdate::ModelOutputReady))
+        .unwrap();
+    app.poll_progress();
+    let rendered = screen(&app, 80, 24);
+    assert!(
+        rendered.contains("💭") && rendered.contains("Thought ("),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn tool_call_drafts_stream_compact_lines_and_hide_after_ready_or_next_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    app.view_width = render::transcript_width(80);
+    let (entry, sender) = entry("t1", app.view_width, 128);
+    app.entries.push(entry);
+
+    sender
+        .send(event(&work("t1"), 0, ProgressUpdate::ModelStarted))
+        .unwrap();
+    sender
+        .send(event(
+            &work("t1"),
+            0,
+            ProgressUpdate::ToolCallDelta {
+                call_index: 0,
+                name_delta: Some("read_file".into()),
+                arguments_delta: None,
+                truncated: false,
+            },
+        ))
+        .unwrap();
+    app.poll_progress();
+    let rendered = screen(&app, 80, 24);
+    assert!(rendered.contains("⠋ Preparing read_file"), "{rendered}");
+
+    sender
+        .send(event(
+            &work("t1"),
+            0,
+            ProgressUpdate::ToolCallDelta {
+                call_index: 0,
+                name_delta: None,
+                arguments_delta: Some("{\"path\":\n\"src/lib.rs\"}".into()),
+                truncated: false,
+            },
+        ))
+        .unwrap();
+    app.poll_progress();
+    let rendered = screen(&app, 80, 24);
+    assert!(
+        rendered.contains("⠋ Preparing read_file: {\"path\": \"src/lib.rs\"}"),
+        "{rendered}"
+    );
+
+    // Ready hides Preparing draft lines so formal ToolProgress does not duplicate.
+    sender
+        .send(event(&work("t1"), 0, ProgressUpdate::ModelOutputReady))
+        .unwrap();
+    app.poll_progress();
+    let rendered = screen(&app, 80, 24);
+    assert!(!rendered.contains("Preparing read_file"), "{rendered}");
+
+    // Next round ModelStarted resets both reasoning and tool drafts cleanly.
+    sender
+        .send(event(&work("t1"), 1, ProgressUpdate::ModelStarted))
+        .unwrap();
+    app.poll_progress();
+    assert!(app.entries[0].preview.reasoning.is_empty());
+    assert!(app.entries[0].preview.tool_calls.is_empty());
+}
+
+#[test]
+fn reasoning_and_tool_drafts_are_panic_free_at_min_height_and_escape_controls() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    app.view_width = render::transcript_width(30);
+    let (entry, sender) = entry("h1", app.view_width, 128);
+    app.entries.push(entry);
+
+    sender
+        .send(event(&work("h1"), 0, ProgressUpdate::ModelStarted))
+        .unwrap();
+    sender
+        .send(event(
+            &work("h1"),
+            0,
+            ProgressUpdate::Reasoning {
+                delta: "think\x1b[31m\u{202e}你好🙂".into(),
+                truncated: false,
+            },
+        ))
+        .unwrap();
+    sender
+        .send(event(
+            &work("h1"),
+            0,
+            ProgressUpdate::ToolCallDelta {
+                call_index: 0,
+                name_delta: Some("search\x1b".into()),
+                arguments_delta: Some("{\"q\":\"中文\n🙂\"}".into()),
+                truncated: false,
+            },
+        ))
+        .unwrap();
+    app.poll_progress();
+    assert!(!app.entries[0].preview.reasoning.contains('\x1b'));
+    assert!(!app.entries[0].preview.reasoning.contains('\u{202e}'));
+    assert!(!app.entries[0].preview.tool_calls[0].name.contains('\x1b'));
+    app.event(Event::Resize(30, 12));
+    let rendered = screen(&app, 30, 12);
+    assert!(rendered.contains("Generating temp"), "{rendered}");
+}

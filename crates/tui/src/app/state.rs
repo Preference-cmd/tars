@@ -19,6 +19,7 @@ use tokio::task::JoinSet;
 
 // Limits UI-owned in-flight work/results; core separately limits active instances.
 pub(super) const MAX_JOBS: usize = 64;
+pub(super) const MAX_INPUT_HISTORY: usize = 100;
 
 /// How long keys are ignored after sensitive confirmation content appears or
 /// changes without a key press, so keys typed for something else do not decide it.
@@ -323,6 +324,9 @@ pub(crate) struct Entry {
     pub status: String,
     pub notice: String,
     pub editor: TextArea<'static>,
+    pub(crate) input_history: Vec<String>,
+    pub(crate) history_cursor: Option<usize>,
+    pub(crate) history_saved_draft: String,
     pub transcript: Arc<Transcript>,
     pub preview: crate::preview::Preview,
     pub(crate) tools: super::tool_progress::ToolView,
@@ -379,6 +383,9 @@ impl Entry {
             status: "Stored; F3 to open".into(),
             notice: String::new(),
             editor: input::editor(),
+            input_history: Vec::new(),
+            history_cursor: None,
+            history_saved_draft: String::new(),
             transcript: Arc::new(Transcript::default()),
             preview: crate::preview::Preview::default(),
             tools: super::tool_progress::ToolView::default(),
@@ -446,6 +453,61 @@ impl Entry {
     }
     pub fn has_draft(&self) -> bool {
         self.editor.lines().iter().any(|line| !line.is_empty())
+    }
+
+    pub(crate) fn reset_history_cursor(&mut self) {
+        self.history_cursor = None;
+        self.history_saved_draft.clear();
+    }
+
+    pub(crate) fn push_input_history(&mut self, text: &str) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && self.input_history.last().map(String::as_str) != Some(trimmed) {
+            if self.input_history.len() >= MAX_INPUT_HISTORY {
+                self.input_history.remove(0);
+            }
+            self.input_history.push(trimmed.to_owned());
+        }
+        self.reset_history_cursor();
+    }
+
+    pub(crate) fn step_history_up(&mut self) -> bool {
+        if self.viewed_agent_id.is_some()
+            || self.input_history.is_empty()
+            || self.editor.cursor().0 != 0
+        {
+            return false;
+        }
+        let next = match self.history_cursor {
+            None => {
+                self.history_saved_draft = self.editor.lines().join("\n");
+                self.input_history.len() - 1
+            }
+            Some(idx) => idx.saturating_sub(1),
+        };
+        self.history_cursor = Some(next);
+        input::set_editor_text(&mut self.editor, &self.input_history[next], true);
+        true
+    }
+
+    pub(crate) fn step_history_down(&mut self) -> bool {
+        let Some(idx) = self.history_cursor else {
+            return false;
+        };
+        let last_line = self.editor.lines().len().saturating_sub(1);
+        if self.viewed_agent_id.is_some() || self.editor.cursor().0 != last_line {
+            return false;
+        }
+        if idx + 1 < self.input_history.len() {
+            let next = idx + 1;
+            self.history_cursor = Some(next);
+            input::set_editor_text(&mut self.editor, &self.input_history[next], false);
+        } else {
+            self.history_cursor = None;
+            let draft = std::mem::take(&mut self.history_saved_draft);
+            input::set_editor_text(&mut self.editor, &draft, false);
+        }
+        true
     }
 }
 pub(crate) enum Confirmation {

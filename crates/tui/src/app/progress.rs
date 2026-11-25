@@ -61,7 +61,21 @@ impl Entry {
         match &event.update {
             ProgressUpdate::ModelStarted => self.preview.start(event.invocation_id.clone()),
             ProgressUpdate::Text { delta, truncated } => self.preview.append(delta, *truncated),
-            ProgressUpdate::ModelOutputReady => self.preview.ready = true,
+            ProgressUpdate::Reasoning { delta, truncated } => {
+                self.preview.append_reasoning(delta, *truncated)
+            }
+            ProgressUpdate::ToolCallDelta {
+                call_index,
+                name_delta,
+                arguments_delta,
+                truncated,
+            } => self.preview.append_tool_call_delta(
+                *call_index,
+                name_delta.as_deref(),
+                arguments_delta.as_deref(),
+                *truncated,
+            ),
+            ProgressUpdate::ModelOutputReady => self.preview.mark_ready(),
             ProgressUpdate::Tool(_) => unreachable!("handled independently of model preview"),
             ProgressUpdate::Compaction(_) => {
                 unreachable!("handled independently of model preview")

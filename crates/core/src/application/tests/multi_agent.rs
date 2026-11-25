@@ -2994,3 +2994,100 @@ async fn child_reactive_wakeup_admit_failure_enters_save_blocked_and_recovers() 
     .unwrap();
     assert_eq!(close_out.policy, ClosePolicy::DiscardLocal);
 }
+
+#[tokio::test]
+async fn managed_session_cancel_agent_operation_cancels_active_suppresses_wake_and_is_idempotent() {
+    let store_dir = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(store_dir.path().into()));
+    let child_entered = Arc::new(Notify::new());
+    let root_calls = Arc::new(AtomicUsize::new(0));
+    let root_calls_gw = root_calls.clone();
+
+    let root_gw: Arc<dyn ModelGateway> = ScriptedGateway::new(vec![], "root-unused");
+    let root_gw_count = Arc::new(CountingGateway {
+        inner: root_gw,
+        calls: root_calls_gw,
+    });
+    let child_gw = ScriptedGateway::new(
+        vec![ScriptedStep {
+            entered: Some(child_entered.clone()),
+            release: None,
+            response_text: None,
+            tool_calls: Vec::new(),
+            capture_blocks: None,
+            wait_for_cancel: true,
+        }],
+        "done",
+    );
+
+    host.set_test_gateway(Some(root_gw_count));
+    host.set_test_agent_gateway(Some(Arc::new(move |name, _| {
+        (name == "worker").then_some(child_gw.clone())
+    })));
+
+    let session = host
+        .create(PreparedCreate::persistent(definition(), Context::new()))
+        .await
+        .unwrap();
+    let root_id = entry_id(&session);
+
+    // Unknown operation returns ApplicationError::UnknownOperation.
+    let unknown = session.cancel_agent_operation("missing-op").await;
+    assert!(
+        matches!(unknown, Err(ApplicationError::UnknownOperation(ref id)) if id == "missing-op"),
+        "expected UnknownOperation, got {unknown:?}"
+    );
+
+    let SpawnAgentOutcome::Background(rec) = session
+        .spawn_agent(spawn_req(&root_id, "worker", "work"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected background spawn");
+    };
+    child_entered.notified().await;
+
+    // First cancel_agent_operation returns Ok(true) and suppresses wakeup.
+    let first = session
+        .cancel_agent_operation(&rec.operation_id)
+        .await
+        .unwrap();
+    assert!(first);
+
+    // Second cancel_agent_operation on the now-terminal operation returns Ok(false).
+    let second = session
+        .cancel_agent_operation(&rec.operation_id)
+        .await
+        .unwrap();
+    assert!(!second);
+
+    // Settle and verify no zombie root wakeup ran.
+    session.wait_settled().await.unwrap();
+    assert_eq!(root_calls.load(Ordering::SeqCst), 0);
+
+    // Closed session returns ApplicationError::Closed.
+    let target = session.target();
+    host.close(&target, ClosePolicy::Save).await.unwrap();
+    let closed_err = session.cancel_agent_operation(&rec.operation_id).await;
+    assert!(
+        matches!(closed_err, Err(ApplicationError::Closed)),
+        "expected Closed, got {closed_err:?}"
+    );
+}
+
+struct CountingGateway {
+    inner: Arc<dyn ModelGateway>,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl ModelGateway for CountingGateway {
+    async fn invoke(
+        &self,
+        request: &ModelRequest,
+        control: &CallControl,
+    ) -> Result<ModelOutput, ModelInvokeError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.invoke(request, control).await
+    }
+}

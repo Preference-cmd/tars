@@ -2009,11 +2009,33 @@ impl SessionCoordinator {
         &self,
         operation_id: &str,
     ) -> Result<OperationOutcome, CoordinatorError> {
-        let (wait_ids, tokens, suppress_ids) = {
+        let (outcome, _) = self.cancel_operation_inner(operation_id).await?;
+        Ok(outcome)
+    }
+
+    /// Cooperatively cancel `operation_id` (and any active descendants), returning `Ok(true)` if
+    /// `operation_id` was active when cancellation was initiated or `Ok(false)` if it was already
+    /// terminal.
+    pub(crate) async fn cancel_operation(
+        &self,
+        operation_id: &str,
+    ) -> Result<bool, CoordinatorError> {
+        let (_, was_active) = self.cancel_operation_inner(operation_id).await?;
+        Ok(was_active)
+    }
+
+    async fn cancel_operation_inner(
+        &self,
+        operation_id: &str,
+    ) -> Result<(OperationOutcome, bool), CoordinatorError> {
+        let (was_active, wait_ids, tokens, suppress_ids) = {
             let mut state = self.state.lock().expect("coord lock");
-            if !state.operations.contains_key(operation_id) {
-                return Err(CoordinatorError::UnknownOperation(operation_id.to_owned()));
-            }
+            let was_active = state
+                .operations
+                .get(operation_id)
+                .ok_or_else(|| CoordinatorError::UnknownOperation(operation_id.to_owned()))?
+                .status
+                .is_active();
             let subtree = collect_operation_subtree(&state.operations, operation_id);
             let mut tokens = Vec::new();
             let mut wait_ids = Vec::new();
@@ -2027,14 +2049,16 @@ impl SessionCoordinator {
                 }
             }
             suppress_in_memory_events_for_sources(&mut state.agents, &subtree);
-            (wait_ids, tokens, subtree)
+            (was_active, wait_ids, tokens, subtree)
         };
 
         for token in tokens {
             token.cancel();
         }
-        self.suppress_events_sync_best_effort(&suppress_ids);
-        self.wakeup_notify.notify_one();
+        if !suppress_ids.is_empty() {
+            self.suppress_events_sync_best_effort(&suppress_ids);
+            self.wakeup_notify.notify_one();
+        }
 
         for id in wait_ids {
             let _ = self.wait_operation_outcome(&id).await;
@@ -2044,7 +2068,7 @@ impl SessionCoordinator {
             .operations
             .get(operation_id)
             .ok_or_else(|| CoordinatorError::UnknownOperation(operation_id.to_owned()))?;
-        Ok(op.to_outcome())
+        Ok((op.to_outcome(), was_active))
     }
 
     pub(crate) fn read_agent_materials(

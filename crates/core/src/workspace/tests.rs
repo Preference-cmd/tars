@@ -139,3 +139,93 @@ fn a_real_different_device_mount_is_rejected_when_present() {
         Err(WorkspaceError::Forbidden)
     ));
 }
+
+#[test]
+fn complete_workspace_paths_is_sorted_bounded_and_enforces_safety_boundaries() {
+    let (_root, path) = root();
+    std::fs::create_dir(path.join("src")).unwrap();
+    std::fs::create_dir(path.join("docs")).unwrap();
+    std::fs::create_dir(path.join(".git")).unwrap();
+    std::fs::create_dir(path.join(".HG")).unwrap();
+    std::fs::write(path.join(".git/HEAD"), "ref: refs/heads/main").unwrap();
+    std::fs::write(path.join("Cargo.toml"), "[package]\n").unwrap();
+    std::fs::write(path.join("README.md"), "# readme\n").unwrap();
+    std::fs::write(path.join("src/lib.rs"), "").unwrap();
+    std::fs::write(path.join("src/main.rs"), "").unwrap();
+    std::fs::create_dir(path.join("src/sub")).unwrap();
+    std::fs::write(path.join("src/sub/deep.rs"), "").unwrap();
+
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+    symlink(outside.path(), path.join("escape_dir")).unwrap();
+    symlink(outside.path().join("secret.txt"), path.join("src/link.rs")).unwrap();
+
+    // Empty prefix lists top-level files and dirs, sorted lexicographically, excluding symlinks and VCS.
+    let top = super::complete_workspace_paths(&path, "", 64);
+    assert_eq!(
+        top,
+        vec![
+            super::WorkspacePathCandidate {
+                relative_path: "Cargo.toml".into(),
+                is_dir: false,
+            },
+            super::WorkspacePathCandidate {
+                relative_path: "README.md".into(),
+                is_dir: false,
+            },
+            super::WorkspacePathCandidate {
+                relative_path: "docs".into(),
+                is_dir: true,
+            },
+            super::WorkspacePathCandidate {
+                relative_path: "src".into(),
+                is_dir: true,
+            },
+        ]
+    );
+
+    // Subdirectory completion strips `./` and skips symlinks.
+    let src = super::complete_workspace_paths(&path, "./src/", 64);
+    assert_eq!(
+        src,
+        vec![
+            super::WorkspacePathCandidate {
+                relative_path: "src/lib.rs".into(),
+                is_dir: false,
+            },
+            super::WorkspacePathCandidate {
+                relative_path: "src/main.rs".into(),
+                is_dir: false,
+            },
+            super::WorkspacePathCandidate {
+                relative_path: "src/sub".into(),
+                is_dir: true,
+            },
+        ]
+    );
+
+    // Prefix filtering + limit bound.
+    let limited = super::complete_workspace_paths(&path, "", 2);
+    assert_eq!(limited.len(), 2);
+    assert_eq!(limited[0].relative_path, "Cargo.toml");
+    assert_eq!(limited[1].relative_path, "README.md");
+
+    // Unsafe and VCS prefixes always return empty.
+    for bad in [
+        "/etc",
+        "../",
+        "src/../Cargo",
+        "..",
+        "src\\lib",
+        "a\0b",
+        ".git/",
+        ".GIT/",
+        ".HG/",
+        "escape_dir/",
+    ] {
+        assert!(
+            super::complete_workspace_paths(&path, bad, 64).is_empty(),
+            "unsafe prefix {bad:?} must return no candidates"
+        );
+    }
+}

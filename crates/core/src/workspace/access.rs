@@ -235,3 +235,130 @@ pub(crate) fn map_errno(error: rustix::io::Errno) -> WorkspaceError {
         WorkspaceError::Io(error.into())
     }
 }
+
+/// One workspace-relative candidate returned by [`complete_workspace_paths`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspacePathCandidate {
+    /// Workspace-relative path without a leading `./`.
+    pub relative_path: String,
+    /// Whether the entry is a directory on the pinned workspace device.
+    pub is_dir: bool,
+}
+
+/// List bounded workspace-relative path completion candidates for `prefix` under `root`.
+///
+/// Uses handle-relative directory listing without following symbolic links, excludes VCS metadata
+/// directories (`.git`, `.hg`, `.svn`, `.jj`, ASCII case-insensitive), rejects absolute paths,
+/// parent traversal (`..`), NUL bytes, and backslashes, sorts results lexicographically, and
+/// caps the output at `limit`. Returns an empty list on non-Unix platforms or invalid inputs.
+pub fn complete_workspace_paths(
+    root: &Path,
+    prefix: &str,
+    limit: usize,
+) -> Vec<WorkspacePathCandidate> {
+    if limit == 0 || prefix.len() > 4096 || prefix.contains('\0') || prefix.contains('\\') {
+        return Vec::new();
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        complete_workspace_paths_unix(root, prefix, limit)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (root, prefix, limit);
+        Vec::new()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn complete_workspace_paths_unix(
+    root: &Path,
+    prefix: &str,
+    limit: usize,
+) -> Vec<WorkspacePathCandidate> {
+    use rustix::fs::{AtFlags, FileType, statat};
+
+    let (dir_parts, name_prefix) = match prefix.rfind('/') {
+        Some(slash) => {
+            let dir_part = &prefix[..slash];
+            if dir_part.is_empty() {
+                return Vec::new();
+            }
+            let Ok(parts) = Workspace::components(dir_part) else {
+                return Vec::new();
+            };
+            if Workspace::vcs_metadata_component(&parts).is_some() {
+                return Vec::new();
+            }
+            (parts, &prefix[slash + 1..])
+        }
+        None => (Vec::new(), prefix),
+    };
+    if name_prefix == ".." {
+        return Vec::new();
+    }
+    let Ok(ws) = Workspace::open(root) else {
+        return Vec::new();
+    };
+    let Ok(mut dir_fd) = ws.child_directory(&ws.root, ".") else {
+        return Vec::new();
+    };
+    for part in &dir_parts {
+        let Ok(next_fd) = ws.child_directory(&dir_fd, part) else {
+            return Vec::new();
+        };
+        dir_fd = next_fd;
+    }
+    let Ok(mut dir) = rustix::fs::Dir::new(dir_fd) else {
+        return Vec::new();
+    };
+    let dir_prefix = if dir_parts.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", dir_parts.join("/"))
+    };
+    let mut results = Vec::new();
+    while let Some(Ok(entry)) = dir.read() {
+        let name_cstr = entry.file_name();
+        if name_cstr.to_bytes() == b"." || name_cstr.to_bytes() == b".." {
+            continue;
+        }
+        let Ok(name) = name_cstr.to_str() else {
+            continue;
+        };
+        if Workspace::is_vcs_metadata_name(name) || !name.starts_with(name_prefix) {
+            continue;
+        }
+        let Ok(fd) = dir.fd() else {
+            break;
+        };
+        let hint = entry.file_type();
+        let Ok(kind) = ws.entry_kind_nofollow(fd, name_cstr, hint) else {
+            continue;
+        };
+        let is_dir = match kind {
+            EntryKind::RegularFile => false,
+            EntryKind::Directory => {
+                if hint == FileType::Directory {
+                    let Ok(stat) = statat(fd, name_cstr, AtFlags::SYMLINK_NOFOLLOW) else {
+                        continue;
+                    };
+                    if stat.st_dev != ws.device
+                        || FileType::from_raw_mode(stat.st_mode) != FileType::Directory
+                    {
+                        continue;
+                    }
+                }
+                true
+            }
+            EntryKind::Other => continue,
+        };
+        results.push(WorkspacePathCandidate {
+            relative_path: format!("{dir_prefix}{name}"),
+            is_dir,
+        });
+    }
+    results.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    results.truncate(limit);
+    results
+}

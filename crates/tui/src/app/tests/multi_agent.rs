@@ -793,3 +793,120 @@ fn transcript_compacts_multiple_task_notifications() {
     assert!(transcript.text.contains("found 3 files"));
     assert!(transcript.text.contains("compile error"));
 }
+
+#[tokio::test]
+async fn agents_panel_x_cancels_running_child_and_reports_idle_safely() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::new().await;
+    let mut app = app(dir.path());
+
+    app.form = Some(create_form(&server.endpoint, None));
+    app.event(ctrl('s'));
+    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    let id = app.entries[app.selected].id().to_owned();
+    let session = app.entries[app.selected].session.clone().unwrap();
+
+    // Spawn a running background child agent while server holds its response.
+    let SpawnAgentOutcome::Background(spawn) = session
+        .spawn_agent(SpawnAgentRequest {
+            caller_agent_id: id.clone(),
+            caller_operation_id: None,
+            source_block_id: None,
+            name: "worker".into(),
+            preset_name: Some("explore".into()),
+            role_prompt: None,
+            prompt: "stay busy".into(),
+            narrowing: ChildNarrowingRequest::default(),
+            interaction: AgentInteraction::Reusable,
+            execution_mode: OperationExecutionMode::Background,
+            on_parent_complete: OnParentComplete::Continue,
+            timeout_secs: None,
+            max_rounds: None,
+            coalesce_key: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected background spawn");
+    };
+
+    until(&mut app, |a| a.entries[a.selected].active_bg_count == 1).await;
+
+    // Open `/agents` panel and verify updated footer hint.
+    command(&mut app, "agents");
+    assert!(matches!(app.panel, Some(Panel::Agents { .. })));
+    let panel_screen = screen(&app);
+    assert!(
+        panel_screen.contains("x cancel running"),
+        "panel_screen: {panel_screen}"
+    );
+
+    // Select child agent (index 1) and press 'x' to cancel its running operation.
+    app.event(key(KeyCode::Down));
+    app.event(key(KeyCode::Char('x')));
+    until(&mut app, |a| {
+        a.entries[a.selected]
+            .notice
+            .contains("Cancelled running operation for agent worker")
+            && a.entries[a.selected].active_bg_count == 0
+    })
+    .await;
+
+    // Wait for operation to settle to non-running, then press 'x' again on the now-idle child.
+    until(&mut app, |a| {
+        a.entries[a.selected]
+            .session
+            .as_ref()
+            .unwrap()
+            .agent_snapshot(&spawn.agent_id)
+            .is_some_and(|s| s.active_operation_id.is_none())
+    })
+    .await;
+    app.event(key(KeyCode::Char('x')));
+    assert!(
+        app.entries[app.selected]
+            .notice
+            .contains("Agent worker has no running operation"),
+        "notice: {}",
+        app.entries[app.selected].notice
+    );
+
+    let target = session.target();
+    app.host.close(&target, ClosePolicy::Save).await.unwrap();
+}
+
+#[tokio::test]
+async fn agents_panel_x_on_idle_main_after_completed_turn_reports_idle() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::new().await;
+    server.release.add_permits(1);
+    let mut app = app(dir.path());
+
+    app.form = Some(create_form(&server.endpoint, None));
+    app.event(ctrl('s'));
+    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    let session = app.entries[app.selected].session.clone().unwrap();
+
+    // Complete one root turn so `entry.work` stays populated with the finished WorkRef.
+    app.event(crossterm::event::Event::Paste("hello".into()));
+    app.event(ctrl('s'));
+    until(&mut app, |a| {
+        a.entries[a.selected].execution == "Completed"
+            && a.entries[a.selected].work.is_some()
+            && !session.has_active_execution()
+    })
+    .await;
+
+    // Open `/agents` (main (entry) is selected at index 0) and press 'x'.
+    command(&mut app, "agents");
+    assert!(matches!(app.panel, Some(Panel::Agents { selected: 0 })));
+    app.event(key(KeyCode::Char('x')));
+    assert!(app.panel.is_none());
+    assert_eq!(
+        app.entries[app.selected].notice,
+        "Agent main has no running operation"
+    );
+
+    let target = session.target();
+    app.host.close(&target, ClosePolicy::Save).await.unwrap();
+}

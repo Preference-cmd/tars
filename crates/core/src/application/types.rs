@@ -487,6 +487,9 @@ pub enum ApplicationError {
     /// Requested persistent record does not exist.
     #[error("saved conversation not found")]
     NotFound,
+    /// Referenced child operation does not exist in this session.
+    #[error("unknown operation: {0}")]
+    UnknownOperation(String),
     /// Multiple agents share the same display name; caller must disambiguate using `agent_id`.
     #[error("multiple agents named '{name}' exist ({}); specify the UUID agent_id instead", candidates.join(", "))]
     AmbiguousAgent {
