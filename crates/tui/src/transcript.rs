@@ -212,6 +212,21 @@ impl Transcript {
                 index += 1;
                 continue;
             }
+            if collapse_prelude
+                && block.meta().source.as_deref()
+                    == Some(tars_core::events::TASK_NOTIFICATION_SOURCE)
+                && let BlockContent::Message { parts, .. } = block.content()
+            {
+                let mut raw = String::new();
+                for part in parts {
+                    if let ContentPart::Text(value) = part {
+                        raw.push_str(&value.0);
+                    }
+                }
+                text.push_str(&format_task_notifications_compact(&raw));
+                index += 1;
+                continue;
+            }
             let is_summary =
                 block.meta().source.as_deref() == Some(tars_core::compact::SUMMARY_SOURCE);
             if is_summary && let BlockContent::Message { parts, .. } = block.content() {
@@ -256,6 +271,9 @@ impl Transcript {
                     } else {
                         text.push_str(&format!("● Skill · {source}\n"));
                     }
+                }
+                Some(source) if source == tars_core::events::TASK_NOTIFICATION_SOURCE => {
+                    text.push_str(&format!("● Task notification · {source}\n"));
                 }
                 Some(source) => {
                     text.push_str("● ");
@@ -387,6 +405,162 @@ fn summary(value: &str) -> String {
         &clean[..end],
         if end < clean.len() { "…" } else { "" }
     )
+}
+
+fn format_task_notifications_compact(raw: &str) -> String {
+    let mut out = String::new();
+    let mut rest = raw;
+    let mut found_envelope = false;
+    while let Some(start) = rest.find("<task-notification") {
+        let after_tag = &rest[start + "<task-notification".len()..];
+        let Some(open_end) = after_tag.find('>') else {
+            break;
+        };
+        let attrs = &after_tag[..open_end];
+        let content_start = &after_tag[open_end + 1..];
+        let (body, next_rest) = match content_start.find("</task-notification>") {
+            Some(close_idx) => (
+                &content_start[..close_idx],
+                &content_start[close_idx + "</task-notification>".len()..],
+            ),
+            None => (content_start, ""),
+        };
+        found_envelope = true;
+        append_compact_task_notification(&mut out, attrs, body);
+        rest = next_rest;
+    }
+    if !found_envelope {
+        out.push_str("● Task notification\n");
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            out.push_str("  ");
+            out.push_str(&summary(trimmed));
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn append_compact_task_notification(out: &mut String, attrs: &str, body: &str) {
+    let agent = xml_attr(attrs, "agent_name")
+        .or_else(|| xml_attr(attrs, "agent"))
+        .or_else(|| xml_tag(body, "agent_name"))
+        .or_else(|| xml_tag(body, "agent"))
+        .or_else(|| xml_attr(attrs, "agent_id"))
+        .or_else(|| xml_attr(attrs, "source_id"))
+        .or_else(|| xml_attr(attrs, "source"));
+    let status = xml_attr(attrs, "status").or_else(|| xml_tag(body, "status"));
+    let operation_id = xml_attr(attrs, "operation_id")
+        .or_else(|| xml_attr(attrs, "operation-id"))
+        .or_else(|| xml_tag(body, "operation-id"))
+        .or_else(|| xml_tag(body, "operation_id"));
+
+    let agent_label = agent
+        .map(|v| display(&v).replace('\n', " "))
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "task".to_owned());
+    let status_part = status
+        .map(|v| display(&v).replace('\n', " "))
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| format!(" ({v})"))
+        .unwrap_or_default();
+    let op_part = operation_id
+        .map(|v| display(&v).replace('\n', " "))
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| format!(" · op {}", truncate_chars(&v, 32)))
+        .unwrap_or_default();
+
+    out.push_str(&format!(
+        "● Task notification · {agent_label}{status_part}{op_part}\n"
+    ));
+
+    let snippet = xml_tag(body, "summary")
+        .or_else(|| xml_tag(body, "result"))
+        .or_else(|| {
+            let trimmed = body.trim();
+            (!trimmed.is_empty()).then(|| unescape_xml_entities(trimmed))
+        });
+    if let Some(snippet) = snippet {
+        let preview = summary(snippet.trim());
+        if !preview.is_empty() {
+            out.push_str("  ");
+            out.push_str(&preview);
+            out.push('\n');
+        }
+    }
+    out.push('\n');
+}
+
+fn xml_attr(attrs: &str, name: &str) -> Option<String> {
+    let mut rest = attrs;
+    while let Some(pos) = rest.find(name) {
+        let before_ok = pos == 0 || rest.as_bytes()[pos - 1].is_ascii_whitespace();
+        let after = &rest[pos + name.len()..];
+        let trimmed = after.trim_start();
+        if before_ok && let Some(after_eq) = trimmed.strip_prefix('=') {
+            let after_eq = after_eq.trim_start();
+            if let Some(quote) = after_eq.chars().next().filter(|&c| c == '"' || c == '\'') {
+                let value_start = &after_eq[quote.len_utf8()..];
+                if let Some(end) = value_start.find(quote) {
+                    return Some(unescape_xml_entities(&value_start[..end]));
+                }
+            }
+        }
+        rest = &rest[pos + name.len()..];
+    }
+    None
+}
+
+fn xml_tag(body: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = body.find(&open)?;
+    let content = &body[start + open.len()..];
+    let end = content.find(&close)?;
+    Some(unescape_xml_entities(content[..end].trim()))
+}
+
+fn unescape_xml_entities(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp..];
+        if let Some(semi) = after.find(';')
+            && semi <= 6
+        {
+            let entity = &after[1..semi];
+            let decoded = match entity {
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "amp" => Some('&'),
+                _ => None,
+            };
+            if let Some(ch) = decoded {
+                out.push(ch);
+                rest = &after[semi + 1..];
+                continue;
+            }
+        }
+        out.push('&');
+        rest = &rest[amp + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn truncate_chars(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &value[..end])
 }
 
 // Detail panels use the same grapheme/cell wrapping for drawing and scrolling.
@@ -759,5 +933,136 @@ mod tests {
         );
         assert!(transcript.text.contains("HISTORY_SKILL_BODY"));
         assert!(!transcript.text.contains("· folded"));
+    }
+
+    #[test]
+    fn from_materials_compacts_task_notification_and_escapes_controls() {
+        use causa::kernel::BlockMeta;
+
+        let long_body = "x".repeat(300);
+        let xml = format!(
+            "<task-notification source=\"agent_operation\" id=\"7\" operation_id=\"op-12345\" agent_id=\"agent-2\" agent_name=\"bad\u{202e}\x1b[31magent\" status=\"completed\" priority=\"normal\">\n<summary>Finished\u{202e}\x1b[0m scan: {long_body}</summary>\n</task-notification>"
+        );
+        let block = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, &xml),
+            BlockMeta::from_source(tars_core::events::TASK_NOTIFICATION_SOURCE),
+        );
+        let context = Context::from_blocks(vec![block]).unwrap();
+        let compact = Transcript::from_materials(&context, &[]);
+
+        assert!(
+            compact.text.contains(
+                "● Task notification · bad\\u{202e}\\x1b[31magent (completed) · op op-12345"
+            ),
+            "{}",
+            compact.text
+        );
+        assert!(
+            compact.text.contains("Finished\\u{202e}\\x1b[0m scan:"),
+            "{}",
+            compact.text
+        );
+        assert!(compact.text.contains('…'), "{}", compact.text);
+        assert!(
+            !compact.text.contains("<task-notification"),
+            "raw XML envelope must be compacted: {}",
+            compact.text
+        );
+        assert!(!compact.text.contains('\x1b'));
+        assert!(!compact.text.contains('\u{202e}'));
+    }
+
+    #[test]
+    fn from_history_blocks_keeps_task_notification_expanded() {
+        use causa::kernel::BlockMeta;
+
+        let xml = "<task-notification source=\"agent_operation\" id=\"9\" operation_id=\"op-9\" agent_id=\"a1\" agent_name=\"explore\" status=\"completed\" priority=\"normal\">\nfull archived body\n</task-notification>";
+        let block = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, xml),
+            BlockMeta::from_source(tars_core::events::TASK_NOTIFICATION_SOURCE),
+        );
+        let expanded = Transcript::from_history_blocks(&[block]);
+        assert!(
+            expanded
+                .text
+                .contains("● Task notification · tars:task-notification"),
+            "{}",
+            expanded.text
+        );
+        assert!(
+            expanded.text.contains("full archived body"),
+            "{}",
+            expanded.text
+        );
+        assert!(
+            expanded.text.contains("<task-notification"),
+            "{}",
+            expanded.text
+        );
+    }
+
+    #[test]
+    fn from_materials_compacts_malformed_task_notification_and_multiline_attrs() {
+        use causa::kernel::BlockMeta;
+
+        let malformed = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, "plain fallback\nbody\x1b[31m"),
+            BlockMeta::from_source(tars_core::events::TASK_NOTIFICATION_SOURCE),
+        );
+        let multiline_attr = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(
+                Role::User,
+                "<task-notification agent_name=\"alpha\nbeta\" status=\"done\nnow\" operation_id=\"op\n1\">\n<summary>ok</summary>\n</task-notification>",
+            ),
+            BlockMeta::from_source(tars_core::events::TASK_NOTIFICATION_SOURCE),
+        );
+        let context = Context::from_blocks(vec![malformed, multiline_attr]).unwrap();
+        let transcript = Transcript::from_materials(&context, &[]);
+
+        assert!(
+            transcript
+                .text
+                .contains("● Task notification\n  plain fallback body\\x1b[31m"),
+            "{}",
+            transcript.text
+        );
+        assert!(
+            transcript
+                .text
+                .contains("● Task notification · alpha beta (done now) · op op 1\n  ok"),
+            "{}",
+            transcript.text
+        );
+    }
+
+    #[test]
+    fn from_materials_truncates_multibyte_utf8_task_notification_safely() {
+        use causa::kernel::BlockMeta;
+
+        let utf8_op = "操作-".repeat(12);
+        let utf8_body = "中文测试内容🎉".repeat(30);
+        let xml = format!(
+            "<task-notification agent_name=\"测试代理\" status=\"completed\" operation_id=\"{utf8_op}\">\n{utf8_body}\n</task-notification>"
+        );
+        let block = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, &xml),
+            BlockMeta::from_source(tars_core::events::TASK_NOTIFICATION_SOURCE),
+        );
+        let context = Context::from_blocks(vec![block]).unwrap();
+        let transcript = Transcript::from_materials(&context, &[]);
+
+        assert!(
+            transcript
+                .text
+                .contains("● Task notification · 测试代理 (completed) · op "),
+            "{}",
+            transcript.text
+        );
+        assert!(transcript.text.contains('…'), "{}", transcript.text);
     }
 }

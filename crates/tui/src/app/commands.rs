@@ -21,6 +21,9 @@ pub(crate) enum Panel {
     ModeSelect {
         selected: usize,
     },
+    Agents {
+        selected: usize,
+    },
 }
 
 /// The `/status` line for the probed command sandbox, with its own vocabulary
@@ -32,6 +35,7 @@ pub(super) fn command_status_line(status: &tars_core::sandbox::SandboxStatus) ->
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("new", "Create a session with model settings"),
     ("sessions", "Find and open a saved or active session"),
+    ("agents", "List session agents and switch transcript view"),
     ("mode", "Show or change the permission mode"),
     (
         "rules",
@@ -158,6 +162,27 @@ impl App {
                     selected,
                 });
             }
+            "agents" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("agents").unwrap_or("").trim();
+                if arg.is_empty() {
+                    if let Some(entry) = self.entries.get(self.selected)
+                        && let Some(session) = &entry.session
+                    {
+                        let agents = session.list_agents();
+                        let active_id = entry.viewed_agent_id.as_deref().unwrap_or(entry.id());
+                        let selected = agents
+                            .iter()
+                            .position(|a| a.agent_id == active_id)
+                            .unwrap_or(0);
+                        self.panel = Some(Panel::Agents { selected });
+                    } else {
+                        self.notice = "Open a session first to list or switch agents".into();
+                    }
+                } else {
+                    self.switch_agent_by_selector(arg);
+                }
+            }
             "mode" => {
                 let clean = query.trim_start_matches('/').trim();
                 let arg = if let Some(rest) = clean.strip_prefix("mode") {
@@ -211,6 +236,7 @@ impl App {
                 title: "Keyboard shortcuts".into(), scroll: 0,
                 lines: ["Enter / Ctrl-S   Send input", "Ctrl-J / Alt-Enter   New line",
                     "Shift-Tab   Cycle mode (ask -> accept-edits -> read-only)",
+                    "/agents [name|id|main]   List session agents and switch transcript view",
                     "/mode [name]   Show or change the permission mode",
                     "/rules [list | remove <N> | clear]   Show active rules or manage session rules",
                     "/auto_compact [on|off|PERCENT]   Compaction switch and threshold",
@@ -286,6 +312,33 @@ impl App {
                         .and_then(|session| session.session_usage())
                     {
                         lines.extend(tars_core::usage::session_usage_lines(&usage));
+                    }
+                    if let Some(session) = entry.session.as_ref() {
+                        let agents = session.list_agents();
+                        let running_agents = agents
+                            .iter()
+                            .filter(|agent| agent.active_operation_id.is_some())
+                            .count();
+                        lines.push(format!(
+                            "Agents: {} total ({} running)",
+                            agents.len(),
+                            running_agents
+                        ));
+                        lines.push(format!(
+                            "Background tasks: {} running",
+                            session.active_finite_background_tasks()
+                        ));
+                        if let Some(viewed_id) = &entry.viewed_agent_id {
+                            let label = entry
+                                .viewed_agent_label
+                                .as_deref()
+                                .unwrap_or(viewed_id.as_str());
+                            lines.push(format!(
+                                "Viewing agent: {} ({})",
+                                tars_core::permission::escape_untrusted_text(label),
+                                tars_core::permission::escape_untrusted_text(viewed_id),
+                            ));
+                        }
                     }
                 }
                 lines.push(self.notice.clone());
@@ -688,6 +741,31 @@ impl App {
                         self.panel = None;
                         self.apply_permission_mode(chosen);
                         return;
+                    }
+                    _ => {}
+                }
+                self.panel = Some(panel);
+                return;
+            }
+            Panel::Agents { selected } => {
+                let agents = self
+                    .entries
+                    .get(self.selected)
+                    .and_then(|e| e.session.as_ref())
+                    .map(|s| s.list_agents())
+                    .unwrap_or_default();
+                let max = agents.len().saturating_sub(1);
+                *selected = (*selected).min(max);
+                match key.code {
+                    KeyCode::Up => *selected = selected.saturating_sub(1),
+                    KeyCode::Down => *selected = (*selected + 1).min(max),
+                    KeyCode::Enter if key.kind == KeyEventKind::Press => {
+                        if let Some(agent) = agents.get(*selected) {
+                            let agent_id = agent.agent_id.clone();
+                            self.panel = None;
+                            self.switch_viewed_agent(&agent_id);
+                            return;
+                        }
                     }
                     _ => {}
                 }

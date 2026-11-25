@@ -22,6 +22,7 @@ mod code_execution;
 mod command;
 mod compaction;
 mod history;
+mod multi_agent;
 mod prompt_cache;
 mod sessions;
 mod workspace_rules;

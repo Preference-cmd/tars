@@ -86,10 +86,16 @@ impl App {
         entry.tools = super::tool_progress::ToolView::default();
         entry.key.generation += 1;
         entry.approvals_rx = None;
+        entry.session_events_rx = None;
+        entry.active_bg_count = 0;
+        entry.viewed_agent_id = None;
+        entry.viewed_agent_label = None;
+        entry.viewed_agent_dirty = false;
         entry.approval_queue.clear();
         entry.approval_reason = None;
         entry.approval_scroll = 0;
         entry.workspace_rules_trust = None;
+        entry.workspace_agents_trust = None;
         entry.material_version = None;
         entry.requested_material_version = None;
         entry.material_retry_after = None;
@@ -120,6 +126,10 @@ impl App {
         let Some(session) = entry.session.clone() else {
             return;
         };
+        if entry.viewed_agent_id.is_some() {
+            entry.notice = "Viewing child agent (read-only); run /agents main to send input".into();
+            return;
+        }
         if entry.busy.is_some() {
             entry.notice = "Input retained; wait for the current session operation".into();
             return;
@@ -176,6 +186,10 @@ impl App {
         let Some(entry) = self.entries.get_mut(self.selected) else {
             return;
         };
+        if entry.busy.is_some() {
+            entry.notice = "Wait for the current session operation".into();
+            return;
+        }
         let Some(session) = entry.session.clone() else {
             return;
         };
@@ -192,14 +206,56 @@ impl App {
         );
         self.update_workspace_trust_guard();
     }
+    pub(super) fn trust_workspace_agents(&mut self) {
+        if !self.capacity() {
+            return;
+        }
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            return;
+        };
+        if entry.busy.is_some() {
+            entry.notice = "Wait for the current session operation".into();
+            return;
+        }
+        let Some(session) = entry.session.clone() else {
+            return;
+        };
+        entry.workspace_agents_trust = None;
+        entry.busy = Some("trusting workspace agents");
+        let key = entry.key.clone();
+        self.spawn_job(
+            Some(key.clone()),
+            super::jobs::JobKind::TrustWorkspaceAgents,
+            async move {
+                let result = session.trust_workspace_agents().await;
+                Message::WorkspaceAgentsTrusted(key, result)
+            },
+        );
+        self.update_workspace_trust_guard();
+    }
     pub(super) fn cancel(&mut self) {
         if let Some(entry) = self.entries.get_mut(self.selected)
-            && let (Some(session), Some(work)) = (&entry.session, &entry.work)
+            && let Some(session) = &entry.session
         {
-            entry.notice = match session.cancel(work) {
-                Ok(()) => "Cancellation requested; waiting for actual result".into(),
-                Err(e) => e.to_string(),
-            };
+            if let Some(active) = session.status().active_work {
+                if let Some(work) = entry.work.as_ref().filter(|w| **w == active) {
+                    entry.notice = match session.cancel(work) {
+                        Ok(()) => "Cancellation requested; waiting for actual result".into(),
+                        Err(e) => e.to_string(),
+                    };
+                } else {
+                    session.cancel_all_active();
+                    entry.notice = "Cancellation requested for active background tasks".into();
+                }
+            } else if session.active_finite_background_tasks() > 0 {
+                session.cancel_all_active();
+                entry.notice = "Cancellation requested for active background tasks".into();
+            } else if let Some(work) = &entry.work {
+                entry.notice = match session.cancel(work) {
+                    Ok(()) => "Cancellation requested; waiting for actual result".into(),
+                    Err(e) => e.to_string(),
+                };
+            }
         }
     }
     pub(super) fn close(&mut self, index: usize, policy: ClosePolicy) {
@@ -220,6 +276,7 @@ impl App {
         entry.approval_reason = None;
         entry.approval_scroll = 0;
         entry.workspace_rules_trust = None;
+        entry.workspace_agents_trust = None;
         let host = self.host.clone();
         let key = entry.key.clone();
         self.spawn_job(Some(key.clone()), super::jobs::JobKind::Close, async move {
@@ -283,6 +340,100 @@ impl App {
             },
         );
     }
+    pub(super) fn switch_viewed_agent(&mut self, target_agent_id: &str) {
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            return;
+        };
+        let Some(session) = entry.session.clone() else {
+            self.notice = "Open a session first to switch agents".into();
+            return;
+        };
+        if target_agent_id == entry.id() {
+            if entry.viewed_agent_id.is_none() {
+                entry.notice = "Already viewing main (entry) agent".into();
+                return;
+            }
+            entry.viewed_agent_id = None;
+            entry.viewed_agent_label = None;
+            entry.viewed_agent_dirty = false;
+            entry.requested_material_version = None;
+            entry.material_version = None;
+            entry.material_retry_after = None;
+            entry.refreshing = false;
+            entry.transcript = Arc::new(crate::transcript::Transcript::default());
+            entry.rows = None;
+            entry.scroll = None;
+            entry.scroll_anchor = None;
+            entry.clear_history();
+            entry.notice = "Switched to main (entry) agent".into();
+            self.dirty = true;
+            return;
+        }
+        let Some(snap) = session.agent_snapshot(target_agent_id) else {
+            entry.notice = format!(
+                "Agent '{}' is no longer available",
+                tars_core::permission::escape_untrusted_text(target_agent_id)
+            );
+            return;
+        };
+        entry.viewed_agent_id = Some(snap.agent_id);
+        entry.viewed_agent_label = Some(snap.name.clone());
+        entry.viewed_agent_dirty = true;
+        entry.refreshing = false;
+        entry.transcript = Arc::new(crate::transcript::Transcript::default());
+        entry.rows = None;
+        entry.scroll = None;
+        entry.scroll_anchor = None;
+        entry.clear_history();
+        entry.notice = format!(
+            "Viewing child agent {} (read-only); run /agents main to return",
+            tars_core::permission::escape_untrusted_text(&snap.name)
+        );
+        self.dirty = true;
+    }
+
+    pub(super) fn switch_agent_by_selector(&mut self, selector: &str) {
+        let Some(entry) = self.entries.get(self.selected) else {
+            self.notice = "Open a session first to switch agents".into();
+            return;
+        };
+        let Some(session) = entry.session.clone() else {
+            self.notice = "Open a session first to switch agents".into();
+            return;
+        };
+        let selector = selector.trim();
+        if selector == "main" || selector == entry.id() {
+            let root_id = entry.id().to_owned();
+            self.switch_viewed_agent(&root_id);
+            return;
+        }
+        let agents = session.list_agents();
+        if let Some(exact_id) = agents.iter().find(|a| a.agent_id == selector) {
+            let id = exact_id.agent_id.clone();
+            self.switch_viewed_agent(&id);
+            return;
+        }
+        let by_name: Vec<_> = agents.iter().filter(|a| a.name == selector).collect();
+        match by_name.as_slice() {
+            [] => {
+                self.notice = format!(
+                    "No agent matching '{}'",
+                    tars_core::permission::escape_untrusted_text(selector)
+                );
+            }
+            [single] => {
+                let id = single.agent_id.clone();
+                self.switch_viewed_agent(&id);
+            }
+            _ => {
+                self.notice = format!(
+                    "Multiple agents named '{}'; use agent_id or /agents panel",
+                    tars_core::permission::escape_untrusted_text(selector)
+                );
+            }
+        }
+    }
+
     pub(super) fn poll(&mut self) {
         self.poll_startup();
         self.poll_progress();
@@ -300,54 +451,102 @@ impl App {
                     entry.approval_scroll = 0;
                 }
             }
+            if drain_session_events(entry) {
+                self.dirty = true;
+            }
             if let Some(status) = self.host.lookup(&entry.id().into()) {
                 let label = format!("{:?} | {}", status.lifecycle, save_label(&status.save));
                 if entry.status != label {
                     entry.status = label;
                     self.dirty = true;
                 }
-                let version = match &status.save {
-                    SaveStatus::Saved {
-                        material_version, ..
-                    }
-                    | SaveStatus::Saving {
-                        material_version, ..
-                    }
-                    | SaveStatus::SaveBlocked {
-                        material_version, ..
-                    } => Some(material_version),
-                    _ => None,
-                };
-                if let (Some(session), Some(version)) = (entry.session.clone(), version)
-                    && entry.requested_material_version.as_ref() != Some(version)
-                    && entry
-                        .material_retry_after
-                        .is_none_or(|retry| tokio::time::Instant::now() >= retry)
-                    && !entry.refreshing
-                    && entry.busy != Some("closing")
-                    && entry.busy != Some("compacting")
-                    && self.jobs.len() < super::state::MAX_JOBS
-                {
-                    entry.refreshing = true;
-                    entry.requested_material_version = Some(version.clone());
-                    #[cfg(test)]
+                if let Some(agent_id) = entry.viewed_agent_id.clone() {
+                    if let Some(session) = entry.session.clone()
+                        && entry.viewed_agent_dirty
+                        && !entry.refreshing
+                        && entry.busy != Some("closing")
+                        && self.jobs.len() < super::state::MAX_JOBS
                     {
-                        entry.material_reads += 1;
+                        entry.viewed_agent_dirty = false;
+                        entry.refreshing = true;
+                        let key = entry.key.clone();
+                        let read_id = agent_id.clone();
+                        super::jobs::spawn_job(
+                            &mut self.jobs,
+                            Some(key.clone()),
+                            super::jobs::JobKind::AgentMaterials,
+                            async move {
+                                let result =
+                                    super::jobs::blocking(move || {
+                                        match session.read_agent_materials(&read_id) {
+                                        Ok(snap) => Ok(Arc::new(
+                                            crate::transcript::Transcript::from_materials(
+                                                &snap.context,
+                                                &snap.history,
+                                            ),
+                                        )),
+                                        Err(
+                                            tars_core::application::CoordinatorError::AgentBusy {
+                                                ..
+                                            },
+                                        ) => Err(super::jobs::AgentMaterialsError::Busy),
+                                        Err(error) => Err(super::jobs::AgentMaterialsError::Failed(
+                                            error.to_string(),
+                                        )),
+                                    }
+                                    })
+                                    .await
+                                    .unwrap_or_else(|e| {
+                                        Err(super::jobs::AgentMaterialsError::Failed(e.to_string()))
+                                    });
+                                Message::AgentMaterials(key, agent_id, result)
+                            },
+                        );
                     }
-                    let key = entry.key.clone();
-                    super::jobs::spawn_job(
-                        &mut self.jobs,
-                        Some(key.clone()),
-                        super::jobs::JobKind::Materials,
-                        async move {
-                            let result = super::jobs::blocking(move || {
-                                super::jobs::MaterialView::read(&session)
-                            })
-                            .await
-                            .unwrap_or_else(|e| Err(e.to_string()));
-                            Message::Materials(key, result)
-                        },
-                    );
+                } else {
+                    let version = match &status.save {
+                        SaveStatus::Saved {
+                            material_version, ..
+                        }
+                        | SaveStatus::Saving {
+                            material_version, ..
+                        }
+                        | SaveStatus::SaveBlocked {
+                            material_version, ..
+                        } => Some(material_version),
+                        _ => None,
+                    };
+                    if let (Some(session), Some(version)) = (entry.session.clone(), version)
+                        && entry.requested_material_version.as_ref() != Some(version)
+                        && entry
+                            .material_retry_after
+                            .is_none_or(|retry| tokio::time::Instant::now() >= retry)
+                        && !entry.refreshing
+                        && entry.busy != Some("closing")
+                        && entry.busy != Some("compacting")
+                        && self.jobs.len() < super::state::MAX_JOBS
+                    {
+                        entry.refreshing = true;
+                        entry.requested_material_version = Some(version.clone());
+                        #[cfg(test)]
+                        {
+                            entry.material_reads += 1;
+                        }
+                        let key = entry.key.clone();
+                        super::jobs::spawn_job(
+                            &mut self.jobs,
+                            Some(key.clone()),
+                            super::jobs::JobKind::Materials,
+                            async move {
+                                let result = super::jobs::blocking(move || {
+                                    super::jobs::MaterialView::read(&session)
+                                })
+                                .await
+                                .unwrap_or_else(|e| Err(e.to_string()));
+                                Message::Materials(key, result)
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -421,7 +620,11 @@ impl App {
         let Some(entry) = self.entries.get_mut(self.selected) else {
             return;
         };
-        if entry.session.is_none() || entry.rows.is_none() || entry.wrapping {
+        if entry.session.is_none()
+            || entry.viewed_agent_id.is_some()
+            || entry.rows.is_none()
+            || entry.wrapping
+        {
             return;
         }
         if entry.history.loading() {
@@ -485,6 +688,10 @@ impl App {
             self.notice = "Open a session first to compact its context".into();
             return;
         };
+        if entry.viewed_agent_id.is_some() {
+            entry.notice = "Viewing child agent (read-only); run /agents main to compact".into();
+            return;
+        }
         if entry.busy.is_some() {
             entry.notice = "Wait for the current session operation".into();
             return;
@@ -619,6 +826,110 @@ impl App {
         };
         self.apply_permission_mode(next_mode);
     }
+}
+
+fn drain_session_events(entry: &mut Entry) -> bool {
+    const MAX_SESSION_EVENTS_PER_TICK: usize = 64;
+    let Some(mut rx) = entry.session_events_rx.take() else {
+        return false;
+    };
+    let mut dirty = false;
+    let mut closed = false;
+    for _ in 0..MAX_SESSION_EVENTS_PER_TICK {
+        match rx.try_recv() {
+            Ok(ev) => {
+                use tars_core::events::{OperationStatus, SessionEvent};
+                match ev.as_ref() {
+                    SessionEvent::AgentRegistered { .. }
+                    | SessionEvent::BackgroundTaskChanged { .. }
+                    | SessionEvent::InboxEventChanged { .. }
+                    | SessionEvent::SessionLifecycleChanged { .. } => {
+                        if let Some(session) = &entry.session {
+                            entry.active_bg_count = session.active_finite_background_tasks();
+                        }
+                    }
+                    SessionEvent::OperationStateChanged {
+                        target_agent_id,
+                        operation_id,
+                        status,
+                        ..
+                    } => {
+                        if let Some(session) = &entry.session {
+                            entry.active_bg_count = session.active_finite_background_tasks();
+                        }
+                        if target_agent_id == entry.id()
+                            && entry
+                                .work
+                                .as_ref()
+                                .is_none_or(|w| w.turn_id.0 != *operation_id)
+                        {
+                            if *status == OperationStatus::Running {
+                                entry.execution = "Running (background wakeup)".into();
+                            } else if status.is_terminal() {
+                                entry.execution = match status {
+                                    OperationStatus::Completed => {
+                                        "Completed (background wakeup)".into()
+                                    }
+                                    other => format!("Background wakeup: {other}"),
+                                };
+                                entry.requested_material_version = None;
+                            }
+                        }
+                        if entry.viewed_agent_id.as_deref() == Some(target_agent_id.as_str()) {
+                            entry.viewed_agent_dirty = true;
+                        }
+                    }
+                    SessionEvent::AutoWakeupLimitReached {
+                        agent_id,
+                        max_auto_wakeups,
+                        ..
+                    } => {
+                        if agent_id == entry.id() {
+                            entry.notice = format!(
+                                "Auto-wakeup limit ({max_auto_wakeups}) reached; remaining notifications queued for next turn"
+                            );
+                        } else {
+                            entry.notice = format!(
+                                "Agent {} reached auto-wakeup limit ({max_auto_wakeups}); remaining notifications queued",
+                                tars_core::permission::escape_untrusted_text(agent_id)
+                            );
+                        }
+                    }
+                    SessionEvent::AgentProgress { .. } => {}
+                }
+                dirty = true;
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                if let Some(session) = &entry.session {
+                    entry.active_bg_count = session.active_finite_background_tasks();
+                    if entry.execution == "Running (background wakeup)"
+                        && session.status().active_work.is_none()
+                        && session
+                            .agent_snapshot(entry.id())
+                            .is_none_or(|snap| snap.active_operation_id.is_none())
+                    {
+                        entry.execution = "Completed (background wakeup)".into();
+                        entry.requested_material_version = None;
+                    }
+                    if let Some(agent_id) = entry.viewed_agent_id.as_deref() {
+                        entry.viewed_agent_label =
+                            session.agent_snapshot(agent_id).map(|snap| snap.name);
+                        entry.viewed_agent_dirty = true;
+                    }
+                }
+                dirty = true;
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                closed = true;
+                break;
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+        }
+    }
+    if !closed {
+        entry.session_events_rx = Some(rx);
+    }
+    dirty
 }
 
 #[cfg(test)]

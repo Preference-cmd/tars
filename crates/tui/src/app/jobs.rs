@@ -53,6 +53,11 @@ pub(super) struct CompactedReload {
     pub(super) view: MaterialView,
 }
 
+pub(super) enum AgentMaterialsError {
+    Busy,
+    Failed(String),
+}
+
 pub(super) enum Message {
     RepairInspected(
         Key,
@@ -73,6 +78,7 @@ pub(super) enum Message {
     Listed(Result<Vec<SessionListing>, ApplicationError>),
     Opened(Key, Result<ManagedSession, ApplicationError>),
     WorkspaceRulesTrusted(Key, Result<usize, ApplicationError>),
+    WorkspaceAgentsTrusted(Key, Result<usize, ApplicationError>),
     Finished(
         Key,
         WorkRef,
@@ -85,6 +91,7 @@ pub(super) enum Message {
         >,
     ),
     Materials(Key, Result<MaterialView, String>),
+    AgentMaterials(Key, String, Result<Arc<Transcript>, AgentMaterialsError>),
     HistoryLoaded(Key, String, Result<HistoryRecord, String>),
     ToolArtifactsLoaded(Key, Option<MaterialVersion>, Vec<String>, usize),
     Compacted(Key, Result<CompactedReload, String>),
@@ -107,11 +114,13 @@ pub(super) enum JobKind {
     List,
     Open,
     TrustWorkspaceRules,
+    TrustWorkspaceAgents,
     Work,
     Close,
     Retry,
     Export,
     Materials,
+    AgentMaterials,
     HistoryRead,
     ToolArtifacts,
     Compact,
@@ -299,6 +308,11 @@ impl App {
                     match result {
                         Ok(session) => {
                             entry.approvals_rx = Some(session.connect_approvals());
+                            entry.session_events_rx = Some(session.subscribe_events());
+                            entry.active_bg_count = session.active_finite_background_tasks();
+                            entry.viewed_agent_id = None;
+                            entry.viewed_agent_label = None;
+                            entry.viewed_agent_dirty = false;
                             entry.approval_queue.clear();
                             entry.approval_reason = None;
                             entry.approval_scroll = 0;
@@ -311,6 +325,10 @@ impl App {
                             entry.workspace_rules_trust =
                                 super::state::WorkspaceRulesTrustPrompt::from_report(
                                     &report.workspace_rules,
+                                );
+                            entry.workspace_agents_trust =
+                                super::state::WorkspaceAgentsTrustPrompt::from_report(
+                                    &report.workspace_agents,
                                 );
                             let command_notice = session
                                 .command_status()
@@ -345,6 +363,19 @@ impl App {
                     };
                 }
             }
+            Message::WorkspaceAgentsTrusted(key, result) => {
+                if let Some(entry) = self.entry_mut(&key) {
+                    if entry.busy == Some("trusting workspace agents") {
+                        entry.busy = None;
+                    }
+                    entry.notice = match result {
+                        Ok(count) => {
+                            format!("Trusted workspace agents; {count} preset(s) active")
+                        }
+                        Err(error) => format!("Failed to trust workspace agents: {error}"),
+                    };
+                }
+            }
             Message::Finished(key, work, result) => {
                 if let Some(entry) = self.entry_mut(&key)
                     && entry.work.as_ref() == Some(&work)
@@ -375,6 +406,11 @@ impl App {
             }
             Message::Materials(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
+                    // Discard stale root reads when the user has switched to a child agent view.
+                    if entry.viewed_agent_id.is_some() {
+                        entry.requested_material_version = None;
+                        return;
+                    }
                     entry.refreshing = false;
                     // A late material read for an instance that already closed
                     // must not rebuild a conversation view with no session.
@@ -430,6 +466,50 @@ impl App {
                     }
                 }
             }
+            Message::AgentMaterials(key, agent_id, result) => {
+                if let Some(entry) = self.entry_mut(&key) {
+                    if entry.session.is_none()
+                        || entry.viewed_agent_id.as_deref() != Some(agent_id.as_str())
+                    {
+                        return;
+                    }
+                    entry.refreshing = false;
+                    if let Some(session) = &entry.session {
+                        entry.viewed_agent_label =
+                            session.agent_snapshot(&agent_id).map(|snap| snap.name);
+                    }
+                    match result {
+                        Ok(transcript) => {
+                            entry.transcript = transcript;
+                            entry.rows = None;
+                            if entry.notice.starts_with("Agent materials unavailable")
+                                || (entry.notice.starts_with("Child agent ")
+                                    && entry
+                                        .notice
+                                        .contains("is running; materials will load when idle"))
+                            {
+                                entry.notice.clear();
+                            }
+                        }
+                        Err(AgentMaterialsError::Busy) => {
+                            let label = entry
+                                .viewed_agent_label
+                                .as_deref()
+                                .unwrap_or(agent_id.as_str());
+                            entry.notice = format!(
+                                "Child agent {} is running; materials will load when idle",
+                                tars_core::permission::escape_untrusted_text(label)
+                            );
+                        }
+                        Err(AgentMaterialsError::Failed(error)) => {
+                            entry.notice = format!(
+                                "Agent materials unavailable: {}",
+                                tars_core::permission::escape_untrusted_text(&error)
+                            );
+                        }
+                    }
+                }
+            }
             Message::HistoryLoaded(key, record, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     match result {
@@ -469,27 +549,32 @@ impl App {
                         Ok(reload) => {
                             let outcome = reload.outcome;
                             let view = reload.view;
-                            let rebuilt = entry.history.refresh(
-                                view.history,
-                                view.prefix,
-                                &view.live_tail_ids,
-                                &view.records,
-                            );
-                            if rebuilt {
-                                entry.capture_scroll_anchor();
-                                entry.history_anchor = None;
-                            }
-                            entry.material_version = Some(view.version.clone());
-                            entry.requested_material_version = Some(view.version);
-                            entry.material_retry_after = None;
-                            entry.transcript = view.transcript;
-                            entry.rows = None;
-                            entry.notice = format!(
+                            let notice = format!(
                                 "Compacted ({}, {} → {} tokens); the replaced conversation remains above",
                                 outcome.trigger.name(),
                                 super::history::estimate_label(outcome.estimate_before),
                                 super::history::estimate_label(outcome.estimate_after),
                             );
+                            if entry.viewed_agent_id.is_none() {
+                                let rebuilt = entry.history.refresh(
+                                    view.history,
+                                    view.prefix,
+                                    &view.live_tail_ids,
+                                    &view.records,
+                                );
+                                if rebuilt {
+                                    entry.capture_scroll_anchor();
+                                    entry.history_anchor = None;
+                                }
+                                entry.material_version = Some(view.version.clone());
+                                entry.requested_material_version = Some(view.version);
+                                entry.material_retry_after = None;
+                                entry.transcript = view.transcript;
+                                entry.rows = None;
+                            } else {
+                                entry.requested_material_version = None;
+                            }
+                            entry.notice = notice;
                         }
                         Err(error) => entry.notice = format!("Compaction failed: {error}"),
                     }
@@ -568,7 +653,19 @@ impl App {
                     entry.approval_scroll = 0;
                     match &result {
                         Ok(outcome) => {
+                            let was_viewing_child = entry.viewed_agent_id.take().is_some();
                             entry.session = None;
+                            entry.session_events_rx = None;
+                            entry.active_bg_count = 0;
+                            entry.viewed_agent_label = None;
+                            entry.viewed_agent_dirty = false;
+                            if was_viewing_child {
+                                entry.transcript = Arc::new(Transcript::default());
+                                entry.rows = None;
+                                entry.scroll = None;
+                            }
+                            entry.workspace_rules_trust = None;
+                            entry.workspace_agents_trust = None;
                             entry.prepared = None;
                             entry.work = None;
                             entry.execution = "No work in this instance".into();
@@ -634,7 +731,7 @@ impl App {
                         JobKind::Startup | JobKind::StartupInstall => {
                             unreachable!("handled before the entry lookup")
                         }
-                        JobKind::Materials => {
+                        JobKind::Materials | JobKind::AgentMaterials => {
                             entry.refreshing = false;
                             entry.requested_material_version = None;
                             entry.material_retry_after = Some(
@@ -672,6 +769,10 @@ impl App {
                         }
                         JobKind::TrustWorkspaceRules => {
                             clear_busy(entry, "trusting workspace rules");
+                            entry.notice = message.clone();
+                        }
+                        JobKind::TrustWorkspaceAgents => {
+                            clear_busy(entry, "trusting workspace agents");
                             entry.notice = message.clone();
                         }
                         JobKind::Close => {

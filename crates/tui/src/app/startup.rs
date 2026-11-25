@@ -522,7 +522,8 @@ impl App {
                 .map(|dir| dir.join("permissions.toml"));
             self.host = tars_core::application::SessionHost::new(Some(self.options.store.clone()))
                 .with_external_tools(tools.clone())
-                .with_user_rules_path(user_rules_path);
+                .with_user_rules_path(user_rules_path)
+                .with_model_profiles(self.options.config.model_profiles());
             self.external_tools = Some(tools);
         }
         self.search_reason = reason;

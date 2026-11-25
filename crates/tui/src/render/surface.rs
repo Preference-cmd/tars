@@ -50,7 +50,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     }
     let area = frame.area();
     let pending = app.entries.get(app.selected).is_some_and(|entry| {
-        entry.workspace_rules_trust.is_some() || !entry.approval_queue.is_empty()
+        entry.workspace_rules_trust.is_some()
+            || entry.workspace_agents_trust.is_some()
+            || !entry.approval_queue.is_empty()
     });
     let approval_visible =
         pending && app.panel.is_none() && app.form.is_none() && app.confirmation.is_none();
@@ -93,10 +95,21 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                 entry.map_or_else(
                     || "Local sessions  ·  /new to begin".into(),
                     |e| {
-                        format!(
-                            "Session {}  ·  /sessions to switch",
-                            e.id().get(..8).unwrap_or(e.id())
-                        )
+                        let short = e.id().get(..8).unwrap_or(e.id());
+                        if let Some(agent_id) = &e.viewed_agent_id {
+                            let label = e
+                                .viewed_agent_label
+                                .as_deref()
+                                .unwrap_or(agent_id.as_str());
+                            format!(
+                                "Session {short}  ·  agent: {} (read-only)  ·  /agents main · /sessions to switch",
+                                tars_core::permission::escape_untrusted_text(label),
+                            )
+                        } else if e.session.is_some() {
+                            format!("Session {short}  ·  /sessions to switch  ·  /agents")
+                        } else {
+                            format!("Session {short}  ·  /sessions to switch")
+                        }
                     },
                 ),
                 Style::default().fg(MUTED),
@@ -130,6 +143,20 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     }
     if app.panel.is_none() && entry.is_some_and(|e| e.workspace_rules_trust.is_some()) {
         super::panels::workspace_rules_trust(
+            frame,
+            app,
+            entry.unwrap(),
+            Rect {
+                y: regions[1].y,
+                height: regions[1].height + regions[2].height,
+                ..body
+            },
+        );
+        footer(frame, app, regions[3]);
+        return;
+    }
+    if app.panel.is_none() && entry.is_some_and(|e| e.workspace_agents_trust.is_some()) {
+        super::panels::workspace_agents_trust(
             frame,
             app,
             entry.unwrap(),
@@ -215,6 +242,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                 lines.push(Line::styled(warning, Style::default().fg(Color::Yellow)));
             }
         }
+        let show_live_root = entry.viewed_agent_id.is_none();
         let tool_lines = entry.tools.lines();
         for index in start..entry.conversation_len() {
             if lines.len() >= height {
@@ -228,11 +256,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                 let rows = entry.rows.as_ref().unwrap();
                 let text = &rows.transcript.text[rows.ranges[index - history].clone()];
                 lines.push(Line::styled(text, conversation_style(text)));
-            } else if index >= committed + entry.preview.line_count() {
+            } else if show_live_root && index >= committed + entry.preview.line_count() {
                 if let Some(text) = tool_lines.get(index - committed - entry.preview.line_count()) {
                     lines.push(Line::styled(text.clone(), Style::default().fg(MUTED)));
                 }
-            } else {
+            } else if show_live_root {
                 let offset = index - committed;
                 let text = entry.preview.line(offset);
                 let style = if offset == 0 {
@@ -246,7 +274,33 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             }
         }
         frame.render_widget(Paragraph::new(lines), regions[1]);
-        if entry.transcript.text.is_empty()
+        if entry.viewed_agent_id.is_some() && entry.transcript.text.is_empty() {
+            let label = entry
+                .viewed_agent_label
+                .as_deref()
+                .or(entry.viewed_agent_id.as_deref())
+                .unwrap_or("child");
+            frame.render_widget(
+                Paragraph::new(vec![
+                    Line::default(),
+                    Line::styled(
+                        format!(
+                            "Child agent {} (read-only)",
+                            tars_core::permission::escape_untrusted_text(label)
+                        ),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Line::default(),
+                    Line::from("Waiting for idle materials, or no conversation recorded yet."),
+                    Line::styled(
+                        "Run /agents main to return to the entry agent.",
+                        Style::default().fg(MUTED),
+                    ),
+                ])
+                .wrap(Wrap { trim: false }),
+                regions[1],
+            );
+        } else if entry.transcript.text.is_empty()
             && entry.history.is_empty()
             && !entry.preview.is_active()
             && entry.tools.calls.is_empty()
@@ -274,7 +328,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         frame.render_widget(&entry.editor, editor_area);
         if !entry.has_draft() && app.panel.is_none() {
             frame.render_widget(
-                Paragraph::new(if entry.session.is_some() {
+                Paragraph::new(if entry.viewed_agent_id.is_some() {
+                    "Read-only child agent view · /agents to return to main"
+                } else if entry.session.is_some() {
                     "Ask something…"
                 } else {
                     "/open this session, or /new"
@@ -313,10 +369,32 @@ fn conversation_style(text: &str) -> Style {
         || text.starts_with("this history record cannot be read")
         || text.starts_with("start of conversation")
         || text.starts_with("● Context summary")
+        || text.starts_with("● Task notification")
     {
         Style::default().fg(MUTED)
     } else {
         Style::default()
+    }
+}
+
+pub(super) fn approval_agent_prefix(
+    origin: &tars_core::permission::ApprovalOrigin,
+    entry_id: &str,
+) -> String {
+    let is_child_id = !origin.agent_id.is_empty() && origin.agent_id != entry_id;
+    let is_child_name = !origin.agent_name.is_empty() && origin.agent_name != "main";
+    if is_child_id || is_child_name {
+        let name = if origin.agent_name.is_empty() {
+            origin.agent_id.as_str()
+        } else {
+            origin.agent_name.as_str()
+        };
+        format!(
+            "[agent: {}] ",
+            tars_core::permission::escape_untrusted_text(name)
+        )
+    } else {
+        String::new()
     }
 }
 
@@ -456,6 +534,22 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Style::default().fg(if over { Color::Yellow } else { MUTED }),
             ));
         }
+        if e.active_bg_count > 0 {
+            spans.push(Span::styled(
+                format!(" · bg {} running", e.active_bg_count),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if let Some(agent_id) = &e.viewed_agent_id {
+            let name = e.viewed_agent_label.as_deref().unwrap_or(agent_id.as_str());
+            let escaped_name = tars_core::permission::escape_untrusted_text(name);
+            spans.push(Span::styled(
+                format!(" · viewing agent: {escaped_name} (read-only)"),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ));
+        }
         frame.render_widget(Paragraph::new(Line::from(spans)), sections[1]);
     } else {
         frame.render_widget(
@@ -483,11 +577,14 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let self_waiting = if (app.panel.is_some() || app.form.is_some() || app.confirmation.is_some())
         && entry.is_some_and(|e| !e.approval_queue.is_empty())
     {
-        entry.and_then(|e| e.approval_queue.front()).map(|req| {
-            format!(
-                "{} is waiting for confirmation · Esc to return",
-                tars_core::permission::escape_untrusted_text(&req.tool_name)
-            )
+        entry.and_then(|e| {
+            e.approval_queue.front().map(|req| {
+                let prefix = approval_agent_prefix(&req.origin, e.id());
+                format!(
+                    "{prefix}{} is waiting for confirmation · Esc to return",
+                    tars_core::permission::escape_untrusted_text(&req.tool_name)
+                )
+            })
         })
     } else {
         None

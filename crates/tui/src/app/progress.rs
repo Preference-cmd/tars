@@ -134,7 +134,8 @@ impl Entry {
         let committed = self.committed_rows();
         let base_end = total.saturating_sub(height);
         let headings = 1 + usize::from(self.preview.warning().is_some());
-        let sticky_at = |start| self.preview.is_active() && start > committed;
+        let sticky_at =
+            |start| self.viewed_agent_id.is_none() && self.preview.is_active() && start > committed;
         // A one-row viewport combines label and tail text in the same row.
         // Short viewports reserve at most height-1 rows to retain body text.
         let reserve = |start| {
@@ -164,7 +165,11 @@ impl Entry {
     }
 
     pub fn conversation_len(&self) -> usize {
-        self.committed_rows() + self.preview.line_count() + self.tools.lines().len()
+        if self.viewed_agent_id.is_some() {
+            self.committed_rows()
+        } else {
+            self.committed_rows() + self.preview.line_count() + self.tools.lines().len()
+        }
     }
 }
 impl App {

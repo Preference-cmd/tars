@@ -78,6 +78,106 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
             );
             return;
         }
+        Panel::Agents { selected } => {
+            let entry = app.entries.get(app.selected);
+            let agents = entry
+                .and_then(|e| e.session.as_ref())
+                .map(|s| s.list_agents())
+                .unwrap_or_default();
+            let regions = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Min(1),
+                Constraint::Length(2),
+            ])
+            .split(area);
+            frame.render_widget(
+                Paragraph::new(format!("Session agents ({})", agents.len()))
+                    .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                regions[0],
+            );
+            if agents.is_empty() {
+                frame.render_widget(
+                    Paragraph::new("No active agents in this session.")
+                        .wrap(Wrap { trim: false })
+                        .style(Style::default().fg(MUTED)),
+                    regions[1],
+                );
+            } else {
+                let items: Vec<_> = agents
+                    .iter()
+                    .map(|agent| {
+                        let is_entry = entry.is_some_and(|e| agent.agent_id == e.id());
+                        let is_viewing = entry.is_some_and(|e| match &e.viewed_agent_id {
+                            None => agent.agent_id == e.id(),
+                            Some(id) => *id == agent.agent_id,
+                        });
+                        let escaped_name =
+                            tars_core::permission::escape_untrusted_text(&agent.name);
+                        let name_label = if is_entry && agent.name == "main" {
+                            "main (entry)".to_owned()
+                        } else if is_entry {
+                            format!("{escaped_name} (entry)")
+                        } else {
+                            escaped_name
+                        };
+                        let preset_part = agent
+                            .preset_name
+                            .as_deref()
+                            .map(|preset| {
+                                format!(
+                                    " · preset {}",
+                                    tars_core::permission::escape_untrusted_text(preset)
+                                )
+                            })
+                            .unwrap_or_default();
+                        let viewing_part = if is_viewing { " · (viewing)" } else { "" };
+                        let status_part = if agent.active_operation_id.is_some() {
+                            "running"
+                        } else {
+                            "idle"
+                        };
+                        let pending_part = if agent.pending_inbox_count > 0 {
+                            format!(" · pending {}", agent.pending_inbox_count)
+                        } else {
+                            String::new()
+                        };
+                        let short_id = agent.agent_id.get(..8).unwrap_or(&agent.agent_id);
+                        let detail_style = if agent.active_operation_id.is_some() {
+                            Style::default().fg(Color::Cyan)
+                        } else if agent.pending_inbox_count > 0 {
+                            Style::default().fg(Color::Yellow)
+                        } else {
+                            Style::default().fg(MUTED)
+                        };
+                        ListItem::new(vec![
+                            Line::from(format!("{name_label}{preset_part}{viewing_part}")),
+                            Line::styled(
+                                format!(
+                                    "  {short_id} · {} · {status_part}{pending_part}",
+                                    agent.interaction
+                                ),
+                                detail_style,
+                            ),
+                        ])
+                    })
+                    .collect();
+                let mut state =
+                    ListState::default().with_selected(Some((*selected).min(items.len() - 1)));
+                frame.render_stateful_widget(
+                    List::new(items)
+                        .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+                        .highlight_symbol("❯ "),
+                    regions[1],
+                    &mut state,
+                );
+            }
+            frame.render_widget(
+                Paragraph::new("↑↓ select · Enter switch view · Esc return")
+                    .style(Style::default().fg(MUTED)),
+                regions[2],
+            );
+            return;
+        }
         Panel::Repair(panel) => {
             let regions = Layout::vertical([
                 Constraint::Length(2),
@@ -382,6 +482,9 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
         }
     };
 
+    let agent_prefix = super::surface::approval_agent_prefix(&req.origin, entry.id());
+    let title_line = format!("{agent_prefix}{title_line}");
+
     let current_mode = entry
         .session
         .as_ref()
@@ -567,8 +670,6 @@ pub(super) fn workspace_rules_trust(
     entry: &crate::app::Entry,
     area: Rect,
 ) {
-    use crate::app::WorkspaceTrustLineKind;
-
     frame.render_widget(Clear, area);
     let Some(prompt) = entry.workspace_rules_trust.as_ref() else {
         return;
@@ -597,6 +698,61 @@ pub(super) fn workspace_rules_trust(
     header_lines.push(Line::from(
         "Pending allow rules (currently ignored; deny/ask rules are already active):",
     ));
+    render_workspace_trust_prompt(
+        frame,
+        app,
+        area,
+        header_lines,
+        &prompt.body_lines,
+        prompt.scroll,
+    );
+}
+
+pub(super) fn workspace_agents_trust(
+    frame: &mut Frame<'_>,
+    app: &App,
+    entry: &crate::app::Entry,
+    area: Rect,
+) {
+    frame.render_widget(Clear, area);
+    let Some(prompt) = entry.workspace_agents_trust.as_ref() else {
+        return;
+    };
+    let header_lines = vec![
+        Line::styled(
+            "Trust workspace agent presets?",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!(
+                "Directory: {}",
+                tars_core::permission::escape_untrusted_text(
+                    &prompt.agents_dir.display().to_string()
+                )
+            ),
+            Style::default().fg(MUTED),
+        ),
+        Line::from("Pending workspace presets from .tars/agents/*.md (currently excluded):"),
+    ];
+    render_workspace_trust_prompt(
+        frame,
+        app,
+        area,
+        header_lines,
+        &prompt.body_lines,
+        prompt.scroll,
+    );
+}
+
+fn render_workspace_trust_prompt(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    header_lines: Vec<Line<'_>>,
+    body_lines: &[crate::app::WorkspaceTrustLine],
+    scroll: usize,
+) {
+    use crate::app::WorkspaceTrustLineKind;
 
     let header_len = header_lines.len() as u16;
     let regions = Layout::vertical([
@@ -609,11 +765,8 @@ pub(super) fn workspace_rules_trust(
     frame.render_widget(Paragraph::new(header_lines), regions[0]);
 
     let body_height = usize::from(regions[1].height.saturating_sub(2));
-    let scroll = prompt
-        .scroll
-        .min(prompt.body_lines.len().saturating_sub(body_height));
-    let visible: Vec<Line> = prompt
-        .body_lines
+    let scroll = scroll.min(body_lines.len().saturating_sub(body_height));
+    let visible: Vec<Line> = body_lines
         .iter()
         .skip(scroll)
         .take(body_height)

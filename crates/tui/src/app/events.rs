@@ -102,7 +102,7 @@ impl App {
             if let Some(form) = &mut self.form {
                 input::paste(&mut form.fields[form.selected], text, false);
             } else if let Some(entry) = self.entries.get_mut(self.selected) {
-                if entry.workspace_rules_trust.is_some() {
+                if entry.workspace_rules_trust.is_some() || entry.workspace_agents_trust.is_some() {
                     return;
                 }
                 if let Some(reason) = &mut entry.approval_reason {
@@ -164,67 +164,17 @@ impl App {
             self.update_workspace_trust_guard();
             return;
         }
-        if let Some(entry) = self.entries.get_mut(self.selected)
-            && entry.workspace_rules_trust.is_some()
-        {
-            if key.kind != KeyEventKind::Press {
-                return;
+        let trust_kind = self.entries.get(self.selected).and_then(|entry| {
+            if entry.workspace_rules_trust.is_some() {
+                Some(TrustPromptKind::Rules)
+            } else if entry.workspace_agents_trust.is_some() {
+                Some(TrustPromptKind::Agents)
+            } else {
+                None
             }
-            if self.too_small || self.view_height < 19 || self.view_width.saturating_add(4) < 30 {
-                if key.code == KeyCode::Esc {
-                    entry.workspace_rules_trust = None;
-                    entry.notice =
-                        "Declined workspace allow rules; only deny/ask and user rules are active"
-                            .into();
-                    self.update_workspace_trust_guard();
-                }
-                return;
-            }
-            if is_workspace_trust_guarded {
-                if let Some(prompt) = entry.workspace_rules_trust.as_mut() {
-                    scroll_workspace_trust(prompt, key.code);
-                }
-                return;
-            }
-            if input::control(key, 'w') {
-                self.request_close();
-                return;
-            }
-            match key.code {
-                KeyCode::Enter | KeyCode::Char('y' | 'Y')
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    self.trust_workspace_rules();
-                    return;
-                }
-                KeyCode::Char('n' | 'N')
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    entry.workspace_rules_trust = None;
-                    entry.notice =
-                        "Declined workspace allow rules; only deny/ask and user rules are active"
-                            .into();
-                    self.update_workspace_trust_guard();
-                    return;
-                }
-                KeyCode::Esc => {
-                    entry.workspace_rules_trust = None;
-                    entry.notice =
-                        "Declined workspace allow rules; only deny/ask and user rules are active"
-                            .into();
-                    self.update_workspace_trust_guard();
-                    return;
-                }
-                code => {
-                    if let Some(prompt) = entry.workspace_rules_trust.as_mut() {
-                        scroll_workspace_trust(prompt, code);
-                    }
-                }
-            }
+        });
+        if let Some(kind) = trust_kind {
+            self.workspace_trust_key(key, kind, is_workspace_trust_guarded);
             return;
         }
         if let Some(entry) = self.entries.get_mut(self.selected)
@@ -486,13 +436,98 @@ impl App {
     }
 }
 
-fn scroll_workspace_trust(prompt: &mut super::state::WorkspaceRulesTrustPrompt, code: KeyCode) {
-    let max = prompt.body_lines.len().saturating_sub(1);
-    prompt.scroll = match code {
-        KeyCode::Up => prompt.scroll.saturating_sub(1),
-        KeyCode::Down => prompt.scroll.saturating_add(1).min(max),
-        KeyCode::PageUp => prompt.scroll.saturating_sub(5),
-        KeyCode::PageDown => prompt.scroll.saturating_add(5).min(max),
+#[derive(Clone, Copy)]
+enum TrustPromptKind {
+    Rules,
+    Agents,
+}
+
+impl App {
+    fn workspace_trust_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        kind: TrustPromptKind,
+        is_guarded: bool,
+    ) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        if self.too_small || self.view_height < 19 || self.view_width.saturating_add(4) < 30 {
+            if key.code == KeyCode::Esc {
+                self.decline_workspace_trust(kind);
+            }
+            return;
+        }
+        if is_guarded {
+            if let Some(entry) = self.entries.get_mut(self.selected) {
+                scroll_workspace_trust(entry, kind, key.code);
+            }
+            return;
+        }
+        if input::control(key, 'w') {
+            self.request_close();
+            return;
+        }
+        let no_ctrl_alt = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y' | 'Y') if no_ctrl_alt => match kind {
+                TrustPromptKind::Rules => self.trust_workspace_rules(),
+                TrustPromptKind::Agents => self.trust_workspace_agents(),
+            },
+            KeyCode::Char('n' | 'N') if no_ctrl_alt => self.decline_workspace_trust(kind),
+            KeyCode::Esc => self.decline_workspace_trust(kind),
+            code => {
+                if let Some(entry) = self.entries.get_mut(self.selected) {
+                    scroll_workspace_trust(entry, kind, code);
+                }
+            }
+        }
+    }
+
+    fn decline_workspace_trust(&mut self, kind: TrustPromptKind) {
+        if let Some(entry) = self.entries.get_mut(self.selected) {
+            match kind {
+                TrustPromptKind::Rules => {
+                    entry.workspace_rules_trust = None;
+                    entry.notice =
+                        "Declined workspace allow rules; only deny/ask and user rules are active"
+                            .into();
+                }
+                TrustPromptKind::Agents => {
+                    entry.workspace_agents_trust = None;
+                    entry.notice =
+                        "Declined workspace agent presets; only built-in/user/configured agents are active"
+                            .into();
+                }
+            }
+        }
+        self.update_workspace_trust_guard();
+    }
+}
+
+fn scroll_workspace_trust(entry: &mut super::Entry, kind: TrustPromptKind, code: KeyCode) {
+    let (len, scroll) = match kind {
+        TrustPromptKind::Rules => {
+            let Some(prompt) = entry.workspace_rules_trust.as_mut() else {
+                return;
+            };
+            (prompt.body_lines.len(), &mut prompt.scroll)
+        }
+        TrustPromptKind::Agents => {
+            let Some(prompt) = entry.workspace_agents_trust.as_mut() else {
+                return;
+            };
+            (prompt.body_lines.len(), &mut prompt.scroll)
+        }
+    };
+    let max = len.saturating_sub(1);
+    *scroll = match code {
+        KeyCode::Up => scroll.saturating_sub(1),
+        KeyCode::Down => scroll.saturating_add(1).min(max),
+        KeyCode::PageUp => scroll.saturating_sub(5),
+        KeyCode::PageDown => scroll.saturating_add(5).min(max),
         _ => return,
     };
 }

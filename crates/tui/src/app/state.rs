@@ -79,6 +79,7 @@ pub(crate) struct VisibleApproval {
 /// Approval request held by the TUI until the reviewer answers.
 pub(crate) struct PendingApproval {
     pub(crate) id: u64,
+    pub(crate) origin: tars_core::permission::ApprovalOrigin,
     pub(crate) tool_name: String,
     pub(crate) mode: PermissionMode,
     pub(crate) subject: ApprovalSubject,
@@ -89,6 +90,11 @@ impl PendingApproval {
     pub(crate) fn from_request(request: ApprovalRequest) -> Self {
         Self {
             id: next_approval_id(),
+            origin: tars_core::permission::ApprovalOrigin::new(
+                request.agent_id,
+                request.agent_name,
+                request.operation_id,
+            ),
             tool_name: request.tool_name,
             mode: request.mode,
             subject: request.subject,
@@ -108,8 +114,29 @@ impl PendingApproval {
     where
         F: FnOnce(ApprovalDecision) + Send + 'static,
     {
+        Self::mock_with_origin(
+            tool_name,
+            mode,
+            subject,
+            tars_core::permission::ApprovalOrigin::new("", "main", ""),
+            on_reply,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mock_with_origin<F>(
+        tool_name: String,
+        mode: PermissionMode,
+        subject: ApprovalSubject,
+        origin: tars_core::permission::ApprovalOrigin,
+        on_reply: F,
+    ) -> Self
+    where
+        F: FnOnce(ApprovalDecision) + Send + 'static,
+    {
         Self {
             id: next_approval_id(),
+            origin,
             tool_name,
             mode,
             subject,
@@ -211,6 +238,70 @@ impl WorkspaceRulesTrustPrompt {
     }
 }
 
+/// Untrusted workspace `.tars/agents/*.md` preset trust prompt shown on open.
+#[derive(Clone, Debug)]
+pub(crate) struct WorkspaceAgentsTrustPrompt {
+    pub(crate) agents_dir: std::path::PathBuf,
+    pub(crate) body_lines: Vec<WorkspaceTrustLine>,
+    pub(crate) scroll: usize,
+}
+
+impl WorkspaceAgentsTrustPrompt {
+    pub(crate) fn from_report(report: &tars_core::agents::WorkspaceAgentsReport) -> Option<Self> {
+        if report.trusted || report.untrusted_agents.is_empty() || !report.can_trust {
+            return None;
+        }
+        let agents_dir = report
+            .agents_dir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(".tars/agents"));
+        let mut body_lines = Vec::with_capacity(report.untrusted_agents.len());
+        for name in &report.untrusted_agents {
+            let escaped = tars_core::permission::escape_untrusted_text(name);
+            body_lines.push(WorkspaceTrustLine {
+                kind: WorkspaceTrustLineKind::Rule,
+                text: format!("  agent: {escaped}"),
+            });
+        }
+        if !report.diagnostics.is_empty() {
+            body_lines.push(WorkspaceTrustLine {
+                kind: WorkspaceTrustLineKind::Plain,
+                text: String::new(),
+            });
+            body_lines.push(WorkspaceTrustLine {
+                kind: WorkspaceTrustLineKind::Heading,
+                text: "Diagnostics while scanning .tars/agents/:".into(),
+            });
+            for diag in &report.diagnostics {
+                let path =
+                    tars_core::permission::escape_untrusted_text(&diag.path.display().to_string());
+                let msg = tars_core::permission::escape_untrusted_text(&diag.message);
+                body_lines.push(WorkspaceTrustLine {
+                    kind: WorkspaceTrustLineKind::Plain,
+                    text: format!("  {path}: {msg}"),
+                });
+            }
+        }
+        Some(Self {
+            agents_dir,
+            body_lines,
+            scroll: 0,
+        })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum VisibleWorkspaceTrustKind {
+    Rules,
+    Agents,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct VisibleWorkspaceTrust {
+    pub(super) key: Key,
+    pub(super) kind: VisibleWorkspaceTrustKind,
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct ScrollAnchor {
     pub(super) index: usize,
@@ -262,6 +353,13 @@ pub(crate) struct Entry {
     pub(crate) approval_reason: Option<String>,
     pub(crate) approval_scroll: usize,
     pub(crate) workspace_rules_trust: Option<WorkspaceRulesTrustPrompt>,
+    pub(crate) workspace_agents_trust: Option<WorkspaceAgentsTrustPrompt>,
+    pub(super) session_events_rx:
+        Option<tokio::sync::broadcast::Receiver<Arc<tars_core::events::SessionEvent>>>,
+    pub(crate) active_bg_count: usize,
+    pub(crate) viewed_agent_id: Option<String>,
+    pub(crate) viewed_agent_label: Option<String>,
+    pub(super) viewed_agent_dirty: bool,
 }
 impl Entry {
     pub(super) fn new(id: String, model: String) -> Self {
@@ -308,6 +406,12 @@ impl Entry {
             approval_reason: None,
             approval_scroll: 0,
             workspace_rules_trust: None,
+            workspace_agents_trust: None,
+            session_events_rx: None,
+            active_bg_count: 0,
+            viewed_agent_id: None,
+            viewed_agent_label: None,
+            viewed_agent_dirty: false,
         }
     }
     pub fn id(&self) -> &str {
@@ -372,7 +476,7 @@ pub(crate) struct App {
     pub(crate) clock: Clock,
     pub(crate) last_visible_approval: Option<VisibleApproval>,
     pub(crate) approval_guard: GuardWindow,
-    pub(super) last_visible_workspace_trust: Option<Key>,
+    pub(super) last_visible_workspace_trust: Option<VisibleWorkspaceTrust>,
     pub(crate) workspace_trust_guard: GuardWindow,
     /// The startup environment check; `None` once the main screen is reached.
     pub(crate) startup: Option<super::startup::Startup>,
@@ -397,7 +501,8 @@ impl App {
             .config_dir()
             .map(|dir| dir.join("permissions.toml"));
         let host = SessionHost::new(Some(options.store.clone()))
-            .with_user_rules_path(user_rules_path.clone());
+            .with_user_rules_path(user_rules_path.clone())
+            .with_model_profiles(options.config.model_profiles());
         let startup_backend: Arc<dyn super::startup::StartupBackend> =
             Arc::new(super::startup::ProcessBackend::new(options.config.clone()));
         let notice = if let Some(warning) = options.config.warnings().first() {
@@ -452,7 +557,9 @@ impl App {
     pub(super) fn refresh_size_flags(&mut self) {
         let width = self.view_width.saturating_add(4);
         let pending = self.entries.get(self.selected).is_some_and(|entry| {
-            entry.workspace_rules_trust.is_some() || !entry.approval_queue.is_empty()
+            entry.workspace_rules_trust.is_some()
+                || entry.workspace_agents_trust.is_some()
+                || !entry.approval_queue.is_empty()
         });
         let approval_visible =
             pending && self.panel.is_none() && self.form.is_none() && self.confirmation.is_none();
@@ -480,7 +587,7 @@ impl App {
             return None;
         }
         let entry = self.entries.get(self.selected)?;
-        if entry.workspace_rules_trust.is_some() {
+        if entry.workspace_rules_trust.is_some() || entry.workspace_agents_trust.is_some() {
             return None;
         }
         let front = entry.approval_queue.front()?;
@@ -516,8 +623,8 @@ impl App {
         }
         self.approval_guard.is_guarded(self.clock.now())
     }
-    /// The workspace rules trust prompt actually on screen, or `None` when obscured.
-    pub(super) fn current_visible_workspace_trust(&self) -> Option<Key> {
+    /// The workspace rules or agents trust prompt actually on screen, or `None` when obscured.
+    pub(super) fn current_visible_workspace_trust(&self) -> Option<VisibleWorkspaceTrust> {
         if self.panel.is_some()
             || self.form.is_some()
             || self.confirmation.is_some()
@@ -529,8 +636,19 @@ impl App {
             return None;
         }
         let entry = self.entries.get(self.selected)?;
-        entry.workspace_rules_trust.as_ref()?;
-        Some(entry.key.clone())
+        if entry.workspace_rules_trust.is_some() {
+            Some(VisibleWorkspaceTrust {
+                key: entry.key.clone(),
+                kind: VisibleWorkspaceTrustKind::Rules,
+            })
+        } else if entry.workspace_agents_trust.is_some() {
+            Some(VisibleWorkspaceTrust {
+                key: entry.key.clone(),
+                kind: VisibleWorkspaceTrustKind::Agents,
+            })
+        } else {
+            None
+        }
     }
     /// Re-arm the 500 ms window whenever the visible workspace rules trust prompt changes.
     pub(crate) fn update_workspace_trust_guard(&mut self) {
