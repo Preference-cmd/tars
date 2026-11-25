@@ -77,9 +77,8 @@ Current gaps and roadmap items not yet implemented:
 
 - Prebuilt binaries and package-manager installers (currently source build via Cargo only)
 - Linux and Windows sandbox backends for `run_command` and `search_text` (and restoring Windows CI)
-- Multi-agent / subagent collaboration
 - Desktop GUI
-- Live verification against third-party MCP servers (current tests cover local fixtures)
+- Live verification against third-party model and MCP endpoints (current tests cover local HTTP and MCP fixtures)
 
 ## Architecture
 
