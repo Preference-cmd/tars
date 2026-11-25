@@ -25,6 +25,7 @@ pub(crate) fn should_connect_stdio(used_stdin_input: bool) -> bool {
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn ask_approval<R: BufRead, W: Write>(
     tool_name: &str,
     mode: PermissionMode,
@@ -34,9 +35,35 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
     prompt_open: &AtomicBool,
     cancelled: &AtomicBool,
 ) -> std::io::Result<ApprovalDecision> {
+    ask_approval_with_agent(
+        tool_name,
+        mode,
+        subject,
+        None,
+        reader,
+        writer,
+        prompt_open,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ask_approval_with_agent<R: BufRead, W: Write>(
+    tool_name: &str,
+    mode: PermissionMode,
+    subject: &ApprovalSubject,
+    agent_label: Option<&str>,
+    reader: &mut R,
+    writer: &mut W,
+    prompt_open: &AtomicBool,
+    cancelled: &AtomicBool,
+) -> std::io::Result<ApprovalDecision> {
     if cancelled.load(Ordering::SeqCst) {
         return Ok(ApprovalDecision::Deny { reason: None });
     }
+    let agent_prefix = agent_label
+        .map(|name| format!("[agent: {}] ", escape_untrusted_text(name)))
+        .unwrap_or_default();
 
     match subject {
         ApprovalSubject::FileWrite { path, action, diff } => {
@@ -46,7 +73,7 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
             };
             writeln!(
                 writer,
-                "TARS: {} wants to {} {} (permission mode: {})",
+                "TARS: {agent_prefix}{} wants to {} {} (permission mode: {})",
                 escape_untrusted_text(tool_name),
                 action_str,
                 escape_untrusted_text(path),
@@ -67,7 +94,7 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
         } => {
             writeln!(
                 writer,
-                "TARS: {} wants to run a command{} (permission mode: {})",
+                "TARS: {agent_prefix}{} wants to run a command{} (permission mode: {})",
                 escape_untrusted_text(tool_name),
                 if matches!(target, CommandTarget::Outside { .. }) {
                     " outside the sandbox"
@@ -110,7 +137,7 @@ pub(crate) fn ask_approval<R: BufRead, W: Write>(
         } => {
             writeln!(
                 writer,
-                "TARS: {} wants to call MCP tool {}/{} (permission mode: {})",
+                "TARS: {agent_prefix}{} wants to call MCP tool {}/{} (permission mode: {})",
                 escape_untrusted_text(tool_name),
                 escape_untrusted_text(server),
                 escape_untrusted_text(tool),
@@ -262,10 +289,18 @@ pub(crate) fn spawn_approver(session: &tars_core::application::ManagedSession) -
                     let _ = request.reply.send(ApprovalDecision::Deny { reason: None });
                     continue;
                 }
-                match ask_approval(
+                let agent_label = if request.agent_id != request.work.conversation_id.as_str()
+                    || request.agent_name != "main"
+                {
+                    Some(request.agent_name.as_str())
+                } else {
+                    None
+                };
+                match ask_approval_with_agent(
                     &request.tool_name,
                     request.mode,
                     &request.subject,
+                    agent_label,
                     &mut reader,
                     &mut writer,
                     &prompt_open_thread,
@@ -969,5 +1004,64 @@ mod tests {
         host.close(&session.target(), ClosePolicy::Save)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn sub_agent_prefix_renders_and_escapes_control_characters() {
+        let mut reader = Cursor::new(b"y\n".as_slice());
+        let mut writer = Vec::new();
+        let prompt_open = AtomicBool::new(false);
+        let cancelled = AtomicBool::new(false);
+        let subject = ApprovalSubject::FileWrite {
+            path: "notes.txt".into(),
+            action: WriteAction::Updated,
+            diff: "+ok\n".into(),
+        };
+        let decision = ask_approval_with_agent(
+            "write_file",
+            PermissionMode::Ask,
+            &subject,
+            Some("worker\x1b[31m\nspoof"),
+            &mut reader,
+            &mut writer,
+            &prompt_open,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(decision, ApprovalDecision::Allow);
+        let rendered = String::from_utf8(writer).unwrap();
+        assert!(
+            rendered.starts_with("TARS: [agent: worker"),
+            "missing agent prefix: {rendered}"
+        );
+        assert!(
+            !rendered.contains('\x1b'),
+            "ANSI escape must be stripped/escaped: {rendered}"
+        );
+        assert!(
+            rendered.contains("] write_file wants to update notes.txt"),
+            "unexpected prompt body: {rendered}"
+        );
+
+        // Plain worker name renders cleanly.
+        let mut reader = Cursor::new(b"y\n".as_slice());
+        let mut writer = Vec::new();
+        let decision = ask_approval_with_agent(
+            "write_file",
+            PermissionMode::Ask,
+            &subject,
+            Some("worker"),
+            &mut reader,
+            &mut writer,
+            &prompt_open,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(decision, ApprovalDecision::Allow);
+        let rendered = String::from_utf8(writer).unwrap();
+        assert!(
+            rendered.starts_with("TARS: [agent: worker] write_file wants to update notes.txt"),
+            "{rendered}"
+        );
     }
 }

@@ -2332,3 +2332,449 @@ fn inbox_drain_restore_on_failed_submit_preserves_events() {
     assert_eq!(re_drained.consumed.dropped_ids, vec![1]);
     assert_eq!(handle.pending_count(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// 16. `wait_settled`, `cancel_all_active`, Root Wakeup Events, and Lock-Free Reads
+// ---------------------------------------------------------------------------
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_settled_returns_none_immediately_when_idle() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(root.path().into()));
+    host.set_test_gateway(Some(ScriptedGateway::simple("idle")));
+    let session = host
+        .create(PreparedCreate::persistent(definition(), Context::new()))
+        .await
+        .unwrap();
+
+    let settled = tokio::time::timeout(Duration::from_secs(2), session.wait_settled())
+        .await
+        .expect("idle wait_settled must return immediately")
+        .unwrap();
+    assert_eq!(settled, None);
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_settled_tracks_root_reactive_wakeup_and_publishes_plane2_events() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(root.path().into()));
+    let main_gw = ScriptedGateway::new(
+        vec![
+            ScriptedStep::text("initial done"),
+            ScriptedStep::text("wakeup merged answer"),
+        ],
+        "fallback",
+    );
+    let bg_entered = Arc::new(Notify::new());
+    let bg_release = Arc::new(Notify::new());
+    let bg_gw = ScriptedGateway::new(
+        vec![ScriptedStep {
+            entered: Some(bg_entered.clone()),
+            release: Some(bg_release.clone()),
+            response_text: Some("bg payload".into()),
+            tool_calls: Vec::new(),
+            capture_blocks: None,
+            wait_for_cancel: false,
+        }],
+        "bg fallback",
+    );
+
+    host.set_test_gateway(Some(main_gw.clone()));
+    host.set_test_agent_gateway(Some(Arc::new(move |name, _| {
+        if name == "worker" {
+            Some(bg_gw.clone())
+        } else {
+            None
+        }
+    })));
+
+    let session = host
+        .create(PreparedCreate::persistent(definition(), Context::new()))
+        .await
+        .unwrap();
+    let root_id = entry_id(&session);
+    let mut events = session.subscribe_events();
+
+    let initial = session.submit(request("start")).unwrap();
+    finished(&session, &initial.work).await;
+    session.wait_saved().await.unwrap();
+
+    // Verify wait_settled returns None when initial work already finished & saved.
+    assert_eq!(session.wait_settled().await.unwrap(), None);
+
+    // Spawn a background child task, wait until it is running, then wait_settled in parallel.
+    let SpawnAgentOutcome::Background(bg_rec) = session
+        .spawn_agent(spawn_req(&root_id, "worker", "run bg"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected background");
+    };
+    tokio::time::timeout(Duration::from_secs(5), bg_entered.notified())
+        .await
+        .unwrap();
+
+    let session_waiter = session.clone();
+    let wait_task = tokio::spawn(async move { session_waiter.wait_settled().await });
+
+    // Let background child complete, triggering root reactive wakeup.
+    bg_release.notify_one();
+    let settled_work = tokio::time::timeout(Duration::from_secs(5), wait_task)
+        .await
+        .expect("wait_settled should settle after reactive wakeup")
+        .unwrap()
+        .unwrap();
+    let wakeup_work = settled_work.expect("must return reactive wakeup WorkRef");
+    assert_ne!(wakeup_work, initial.work);
+
+    let obs = session.observe(&wakeup_work).unwrap();
+    let crate::session::WorkState::Finished(res) = obs.state else {
+        panic!("expected finished wakeup work");
+    };
+    assert_eq!(crate::application::WorkOutcome::of(&res).kind, "completed");
+
+    // Verify Plane 2 OperationStateChanged Running + Completed for root reactive wakeup!
+    let mut saw_root_running = false;
+    let mut saw_root_completed = false;
+    while let Ok(ev) = events.try_recv() {
+        if let SessionEvent::OperationStateChanged {
+            operation_id,
+            target_agent_id,
+            parent_operation_id,
+            status,
+            ..
+        } = &*ev
+            && operation_id == &wakeup_work.turn_id.0
+        {
+            assert_eq!(target_agent_id, &root_id);
+            assert_eq!(parent_operation_id, &None);
+            match status {
+                OperationStatus::Running => saw_root_running = true,
+                OperationStatus::Completed => saw_root_completed = true,
+                _ => {}
+            }
+        }
+    }
+    assert!(saw_root_running, "missing root wakeup Running event");
+    assert!(saw_root_completed, "missing root wakeup Completed event");
+
+    // Verify lock-free inspect, inspect_agent, and read_saved_history!
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    let ro_host = SessionHost::new(Some(root.path().into()));
+    let conv_id = initial.work.conversation_id.clone();
+    let inspection = ro_host.inspect(&conv_id).await.unwrap();
+    assert_eq!(inspection.agents.len(), 2);
+    assert!(
+        inspection
+            .agents
+            .iter()
+            .any(|a| a.is_entry && a.name == "main")
+    );
+    assert!(
+        inspection
+            .agents
+            .iter()
+            .any(|a| !a.is_entry && a.agent_id == bg_rec.agent_id && a.name == "worker")
+    );
+
+    let by_id = ro_host
+        .inspect_agent(&conv_id, &bg_rec.agent_id)
+        .await
+        .unwrap();
+    assert_eq!(by_id.agent_id, bg_rec.agent_id);
+    assert_eq!(by_id.operations.len(), 1);
+    assert_eq!(by_id.operations[0].status, OperationStatus::Completed);
+
+    let by_name = ro_host.inspect_agent(&conv_id, "worker").await.unwrap();
+    assert_eq!(by_name.agent_id, bg_rec.agent_id);
+
+    let missing_err = ro_host.inspect_agent(&conv_id, "nope").await.unwrap_err();
+    assert!(matches!(missing_err, ApplicationError::NotFound));
+
+    let child_hist = ro_host
+        .read_saved_history(&conv_id, Some(&bg_rec.agent_id), None)
+        .await
+        .unwrap();
+    assert!(!child_hist.blocks.is_empty());
+    let root_hist = ro_host
+        .read_saved_history(&conv_id, None, None)
+        .await
+        .unwrap();
+    assert!(root_hist.blocks.len() > child_hist.blocks.len());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_all_active_cancels_running_background_task_and_prevents_zombie_wakeup() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(root.path().into()));
+    let main_calls = Arc::new(AtomicUsize::new(0));
+    let main_gw = Arc::new(ScriptedGateway {
+        calls: main_calls.clone(),
+        steps: Mutex::new(VecDeque::from([ScriptedStep::text("root done")])),
+        default_text: "unexpected wakeup".into(),
+        captured_requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    let bg_entered = Arc::new(Notify::new());
+    let bg_gw = ScriptedGateway::new(
+        vec![ScriptedStep {
+            entered: Some(bg_entered.clone()),
+            release: None,
+            response_text: None,
+            tool_calls: Vec::new(),
+            capture_blocks: None,
+            wait_for_cancel: true,
+        }],
+        "bg fallback",
+    );
+
+    host.set_test_gateway(Some(main_gw));
+    host.set_test_agent_gateway(Some(Arc::new(move |name, _| {
+        if name == "blocker" {
+            Some(bg_gw.clone())
+        } else {
+            None
+        }
+    })));
+
+    let session = host
+        .create(PreparedCreate::persistent(definition(), Context::new()))
+        .await
+        .unwrap();
+    let root_id = entry_id(&session);
+
+    let initial = session.submit(request("go")).unwrap();
+    finished(&session, &initial.work).await;
+    session.wait_saved().await.unwrap();
+    assert_eq!(main_calls.load(Ordering::SeqCst), 1);
+
+    let SpawnAgentOutcome::Background(bg_rec) = session
+        .spawn_agent(spawn_req(&root_id, "blocker", "block forever"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected background");
+    };
+    tokio::time::timeout(Duration::from_secs(5), bg_entered.notified())
+        .await
+        .unwrap();
+
+    // Cancel all active operations and await convergence.
+    session.cancel_all_active();
+    let settled = tokio::time::timeout(Duration::from_secs(5), session.wait_settled())
+        .await
+        .expect("cancel_all_active + wait_settled must converge promptly")
+        .unwrap();
+    assert_eq!(settled, None);
+    assert_eq!(session.active_finite_background_tasks(), 0);
+
+    let read = session
+        .read_agent(&bg_rec.operation_id, 0, 1024)
+        .await
+        .unwrap();
+    assert_eq!(read.status, OperationStatus::Cancelled);
+    // No zombie reactive wakeup occurred on root.
+    assert_eq!(main_calls.load(Ordering::SeqCst), 1);
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn inspect_agent_reports_ambiguous_duplicate_names() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(root.path().into()));
+    host.set_test_gateway(Some(ScriptedGateway::simple("ok")));
+    host.set_test_agent_gateway(Some(Arc::new(|_, _| {
+        Some(ScriptedGateway::simple("child ok"))
+    })));
+
+    let session = host
+        .create(PreparedCreate::persistent(definition(), Context::new()))
+        .await
+        .unwrap();
+    let root_id = entry_id(&session);
+
+    let SpawnAgentOutcome::Background(first) = session
+        .spawn_agent(spawn_req(&root_id, "dup", "one"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected background");
+    };
+    let SpawnAgentOutcome::Background(second) = session
+        .spawn_agent(spawn_req(&root_id, "dup", "two"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected background");
+    };
+    session.wait_settled().await.unwrap();
+    let conv_id = session.target().conversation_id().clone();
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    let ro_host = SessionHost::new(Some(root.path().into()));
+    let err = ro_host.inspect_agent(&conv_id, "dup").await.unwrap_err();
+    match err {
+        ApplicationError::AmbiguousAgent { name, candidates } => {
+            assert_eq!(name, "dup");
+            assert_eq!(candidates.len(), 2);
+            assert!(candidates.contains(&first.agent_id));
+            assert!(candidates.contains(&second.agent_id));
+        }
+        other => panic!("expected AmbiguousAgent, got {other:?}"),
+    }
+    // Exact UUID selection still succeeds.
+    assert_eq!(
+        ro_host
+            .inspect_agent(&conv_id, &second.agent_id)
+            .await
+            .unwrap()
+            .agent_id,
+        second.agent_id
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_settled_after_catches_fast_completed_reactive_wakeup() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(root.path().into()));
+    let main_calls = Arc::new(AtomicUsize::new(0));
+    let main_gw = Arc::new(ScriptedGateway {
+        calls: main_calls.clone(),
+        steps: Mutex::new(VecDeque::from([
+            ScriptedStep::text("initial ok"),
+            ScriptedStep::text("fast wakeup ok"),
+        ])),
+        default_text: "fallback".into(),
+        captured_requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    host.set_test_gateway(Some(main_gw));
+    host.set_test_agent_gateway(Some(Arc::new(|_, _| {
+        Some(ScriptedGateway::simple("fast child ok"))
+    })));
+
+    let session = host
+        .create(PreparedCreate::persistent(definition(), Context::new()))
+        .await
+        .unwrap();
+    let root_id = entry_id(&session);
+
+    let initial = session.submit(request("go")).unwrap();
+    finished(&session, &initial.work).await;
+    session.wait_saved().await.unwrap();
+
+    // Spawn child and let BOTH the child and the resulting root reactive wakeup
+    // finish completely BEFORE calling `wait_settled_after(&initial.work)`.
+    let SpawnAgentOutcome::Background(_) = session
+        .spawn_agent(spawn_req(&root_id, "fast-worker", "quick"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected background");
+    };
+    until(|| main_calls.load(Ordering::SeqCst) >= 2).await;
+    session.wait_settled().await.unwrap();
+
+    let after = tokio::time::timeout(
+        Duration::from_secs(2),
+        session.wait_settled_after(&initial.work),
+    )
+    .await
+    .expect("wait_settled_after must return immediately once settled")
+    .unwrap();
+    let wakeup_work = after.expect("fast-completed wakeup must not be missed");
+    assert_ne!(wakeup_work, initial.work);
+    let obs = session.observe(&wakeup_work).unwrap();
+    let crate::session::WorkState::Finished(res) = obs.state else {
+        panic!("expected finished wakeup");
+    };
+    assert_eq!(crate::application::WorkOutcome::of(&res).kind, "completed");
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn low_retained_capacity_evicts_unread_auto_wakeup_turns_without_hanging() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(root.path().into()));
+    let main_calls = Arc::new(AtomicUsize::new(0));
+    let main_gw = Arc::new(ScriptedGateway {
+        calls: main_calls.clone(),
+        steps: Mutex::new(VecDeque::from([
+            ScriptedStep::text("user turn"),
+            ScriptedStep::text("wakeup 1"),
+            ScriptedStep::text("wakeup 2"),
+        ])),
+        default_text: "fallback".into(),
+        captured_requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    host.set_test_gateway(Some(main_gw));
+    host.set_test_agent_gateway(Some(Arc::new(|_, _| {
+        Some(ScriptedGateway::simple("bg ok"))
+    })));
+
+    let mut def = definition();
+    def.retained_work_capacity = 1;
+    let session = host
+        .create(PreparedCreate::persistent(def, Context::new()))
+        .await
+        .unwrap();
+    let root_id = entry_id(&session);
+
+    // User work #1 fills the single retained slot, then is read by `finished`.
+    let initial = session.submit(request("start")).unwrap();
+    finished(&session, &initial.work).await;
+    session.wait_saved().await.unwrap();
+
+    // First background child triggers auto-wakeup #1 (unread!).
+    let SpawnAgentOutcome::Background(_) = session
+        .spawn_agent(spawn_req(&root_id, "w1", "task 1"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected background");
+    };
+    let first_wakeup = tokio::time::timeout(
+        Duration::from_secs(5),
+        session.wait_settled_after(&initial.work),
+    )
+    .await
+    .expect("first auto-wakeup must settle")
+    .unwrap()
+    .expect("first wakeup WorkRef");
+
+    // Deliberately DO NOT call `observe(&first_wakeup)`, leaving the single
+    // retained slot occupied by an unread auto-wakeup work!
+    let SpawnAgentOutcome::Background(_) = session
+        .spawn_agent(spawn_req(&root_id, "w2", "task 2"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected background");
+    };
+    let second_wakeup = tokio::time::timeout(
+        Duration::from_secs(5),
+        session.wait_settled_after(&first_wakeup),
+    )
+    .await
+    .expect("second auto-wakeup must evict unread first auto-wakeup and settle")
+    .unwrap()
+    .expect("second wakeup WorkRef");
+    assert_ne!(second_wakeup, first_wakeup);
+    assert_eq!(main_calls.load(Ordering::SeqCst), 3);
+
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}

@@ -9,6 +9,7 @@ pub(super) struct RunOptions {
     pub definition: SessionDefinition,
     /// Resolved once from the loaded configuration and handed to the host.
     pub external_tools: ExternalTools,
+    pub model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
     pub user_rules_path: Option<PathBuf>,
     pub input: Option<String>,
     pub load: Option<PathBuf>,
@@ -96,6 +97,7 @@ impl RunOptions {
             configuration::resolve_code_execution(code_execution, no_code_execution)?;
         let config = configuration::load(&values, no_config)?;
         let external_tools = ExternalTools::resolve(&config);
+        let model_profiles = config.model_profiles();
         let user_rules_path = config.config_dir().map(|dir| dir.join("permissions.toml"));
         let mut definition = configuration::definition(
             &config,
@@ -106,9 +108,10 @@ impl RunOptions {
             },
             code_execution_enabled,
         )?;
-        // This entry performs exactly one transient work; it does not retain an
-        // interactive work history even when the preset has a larger capacity.
-        definition.retained_work_capacity = 1;
+        // Transient `tars run` executes one initial user work plus up to 16
+        // reactive auto-wakeups; keep retained work bounded while preserving all
+        // observations until convergence completes.
+        definition.retained_work_capacity = 17;
         let input = string("--input")?;
         if stdin == input.is_some() {
             return Err("choose exactly one of --input or --stdin".into());
@@ -119,6 +122,7 @@ impl RunOptions {
         Ok(Self {
             definition,
             external_tools,
+            model_profiles,
             user_rules_path,
             input,
             load: values.get("--load").map(PathBuf::from),

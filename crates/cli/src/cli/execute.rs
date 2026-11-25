@@ -52,7 +52,8 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
     managed_execution::report_prelude_diagnostics(&initial_diagnostics);
     let host = SessionHost::new(None)
         .with_external_tools(options.external_tools)
-        .with_user_rules_path(options.user_rules_path);
+        .with_user_rules_path(options.user_rules_path)
+        .with_model_profiles(options.model_profiles);
     let session = match host.create(prepared).await {
         Ok(session) => session,
         Err(error) => {
@@ -63,6 +64,7 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
         }
     };
     managed_execution::report_workspace_rules_notice(&session);
+    managed_execution::report_workspace_agents_notice(&session);
     managed_execution::report_mcp_status(&session);
     managed_execution::report_command_brief(&session);
     let connect_approvals = super::approval::should_connect_stdio(used_stdin_input);
@@ -89,10 +91,24 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
     let mut code = presented.code;
     let model_error = presented.model_failure;
     let detail = presented.detail;
-    let save_wait_abandoned = matches!(report.save, managed_execution::SaveWait::Abandoned);
-    if save_wait_abandoned {
-        error = Some("stopped waiting for saving after a second interrupt".to_owned());
-        code = 1;
+    let save_wait_abandoned = matches!(
+        report.save,
+        managed_execution::SaveWait::Abandoned | managed_execution::SaveWait::CancelWaitTimedOut
+    );
+    match &report.save {
+        managed_execution::SaveWait::Abandoned => {
+            error = Some("stopped waiting for saving after a second interrupt".to_owned());
+            code = 1;
+        }
+        managed_execution::SaveWait::CancelWaitTimedOut => {
+            error = Some("timed out waiting for cancelled execution to settle".to_owned());
+            code = 1;
+        }
+        managed_execution::SaveWait::Finished(Err(save_err)) if error.is_none() => {
+            error = Some(save_err.to_string());
+            code = 1;
+        }
+        managed_execution::SaveWait::Finished(_) => {}
     }
     let mut saved = false;
     if let Some(path) = options.save {

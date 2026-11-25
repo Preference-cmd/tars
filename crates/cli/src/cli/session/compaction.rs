@@ -143,16 +143,15 @@ pub(super) async fn compact(
 pub(super) async fn history(
     store: PathBuf,
     id: String,
+    agent: Option<String>,
     last: Option<usize>,
     json_output: bool,
 ) -> ExitCode {
     let host = managed_execution::definition_host(store);
-    let session = match host.open(id.clone().into()).await {
-        Ok(session) => session,
-        Err(error) => return early_failure(json_output, &error.to_string()),
-    };
-    managed_execution::report_open_notices(&session);
-    let expansion = match session.expanded_conversation(last) {
+    let expansion = match host
+        .read_saved_history(&id.into(), agent.as_deref(), last)
+        .await
+    {
         Ok(exp) => exp,
         Err(error) => return early_failure(json_output, &error.to_string()),
     };
@@ -194,13 +193,6 @@ pub(super) async fn history(
             code = 1;
             let _ = writeln!(io::stderr().lock(), "TARS: {error}");
         }
-    }
-    if let Err(error) = host
-        .close(&session.target(), ClosePolicy::DiscardLocal)
-        .await
-    {
-        code = 1;
-        let _ = writeln!(io::stderr().lock(), "TARS: close_error: {error}");
     }
     ExitCode::from(code)
 }

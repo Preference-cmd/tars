@@ -50,8 +50,10 @@ fn global_profile_changes_do_not_replace_a_reopened_definition() {
             .arg(&config_path),
     );
     let request = fixture.request();
-    assert!(request.contains("original-profile-model"));
-    assert!(!request.contains("changed-profile-model"));
+    let (_, body) = request.split_once("\r\n\r\n").unwrap();
+    let body_json: Value = serde_json::from_str(body).unwrap();
+    assert_eq!(body_json["model"], "original-profile-model");
+    assert_ne!(body_json["model"], "changed-profile-model");
     fixture.answer("saved definition result");
     let output = finished(child);
     assert!(output.status.success(), "{output:?}");

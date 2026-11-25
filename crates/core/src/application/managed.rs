@@ -598,6 +598,8 @@ impl ManagedSession {
         // The supervisor already exists. This synchronous registration holds the
         // application gate until it captures and confirms this work's materials.
         state.active = Some(receipt.work.clone());
+        state.root_work_seq = state.root_work_seq.saturating_add(1);
+        state.last_root_work = Some(receipt.work.clone());
         if state.persistent {
             state.save = SaveStatus::Dirty {
                 base_revision: state.revision,
@@ -1442,6 +1444,138 @@ impl ManagedSession {
     pub async fn wait_background_tasks_settled(&self) {
         if let Some(coord) = self.entry.coordinator.get() {
             coord.wait_background_tasks_settled().await;
+        }
+    }
+
+    /// Cooperatively cancel any active root work and all active child/background operations,
+    /// suppressing pending idle wakeups to prevent zombie turns.
+    pub fn cancel_all_active(&self) {
+        let (handle, active, coord_cancel) = {
+            let entry_state = self.entry.lock();
+            let handle = entry_state.handle.clone();
+            let active = entry_state.active.clone();
+            let coord_cancel = self
+                .entry
+                .coordinator
+                .get()
+                .map(|coord| (coord, coord.collect_cancel_all_active()));
+            (handle, active, coord_cancel)
+        };
+        if let (Some(handle), Some(work)) = (handle, active) {
+            let _ = handle.cancel(&work);
+        }
+        if let Some((coord, (tokens, suppress_ids))) = coord_cancel {
+            coord.apply_cancel_all_active(tokens, suppress_ids);
+        }
+    }
+
+    /// Return `true` if root execution, any finite background task, active child operation,
+    /// in-flight admission, or eligible idle wakeup is still active (as opposed to only
+    /// persistence/saving remaining).
+    pub fn has_active_execution(&self) -> bool {
+        let mut entry_state = self.entry.lock();
+        if entry_state.active.is_some()
+            && entry_state.pending.is_none()
+            && entry_state.fault.is_none()
+        {
+            return true;
+        }
+        self.entry
+            .coordinator
+            .get()
+            .is_some_and(|coord| coord.has_active_execution_with_entry(&mut entry_state))
+    }
+
+    /// Wait with zero polling until root execution, persistence, all `Finite` background
+    /// tasks, child saves/outboxes, in-flight admissions, and eligible idle wakeups settle.
+    ///
+    /// Returns the last active root [`WorkRef`] observed during this wait (including an
+    /// active root work already running when `wait_settled` was called, and any reactive
+    /// wakeup work submitted while settling), or `None` if root was already idle and no
+    /// reactive wakeup occurred.
+    pub async fn wait_settled(&self) -> Result<Option<WorkRef>, ApplicationError> {
+        let (start_seq, had_initial_active) = {
+            let entry_state = self.entry.lock();
+            (entry_state.root_work_seq, entry_state.active.is_some())
+        };
+        self.wait_settled_with(|entry_state| {
+            if entry_state.root_work_seq > start_seq || had_initial_active {
+                entry_state.last_root_work.clone()
+            } else {
+                None
+            }
+        })
+        .await
+    }
+
+    /// Wait with zero polling until all root/child execution and persistence settle,
+    /// returning the final root [`WorkRef`] if a new reactive wakeup occurred after `baseline`.
+    ///
+    /// Unlike [`Self::wait_settled`], this compares against `baseline` so a reactive wakeup
+    /// that started and finished before `wait_settled_after` was polled is never missed.
+    pub async fn wait_settled_after(
+        &self,
+        baseline: &WorkRef,
+    ) -> Result<Option<WorkRef>, ApplicationError> {
+        self.wait_settled_with(|entry_state| {
+            entry_state
+                .last_root_work
+                .as_ref()
+                .filter(|w| *w != baseline)
+                .cloned()
+        })
+        .await
+    }
+
+    async fn wait_settled_with(
+        &self,
+        mut pick_result: impl FnMut(&super::entry::State) -> Option<WorkRef>,
+    ) -> Result<Option<WorkRef>, ApplicationError> {
+        let coord = self.entry.coordinator.get();
+        loop {
+            let entry_changed = self.entry.changed.notified();
+            tokio::pin!(entry_changed);
+            entry_changed.as_mut().enable();
+
+            let coord_changed = coord.map(|c| c.state_changed.notified());
+            tokio::pin!(coord_changed);
+            if let Some(fut) = coord_changed.as_mut().as_pin_mut() {
+                fut.enable();
+            }
+
+            {
+                let mut entry_state = self.entry.lock();
+                if let Some(error) = &entry_state.fault {
+                    return Err(error.clone());
+                }
+                if let SaveStatus::SaveBlocked { error, .. } = &entry_state.save {
+                    return Err(ApplicationError::SaveBlocked(error.clone()));
+                }
+                let root_settled = entry_state.active.is_none()
+                    && entry_state.pending.is_none()
+                    && !entry_state.save_requested;
+                let coord_settled = match coord {
+                    Some(c) => c.check_settled_with_entry(&mut entry_state)?,
+                    None => true,
+                };
+                if matches!(
+                    entry_state.lifecycle,
+                    Lifecycle::Closed | Lifecycle::Closing
+                ) || (root_settled && coord_settled)
+                {
+                    return Ok(pick_result(&entry_state));
+                }
+            }
+
+            match coord_changed.as_pin_mut() {
+                Some(coord_notified) => {
+                    tokio::select! {
+                        _ = entry_changed => {}
+                        _ = coord_notified => {}
+                    }
+                }
+                None => entry_changed.await,
+            }
         }
     }
 

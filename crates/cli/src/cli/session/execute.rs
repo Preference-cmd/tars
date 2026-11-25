@@ -55,8 +55,10 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 store,
                 definition,
                 external_tools,
+                model_profiles,
                 user_rules_path,
                 trust_workspace_rules,
+                trust_workspace_agents,
                 load,
                 recovery_dir,
                 json,
@@ -65,8 +67,10 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                     store,
                     *definition,
                     external_tools,
+                    model_profiles,
                     user_rules_path,
                     trust_workspace_rules,
+                    trust_workspace_agents,
                     load,
                     recovery_dir,
                     json,
@@ -78,8 +82,10 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 store,
                 id,
                 external_tools,
+                model_profiles,
                 user_rules_path,
                 trust_workspace_rules,
+                trust_workspace_agents,
                 input,
                 permission_mode,
                 recovery_dir,
@@ -89,8 +95,10 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                     store,
                     id,
                     external_tools,
+                    model_profiles,
                     user_rules_path,
                     trust_workspace_rules,
+                    trust_workspace_agents,
                     input,
                     permission_mode,
                     recovery_dir,
@@ -111,15 +119,19 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
             SessionCommand::History {
                 store,
                 id,
+                agent,
                 last,
                 json,
             } => (
-                super::compaction::history(store, id, last, json).await,
+                super::compaction::history(store, id, agent, last, json).await,
                 false,
             ),
-            SessionCommand::Show { store, id, json } => {
-                (super::show::show(store, id, json).await, false)
-            }
+            SessionCommand::Show {
+                store,
+                id,
+                agent,
+                json,
+            } => (super::show::show(store, id, agent, json).await, false),
             SessionCommand::Repair {
                 store,
                 id,
@@ -177,8 +189,10 @@ async fn create(
     store: PathBuf,
     definition: SessionDefinition,
     external_tools: tars_core::external_tools::ExternalTools,
+    model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
     user_rules_path: Option<PathBuf>,
     trust_workspace_rules: bool,
+    trust_workspace_agents: bool,
     load: Option<PathBuf>,
     recovery_dir: PathBuf,
     json_output: bool,
@@ -205,7 +219,8 @@ async fn create(
     // Creating saves the definition and closes; it starts no MCP server.
     let host = managed_execution::definition_host(store)
         .with_external_tools(external_tools)
-        .with_user_rules_path(user_rules_path);
+        .with_user_rules_path(user_rules_path)
+        .with_model_profiles(model_profiles);
     let session = match host.create(prepared).await {
         Ok(session) => session,
         Err(error) => {
@@ -266,6 +281,16 @@ async fn create(
     } else {
         managed_execution::report_workspace_rules_notice(&session);
     }
+    if trust_workspace_agents {
+        if !session.workspace_agents_trusted()
+            && let Err(error) = session.trust_workspace_agents().await
+        {
+            let _ = host.close(&session.target(), ClosePolicy::Save).await;
+            return early_failure(json_output, &error.to_string());
+        }
+    } else {
+        managed_execution::report_workspace_agents_notice(&session);
+    }
     managed_execution::report_command_details(&session);
     if let Err(error) = host.close(&session.target(), ClosePolicy::Save).await {
         return early_failure(json_output, &error.to_string());
@@ -298,8 +323,10 @@ async fn run_saved(
     store: PathBuf,
     id: String,
     external_tools: tars_core::external_tools::ExternalTools,
+    model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
     user_rules_path: Option<PathBuf>,
     trust_workspace_rules: bool,
+    trust_workspace_agents: bool,
     input: Option<String>,
     permission_mode: Option<tars_core::permission::PermissionMode>,
     recovery_dir: PathBuf,
@@ -312,7 +339,8 @@ async fn run_saved(
     };
     let host = SessionHost::new(Some(store))
         .with_external_tools(external_tools)
-        .with_user_rules_path(user_rules_path);
+        .with_user_rules_path(user_rules_path)
+        .with_model_profiles(model_profiles);
     let session = match host.open(id.into()).await {
         Ok(session) => session,
         Err(error) => {
@@ -333,6 +361,18 @@ async fn run_saved(
         }
     } else {
         managed_execution::report_workspace_rules_notice(&session);
+    }
+    if trust_workspace_agents {
+        if !session.workspace_agents_trusted()
+            && let Err(error) = session.trust_workspace_agents().await
+        {
+            let _ = host
+                .close(&session.target(), ClosePolicy::DiscardLocal)
+                .await;
+            return (early_failure(json_output, &error.to_string()), false);
+        }
+    } else {
+        managed_execution::report_workspace_agents_notice(&session);
     }
     managed_execution::report_mcp_status(&session);
     managed_execution::report_command_brief(&session);
@@ -372,10 +412,12 @@ async fn run_saved(
     let mut code = presented.code;
     let model_error = presented.model_failure;
     let detail = presented.detail;
-    let abandoned = matches!(report.save, SaveWait::Abandoned);
+    let save_abandoned = matches!(report.save, SaveWait::Abandoned);
+    let cancel_timed_out = matches!(report.save, SaveWait::CancelWaitTimedOut);
+    let abandoned = save_abandoned || cancel_timed_out;
     let save_result = match &report.save {
         SaveWait::Finished(result) => Some(result),
-        SaveWait::Abandoned => None,
+        SaveWait::Abandoned | SaveWait::CancelWaitTimedOut => None,
     };
     let mut saved_revision = save_result
         .and_then(|result| result.as_ref().ok())
@@ -426,8 +468,10 @@ async fn run_saved(
     if close_error.is_some() || report.signal_failed {
         code = 1;
     }
-    let error = if abandoned {
+    let error = if save_abandoned {
         Some("stopped waiting for saving after a second interrupt".to_owned())
+    } else if cancel_timed_out {
+        Some("timed out waiting for cancelled execution to settle".to_owned())
     } else if save_error.is_some() {
         Some("session save failed".to_owned())
     } else if close_error.is_some() {

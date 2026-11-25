@@ -487,6 +487,14 @@ pub enum ApplicationError {
     /// Requested persistent record does not exist.
     #[error("saved conversation not found")]
     NotFound,
+    /// Multiple agents share the same display name; caller must disambiguate using `agent_id`.
+    #[error("multiple agents named '{name}' exist ({}); specify the UUID agent_id instead", candidates.join(", "))]
+    AmbiguousAgent {
+        /// Ambiguous display name passed as selector.
+        name: String,
+        /// Candidate UUID `agent_id` values sharing that name.
+        candidates: Vec<String>,
+    },
     /// Permission state is not available on this session instance.
     #[error("permission state is not available for this session instance")]
     PermissionUnavailable,
@@ -569,6 +577,99 @@ pub struct SavedSessionInspection {
     pub skills_count: usize,
     /// Whether `dynamic_custom` is a file path that currently exists as a regular file (`None` when not a file).
     pub dynamic_context_file_exists: Option<bool>,
+    /// Lock-free summary of all persisted agents belonging to this session.
+    pub agents: Vec<SavedAgentSummary>,
+}
+
+/// Summary of one persisted agent row within a saved session.
+#[derive(Clone, Debug)]
+pub struct SavedAgentSummary {
+    /// Canonical UUID agent identifier (`entry_agent_id` equals the session ID).
+    pub agent_id: String,
+    /// Display name of the agent (`"main"` for the root entry agent).
+    pub name: String,
+    /// Optional preset name from which the agent was created.
+    pub preset_name: Option<String>,
+    /// Agent interaction policy (`reusable` or `one_shot`).
+    pub interaction: crate::events::AgentInteraction,
+    /// Whether this agent is the root entry agent of the session.
+    pub is_entry: bool,
+    /// Monotonic material revision of this agent's stored Context.
+    pub material_revision: u64,
+    /// Number of Context blocks currently stored for this agent.
+    pub block_count: usize,
+    /// Number of rewrite records in this agent's stored history index.
+    pub history_records: usize,
+    /// Number of persisted operations targeting this agent.
+    pub operation_count: usize,
+    /// Number of pending inbox events targeting this agent.
+    pub pending_events: usize,
+    /// Creation timestamp in milliseconds since Unix epoch.
+    pub created_at_ms: u64,
+    /// Last update timestamp in milliseconds since Unix epoch.
+    pub updated_at_ms: u64,
+}
+
+/// Read-only summary of one persisted operation targeting an agent.
+#[derive(Clone, Debug)]
+pub struct SavedOperationSummary {
+    /// Canonical UUID operation identifier.
+    pub operation_id: String,
+    /// Parent operation identifier, if spawned by a child operation.
+    pub parent_operation_id: Option<String>,
+    /// Parent agent identifier that admitted this operation.
+    pub parent_agent_id: Option<String>,
+    /// Execution mode (`sync` or `background`).
+    pub execution_mode: crate::events::OperationExecutionMode,
+    /// Parent-completion lifecycle policy (`cancel` or `continue`).
+    pub on_parent_complete: crate::events::OnParentComplete,
+    /// Delegation depth relative to the root entry agent.
+    pub depth: u32,
+    /// Persisted operation status.
+    pub status: crate::events::OperationStatus,
+    /// Byte length of the archived result text, if any.
+    pub result_bytes: Option<usize>,
+    /// Creation timestamp in milliseconds since Unix epoch.
+    pub created_at_ms: u64,
+    /// Completion timestamp in milliseconds since Unix epoch, if terminal.
+    pub finished_at_ms: Option<u64>,
+}
+
+/// Detailed lock-free read-only inspection of one persisted agent in a saved session.
+#[derive(Clone, Debug)]
+pub struct SavedAgentInspection {
+    /// Canonical conversation/session identity.
+    pub conversation_id: ConversationId,
+    /// Canonical UUID agent identifier.
+    pub agent_id: String,
+    /// Display name of the agent.
+    pub name: String,
+    /// Optional preset name from which the agent was created.
+    pub preset_name: Option<String>,
+    /// Agent interaction policy (`reusable` or `one_shot`).
+    pub interaction: crate::events::AgentInteraction,
+    /// Whether this agent is the root entry agent of the session.
+    pub is_entry: bool,
+    /// Frozen execution definition of this agent.
+    pub definition: SessionDefinition,
+    /// Monotonic material revision of this agent's stored Context.
+    pub material_revision: u64,
+    /// Number of Context blocks currently stored for this agent.
+    pub block_count: usize,
+    /// Conservative request-size estimate and compaction settings for this agent.
+    pub context_usage: ContextUsage,
+    /// Number of rewrite records in this agent's stored history index.
+    pub history_records: usize,
+    /// Cumulative model usage totals stored for this agent.
+    pub usage: crate::usage::SessionUsage,
+    /// Persisted operations targeting this agent, ordered by creation time.
+    pub operations: Vec<SavedOperationSummary>,
+    /// Number of pending inbox events targeting this agent.
+    pub pending_events: usize,
+    /// Creation timestamp in milliseconds since Unix epoch.
+    pub created_at_ms: u64,
+    /// Last update timestamp in milliseconds since Unix epoch.
+    pub updated_at_ms: u64,
 }
 
 /// Confirmation of a pending commit when explicitly abandoning local materials.

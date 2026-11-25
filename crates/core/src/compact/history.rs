@@ -344,6 +344,18 @@ impl HistoryStore {
         Self::with_mode(store_root, conversation_id, agent_id, entries, false)
     }
 
+    /// Bind a read-only view of one agent's SQLite `history_records` table.
+    ///
+    /// Reading via [`Self::read`] only opens a read-only WAL connection and never
+    /// creates or mutates any files.
+    pub(crate) fn open_read_only_for_agent(
+        store_root: &Path,
+        session_id: &str,
+        agent_id: &str,
+    ) -> Self {
+        Self::new_strict_for_agent(store_root, session_id, agent_id, Vec::new())
+    }
+
     fn with_mode(
         store_root: &Path,
         conversation_id: &str,

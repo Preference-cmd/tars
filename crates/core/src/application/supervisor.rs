@@ -170,6 +170,9 @@ async fn drive(host: &Arc<HostInner>, entry: &Arc<Entry>) {
         };
         if should_save {
             saving::save(host, entry).await;
+            if let Some(coord) = entry.coordinator.get() {
+                coord.state_changed.notify_waiters();
+            }
             continue;
         }
         let close = {

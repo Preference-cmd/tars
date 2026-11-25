@@ -49,6 +49,10 @@ pub(crate) struct State {
     pub error: Option<ApplicationError>,
     pub fault: Option<ApplicationError>,
     pub active: Option<WorkRef>,
+    /// Monotonically incremented whenever a root work (user or reactive wakeup) is submitted.
+    pub root_work_seq: u64,
+    /// Most recent root [`WorkRef`] submitted to this session.
+    pub last_root_work: Option<WorkRef>,
     /// A manual compaction is between its material snapshot and its edit.
     pub compacting: bool,
     pub pending: Option<Arc<PreparedCommit>>,
@@ -118,6 +122,8 @@ impl Entry {
                 error: None,
                 fault: None,
                 active: None,
+                root_work_seq: 0,
+                last_root_work: None,
                 compacting: false,
                 pending: None,
                 pending_consumed: ConsumedInboxEvents::default(),

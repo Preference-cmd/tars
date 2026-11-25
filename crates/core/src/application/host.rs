@@ -380,6 +380,37 @@ impl SessionHost {
                 _ => None,
             };
             let usage = record.session_usage();
+            let agent_rows = store.list_agents(&raw_id)?;
+            let op_rows = store.list_operations(&raw_id)?;
+            let mut agents = Vec::with_capacity(agent_rows.len());
+            for agent in agent_rows {
+                let context: causa::kernel::Context =
+                    crate::material::decode_stored(agent.context_json.as_bytes())?;
+                let history: Vec<crate::compact::HistoryRecordEntry> =
+                    serde_json::from_str(&agent.history_index_json)
+                        .map_err(crate::store::StoreError::from)?;
+                let operation_count = op_rows
+                    .iter()
+                    .filter(|op| op.target_agent_id == agent.agent_id)
+                    .count();
+                let pending_events = store
+                    .list_pending_inbox_events(&raw_id, &agent.agent_id)?
+                    .len();
+                agents.push(SavedAgentSummary {
+                    is_entry: agent.agent_id == raw_id,
+                    agent_id: agent.agent_id,
+                    name: agent.name,
+                    preset_name: agent.preset_name,
+                    interaction: agent.interaction,
+                    material_revision: agent.material_revision,
+                    block_count: context.blocks().len(),
+                    history_records: history.len(),
+                    operation_count,
+                    pending_events,
+                    created_at_ms: agent.created_at_ms,
+                    updated_at_ms: agent.updated_at_ms,
+                });
+            }
             Ok(Some(SavedSessionInspection {
                 conversation_id: record.conversation_id.into(),
                 definition: record.definition,
@@ -394,11 +425,164 @@ impl SessionHost {
                 updated_at_ms: record.updated_at_ms,
                 skills_count,
                 dynamic_context_file_exists,
+                agents,
             }))
         })
         .await?
         .ok_or(ApplicationError::NotFound)?;
         Ok(inspection)
+    }
+
+    /// Inspect one persisted agent in a saved session without resolving credentials,
+    /// locking, or mutating any Context, history, or database files.
+    ///
+    /// `agent_selector` matches an exact `agent_id` first, then a unique `name`
+    /// within the session (returning [`ApplicationError::AmbiguousAgent`] when multiple
+    /// agents share that name, or [`ApplicationError::NotFound`] when absent).
+    pub async fn inspect_agent(
+        &self,
+        id: &ConversationId,
+        agent_selector: &str,
+    ) -> Result<SavedAgentInspection, ApplicationError> {
+        let store = self
+            .inner
+            .store
+            .clone()
+            .ok_or(ApplicationError::StoreUnavailable)?;
+        let raw_id = id.as_str().to_owned();
+        let selector = agent_selector.to_owned();
+        super::saving::io_semaphore(
+            &self.inner.io,
+            move || -> Result<SavedAgentInspection, ApplicationError> {
+                let Some(record) = store.read_saved(&raw_id)? else {
+                    return Err(ApplicationError::NotFound);
+                };
+                let agent_rows = store.list_agents(&raw_id)?;
+                let agent = resolve_agent_row(&agent_rows, &raw_id, Some(&selector))?;
+                let is_entry = agent.agent_id == raw_id;
+                let definition: crate::definition::SessionDefinition =
+                    serde_json::from_str(&agent.definition_json)
+                        .map_err(crate::store::StoreError::from)?;
+                let context: causa::kernel::Context =
+                    crate::material::decode_stored(agent.context_json.as_bytes())
+                        .map_err(crate::store::StoreError::from)?;
+                let history: Vec<crate::compact::HistoryRecordEntry> =
+                    serde_json::from_str(&agent.history_index_json)
+                        .map_err(crate::store::StoreError::from)?;
+                let bytes = crate::compact::estimate::context_bytes(&context);
+                let estimate_tokens = crate::compact::estimate::estimate_bytes(bytes);
+                let context_usage = ContextUsage {
+                    estimate_tokens,
+                    context_window: definition.context_window,
+                    auto_compact: if is_entry {
+                        record.auto_compact.unwrap_or(definition.auto_compact)
+                    } else {
+                        definition.auto_compact
+                    },
+                    compact_threshold: if is_entry {
+                        record
+                            .compact_threshold
+                            .unwrap_or(definition.compact_threshold)
+                    } else {
+                        definition.compact_threshold
+                    },
+                };
+                let usage = match agent.usage_json.as_deref() {
+                    Some(raw) => serde_json::from_str::<crate::store::WireSessionUsage>(raw)
+                        .map_err(crate::store::StoreError::from)?
+                        .to_session_usage(),
+                    None if is_entry => record.session_usage(),
+                    None => crate::usage::SessionUsage::default(),
+                };
+                let op_rows = store.list_operations(&raw_id)?;
+                let operations = op_rows
+                    .into_iter()
+                    .filter(|op| op.target_agent_id == agent.agent_id)
+                    .map(|op| SavedOperationSummary {
+                        operation_id: op.operation_id,
+                        parent_operation_id: op.parent_operation_id,
+                        parent_agent_id: op.parent_agent_id,
+                        execution_mode: op.execution_mode,
+                        on_parent_complete: op.on_parent_complete,
+                        depth: op.depth,
+                        status: op.status,
+                        result_bytes: op.result_bytes,
+                        created_at_ms: op.created_at_ms,
+                        finished_at_ms: op.finished_at_ms,
+                    })
+                    .collect();
+                let pending_events = store
+                    .list_pending_inbox_events(&raw_id, &agent.agent_id)?
+                    .len();
+                Ok(SavedAgentInspection {
+                    conversation_id: record.conversation_id.into(),
+                    agent_id: agent.agent_id.clone(),
+                    name: agent.name.clone(),
+                    preset_name: agent.preset_name.clone(),
+                    interaction: agent.interaction,
+                    is_entry,
+                    definition,
+                    material_revision: agent.material_revision,
+                    block_count: context.blocks().len(),
+                    context_usage,
+                    history_records: history.len(),
+                    usage,
+                    operations,
+                    pending_events,
+                    created_at_ms: agent.created_at_ms,
+                    updated_at_ms: agent.updated_at_ms,
+                })
+            },
+        )
+        .await
+    }
+
+    /// Expand the saved conversation history of one persisted agent without resolving
+    /// credentials, acquiring the writer OS lock, or mutating any files.
+    ///
+    /// When `agent_selector` is `None`, the root entry agent (`id.as_str()`) is expanded.
+    /// When `Some`, `agent_selector` matches an exact `agent_id` first, then a unique `name`.
+    pub async fn read_saved_history(
+        &self,
+        id: &ConversationId,
+        agent_selector: Option<&str>,
+        last_n: Option<usize>,
+    ) -> Result<crate::compact::ExpandedConversation, ApplicationError> {
+        let store = self
+            .inner
+            .store
+            .clone()
+            .ok_or(ApplicationError::StoreUnavailable)?;
+        let raw_id = id.as_str().to_owned();
+        let selector = agent_selector.map(str::to_owned);
+        super::saving::io_semaphore(
+            &self.inner.io,
+            move || -> Result<crate::compact::ExpandedConversation, ApplicationError> {
+                if store.read_saved(&raw_id)?.is_none() {
+                    return Err(ApplicationError::NotFound);
+                }
+                let agent_rows = store.list_agents(&raw_id)?;
+                let agent = resolve_agent_row(&agent_rows, &raw_id, selector.as_deref())?;
+                let context: causa::kernel::Context =
+                    crate::material::decode_stored(agent.context_json.as_bytes())
+                        .map_err(crate::store::StoreError::from)?;
+                let history: Vec<crate::compact::HistoryRecordEntry> =
+                    serde_json::from_str(&agent.history_index_json)
+                        .map_err(crate::store::StoreError::from)?;
+                let history_store = crate::compact::history::HistoryStore::open_read_only_for_agent(
+                    store.root(),
+                    &raw_id,
+                    &agent.agent_id,
+                );
+                Ok(crate::compact::expand_conversation(
+                    context.blocks(),
+                    &history,
+                    last_n,
+                    |record_id| history_store.read(record_id),
+                ))
+            },
+        )
+        .await
     }
     /// Locate an opening or active instance without returning mutable access.
     pub fn lookup(&self, id: &ConversationId) -> Option<SessionStatus> {
@@ -576,5 +760,33 @@ impl Drop for SessionHost {
                 coord.begin_session_shutdown();
             }
         }
+    }
+}
+
+fn resolve_agent_row<'a>(
+    agents: &'a [crate::store::StoredAgentRow],
+    entry_agent_id: &str,
+    selector: Option<&str>,
+) -> Result<&'a crate::store::StoredAgentRow, ApplicationError> {
+    let Some(selector) = selector else {
+        return agents
+            .iter()
+            .find(|agent| agent.agent_id == entry_agent_id)
+            .ok_or(ApplicationError::NotFound);
+    };
+    if let Some(exact) = agents.iter().find(|agent| agent.agent_id == selector) {
+        return Ok(exact);
+    }
+    let named: Vec<&crate::store::StoredAgentRow> = agents
+        .iter()
+        .filter(|agent| agent.name == selector)
+        .collect();
+    match named.as_slice() {
+        [] => Err(ApplicationError::NotFound),
+        [single] => Ok(single),
+        many => Err(ApplicationError::AmbiguousAgent {
+            name: selector.to_owned(),
+            candidates: many.iter().map(|agent| agent.agent_id.clone()).collect(),
+        }),
     }
 }

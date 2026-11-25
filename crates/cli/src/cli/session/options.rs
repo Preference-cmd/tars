@@ -21,8 +21,10 @@ pub(crate) enum SessionCommand {
         definition: Box<SessionDefinition>,
         /// Resolved once from the loaded configuration and handed to the host.
         external_tools: ExternalTools,
+        model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
         user_rules_path: Option<PathBuf>,
         trust_workspace_rules: bool,
+        trust_workspace_agents: bool,
         load: Option<PathBuf>,
         recovery_dir: PathBuf,
         json: bool,
@@ -32,8 +34,10 @@ pub(crate) enum SessionCommand {
         id: String,
         /// Resolved once from the loaded configuration and handed to the host.
         external_tools: ExternalTools,
+        model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
         user_rules_path: Option<PathBuf>,
         trust_workspace_rules: bool,
+        trust_workspace_agents: bool,
         input: Option<String>,
         permission_mode: Option<tars_core::permission::PermissionMode>,
         recovery_dir: PathBuf,
@@ -52,12 +56,14 @@ pub(crate) enum SessionCommand {
     History {
         store: PathBuf,
         id: String,
+        agent: Option<String>,
         last: Option<usize>,
         json: bool,
     },
     Show {
         store: PathBuf,
         id: String,
+        agent: Option<String>,
         json: bool,
     },
     Repair {
@@ -121,6 +127,7 @@ impl SessionCommand {
         let mut json = false;
         let mut no_config = false;
         let mut trust_workspace_rules = false;
+        let mut trust_workspace_agents = false;
         let mut apply = false;
         let mut dry_run = false;
         let mut args = args.iter();
@@ -133,6 +140,11 @@ impl SessionCommand {
                     if matches!(command, "create" | "run") && !trust_workspace_rules =>
                 {
                     trust_workspace_rules = true;
+                }
+                "--trust-workspace-agents"
+                    if matches!(command, "create" | "run") && !trust_workspace_agents =>
+                {
+                    trust_workspace_agents = true;
                 }
                 "--no-skills" if command == "create" && !no_skills => no_skills = true,
                 "--code-execution" if command == "create" && !code_execution => {
@@ -192,6 +204,9 @@ impl SessionCommand {
                 "--last" if command == "history" => {
                     insert(&mut values, flag, &mut args)?;
                 }
+                "--agent" if matches!(command, "show" | "history") => {
+                    insert(&mut values, flag, &mut args)?;
+                }
                 "--permission-mode" if matches!(command, "create" | "run") => {
                     insert(&mut values, flag, &mut args)?;
                 }
@@ -219,6 +234,7 @@ impl SessionCommand {
                 .transpose()
         };
         let config = configuration::load(&values, no_config)?;
+        let model_profiles = config.model_profiles();
         let user_rules_path = config.config_dir().map(|dir| dir.join("permissions.toml"));
         let store = values
             .get("--store")
@@ -274,8 +290,10 @@ impl SessionCommand {
                     store,
                     definition: Box::new(definition),
                     external_tools: ExternalTools::resolve(&config),
+                    model_profiles,
                     user_rules_path,
                     trust_workspace_rules,
+                    trust_workspace_agents,
                     load: values.get("--load").map(PathBuf::from),
                     recovery_dir: values
                         .get("--recovery-dir")
@@ -304,8 +322,10 @@ impl SessionCommand {
                     store,
                     id: id.expect("run ID parsed"),
                     external_tools: ExternalTools::resolve(&config),
+                    model_profiles,
                     user_rules_path,
                     trust_workspace_rules,
+                    trust_workspace_agents,
                     input,
                     permission_mode,
                     recovery_dir: values
@@ -339,6 +359,7 @@ impl SessionCommand {
                 Ok(Self::History {
                     store,
                     id: id.expect("history ID parsed"),
+                    agent: string("--agent")?,
                     last,
                     json,
                 })
@@ -346,6 +367,7 @@ impl SessionCommand {
             "show" => Ok(Self::Show {
                 store,
                 id: id.expect("show ID parsed"),
+                agent: string("--agent")?,
                 json,
             }),
             "import-legacy" => Ok(Self::ImportLegacy {

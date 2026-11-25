@@ -14,9 +14,9 @@ pub(super) const HELP: &str = "Persistent TARS sessions
 Usage: tars session create --store <directory> --provider <protocol> --model <id> [options]
        tars session run <conversation-id> --store <directory> (--input <text> | --stdin) [options]
        tars session list --store <directory> [--json]
-       tars session show <conversation-id> --store <directory> [--json]
+       tars session show <conversation-id> --store <directory> [--agent <id-or-name>] [--json]
        tars session compact <conversation-id> --store <directory> [--json]
-       tars session history <conversation-id> --store <directory> [--last N] [--json]
+       tars session history <conversation-id> --store <directory> [--agent <id-or-name>] [--last N] [--json]
        tars session repair <conversation-id> --store <directory> [--dry-run | --apply --expected-revision N] [--json]
        tars session export-materials --record <file> --output <new-file>
        tars session import-legacy --record <file> --store <directory> [--json]
@@ -61,6 +61,8 @@ Create options:
   --load              Initial Context material file; creates a new conversation
   --trust-workspace-rules
                       Trust and activate allow rules in <workspace>/.tars/permissions.toml
+  --trust-workspace-agents
+                      Trust and activate workspace agent presets in <workspace>/.tars/agents/
   --recovery-dir      Material recovery directory on initial save failure
                       (default: configured recovery_dir, else current directory)
 
@@ -72,8 +74,13 @@ Run options:
                       Reopening reverts full-access to ask unless created as full-access.
   --trust-workspace-rules
                       Trust and activate allow rules in <workspace>/.tars/permissions.toml
+  --trust-workspace-agents
+                      Trust and activate workspace agent presets in <workspace>/.tars/agents/
   --recovery-dir      Material recovery directory on save failure
                       (default: configured recovery_dir, else current directory)
+
+Show options:
+  --agent             Inspect one agent by UUID agent_id or unique name
 
 Compact options:
   --recovery-dir      Material recovery directory if saving the compacted
@@ -81,6 +88,7 @@ Compact options:
                       current directory)
 
 History options:
+  --agent             Expand history for one agent by UUID agent_id or unique name
   --last N            Print only the newest N blocks
 
 Common options:

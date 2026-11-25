@@ -108,6 +108,7 @@ pub(super) struct CoordinatorState {
     pub(super) operations: HashMap<String, OperationRecord>,
     pub(super) dedup_index: HashMap<(Option<String>, String), String>,
     pub(super) active_root_turn: Option<TurnId>,
+    pub(super) auto_wakeup_turns: HashSet<TurnId>,
     pub(super) command_rules: CommandRuleSet,
     pub(super) workspace_rules_backend: Option<WorkspaceRulesBackend>,
     pub(super) save_blocked: Option<Arc<StoreError>>,
@@ -384,6 +385,7 @@ impl SessionCoordinator {
                 operations,
                 dedup_index,
                 active_root_turn: None,
+                auto_wakeup_turns: HashSet::new(),
                 command_rules,
                 workspace_rules_backend,
                 save_blocked: None,
@@ -573,6 +575,14 @@ impl SessionCoordinator {
         }
         self.suppress_events_sync_best_effort(&to_suppress_ids);
         let _ = to_cancel_ops;
+        let status = work_result_to_terminal_status(result, false);
+        self.bus.publish(SessionEvent::OperationStateChanged {
+            session_id: self.session_id.clone(),
+            operation_id: work.turn_id.0.clone(),
+            target_agent_id: self.entry_agent_id.clone(),
+            parent_operation_id: None,
+            status,
+        });
         self.wakeup_notify.notify_one();
         self.state_changed.notify_waiters();
     }
@@ -620,6 +630,131 @@ impl SessionCoordinator {
         }
         self.suppress_events_sync_best_effort(&suppress_ids);
         self.wakeup_notify.notify_one();
+        self.state_changed.notify_waiters();
+    }
+
+    /// Collect active operation cancel tokens and wake-suppression IDs under `Coordinator::state`.
+    ///
+    /// Callers holding `Entry::state` may invoke this while keeping the `Entry -> Coordinator`
+    /// lock order intact, then drop both locks before calling [`Self::apply_cancel_all_active`].
+    pub(crate) fn collect_cancel_all_active(&self) -> (Vec<CancellationToken>, Vec<String>) {
+        let mut state = self.state.lock().expect("coord lock");
+        let mut tokens = Vec::new();
+        let mut suppress_ids = Vec::new();
+        for op in state.operations.values_mut() {
+            if op.status.is_active() {
+                op.suppress_wake = true;
+                tokens.push(op.cancel_token.clone());
+                suppress_ids.push(op.operation_id.clone());
+            }
+        }
+        for unit in state.agents.values_mut() {
+            for ev in &mut unit.pending_events {
+                if ev.wake_policy == WakePolicy::WakeIfIdle {
+                    ev.wake_policy = WakePolicy::SuppressWake;
+                    if ev.source_kind == EventSourceKind::AgentOperation
+                        && !suppress_ids.contains(&ev.source_id)
+                    {
+                        suppress_ids.push(ev.source_id.clone());
+                    }
+                }
+            }
+        }
+        (tokens, suppress_ids)
+    }
+
+    /// Execute cooperative cancellation, background-task cancellation, wake suppression,
+    /// and waiter notifications after releasing locks.
+    pub(crate) fn apply_cancel_all_active(
+        &self,
+        tokens: Vec<CancellationToken>,
+        suppress_ids: Vec<String>,
+    ) {
+        let _ = self.background_tasks.cancel_all();
+        for token in tokens {
+            token.cancel();
+        }
+        self.suppress_events_sync_best_effort(&suppress_ids);
+        self.wakeup_notify.notify_waiters();
+        self.state_changed.notify_waiters();
+    }
+
+    /// Cancel all active child operations and suppress pending idle wakeups without
+    /// shutting down the session coordinator.
+    #[allow(dead_code)]
+    pub(crate) fn cancel_all_active_operations(&self) {
+        let (tokens, suppress_ids) = self.collect_cancel_all_active();
+        self.apply_cancel_all_active(tokens, suppress_ids);
+    }
+
+    /// Return `true` if any agent currently has a `WakeIfIdle` pending event and passes
+    /// all admission guards (meaning the scheduler is about to wake or downgrade it).
+    fn has_ready_wakeup_candidate_locked(
+        &self,
+        state: &CoordinatorState,
+        entry_state: &mut crate::application::entry::State,
+    ) -> bool {
+        if entry_state.lifecycle != Lifecycle::Open
+            || entry_state.closing.is_some()
+            || matches!(entry_state.save, SaveStatus::SaveBlocked { .. })
+            || entry_state.fault.is_some()
+            || state.save_blocked.is_some()
+        {
+            return false;
+        }
+        for agent_id in &state.agent_order {
+            let Some(unit) = state.agents.get(agent_id) else {
+                continue;
+            };
+            if !unit
+                .pending_events
+                .iter()
+                .any(|e| e.wake_policy == WakePolicy::WakeIfIdle)
+            {
+                continue;
+            }
+            if passes_agent_guards(agent_id, &self.entry_agent_id, unit, entry_state) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check coordinator settlement conditions while the caller already holds `Entry::state`.
+    ///
+    /// Returns `Err(ApplicationError::SaveBlocked(..))` if a child save/outbox is blocked,
+    /// or `Ok(true)` when all finite background tasks, child saves, outboxes, admissions,
+    /// active operation tasks, and ready idle-wakeup candidates have settled.
+    pub(crate) fn check_settled_with_entry(
+        &self,
+        entry_state: &mut crate::application::entry::State,
+    ) -> Result<bool, ApplicationError> {
+        let state = self.state.lock().expect("coord lock");
+        if let Some(error) = &state.save_blocked {
+            return Err(ApplicationError::SaveBlocked(error.clone()));
+        }
+        Ok(self.active_finite_background_tasks() == 0
+            && state.child_saves_in_flight == 0
+            && state.pending_outboxes.is_empty()
+            && state.admissions_in_flight == 0
+            && state.active_tasks.is_empty()
+            && !state.operations.values().any(|op| op.status.is_active())
+            && !self.has_ready_wakeup_candidate_locked(&state, entry_state))
+    }
+
+    /// Return `true` when any finite background task, in-flight admission, active
+    /// operation task, or eligible idle wakeup still requires execution (excluding pure
+    /// persistence/saving waits).
+    pub(crate) fn has_active_execution_with_entry(
+        &self,
+        entry_state: &mut crate::application::entry::State,
+    ) -> bool {
+        let state = self.state.lock().expect("coord lock");
+        self.active_finite_background_tasks() > 0
+            || state.admissions_in_flight > 0
+            || !state.active_tasks.is_empty()
+            || state.operations.values().any(|op| op.status.is_active())
+            || self.has_ready_wakeup_candidate_locked(&state, entry_state)
     }
 
     /// Cancel all active operations and background tasks for session shutdown.
@@ -3329,7 +3464,7 @@ impl SessionCoordinator {
         }
 
         // Update in-memory agent & operation state, push parent inbox event, and collect child cascade.
-        let (cascade_tokens, cascade_suppress_ids, op_notify, parent_op_id) = {
+        let (mut cascade_tokens, mut cascade_suppress_ids, op_notify, parent_op_id) = {
             let mut state = self.state.lock().expect("coord lock");
             if let Some(unit) = state.agents.get_mut(target_agent_id) {
                 let has_updated_materials = updated_materials.is_some();
@@ -3365,15 +3500,37 @@ impl SessionCoordinator {
                 parent_op_id = op.parent_operation_id.clone();
             }
 
-            if let Some(inbox_ev) = &inserted_event
-                && let Some(parent_unit) = state.agents.get_mut(&inbox_ev.target_agent_id)
-            {
-                parent_unit.inbox.enqueue(inbox_ev.clone());
-                parent_unit.pending_events.push(inbox_ev.clone());
+            // Re-check suppression after awaiting commit_outbox in case cancel_all_active,
+            // cancel_agent, or session shutdown raced with the outbox write.
+            let should_suppress_wake = force_suppress_wake
+                || self.shutdown.load(Ordering::SeqCst)
+                || state.operations.get(operation_id).is_some_and(|op| {
+                    op.suppress_wake
+                        || op
+                            .parent_operation_id
+                            .as_deref()
+                            .and_then(|pid| state.operations.get(pid))
+                            .is_some_and(|p| {
+                                p.suppress_wake
+                                    || (p.status.is_terminal()
+                                        && p.status != OperationStatus::Completed)
+                            })
+                });
+            let mut late_suppressed_source = None;
+            if let Some(inbox_ev) = inserted_event.as_mut() {
+                if should_suppress_wake && inbox_ev.wake_policy == WakePolicy::WakeIfIdle {
+                    inbox_ev.wake_policy = WakePolicy::SuppressWake;
+                    late_suppressed_source = Some(operation_id.to_owned());
+                }
+                if let Some(parent_unit) = state.agents.get_mut(&inbox_ev.target_agent_id) {
+                    parent_unit.inbox.enqueue(inbox_ev.clone());
+                    parent_unit.pending_events.push(inbox_ev.clone());
+                }
             }
 
             // Child cascade (AC07).
-            let (cascade_tokens, cascade_suppress_ids) = if status == OperationStatus::Completed {
+            let (cascade_tokens, mut cascade_suppress_ids) = if status == OperationStatus::Completed
+            {
                 let state_ref = &mut *state;
                 collect_normal_completion_cascade(
                     &mut state_ref.operations,
@@ -3397,6 +3554,11 @@ impl SessionCoordinator {
                 suppress_in_memory_events_for_sources(&mut state.agents, &subtree);
                 (tokens, subtree)
             };
+            if let Some(source_id) = late_suppressed_source
+                && !cascade_suppress_ids.contains(&source_id)
+            {
+                cascade_suppress_ids.push(source_id);
+            }
 
             state.active_tasks.remove(operation_id);
             (
@@ -3406,6 +3568,7 @@ impl SessionCoordinator {
                 parent_op_id,
             )
         };
+        let _ = (&mut cascade_tokens, &mut cascade_suppress_ids);
 
         if execution_mode == OperationExecutionMode::Background {
             let _ = self.background_tasks.transition(operation_id, status);
@@ -3652,6 +3815,7 @@ impl SessionCoordinator {
             agent_id: agent_id.to_owned(),
             max_auto_wakeups,
         });
+        self.state_changed.notify_waiters();
     }
 
     async fn try_trigger_wakeup(self: &Arc<Self>, target_agent_id: &str) {
@@ -3660,6 +3824,7 @@ impl SessionCoordinator {
         };
 
         let mut overflow_max = None;
+        let mut submitted_root_op_id: Option<String> = None;
         let child_reactive_work: Option<(String, DrainedNotification, u64)> = {
             let mut entry_state = entry.lock();
             if entry_state.lifecycle != Lifecycle::Open
@@ -3676,25 +3841,28 @@ impl SessionCoordinator {
             }
             let max_auto = state.config.max_auto_wakeups;
             let timeout_secs = state.config.default_operation_timeout_secs;
-            let Some(unit) = state.agents.get_mut(target_agent_id) else {
-                return;
+            let is_overflow = {
+                let Some(unit) = state.agents.get(target_agent_id) else {
+                    return;
+                };
+                if !unit
+                    .pending_events
+                    .iter()
+                    .any(|e| e.wake_policy == WakePolicy::WakeIfIdle)
+                {
+                    return;
+                }
+                if !passes_agent_guards(
+                    target_agent_id,
+                    &self.entry_agent_id,
+                    unit,
+                    &mut entry_state,
+                ) {
+                    return;
+                }
+                unit.auto_wakeups_in_cycle >= max_auto
             };
-            if !unit
-                .pending_events
-                .iter()
-                .any(|e| e.wake_policy == WakePolicy::WakeIfIdle)
-            {
-                return;
-            }
-            if !passes_agent_guards(
-                target_agent_id,
-                &self.entry_agent_id,
-                unit,
-                &mut entry_state,
-            ) {
-                return;
-            }
-            if unit.auto_wakeups_in_cycle >= max_auto {
+            if is_overflow {
                 overflow_max = Some(max_auto);
                 None
             } else if target_agent_id == self.entry_agent_id {
@@ -3707,23 +3875,48 @@ impl SessionCoordinator {
                     .map(|d| d.retained_work_capacity);
                 if let (Some(capacity), Some(owner)) = (capacity, entry_state.owner.as_mut()) {
                     while owner.retained_count() >= capacity {
-                        let candidate = owner
+                        if let Some(candidate) = owner
                             .retained()
                             .into_iter()
                             .find(|w| w.finished && w.read && !w.uncommitted)
-                            .map(|w| w.work);
-                        let Some(candidate) = candidate else {
-                            break;
-                        };
-                        if owner.forget(&candidate).is_err() {
-                            break;
+                            .map(|w| w.work)
+                        {
+                            if owner.forget(&candidate).is_err() {
+                                break;
+                            }
+                            state.auto_wakeup_turns.remove(&candidate.turn_id);
+                            continue;
                         }
+                        if let Some(wakeup_candidate) = owner
+                            .retained()
+                            .into_iter()
+                            .find(|w| {
+                                w.finished
+                                    && !w.uncommitted
+                                    && state.auto_wakeup_turns.contains(&w.work.turn_id)
+                            })
+                            .map(|w| w.work)
+                        {
+                            let _ = handle.observe(&wakeup_candidate);
+                            if owner.forget(&wakeup_candidate).is_err() {
+                                break;
+                            }
+                            state.auto_wakeup_turns.remove(&wakeup_candidate.turn_id);
+                            continue;
+                        }
+                        break;
                     }
                 }
-                let Some(drained) = unit.inbox.drain_notification_detailed() else {
-                    return;
+                let drained = {
+                    let Some(unit) = state.agents.get_mut(target_agent_id) else {
+                        return;
+                    };
+                    let Some(drained) = unit.inbox.drain_notification_detailed() else {
+                        return;
+                    };
+                    unit.auto_wakeups_in_cycle += 1;
+                    drained
                 };
-                unit.auto_wakeups_in_cycle += 1;
                 let block = ContextBlock::new(
                     new_block_id(),
                     BlockContent::text(Role::User, drained.rendered.clone()),
@@ -3734,9 +3927,15 @@ impl SessionCoordinator {
                     blocks: vec![block],
                 }) {
                     Ok(receipt) => {
-                        unit.active_work = Some(receipt.work.clone());
+                        submitted_root_op_id = Some(receipt.work.turn_id.0.clone());
+                        if let Some(unit) = state.agents.get_mut(target_agent_id) {
+                            unit.active_work = Some(receipt.work.clone());
+                        }
                         state.active_root_turn = Some(receipt.work.turn_id.clone());
-                        entry_state.active = Some(receipt.work);
+                        state.auto_wakeup_turns.insert(receipt.work.turn_id.clone());
+                        entry_state.active = Some(receipt.work.clone());
+                        entry_state.root_work_seq = entry_state.root_work_seq.saturating_add(1);
+                        entry_state.last_root_work = Some(receipt.work);
                         if entry_state.persistent {
                             entry_state.save = SaveStatus::Dirty {
                                 base_revision: entry_state.revision,
@@ -3747,12 +3946,18 @@ impl SessionCoordinator {
                     }
                     Err(_) => {
                         // Rollback counter and restore mailbox so failed wakeup never loses events.
-                        unit.auto_wakeups_in_cycle = unit.auto_wakeups_in_cycle.saturating_sub(1);
-                        unit.inbox.restore_drained(&drained);
+                        if let Some(unit) = state.agents.get_mut(target_agent_id) {
+                            unit.auto_wakeups_in_cycle =
+                                unit.auto_wakeups_in_cycle.saturating_sub(1);
+                            unit.inbox.restore_drained(&drained);
+                        }
                     }
                 }
                 None
             } else {
+                let Some(unit) = state.agents.get_mut(target_agent_id) else {
+                    return;
+                };
                 let Some(drained) = unit.inbox.drain_notification_detailed() else {
                     return;
                 };
@@ -3792,6 +3997,17 @@ impl SessionCoordinator {
             }
         };
 
+        if let Some(operation_id) = submitted_root_op_id {
+            self.bus.publish(SessionEvent::OperationStateChanged {
+                session_id: self.session_id.clone(),
+                operation_id,
+                target_agent_id: self.entry_agent_id.clone(),
+                parent_operation_id: None,
+                status: OperationStatus::Running,
+            });
+            self.state_changed.notify_waiters();
+        }
+
         if let Some(max_auto) = overflow_max {
             self.downgrade_overflow_wakeups(&entry, target_agent_id, max_auto)
                 .await;
@@ -3802,6 +4018,36 @@ impl SessionCoordinator {
             let prompt = drained.rendered.clone();
             self.spawn_operation_task(op_id, prompt, timeout, None, None, Some(drained));
         }
+    }
+}
+
+fn work_result_to_terminal_status(result: &WorkResult, timed_out: bool) -> OperationStatus {
+    match (result, timed_out) {
+        (WorkResult::Run(TurnResult::Completed { .. }), _) => OperationStatus::Completed,
+        (
+            WorkResult::Run(TurnResult::Interrupted {
+                cause: TurnInterruption::DeadlineExceeded { .. },
+            })
+            | WorkResult::StoppedBeforeRun(ControlError::TimedOut),
+            _,
+        ) => OperationStatus::Deadline,
+        (
+            WorkResult::Run(TurnResult::Interrupted {
+                cause: TurnInterruption::Cancelled { .. },
+            })
+            | WorkResult::StoppedBeforeRun(ControlError::Cancelled),
+            true,
+        ) => OperationStatus::Deadline,
+        (
+            WorkResult::Run(TurnResult::Interrupted {
+                cause: TurnInterruption::Cancelled { .. },
+            })
+            | WorkResult::StoppedBeforeRun(ControlError::Cancelled),
+            false,
+        ) => OperationStatus::Cancelled,
+        (WorkResult::Run(TurnResult::Interrupted { .. }), _)
+        | (WorkResult::AssemblyFailed(_), _) => OperationStatus::Failed,
+        (WorkResult::Faulted(_), _) => OperationStatus::Faulted,
     }
 }
 
