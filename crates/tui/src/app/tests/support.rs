@@ -22,6 +22,9 @@ pub(super) fn app(dir: &std::path::Path) -> App {
         preset: None,
         config_path: None,
         code_execution_enabled: None,
+        no_config: false,
+        auto_onboard: false,
+        onboarding_config_path: None,
     });
     app.clock = Clock::manual(std::time::Instant::now());
     app

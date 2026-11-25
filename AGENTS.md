@@ -1,7 +1,7 @@
 # AGENTS.md — TARS
 
 TARS is an open-source, local-first AI agent written in
-Rust (`tars` CLI and `tars-tui` terminal interface), built on the published
+Rust (single `tars` binary with interactive terminal and CLI subcommands), built on the published
 `causa` crate. TARS ships as an end-user application, not a crates.io library
 or a public Rust SDK. All Cargo packages must remain `publish = false`.
 
@@ -55,7 +55,7 @@ code.
 | Change interrupted-session continuation or material repair | [Session continuation](docs/session-continuation.md), `tars-core::application::repair` |
 | Change workspace tool access, limits or status | [Workspace tools](docs/workspace-tools.md), `tars-core::workspace`, `tars-core::tools`, `session::ToolReporter` |
 | Change shared TOML configuration | [Configuration](docs/configuration.md), `tars-core::config` |
-| Run or change the terminal interface | [TUI prototype](docs/tui.md), `crates/tui/` |
+| Run or change the terminal interface | [TUI guide](docs/tui.md), `crates/tui/` |
 | Plan a change or inspect acceptance status (local checkout) | `.agents/README.md` |
 | Follow Direct/Noted or proposal lifecycle rules (local checkout) | `.agents/pipelines/WORKFLOW.md` |
 
@@ -86,10 +86,11 @@ authoritative acceptance list per proposal scope.
   and inherit workspace metadata.
   `tars-core` owns shared behavior and configuration; `tars-sandbox` owns the
   platform sandbox policy, backends and process control and depends on neither
-  Causa nor `tars-core`; `tars-cli` owns the `tars` binary; `tars-tui` owns the
-  terminal consumer and `tars-tui` binary. `tars-sandbox` is a library package,
-  not an entry crate. Add other entry crates only with real consumers, never
-  placeholder UI packages.
+  Causa nor `tars-core`; `tars-cli` owns the `tars` binary (launching the
+  interactive TUI or running CLI subcommands); `tars-tui` owns the native
+  terminal interface library consumed by `tars-cli`. `tars-sandbox` and
+  `tars-tui` are library packages, not entry binaries. Add other entry crates
+  only with real consumers, never placeholder UI packages.
 - Use Causa's public facade from the published crates.io release pinned in
   `Cargo.toml` and `Cargo.lock`. Do not include or copy Causa sources, and do
   not switch to a path or git dependency without the user's say-so. TARS owns

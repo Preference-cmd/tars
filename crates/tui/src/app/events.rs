@@ -106,6 +106,10 @@ impl App {
             }
             if let Some(form) = &mut self.form {
                 input::paste(&mut form.fields[form.selected], text, false);
+            } else if let Some(onboarding) = &mut self.onboarding {
+                if !self.too_small {
+                    onboarding.paste(text);
+                }
             } else if let Some(entry) = self.entries.get_mut(self.selected) {
                 if entry.workspace_rules_trust.is_some() || entry.workspace_agents_trust.is_some() {
                     return;
@@ -165,6 +169,29 @@ impl App {
                 self.form = None;
             } else {
                 form.key(key);
+            }
+            self.update_approval_guard();
+            self.update_workspace_trust_guard();
+            return;
+        }
+        if self.onboarding.is_some() {
+            if self.too_small {
+                return;
+            }
+            if input::control(key, 's')
+                || (key.code == KeyCode::Enter
+                    && key.kind == KeyEventKind::Press
+                    && !key.modifiers.intersects(
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
+                    ))
+            {
+                self.submit_onboarding();
+            } else if key.code == KeyCode::Esc {
+                self.onboarding = None;
+                self.onboarding_dismissed = true;
+                self.notice = "Setup skipped · press F2 or /new to create a session".into();
+            } else if let Some(onboarding) = &mut self.onboarding {
+                onboarding.key(key);
             }
             self.update_approval_guard();
             self.update_workspace_trust_guard();

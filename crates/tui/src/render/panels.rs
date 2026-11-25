@@ -1,7 +1,7 @@
 use super::surface::{ACCENT, MUTED};
 use crate::{
     app::{App, COMMANDS, Panel, matching_commands},
-    input::FIELD_NAMES,
+    input::{FIELD_NAMES, ONBOARDING_FIELD_NAMES},
 };
 use ratatui::{
     Frame,
@@ -392,6 +392,86 @@ pub(super) fn form(frame: &mut Frame<'_>, app: &App, area: Rect) {
             } else {
                 MUTED
             })),
+        rows[error_row + 1],
+    );
+}
+
+pub(super) fn onboarding(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let onboarding = app.onboarding.as_ref().unwrap();
+    let compact = area.height < 2 + 3 * onboarding.fields.len() as u16 + 4;
+    let shown: Vec<_> = if compact {
+        vec![onboarding.selected]
+    } else {
+        (0..onboarding.fields.len()).collect()
+    };
+    let mut sizes = vec![Constraint::Length(2)];
+    sizes.extend(std::iter::repeat_n(Constraint::Length(3), shown.len()));
+    sizes.push(Constraint::Min(1));
+    sizes.push(Constraint::Length(if compact { 2 } else { 3 }));
+    let rows = Layout::vertical(sizes).split(area);
+    let title = if compact {
+        format!(
+            "Welcome to TARS · First-run setup  ·  {} / {}",
+            onboarding.selected + 1,
+            onboarding.fields.len()
+        )
+    } else {
+        "Welcome to TARS · First-run setup".to_owned()
+    };
+    frame.render_widget(
+        Paragraph::new(title)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        rows[0],
+    );
+    for (row, &index) in shown.iter().enumerate() {
+        let field = &onboarding.fields[index];
+        let title = if index == 2 {
+            let env_name = field.lines().join("");
+            let trimmed = env_name.trim();
+            let is_set = !trimmed.is_empty()
+                && std::env::var_os(trimmed).is_some_and(|value| !value.is_empty());
+            let badge = if is_set {
+                Span::styled(" [set]", Style::default().fg(Color::Green))
+            } else {
+                Span::styled(" [not set]", Style::default().fg(Color::Yellow))
+            };
+            Line::from(vec![Span::raw(ONBOARDING_FIELD_NAMES[index]), badge])
+        } else {
+            Line::from(ONBOARDING_FIELD_NAMES[index])
+        };
+        let block = Block::default()
+            .borders(Borders::BOTTOM)
+            .title(title)
+            .border_style(Style::default().fg(if index == onboarding.selected {
+                ACCENT
+            } else {
+                MUTED
+            }));
+        let inner = block.inner(rows[row + 1]);
+        frame.render_widget(block, rows[row + 1]);
+        if index == 0 {
+            frame.render_widget(
+                Paragraph::new(format!("◀ {} ▶", field.lines().join(""))),
+                inner,
+            );
+        } else if index == onboarding.selected {
+            frame.render_widget(field, inner);
+        } else {
+            frame.render_widget(Paragraph::new(field.lines().join("")), inner);
+        }
+    }
+    let error_row = shown.len() + 1;
+    frame.render_widget(
+        Paragraph::new(onboarding.error.as_str())
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(Color::Yellow)),
+        rows[error_row],
+    );
+    frame.render_widget(
+        Paragraph::new("Tab/↑↓ field · ←→ provider · Enter/Ctrl-S save & start · Esc skip")
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(MUTED)),
         rows[error_row + 1],
     );
 }

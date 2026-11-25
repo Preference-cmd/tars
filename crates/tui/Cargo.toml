@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "Experimental terminal interface for TARS"
+description = "Native terminal interface for TARS"
 
 [dependencies]
 tars-core = { path = "../core" }

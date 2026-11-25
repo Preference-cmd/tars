@@ -54,8 +54,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             || entry.workspace_agents_trust.is_some()
             || !entry.approval_queue.is_empty()
     });
-    let approval_visible =
-        pending && app.panel.is_none() && app.form.is_none() && app.confirmation.is_none();
+    let approval_visible = pending
+        && app.panel.is_none()
+        && app.form.is_none()
+        && app.onboarding.is_none()
+        && app.confirmation.is_none();
     let minimum_height = if approval_visible { 19 } else { 12 };
     if app.too_small || area.width < 30 || area.height < minimum_height {
         let message = if approval_visible {
@@ -131,6 +134,18 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     }
     if app.form.is_some() {
         super::panels::form(
+            frame,
+            app,
+            Rect {
+                y: regions[1].y,
+                height: area.height.saturating_sub(4),
+                ..body
+            },
+        );
+        return;
+    }
+    if app.onboarding.is_some() {
+        super::panels::onboarding(
             frame,
             app,
             Rect {
@@ -574,7 +589,10 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             )
         });
 
-    let self_waiting = if (app.panel.is_some() || app.form.is_some() || app.confirmation.is_some())
+    let self_waiting = if (app.panel.is_some()
+        || app.form.is_some()
+        || app.onboarding.is_some()
+        || app.confirmation.is_some())
         && entry.is_some_and(|e| !e.approval_queue.is_empty())
     {
         entry.and_then(|e| {

@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 use tars_core::{
-    config::{Config, ConfigSource},
+    config::{Config, ConfigSource, default_config_path, default_store_dir},
     definition::SessionDefinition,
 };
 
@@ -12,6 +12,9 @@ pub(crate) struct Options {
     pub preset: Option<SessionDefinition>,
     pub config_path: Option<PathBuf>,
     pub code_execution_enabled: Option<bool>,
+    pub no_config: bool,
+    pub auto_onboard: bool,
+    pub onboarding_config_path: Option<PathBuf>,
 }
 
 pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options>, String> {
@@ -27,15 +30,33 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         match arg.as_str() {
             "--help" | "-h" => {
                 println!(
-                    "TARS TUI prototype\n\nUsage: tars-tui [--config FILE | --no-config] [--profile NAME]\n                [--store DIR] [--recovery-dir DIR]\n                [--code-execution | --no-code-execution]\n\nStore is required via a flag or shared TOML configuration. Explicit directories override configuration.\n/ or F1 commands  /mode change mode  Shift-Tab cycle mode\nEnter / Ctrl-S submit  Ctrl-J newline  PageUp/Down scroll\nF2 new  F3 open  F4 next session  F5 refresh  F6 tool materials\nEsc / Ctrl-C cancel  Ctrl-W close  Ctrl-Q quit  Ctrl-R retry save\nCtrl-E export  Ctrl-D discard (confirmation)\nConfirmation panel: Enter / y allow  n deny (optional reason)  Esc cancel turn\n\nNew-session forms start from the selected model preset. Credentials use environment variable references. Workspace/tool selection and MCP server ids use the same core configuration resolver.\nForm changes affect only the new session; they do not rewrite global configuration.\nRecovery exports never overwrite an existing file. GUI and installation are not included."
+                    "TARS interactive terminal\n\n\
+                     Usage: tars [--config FILE | --no-config] [--profile NAME]\n            \
+                     [--store DIR] [--recovery-dir DIR]\n            \
+                     [--code-execution | --no-code-execution]\n\n\
+                     When configuration is enabled, store defaults to ~/.tars/data (or $TARS_HOME/data)\n\
+                     unless overridden via --store or TOML. With --no-config, --store DIR is required.\n\n\
+                     Slash commands:\n  \
+                     /doctor    Check configuration, credentials, storage, sandbox and tools\n  \
+                     /init      Analyze the workspace and create or update AGENTS.md\n  \
+                     /new       Create a session with model settings (F2)\n  \
+                     /sessions  Find and open a saved or active session\n  \
+                     /agents    List session agents and switch transcript view\n  \
+                     /mode      Show or change permission mode (Shift-Tab cycles)\n  \
+                     /compact   Summarize and replace the current context\n  \
+                     /help      Keyboard shortcuts and session behavior\n\n\
+                     Keys: / or F1 commands · Enter / Ctrl-S submit · Ctrl-J newline · Tab complete\n      \
+                     PageUp/Down scroll · F3 open · F4 next · F5 refresh · F6 tools · F7 repair\n      \
+                     Esc / Ctrl-C cancel · Ctrl-W close · Ctrl-Q quit · Ctrl-R retry · Ctrl-E export"
                 );
                 return Ok(None);
             }
-            "--version" => {
-                println!("tars-tui {} (prototype)", env!("CARGO_PKG_VERSION"));
+            "--version" | "-V" => {
+                println!("tars {}", env!("CARGO_PKG_VERSION"));
                 return Ok(None);
             }
             "--no-config" if !no_config => no_config = true,
+            "--no-config" => return Err("--no-config specified twice".into()),
             "--code-execution" if !code_execution => code_execution = true,
             "--no-code-execution" if !no_code_execution => no_code_execution = true,
             "--code-execution" => return Err("--code-execution specified twice".into()),
@@ -101,10 +122,14 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         (preset, _) => preset,
     };
     let config_path = config.source().map(PathBuf::from);
+    let auto_onboard = !no_config && config_path.is_none() && preset.is_none();
+    let onboarding_config_path = default_config_path();
+    let store = store
+        .or_else(|| config.store_dir().map(PathBuf::from))
+        .or_else(|| (!no_config).then(default_store_dir).flatten())
+        .ok_or("--store or a configured store directory is required")?;
     Ok(Some(Options {
-        store: store
-            .or_else(|| config.store_dir().map(PathBuf::from))
-            .ok_or("--store or a configured store directory is required")?,
+        store,
         recovery_dir: recovery_dir
             .or_else(|| config.recovery_dir().map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(".")),
@@ -113,5 +138,8 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         preset,
         config_path,
         code_execution_enabled,
+        no_config,
+        auto_onboard,
+        onboarding_config_path,
     }))
 }

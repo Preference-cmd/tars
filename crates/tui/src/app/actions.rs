@@ -123,6 +123,31 @@ impl App {
         let Some(entry) = self.entries.get_mut(self.selected) else {
             return;
         };
+        if entry.session.is_none() {
+            return;
+        }
+        if entry.viewed_agent_id.is_some() {
+            entry.notice = "Viewing child agent (read-only); run /agents main to send input".into();
+            return;
+        }
+        if entry.busy.is_some() {
+            entry.notice = "Input retained; wait for the current session operation".into();
+            return;
+        }
+        let text = entry.editor.lines().join("\n");
+        if text.trim().is_empty() {
+            return;
+        }
+        self.submit_text(text, true);
+    }
+
+    pub(super) fn submit_text(&mut self, text: String, push_history: bool) {
+        if !self.capacity() {
+            return;
+        }
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            return;
+        };
         let Some(session) = entry.session.clone() else {
             return;
         };
@@ -134,7 +159,6 @@ impl App {
             entry.notice = "Input retained; wait for the current session operation".into();
             return;
         }
-        let text = entry.editor.lines().join("\n");
         if text.trim().is_empty() {
             return;
         }
@@ -157,8 +181,10 @@ impl App {
                 entry.notice = format!("Input retained: {}{hint}", rejected.reason);
             }
             Ok(receipt) => {
-                entry.editor = input::editor();
-                entry.push_input_history(&history_entry);
+                if push_history {
+                    entry.editor = input::editor();
+                    entry.push_input_history(&history_entry);
+                }
                 entry.work = Some(receipt.work.clone());
                 entry.bind_progress(progress);
                 entry.execution = "Running".into();
@@ -180,6 +206,204 @@ impl App {
                 });
             }
         }
+    }
+
+    pub(super) fn submit_onboarding(&mut self) {
+        if !self.capacity() {
+            return;
+        }
+        let Some(onboarding) = self.onboarding.as_mut() else {
+            return;
+        };
+        let (input, workspace_root) = match onboarding.validate_and_build() {
+            Ok(pair) => pair,
+            Err(error) => {
+                onboarding.error = error;
+                return;
+            }
+        };
+        let Some(target_path) = self.options.onboarding_config_path.clone() else {
+            onboarding.error =
+                "Unable to determine configuration path; pass --config or set TARS_HOME/HOME"
+                    .into();
+            return;
+        };
+        let new_config = match tars_core::config::write_initial_config(&target_path, &input) {
+            Ok(config) => Arc::new(config),
+            Err(error) => {
+                onboarding.error = error.to_string();
+                return;
+            }
+        };
+        let preset = match (
+            new_config
+                .preset(self.options.profile.as_deref())
+                .ok()
+                .flatten(),
+            self.options.code_execution_enabled,
+        ) {
+            (Some(_), Some(_)) => new_config
+                .definition(
+                    self.options.profile.as_deref(),
+                    tars_core::config::DefinitionOverrides {
+                        code_execution_enabled: self.options.code_execution_enabled,
+                        ..Default::default()
+                    },
+                )
+                .ok(),
+            (preset, _) => preset,
+        };
+        let user_rules_path = new_config
+            .config_dir()
+            .map(|dir| dir.join("permissions.toml"));
+        let mut host = tars_core::application::SessionHost::new(Some(self.options.store.clone()))
+            .with_user_rules_path(user_rules_path.clone())
+            .with_model_profiles(new_config.model_profiles());
+        if let Some(external_tools) = &self.external_tools {
+            host = host.with_external_tools(external_tools.clone());
+        }
+        self.options.config = new_config;
+        self.options.config_path = Some(target_path.clone());
+        self.options.preset = preset;
+        self.user_rules_path = user_rules_path;
+        self.host = host;
+
+        let tools = workspace_root
+            .as_ref()
+            .map(|_| tars_core::config::default_tools_for_current_platform());
+        let definition = match self.options.config.definition(
+            self.options.profile.as_deref(),
+            tars_core::config::DefinitionOverrides {
+                workspace_root,
+                tools,
+                code_execution_enabled: self.options.code_execution_enabled,
+                ..Default::default()
+            },
+        ) {
+            Ok(definition) => definition,
+            Err(error) => {
+                self.onboarding = None;
+                self.onboarding_dismissed = true;
+                self.notice = format!(
+                    "Config saved to {}, but session creation failed: {error}",
+                    target_path.display()
+                );
+                return;
+            }
+        };
+
+        let model = definition.model.clone();
+        let prompt_cache = definition.prompt_cache;
+        let code_execution = definition.code_execution;
+        let prepared = match PreparedCreate::prepare_persistent(definition, None) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.onboarding = None;
+                self.onboarding_dismissed = true;
+                self.notice = format!(
+                    "Config saved to {}, but session creation failed: {error}",
+                    target_path.display()
+                );
+                return;
+            }
+        };
+        let mut entry = Entry::new(prepared.conversation_id().as_str().to_owned(), model);
+        entry.prompt_cache = prompt_cache;
+        entry.code_execution = code_execution;
+        entry.prepared = Some(prepared);
+        self.entries.push(entry);
+        self.selected = self.entries.len() - 1;
+        self.onboarding = None;
+        self.onboarding_dismissed = true;
+        self.notice = format!("Config: {} · F2 new / F3 open", target_path.display());
+        self.open();
+    }
+
+    pub(super) fn run_doctor(&mut self) {
+        if !self.capacity() {
+            return;
+        }
+        self.panel = Some(super::commands::Panel::Info {
+            title: super::commands::DOCTOR_PANEL_TITLE.into(),
+            lines: vec!["Running diagnostics...".into()],
+            scroll: 0,
+        });
+        let config = self.options.config.clone();
+        let config_path = self.options.config_path.clone();
+        let config_disabled = self.options.no_config;
+        let profile = self.options.profile.clone();
+        let store_dir = self.options.store.clone();
+        let recovery_dir = self.options.recovery_dir.clone();
+        let active_def = self
+            .entries
+            .get(self.selected)
+            .and_then(|entry| entry.session.as_ref())
+            .map(ManagedSession::definition);
+        let workspace_root = active_def
+            .as_ref()
+            .and_then(|def| def.workspace_root.clone());
+        let active_tools = active_def.map(|def| def.tools);
+        let sandbox_status = self.sandbox_status.clone();
+        let external_tools = self.external_tools.clone();
+        let user_rules_path = self.user_rules_path.clone();
+
+        self.spawn_job(None, super::jobs::JobKind::Doctor, async move {
+            let result = super::jobs::blocking(move || {
+                let input = tars_core::doctor::DoctorInput {
+                    version: env!("CARGO_PKG_VERSION"),
+                    config: &config,
+                    config_path: config_path.as_deref(),
+                    config_disabled,
+                    profile: profile.as_deref(),
+                    store_dir: &store_dir,
+                    recovery_dir: &recovery_dir,
+                    workspace_root: workspace_root.as_deref(),
+                    active_tools: active_tools.as_deref(),
+                    sandbox: sandbox_status.as_ref(),
+                    external_tools: external_tools.as_ref(),
+                    user_rules_path: user_rules_path.as_deref(),
+                };
+                tars_core::doctor::run_diagnostics(&input).format_lines()
+            })
+            .await;
+            let lines = match result {
+                Ok(lines) => lines,
+                Err(error) => vec![format!("Failed to run diagnostics: {error}")],
+            };
+            Message::DoctorLoaded(lines)
+        });
+    }
+
+    pub(super) fn run_init(&mut self) {
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            self.notice = "Open a session with a workspace first to run /init".into();
+            return;
+        };
+        let Some(session) = entry.session.clone() else {
+            entry.notice = "Open a session with a workspace first to run /init".into();
+            return;
+        };
+        if entry.viewed_agent_id.is_some() {
+            entry.notice = "Viewing child agent (read-only); run /agents main to run /init".into();
+            return;
+        }
+        if entry.busy.is_some() || session.status().active_work.is_some() {
+            entry.notice = "Wait for the current session operation before running /init".into();
+            return;
+        }
+        let definition = session.definition();
+        if definition.workspace_root.is_none() {
+            entry.notice = "Bind a workspace to this session first to run /init".into();
+            return;
+        }
+        let writable = definition.tools.iter().any(|tool| {
+            matches!(
+                tool,
+                tars_core::definition::WorkspaceTool::WriteFile
+                    | tars_core::definition::WorkspaceTool::EditFile
+            )
+        });
+        self.submit_text(init_prompt(writable), false);
     }
     pub(super) fn trust_workspace_rules(&mut self) {
         if !self.capacity() {
@@ -983,6 +1207,29 @@ fn drain_session_events(entry: &mut Entry) -> bool {
         entry.session_events_rx = Some(rx);
     }
     dirty
+}
+
+fn init_prompt(writable: bool) -> String {
+    let base = "\
+Inspect this workspace and prepare a concise, accurate `AGENTS.md` for future coding agents working in this repository.
+
+First explore the workspace using your available read-only tools:
+1. Build, test, lint, and formatting commands (check manifest/config files such as `Cargo.toml`, `package.json`, `Makefile`, CI workflows, etc.).
+2. Architecture and directory/module layout (crates, packages, key entry points, and layer boundaries).
+3. Important coding conventions, safety/error-handling rules, and test patterns.
+4. Existing `AGENTS.md` (if present at the workspace root).";
+
+    if writable {
+        format!(
+            "{base}\n\n\
+Then create `AGENTS.md` at the workspace root (or update it if it already exists, preserving any existing user rules and verified constraints). Keep it factual, concise, and grounded only in files you directly observed."
+        )
+    } else {
+        format!(
+            "{base}\n\n\
+Note: File write/edit tools are disabled in this session. Do not attempt to modify files; instead, output a concise, ready-to-save `AGENTS.md` draft directly in your response, grounded only in files you directly observed."
+        )
+    }
 }
 
 #[cfg(test)]

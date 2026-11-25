@@ -1,6 +1,6 @@
 # TARS
 
-TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and both a scriptable CLI (`tars`) and a native terminal interface (`tars-tui`). TARS is in early-stage development (`0.0.0`, built from source via Cargo).
+TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI subcommands (`run`, `session`, `tools`). TARS is in early-stage development (`0.0.0`, built from source via Cargo).
 
 ## Key features
 
@@ -16,24 +16,27 @@ TARS is an open-source, local-first AI agent written in Rust and built on [`caus
 
 **Prerequisites:** Rust `1.96.0` (pinned by `rust-toolchain.toml`).
 
-Build the workspace binaries from source:
+Build the unified `tars` binary from source:
 
 ```sh
 cargo build --workspace --locked --release
 ```
 
-This produces `./target/release/tars` and `./target/release/tars-tui` (`target\release\tars.exe` and `target\release\tars-tui.exe` on Windows).
+This produces `./target/release/tars` (`target\release\tars.exe` on Windows).
 
 Set a provider API key in your shell (`OPENAI_API_KEY` for OpenAI protocols or `ANTHROPIC_API_KEY` for Anthropic).
 
 ### Interactive TUI
 
-Copy and customize [config.example.toml](config.example.toml), then launch `tars-tui`:
+Launch `tars` directly in an interactive terminal (zero-config default store under `~/.tars/data` or `$TARS_HOME/data`, with a guided first-run setup panel when unconfigured; press `Esc` to skip or use `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/mode`, `/compact`, `/help`):
 
 ```sh
-./target/release/tars-tui --config /path/to/config.toml
-# Or run directly with Cargo:
-cargo run -p tars-tui -- --config /path/to/config.toml
+./target/release/tars
+# Or with an explicit config file, or isolated --no-config --store:
+./target/release/tars --config /path/to/config.toml
+./target/release/tars --no-config --store ./tars-data
+# Inspect all interactive options, slash commands, and CLI subcommands:
+./target/release/tars -h
 ```
 
 ### CLI one-shot & persistent sessions
@@ -70,7 +73,7 @@ printf 'Continue analyzing the material' | ./target/release/tars run \
 
 | Capability | macOS | Linux | Windows |
 | --- | --- | --- | --- |
-| Core runtime, CLI (`tars`), TUI (`tars-tui`), persistent sessions, MCP | Verified in CI | Verified in CI | Not currently in CI (unverified) |
+| Core runtime, CLI & TUI (`tars`), persistent sessions, MCP | Verified in CI | Verified in CI | Not currently in CI (unverified) |
 | Workspace file tools (`list_directory`, `read_file`, `find_files`, `write_file`, `edit_file`) | Supported | Supported | Not yet implemented |
 | Sandboxed `run_command` and `search_text` | Supported (Seatbelt) | Fail-closed (no sandbox backend yet) | Fail-closed (no sandbox backend yet) |
 
@@ -87,10 +90,10 @@ Current gaps and roadmap items not yet implemented:
 | --- | --- | --- |
 | `crates/core` | `tars-core` | Shared session host, configuration, tools, permission policy, compaction, and store |
 | `crates/sandbox` | `tars-sandbox` | Platform-independent sandbox policy, capability probes, process trees, and Seatbelt backend |
-| `crates/cli` | `tars-cli` | `tars` CLI binary |
-| `crates/tui` | `tars-tui` | `tars-tui` native terminal interface |
+| `crates/cli` | `tars-cli` | `tars` unified binary (CLI subcommands + interactive TUI entry) |
+| `crates/tui` | `tars-tui` | Native terminal interface library consumed by `tars-cli` |
 
-Dependencies flow strictly one way (`tars-cli` / `tars-tui` → `tars-core` → `tars-sandbox`, with `tars-core` re-exporting `tars_core::sandbox`), and all workspace packages are `publish = false`.
+Dependencies flow strictly one way (`tars-cli` → `tars-tui` → `tars-core` → `tars-sandbox`, with `tars-core` re-exporting `tars_core::sandbox`), and all workspace packages are `publish = false`.
 
 **Causa dependency boundary:** The workspace (`tars-core`, `tars-cli`, and `tars-tui`; `tars-sandbox` depends on neither `causa` nor `tars-core`) consumes `causa 0.3` with the `runtime`, `providers`, and `extensions` features enabled (exact version locked in `Cargo.lock`) strictly through its public facade. TARS owns application policy—sessions, persistence, workspace tools, sandboxing, permission modes, compaction, and UIs—on top of Causa's `Context` and single-run execution primitives; general runtime or protocol improvements uncovered here are contributed upstream to Causa rather than mixing policy across the boundary.
 

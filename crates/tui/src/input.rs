@@ -12,8 +12,10 @@ use tars_core::{
 
 mod complete;
 mod graphemes;
+mod onboarding;
 pub(crate) use complete::{CompleteResult, complete_editor, set_editor_text};
 pub(crate) use graphemes::edit;
+pub(crate) use onboarding::{ONBOARDING_FIELD_NAMES, OnboardingForm};
 
 pub(crate) fn editor() -> TextArea<'static> {
     let mut editor = TextArea::default();

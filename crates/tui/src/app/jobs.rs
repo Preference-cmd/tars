@@ -101,11 +101,16 @@ pub(super) enum Message {
     Closed(Key, Result<CloseOutcome, ApplicationError>),
     AgentOperationCancelled(Key, String, Result<bool, ApplicationError>),
     /// The startup sandbox check finished.
-    StartupSandbox(super::startup::SandboxCheck),
+    StartupSandbox(
+        super::startup::SandboxCheck,
+        Option<tars_core::sandbox::SandboxStatus>,
+    ),
     /// The startup tool check (or its re-resolve after an installation) finished.
     StartupTools(super::startup::ToolCheck),
     /// The consent-gated installation finished; the reason is core's own text.
     StartupInstalled(Result<(), String>),
+    /// `/doctor` diagnostic lines finished loading.
+    DoctorLoaded(Vec<String>),
     JobPanicked(Option<Key>, JobKind, String),
 }
 
@@ -132,6 +137,8 @@ pub(super) enum JobKind {
     Startup,
     /// The consent-gated managed installation.
     StartupInstall,
+    /// Read-only `/doctor` diagnostics.
+    Doctor,
 }
 
 pub(super) fn save_label(save: &SaveStatus) -> String {
@@ -300,6 +307,19 @@ impl App {
                                 _ => String::new(),
                             };
                             self.entries.push(entry);
+                        }
+                        if self.entries.is_empty()
+                            && self.options.auto_onboard
+                            && !self.onboarding_dismissed
+                            && self.onboarding.is_none()
+                            && self.form.is_none()
+                            && self.panel.is_none()
+                            && self.confirmation.is_none()
+                            && !self.quitting
+                        {
+                            self.onboarding = Some(crate::input::OnboardingForm::new(
+                                std::env::current_dir().ok(),
+                            ));
                         }
                     }
                 }
@@ -643,9 +663,21 @@ impl App {
                     };
                 }
             }
-            Message::StartupSandbox(check) => self.startup_sandbox(check),
+            Message::StartupSandbox(check, raw) => self.startup_sandbox(check, raw),
             Message::StartupTools(check) => self.startup_tools(check),
             Message::StartupInstalled(result) => self.startup_installed(result),
+            Message::DoctorLoaded(lines) => {
+                if let Some(super::commands::Panel::Info {
+                    title,
+                    lines: panel_lines,
+                    scroll,
+                }) = &mut self.panel
+                    && title == super::commands::DOCTOR_PANEL_TITLE
+                {
+                    *panel_lines = lines;
+                    *scroll = 0;
+                }
+            }
             Message::AgentOperationCancelled(key, agent_name, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     let escaped = tars_core::permission::escape_untrusted_text(&agent_name);
@@ -727,6 +759,20 @@ impl App {
                     self.startup_failed(&detail);
                     return;
                 }
+                if kind == JobKind::Doctor {
+                    if let Some(super::commands::Panel::Info {
+                        title,
+                        lines: panel_lines,
+                        scroll,
+                    }) = &mut self.panel
+                        && title == super::commands::DOCTOR_PANEL_TITLE
+                    {
+                        *panel_lines = vec![message.clone()];
+                        *scroll = 0;
+                    }
+                    self.notice = message;
+                    return;
+                }
                 let Some(key) = key else {
                     self.notice = message;
                     return;
@@ -741,7 +787,7 @@ impl App {
                     };
                     match kind {
                         JobKind::List => unreachable!("handled before the entry lookup"),
-                        JobKind::Startup | JobKind::StartupInstall => {
+                        JobKind::Startup | JobKind::StartupInstall | JobKind::Doctor => {
                             unreachable!("handled before the entry lookup")
                         }
                         JobKind::Materials | JobKind::AgentMaterials => {

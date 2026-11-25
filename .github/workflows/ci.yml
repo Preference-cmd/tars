@@ -54,7 +54,9 @@ jobs:
         shell: bash
         run: |
           binary=target/release/tars
+          "$binary" -h
           "$binary" --help
+          "$binary" -V
           "$binary" --version
           "$binary" run --help
           "$binary" session --help

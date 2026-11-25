@@ -1,13 +1,32 @@
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::process::ExitCode;
 
 const HELP: &str = "TARS — agent application
 
-Usage: tars [--help | --version]
+Usage: tars [interactive options]
        tars run --provider <protocol> --model <id> (--input <text> | --stdin) [options]
        tars session <create | run | list | show | compact | history | repair | export-materials | import-legacy> [options]
        tars tools <status | install> [options]
+
+Interactive mode (default when stdin and stdout are terminals):
+  --config FILE       Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config (requires --store)
+  --profile NAME      Named model preset (otherwise default_profile)
+  --store DIR         Session store directory (defaults to ~/.tars/data or $TARS_HOME/data)
+  --recovery-dir DIR  Recovery export directory (default configured or current directory)
+  --code-execution    Enable sandboxed read-only run_code
+  --no-code-execution Disable run_code even when enabled in configuration
+
+Interactive slash commands:
+  /doctor    Check configuration, credentials, storage, sandbox and tools
+  /init      Analyze the workspace and create or update AGENTS.md
+  /new       Create a session with model settings (F2)
+  /sessions  Find and open a saved or active session
+  /agents    List session agents and switch transcript view
+  /mode      Show or change the permission mode (Shift-Tab cycles)
+  /compact   Summarize and replace the current context
+  /help      Keyboard shortcuts and session behavior
 
 Commands:
   run            Execute one work with a real model and explicitly selected workspace tools
@@ -72,10 +91,32 @@ Exit codes: 0 complete, 1 execution/configuration/file error, 2 arguments,
 pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
     let args: Vec<_> = args.collect();
     match args.as_slice() {
-        [] => output(HELP),
+        [] => {
+            if io::stdin().is_terminal() && io::stdout().is_terminal() {
+                tars_tui::run(std::iter::empty::<OsString>())
+            } else {
+                output(HELP)
+            }
+        }
         [one] if one == "-h" || one == "--help" => output(HELP),
         [one] if one == "-V" || one == "--version" => {
             output(&format!("tars {}\n", env!("CARGO_PKG_VERSION")))
+        }
+        [first, ..]
+            if matches!(
+                first.to_str(),
+                Some(
+                    "--config"
+                        | "--no-config"
+                        | "--profile"
+                        | "--store"
+                        | "--recovery-dir"
+                        | "--code-execution"
+                        | "--no-code-execution"
+                )
+            ) =>
+        {
+            tars_tui::run(args)
         }
         [one, help] if one == "run" && (help == "--help" || help == "-h") => output(HELP),
         [one] if one == "session" => output(super::session::HELP),

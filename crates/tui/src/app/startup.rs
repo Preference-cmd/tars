@@ -74,6 +74,11 @@ pub(crate) struct ToolCheck {
 pub(crate) trait StartupBackend: Send + Sync {
     /// Probe the platform sandbox. Blocking; called from a blocking task.
     fn sandbox(&self) -> SandboxCheck;
+    /// Probe the platform sandbox, optionally returning the raw 5-dimension
+    /// [`SandboxStatus`] so `/doctor` can reuse it without re-probing.
+    fn sandbox_report(&self) -> (SandboxCheck, Option<SandboxStatus>) {
+        (self.sandbox(), None)
+    }
     /// Resolve the external tools. Blocking; called from a blocking task.
     fn tools(&self) -> ToolCheck;
     /// Download and install the managed tool after an explicit yes.
@@ -93,11 +98,15 @@ impl ProcessBackend {
 
 impl StartupBackend for ProcessBackend {
     fn sandbox(&self) -> SandboxCheck {
+        self.sandbox_report().0
+    }
+
+    fn sandbox_report(&self) -> (SandboxCheck, Option<SandboxStatus>) {
         let status = match Sandbox::open() {
             Ok(sandbox) => SandboxStatus::Available(sandbox.report().clone()),
             Err(error) => SandboxStatus::Unavailable(error),
         };
-        SandboxCheck::of(&status)
+        (SandboxCheck::of(&status), Some(status))
     }
 
     fn tools(&self) -> ToolCheck {
@@ -136,6 +145,7 @@ enum Phase {
 pub(crate) struct Startup {
     phase: Phase,
     sandbox: Option<SandboxCheck>,
+    sandbox_status: Option<SandboxStatus>,
     tools: Option<ToolCheck>,
     guard: GuardWindow,
     deadline: TokioInstant,
@@ -147,6 +157,7 @@ impl Startup {
         Self {
             phase: Phase::Checking,
             sandbox: None,
+            sandbox_status: None,
             tools: None,
             guard: GuardWindow::new(),
             deadline: TokioInstant::now() + timeout,
@@ -242,11 +253,10 @@ impl App {
         self.dirty = true;
         let backend = self.startup_backend.clone();
         self.spawn_job(None, JobKind::Startup, async move {
-            Message::StartupSandbox(
-                blocking(move || backend.sandbox())
-                    .await
-                    .expect("startup check task"),
-            )
+            let (check, raw) = blocking(move || backend.sandbox_report())
+                .await
+                .expect("startup check task");
+            Message::StartupSandbox(check, raw)
         });
         self.spawn_tools_check();
     }
@@ -374,11 +384,12 @@ impl App {
     }
 
     /// The sandbox check finished.
-    pub(super) fn startup_sandbox(&mut self, check: SandboxCheck) {
+    pub(super) fn startup_sandbox(&mut self, check: SandboxCheck, raw: Option<SandboxStatus>) {
         let Some(startup) = self.startup.as_mut() else {
             return;
         };
         startup.sandbox = Some(check);
+        startup.sandbox_status = raw;
         self.startup_decide();
     }
 
@@ -514,6 +525,7 @@ impl App {
             return;
         };
         self.sandbox = startup.sandbox;
+        self.sandbox_status = startup.sandbox_status;
         if let Some(ToolCheck { tools, .. }) = startup.tools {
             let user_rules_path = self
                 .options

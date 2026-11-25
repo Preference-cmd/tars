@@ -32,6 +32,8 @@ pub(super) fn command_status_line(status: &tars_core::sandbox::SandboxStatus) ->
     format!("Commands: {status}")
 }
 
+pub(super) const DOCTOR_PANEL_TITLE: &str = "Doctor · environment & configuration check";
+
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("new", "Create a session with model settings"),
     ("sessions", "Find and open a saved or active session"),
@@ -47,6 +49,14 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "Show or change automatic compaction: on | off | PERCENT",
     ),
     ("summary", "Show the current context summary in full"),
+    (
+        "doctor",
+        "Check configuration, credentials, storage, sandbox and tools",
+    ),
+    (
+        "init",
+        "Analyze the workspace and create or update AGENTS.md",
+    ),
     ("help", "Keyboard shortcuts and session behavior"),
     ("tools", "Expand recorded tool calls and complete results"),
     (
@@ -232,12 +242,16 @@ impl App {
             }
             "compact" => self.compact(),
             "summary" => self.show_summary(),
+            "doctor" => self.run_doctor(),
+            "init" => self.run_init(),
             "help" => self.panel = Some(Panel::Info {
                 title: "Keyboard shortcuts".into(), scroll: 0,
                 lines: ["Enter / Ctrl-S   Send input", "Ctrl-J / Alt-Enter   New line",
                     "↑ / ↓   Prompt history (at top/bottom line)",
                     "Tab   Complete /command or @workspace/path",
                     "Shift-Tab   Cycle mode (ask -> accept-edits -> read-only)",
+                    "/doctor   Check configuration, credentials, storage, sandbox and tools",
+                    "/init   Analyze the workspace and create or update AGENTS.md",
                     "/agents [name|id|main]   List session agents (x cancels running, Enter switches)",
                     "/mode [name]   Show or change the permission mode",
                     "/rules [list | remove <N> | clear]   Show active rules or manage session rules",

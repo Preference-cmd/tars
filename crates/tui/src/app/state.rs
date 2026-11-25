@@ -1,7 +1,7 @@
 use super::Clock;
 use super::jobs::Message;
 use crate::{
-    input::{self, Form},
+    input::{self, Form, OnboardingForm},
     options::Options,
     transcript::{Rows, Transcript},
 };
@@ -521,6 +521,8 @@ pub(crate) struct App {
     pub entries: Vec<Entry>,
     pub selected: usize,
     pub form: Option<Form>,
+    pub onboarding: Option<OnboardingForm>,
+    pub onboarding_dismissed: bool,
     pub confirmation: Option<Confirmation>,
     pub panel: Option<super::commands::Panel>,
     pub viewport_height: usize,
@@ -549,6 +551,8 @@ pub(crate) struct App {
     pub(crate) test_startup_timeout: Duration,
     /// The probed sandbox, kept for `/status`.
     pub(crate) sandbox: Option<super::startup::SandboxCheck>,
+    /// Raw 5-dimension sandbox status reused by `/doctor` without re-probing.
+    pub(crate) sandbox_status: Option<tars_core::sandbox::SandboxStatus>,
     /// The resolved external tools bound to every session host this TUI opens.
     pub(crate) external_tools: Option<tars_core::external_tools::ExternalTools>,
     /// Why search cannot work, when the startup check found a reason.
@@ -582,6 +586,8 @@ impl App {
             entries: Vec::new(),
             selected: 0,
             form: None,
+            onboarding: None,
+            onboarding_dismissed: false,
             confirmation: None,
             panel: None,
             viewport_height: 12,
@@ -606,6 +612,7 @@ impl App {
             #[cfg(test)]
             test_startup_timeout: super::startup::STARTUP_TIMEOUT,
             sandbox: None,
+            sandbox_status: None,
             external_tools: None,
             search_reason: None,
             user_rules_path,
@@ -623,8 +630,11 @@ impl App {
                 || entry.workspace_agents_trust.is_some()
                 || !entry.approval_queue.is_empty()
         });
-        let approval_visible =
-            pending && self.panel.is_none() && self.form.is_none() && self.confirmation.is_none();
+        let approval_visible = pending
+            && self.panel.is_none()
+            && self.form.is_none()
+            && self.onboarding.is_none()
+            && self.confirmation.is_none();
         let minimum_height = if approval_visible { 19 } else { 12 };
         self.too_small = width < 30 || self.view_height < minimum_height;
     }
@@ -640,6 +650,7 @@ impl App {
     pub(crate) fn current_visible_approval(&self) -> Option<VisibleApproval> {
         if self.panel.is_some()
             || self.form.is_some()
+            || self.onboarding.is_some()
             || self.confirmation.is_some()
             || self.quitting
         {
@@ -689,6 +700,7 @@ impl App {
     pub(super) fn current_visible_workspace_trust(&self) -> Option<VisibleWorkspaceTrust> {
         if self.panel.is_some()
             || self.form.is_some()
+            || self.onboarding.is_some()
             || self.confirmation.is_some()
             || self.quitting
         {

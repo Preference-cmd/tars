@@ -24,6 +24,7 @@ mod compaction;
 mod ergonomics;
 mod history;
 mod multi_agent;
+mod onboarding_doctor_init;
 mod prompt_cache;
 mod sessions;
 mod workspace_rules;

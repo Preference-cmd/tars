@@ -60,7 +60,7 @@ max_tool_calls = 64
 
 ## Code execution
 
-`run_code` (read-only ES2020 QuickJS programmatic tool calling) is opt-in and disabled by default (`enabled = false`). Top-level `[code_execution]` sets global defaults, and `[profiles.<name>.code_execution]` overrides fields per profile; CLI `tars run`, `tars session create`, and `tars-tui` accept `--code-execution` and `--no-code-execution` (mutually exclusive), and the TUI `/new` form includes a "Code execution (on | off)" field (`tars session show` and TUI `/status` report the frozen state). Reopening a saved session always keeps the saved `SessionDefinition.code_execution` (existing records without the field deserialize as `None`).
+`run_code` (read-only ES2020 QuickJS programmatic tool calling) is opt-in and disabled by default (`enabled = false`). Top-level `[code_execution]` sets global defaults, and `[profiles.<name>.code_execution]` overrides fields per profile; CLI `tars run`, `tars session create`, and interactive `tars` accept `--code-execution` and `--no-code-execution` (mutually exclusive), and the TUI `/new` form includes a "Code execution (on | off)" field (`tars session show` and TUI `/status` report the frozen state). Reopening a saved session always keeps the saved `SessionDefinition.code_execution` (existing records without the field deserialize as `None`).
 
 ```toml
 [code_execution]
@@ -86,18 +86,18 @@ A transient `tars run` uses a fixed retained work capacity of `17` (1 initial us
 
 All presets are validated at load time; unknown fields, duplicate keys, invalid types, invalid presets, empty paths and unsupported versions all fail. A file is at most 1 MiB. Parse diagnostics show only line and column and never echo TOML values; a plaintext `api_key` field is not accepted. The actual credential is read from the named environment variable when the session is opened.
 
-Paths do not expand `~` or `$VAR`. Relative `store` and `recovery_dir` are based on the directory containing the TOML file; relative command-line paths are based on the current working directory. The store is created according to the existing Store rules, while recovery_dir must already exist. Without a configured store, the persistent CLI and the TUI both require an explicit `--store`.
+Paths do not expand `~` or `$VAR`. Relative `store` and `recovery_dir` are based on the directory containing the TOML file; relative command-line paths are based on the current working directory. The store is created according to the existing Store rules, while recovery_dir must already exist. Without a configured store, persistent CLI subcommands and `--no-config` TUI runs require an explicit `--store`; when configuration is enabled (`!no_config`), interactive `tars` defaults `store` to `<user_tars_dir>/data` (`$TARS_HOME/data` or `~/.tars/data`).
 
 ```sh
 tars run --config ./config.toml --profile work --input 'Analyze the current problem'
 tars session create --config ./config.toml --model another-model --json
 tars session list --config ./config.toml --json
-tars-tui --config ./config.toml --profile work
+tars --config ./config.toml --profile work
 ```
 
 Selecting `--profile NAME` takes precedence over default_profile. Arguments override the selected preset field by field; endpoint, credential reference, deadline and limits that are not overridden still come from the preset. CLI model arguments apply to `run` and `session create`; `session run` accepts neither `--profile` nor model overrides. `--store` and `--recovery-dir` override the corresponding paths in the configuration.
 
-The TUI new-session form is filled from the selected preset, and changes affect only the new session at hand; capacity/call limits, generation settings, prelude/skills settings and `render_options` that the preset does not display are preserved as-is. In the first version the user edits the configuration file, and the TUI neither saves nor overwrites the global configuration automatically. A future GUI should reuse the same loading and parsing module.
+When interactive `tars` launches unconfigured (`!no_config`, no `config.toml`, no preset, empty store), its first-run onboarding panel can atomically create the initial `<user_tars_dir>/config.toml` via `CreateNew` (`tars_core::config::write_initial_config`, storing only env var names and never overwriting an existing file). Once configured, the TUI `/new` form is filled from the selected preset, and changes affect only the new session at hand without rewriting global configuration; capacity/call limits, generation settings, prelude/skills settings and `render_options` that the preset does not display are preserved as-is. A future GUI should reuse the same loading and parsing module.
 
 ## Session prelude and skills
 
