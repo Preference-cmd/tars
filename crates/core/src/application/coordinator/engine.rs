@@ -101,6 +101,13 @@ pub(super) struct QueuedOutbox {
     pub(super) deferred_before_write: bool,
 }
 
+pub(super) struct PendingReactiveAdmit {
+    pub(super) admit_req: AdmitOperationRequest,
+    pub(super) prompt: String,
+    pub(super) timeout_secs: u64,
+    pub(super) drained: DrainedNotification,
+}
+
 pub(super) struct CoordinatorState {
     pub(super) config: CoordinatorConfig,
     pub(super) agents: HashMap<String, AgentUnit>,
@@ -112,6 +119,7 @@ pub(super) struct CoordinatorState {
     pub(super) command_rules: CommandRuleSet,
     pub(super) workspace_rules_backend: Option<WorkspaceRulesBackend>,
     pub(super) save_blocked: Option<Arc<StoreError>>,
+    pub(super) pending_admits: VecDeque<PendingReactiveAdmit>,
     pub(super) pending_outboxes: VecDeque<QueuedOutbox>,
     pub(super) active_tasks: HashMap<String, JoinHandle<()>>,
     pub(super) utility_tasks: Vec<JoinHandle<()>>,
@@ -389,6 +397,7 @@ impl SessionCoordinator {
                 command_rules,
                 workspace_rules_backend,
                 save_blocked: None,
+                pending_admits: VecDeque::new(),
                 pending_outboxes: VecDeque::new(),
                 active_tasks: HashMap::new(),
                 utility_tasks: Vec::new(),
@@ -495,7 +504,9 @@ impl SessionCoordinator {
 
     pub(crate) fn has_pending_child_saves(&self) -> bool {
         let state = self.state.lock().expect("coord lock");
-        state.child_saves_in_flight > 0 || !state.pending_outboxes.is_empty()
+        state.child_saves_in_flight > 0
+            || !state.pending_admits.is_empty()
+            || !state.pending_outboxes.is_empty()
     }
 
     pub(crate) fn save_blocked_error(&self) -> Option<Arc<StoreError>> {
@@ -735,6 +746,7 @@ impl SessionCoordinator {
         }
         Ok(self.active_finite_background_tasks() == 0
             && state.child_saves_in_flight == 0
+            && state.pending_admits.is_empty()
             && state.pending_outboxes.is_empty()
             && state.admissions_in_flight == 0
             && state.active_tasks.is_empty()
@@ -833,7 +845,7 @@ impl SessionCoordinator {
     }
 
     pub(crate) async fn retry_pending_outboxes(
-        &self,
+        self: &Arc<Self>,
         entry: &Arc<Entry>,
     ) -> Result<(), ApplicationError> {
         let writer = {
@@ -845,6 +857,98 @@ impl SessionCoordinator {
         };
         let _writer_guard = self.writer_gate.lock().await;
         loop {
+            let next_admit = {
+                let mut state = self.state.lock().expect("coord lock");
+                state.pending_admits.pop_front()
+            };
+            if let Some(pending) = next_admit {
+                let w = writer.clone();
+                let req_clone = pending.admit_req.clone();
+                match saving::io(&self.host, move || w.admit_operation(&req_clone)).await {
+                    Ok(AdmitOperationOutcome::Admitted {
+                        session_revision, ..
+                    }) => {
+                        entry.lock().revision = Some(session_revision);
+                        let op_id = pending.admit_req.operation_id;
+                        let target_agent_id = pending.admit_req.target_agent_id;
+                        self.bus.publish(SessionEvent::OperationStateChanged {
+                            session_id: self.session_id.clone(),
+                            operation_id: op_id.clone(),
+                            target_agent_id,
+                            parent_operation_id: None,
+                            status: OperationStatus::Creating,
+                        });
+                        self.spawn_operation_task(
+                            op_id,
+                            pending.prompt,
+                            pending.timeout_secs,
+                            None,
+                            None,
+                            Some(pending.drained),
+                        );
+                        self.state_changed.notify_waiters();
+                        continue;
+                    }
+                    Ok(AdmitOperationOutcome::Replayed(_))
+                    | Ok(AdmitOperationOutcome::DedupConflict { .. }) => {
+                        let mut state = self.state.lock().expect("coord lock");
+                        rollback_child_reactive_wakeup(
+                            &mut state,
+                            &pending.admit_req.operation_id,
+                            &pending.admit_req.target_agent_id,
+                            &pending.drained,
+                        );
+                        drop(state);
+                        self.state_changed.notify_waiters();
+                        continue;
+                    }
+                    Err(ApplicationError::Store(err)) => {
+                        let retain_admit =
+                            writer.pending_kind() == crate::store::PendingWriterKind::Admit;
+                        {
+                            let mut es = entry.lock();
+                            es.save = SaveStatus::SaveBlocked {
+                                error: err.clone(),
+                                commit_id: pending.admit_req.commit_id.clone(),
+                                material_version: entry.version(&es),
+                            };
+                            es.error = Some(ApplicationError::SaveBlocked(err.clone()));
+                            entry.changed();
+                            let mut state = self.state.lock().expect("coord lock");
+                            if retain_admit {
+                                state.pending_admits.push_front(pending);
+                            } else {
+                                rollback_child_reactive_wakeup(
+                                    &mut state,
+                                    &pending.admit_req.operation_id,
+                                    &pending.admit_req.target_agent_id,
+                                    &pending.drained,
+                                );
+                            }
+                            state.save_blocked = Some(err.clone());
+                        }
+                        self.state_changed.notify_waiters();
+                        return Err(ApplicationError::SaveBlocked(err));
+                    }
+                    Err(other) => {
+                        let mut state = self.state.lock().expect("coord lock");
+                        if writer.pending_kind() == crate::store::PendingWriterKind::Admit {
+                            state.pending_admits.push_front(pending);
+                        } else {
+                            rollback_child_reactive_wakeup(
+                                &mut state,
+                                &pending.admit_req.operation_id,
+                                &pending.admit_req.target_agent_id,
+                                &pending.drained,
+                            );
+                        }
+                        drop(state);
+                        self.state_changed.notify_waiters();
+                        return Err(other);
+                    }
+                }
+            }
+
             // Read entry revision BEFORE acquiring Coordinator::state to preserve
             // the global Entry::state -> Coordinator::state lock ordering.
             let current_rev = entry.lock().revision.unwrap_or(0);
@@ -866,6 +970,9 @@ impl SessionCoordinator {
                         es.error = None;
                         entry.changed();
                     }
+                    drop(es);
+                    self.wakeup_notify.notify_one();
+                    self.state_changed.notify_waiters();
                     return Ok(());
                 };
                 if item.deferred_before_write && item.req.expected_session_revision < current_rev {
@@ -897,6 +1004,8 @@ impl SessionCoordinator {
                     let mut state = self.state.lock().expect("coord lock");
                     state.pending_outboxes.push_front(requeued);
                     state.save_blocked = Some(err.clone());
+                    drop(state);
+                    self.state_changed.notify_waiters();
                     return Err(ApplicationError::SaveBlocked(err));
                 }
                 Err(other) => return Err(other),
@@ -3825,7 +3934,13 @@ impl SessionCoordinator {
 
         let mut overflow_max = None;
         let mut submitted_root_op_id: Option<String> = None;
-        let child_reactive_work: Option<(String, DrainedNotification, u64)> = {
+        let child_reactive_work: Option<(
+            String,
+            DrainedNotification,
+            u64,
+            u32,
+            CancellationToken,
+        )> = {
             let mut entry_state = entry.lock();
             if entry_state.lifecycle != Lifecycle::Open
                 || entry_state.closing.is_some()
@@ -3988,12 +4103,12 @@ impl SessionCoordinator {
                         result_text: None,
                         error: None,
                         finished_at_ms: None,
-                        cancel_token,
+                        cancel_token: cancel_token.clone(),
                         suppress_wake: false,
                         completion_notify: Arc::new(Notify::new()),
                     },
                 );
-                Some((op_id, drained, timeout))
+                Some((op_id, drained, timeout, depth, cancel_token))
             }
         };
 
@@ -4014,10 +4129,154 @@ impl SessionCoordinator {
             return;
         }
 
-        if let Some((op_id, drained, timeout)) = child_reactive_work {
+        if let Some((op_id, drained, timeout, depth, cancel_token)) = child_reactive_work {
             let prompt = drained.rendered.clone();
+            let writer = if self.persistent {
+                entry.lock().writer.clone()
+            } else {
+                None
+            };
+            if let Some(writer) = writer {
+                let _writer_guard = self.writer_gate.lock().await;
+                let aborted = self.check_open_and_unblocked(&entry).is_err()
+                    || cancel_token.is_cancelled()
+                    || self.shutdown.load(Ordering::SeqCst);
+                if aborted {
+                    let mut state = self.state.lock().expect("coord lock");
+                    rollback_child_reactive_wakeup(&mut state, &op_id, target_agent_id, &drained);
+                    drop(state);
+                    self.state_changed.notify_waiters();
+                    return;
+                }
+                let input_json = serde_json::to_string(&serde_json::json!({
+                    "kind": "reactive_wakeup",
+                    "prompt": &prompt,
+                }))
+                .unwrap_or_else(|_| "{}".into());
+                let admit_req = AdmitOperationRequest {
+                    commit_id: uuid::Uuid::now_v7().to_string(),
+                    operation_id: op_id.clone(),
+                    target_agent_id: target_agent_id.to_owned(),
+                    parent_operation_id: None,
+                    parent_agent_id: None,
+                    source_block_id: None,
+                    dedup_fingerprint: None,
+                    execution_mode: OperationExecutionMode::Background,
+                    on_parent_complete: OnParentComplete::Continue,
+                    depth,
+                    input_json,
+                    created_at_ms: crate::time::current_time_ms(),
+                    new_agent: None,
+                };
+                let w = writer.clone();
+                let req_clone = admit_req.clone();
+                match saving::io(&self.host, move || w.admit_operation(&req_clone)).await {
+                    Ok(AdmitOperationOutcome::Admitted {
+                        session_revision, ..
+                    }) => {
+                        entry.lock().revision = Some(session_revision);
+                    }
+                    Ok(AdmitOperationOutcome::Replayed(_))
+                    | Ok(AdmitOperationOutcome::DedupConflict { .. }) => {
+                        let mut state = self.state.lock().expect("coord lock");
+                        rollback_child_reactive_wakeup(
+                            &mut state,
+                            &op_id,
+                            target_agent_id,
+                            &drained,
+                        );
+                        drop(state);
+                        self.state_changed.notify_waiters();
+                        return;
+                    }
+                    Err(ApplicationError::Store(store_err)) => {
+                        self.handle_child_reactive_admit_failure(
+                            &entry, &writer, store_err, admit_req, prompt, timeout, drained,
+                        );
+                        return;
+                    }
+                    Err(other) => {
+                        let store_err =
+                            Arc::new(crate::store::StoreError::InvalidDatabase(other.to_string()));
+                        self.handle_child_reactive_admit_failure(
+                            &entry, &writer, store_err, admit_req, prompt, timeout, drained,
+                        );
+                        return;
+                    }
+                }
+            }
+            self.bus.publish(SessionEvent::OperationStateChanged {
+                session_id: self.session_id.clone(),
+                operation_id: op_id.clone(),
+                target_agent_id: target_agent_id.to_owned(),
+                parent_operation_id: None,
+                status: OperationStatus::Creating,
+            });
             self.spawn_operation_task(op_id, prompt, timeout, None, None, Some(drained));
+            self.state_changed.notify_waiters();
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn handle_child_reactive_admit_failure(
+        &self,
+        entry: &Arc<Entry>,
+        writer: &crate::store::Writer,
+        store_err: Arc<crate::store::StoreError>,
+        admit_req: AdmitOperationRequest,
+        prompt: String,
+        timeout_secs: u64,
+        drained: DrainedNotification,
+    ) {
+        let is_pending_commit = matches!(&*store_err, crate::store::StoreError::PendingCommit);
+        let retain_pending_admit =
+            !is_pending_commit && writer.pending_kind() == crate::store::PendingWriterKind::Admit;
+        // Strictly maintain Entry::state -> Coordinator::state lock ordering.
+        {
+            let mut es = entry.lock();
+            if !is_pending_commit || !matches!(es.save, SaveStatus::SaveBlocked { .. }) {
+                es.save = SaveStatus::SaveBlocked {
+                    error: store_err.clone(),
+                    commit_id: admit_req.commit_id.clone(),
+                    material_version: entry.version(&es),
+                };
+                es.error = Some(ApplicationError::SaveBlocked(store_err.clone()));
+                entry.changed();
+            }
+            let mut state = self.state.lock().expect("coord lock");
+            if state.save_blocked.is_none() || !is_pending_commit {
+                state.save_blocked = Some(store_err);
+            }
+            if retain_pending_admit {
+                state.pending_admits.push_back(PendingReactiveAdmit {
+                    admit_req,
+                    prompt,
+                    timeout_secs,
+                    drained,
+                });
+            } else {
+                let op_id = admit_req.operation_id;
+                let target_agent_id = admit_req.target_agent_id;
+                rollback_child_reactive_wakeup(&mut state, &op_id, &target_agent_id, &drained);
+            }
+        }
+        self.state_changed.notify_waiters();
+    }
+}
+
+fn rollback_child_reactive_wakeup(
+    state: &mut CoordinatorState,
+    op_id: &str,
+    target_agent_id: &str,
+    drained: &DrainedNotification,
+) {
+    state.operations.remove(op_id);
+    if let Some(unit) = state.agents.get_mut(target_agent_id) {
+        if unit.active_operation_id.as_deref() == Some(op_id) {
+            unit.active_operation_id = None;
+        }
+        unit.auto_wakeups_in_cycle = unit.auto_wakeups_in_cycle.saturating_sub(1);
+        unit.inbox.restore_drained(drained);
     }
 }
 

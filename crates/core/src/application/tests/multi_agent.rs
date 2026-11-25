@@ -2778,3 +2778,219 @@ async fn low_retained_capacity_evicts_unread_auto_wakeup_turns_without_hanging()
         .await
         .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn child_reactive_wakeup_admit_failure_enters_save_blocked_and_recovers() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(root.path().into()));
+
+    let parent_entered = Arc::new(Notify::new());
+    let parent_release = Arc::new(Notify::new());
+    let parent2_entered = Arc::new(Notify::new());
+    let parent2_release = Arc::new(Notify::new());
+    let grand1_entered = Arc::new(Notify::new());
+    let grand1_release = Arc::new(Notify::new());
+    let grand2_entered = Arc::new(Notify::new());
+    let grand2_release = Arc::new(Notify::new());
+
+    let parent_calls = Arc::new(AtomicUsize::new(0));
+    let parent_gw = Arc::new(ScriptedGateway {
+        calls: parent_calls.clone(),
+        steps: Mutex::new(VecDeque::from([
+            ScriptedStep {
+                entered: Some(parent_entered.clone()),
+                release: Some(parent_release.clone()),
+                response_text: Some("parent-child initial done".into()),
+                tool_calls: Vec::new(),
+                capture_blocks: None,
+                wait_for_cancel: false,
+            },
+            ScriptedStep::text("parent-child reactive wakeup 1 done"),
+            ScriptedStep {
+                entered: Some(parent2_entered.clone()),
+                release: Some(parent2_release.clone()),
+                response_text: Some("parent-child round 2 done".into()),
+                tool_calls: Vec::new(),
+                capture_blocks: None,
+                wait_for_cancel: false,
+            },
+        ])),
+        default_text: "parent-child fallback".into(),
+        captured_requests: Arc::new(Mutex::new(Vec::new())),
+    });
+    let grand1_gw = ScriptedGateway::new(
+        vec![ScriptedStep {
+            entered: Some(grand1_entered.clone()),
+            release: Some(grand1_release.clone()),
+            response_text: Some("grandchild 1 done".into()),
+            tool_calls: Vec::new(),
+            capture_blocks: None,
+            wait_for_cancel: false,
+        }],
+        "grand1 fallback",
+    );
+    let grand2_gw = ScriptedGateway::new(
+        vec![ScriptedStep {
+            entered: Some(grand2_entered.clone()),
+            release: Some(grand2_release.clone()),
+            response_text: Some("grandchild 2 done".into()),
+            tool_calls: Vec::new(),
+            capture_blocks: None,
+            wait_for_cancel: false,
+        }],
+        "grand2 fallback",
+    );
+
+    let root_gw = ScriptedGateway::simple("root ok");
+    let root_calls = root_gw.calls.clone();
+    host.set_test_gateway(Some(root_gw));
+    host.set_test_agent_gateway(Some(Arc::new(move |name, _| match name {
+        "parent-child" => Some(parent_gw.clone()),
+        "grandchild-1" => Some(grand1_gw.clone()),
+        "grandchild-2" => Some(grand2_gw.clone()),
+        _ => None,
+    })));
+
+    let session = host
+        .create(PreparedCreate::persistent(definition(), Context::new()))
+        .await
+        .unwrap();
+    session.set_coordinator_config(CoordinatorConfig {
+        max_delegation_depth: 2,
+        ..CoordinatorConfig::default()
+    });
+    let root_id = entry_id(&session);
+
+    // Part 1: Fault during Confirm on child reactive wakeup admit_operation -> SaveBlocked + retry_save recovery.
+    let mut r_parent = spawn_req(&root_id, "parent-child", "start parent-child");
+    r_parent.interaction = AgentInteraction::Reusable;
+    let SpawnAgentOutcome::Background(parent_rec) = session.spawn_agent(r_parent).await.unwrap()
+    else {
+        panic!("expected background parent-child");
+    };
+    parent_entered.notified().await;
+
+    let mut r_g1 = spawn_req(&parent_rec.agent_id, "grandchild-1", "g1");
+    r_g1.caller_operation_id = Some(parent_rec.operation_id.clone());
+    let SpawnAgentOutcome::Background(_g1_rec) = session.spawn_agent(r_g1).await.unwrap() else {
+        panic!("expected background grandchild-1");
+    };
+    grand1_entered.notified().await;
+
+    // Finish parent-child while grandchild-1 is still running, then wait for BOTH parent-child
+    // and the resulting root reactive wakeup to complete and save before installing the fault hook.
+    let root_calls_before_p1 = root_calls.load(Ordering::SeqCst);
+    parent_release.notify_one();
+    until(|| {
+        session
+            .agent_snapshot(&parent_rec.agent_id)
+            .is_some_and(|s| s.active_operation_id.is_none())
+            && root_calls.load(Ordering::SeqCst) > root_calls_before_p1
+            && session.status().active_work.is_none()
+    })
+    .await;
+    session.wait_saved().await.unwrap();
+
+    // Fail the 2nd CommitStage::Confirm: 1st is grandchild-1's commit_outbox, 2nd is parent-child's reactive wakeup admit.
+    let confirm_hits = Arc::new(AtomicUsize::new(0));
+    session.set_writer_fault_hook(Some(Arc::new(move |stage| {
+        if stage == CommitStage::Confirm && confirm_hits.fetch_add(1, Ordering::SeqCst) == 1 {
+            FaultAction::Fail(std::io::Error::other(
+                "injected reactive admit confirm loss",
+            ))
+        } else {
+            FaultAction::Continue
+        }
+    })));
+
+    grand1_release.notify_one();
+
+    // wait_settled() must return Err(SaveBlocked) promptly without hanging or spinning.
+    let settled = tokio::time::timeout(Duration::from_secs(5), session.wait_settled())
+        .await
+        .expect("wait_settled must not hang on reactive admit failure");
+    assert!(
+        matches!(settled, Err(ApplicationError::SaveBlocked(_))),
+        "expected SaveBlocked, got {settled:?}"
+    );
+    assert!(matches!(
+        session.status().save,
+        SaveStatus::SaveBlocked { .. }
+    ));
+
+    // Clear fault and recover via retry_save(); reactive wakeup should finish cleanly.
+    session.set_writer_fault_hook(None);
+    let retried = session.retry_save().await.unwrap();
+    assert!(matches!(retried, SaveStatus::Saved { .. }));
+    tokio::time::timeout(Duration::from_secs(5), session.wait_settled())
+        .await
+        .expect("wait_settled after retry_save must finish")
+        .unwrap();
+    assert!(
+        parent_calls.load(Ordering::SeqCst) >= 2,
+        "parent-child reactive wakeup should run after retry_save"
+    );
+
+    // Part 2: Fault during Write on child reactive wakeup admit_operation -> SaveBlocked + DiscardLocal close.
+    let mut r_parent_2 = msg_req(&root_id, &parent_rec.agent_id, "second round");
+    r_parent_2.execution_mode = OperationExecutionMode::Background;
+    let SpawnAgentOutcome::Background(parent_op2) =
+        session.message_agent(r_parent_2).await.unwrap()
+    else {
+        panic!("expected background message_agent");
+    };
+    parent2_entered.notified().await;
+
+    let mut r_g2 = spawn_req(&parent_rec.agent_id, "grandchild-2", "g2");
+    r_g2.caller_operation_id = Some(parent_op2.operation_id.clone());
+    let SpawnAgentOutcome::Background(_g2_rec) = session.spawn_agent(r_g2).await.unwrap() else {
+        panic!("expected background grandchild-2");
+    };
+    grand2_entered.notified().await;
+
+    let root_calls_before_p2 = root_calls.load(Ordering::SeqCst);
+    parent2_release.notify_one();
+    until(|| {
+        session
+            .agent_snapshot(&parent_rec.agent_id)
+            .is_some_and(|s| s.active_operation_id.is_none())
+            && root_calls.load(Ordering::SeqCst) > root_calls_before_p2
+            && session.status().active_work.is_none()
+    })
+    .await;
+    session.wait_saved().await.unwrap();
+
+    // Fail the 2nd CommitStage::Write: 1st is grandchild-2's commit_outbox, 2nd is parent-child's reactive wakeup admit.
+    let write_hits = Arc::new(AtomicUsize::new(0));
+    session.set_writer_fault_hook(Some(Arc::new(move |stage| {
+        if stage == CommitStage::Write && write_hits.fetch_add(1, Ordering::SeqCst) == 1 {
+            FaultAction::Fail(std::io::Error::other(
+                "injected reactive admit write failure",
+            ))
+        } else {
+            FaultAction::Continue
+        }
+    })));
+
+    grand2_release.notify_one();
+
+    let settled_write_err = tokio::time::timeout(Duration::from_secs(5), session.wait_settled())
+        .await
+        .expect("wait_settled must not hang on reactive admit write failure");
+    assert!(
+        matches!(settled_write_err, Err(ApplicationError::SaveBlocked(_))),
+        "expected SaveBlocked, got {settled_write_err:?}"
+    );
+
+    // DiscardLocal closes cleanly without hanging.
+    let target = session.target();
+    drop(session);
+    let close_out = tokio::time::timeout(
+        Duration::from_secs(5),
+        host.close(&target, ClosePolicy::DiscardLocal),
+    )
+    .await
+    .expect("DiscardLocal close must not hang")
+    .unwrap();
+    assert_eq!(close_out.policy, ClosePolicy::DiscardLocal);
+}

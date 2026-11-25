@@ -821,6 +821,32 @@ impl ManagedSession {
         }
     }
 
+    async fn wait_root_commit_settled(&self) -> Result<(), ApplicationError> {
+        loop {
+            let changed = self.entry.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let state = self.entry.lock();
+                if let Some(error) = &state.fault {
+                    return Err(error.clone());
+                }
+                if !state.save_requested && !state.save_in_flight {
+                    if state.pending.is_none() {
+                        return Ok(());
+                    }
+                    if let SaveStatus::SaveBlocked { error, .. } = &state.save {
+                        return Err(ApplicationError::SaveBlocked(error.clone()));
+                    }
+                    if state.lifecycle == Lifecycle::Closed {
+                        return Err(ApplicationError::Closed);
+                    }
+                }
+            }
+            changed.await;
+        }
+    }
+
     fn trigger_root_retry_save(&self, allow_close: bool) -> Result<(), ApplicationError> {
         let mut state = self.entry.lock();
         if state.lifecycle == Lifecycle::Closed {
@@ -886,7 +912,7 @@ impl ManagedSession {
             // Order A: Writer holds a retained root commit; settle it first so
             // WriterState::pending clears before retrying any deferred outboxes.
             self.trigger_root_retry_save(false)?;
-            let _ = self.wait_entry_saved().await?;
+            self.wait_root_commit_settled().await?;
             if let Some(coord) = &coord
                 && (coord.has_pending_child_saves() || coord.save_blocked_error().is_some())
             {

@@ -74,10 +74,28 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
     }
     state.save_requested = true;
     state.pending_attempted = false;
-    state.save = SaveStatus::Dirty {
-        base_revision: state.revision,
-        material_version: entry.version(state),
-    };
+    let coord_blocked = entry.coordinator.get().and_then(|c| c.save_blocked_error());
+    if let Some(blocked_err) = coord_blocked {
+        let commit_id = match &state.save {
+            SaveStatus::SaveBlocked { commit_id, .. } => commit_id.clone(),
+            _ => state
+                .pending
+                .as_ref()
+                .map(|p| p.record.last_commit_id.clone())
+                .unwrap_or_default(),
+        };
+        state.save = SaveStatus::SaveBlocked {
+            error: blocked_err.clone(),
+            commit_id,
+            material_version: entry.version(state),
+        };
+        state.error = Some(ApplicationError::SaveBlocked(blocked_err));
+    } else {
+        state.save = SaveStatus::Dirty {
+            base_revision: state.revision,
+            material_version: entry.version(state),
+        };
+    }
     Ok(())
 }
 
@@ -86,6 +104,7 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
     let (writer, pending, consumed, attempted, history_store, entry_agent_id) = {
         let mut state = entry.lock();
         state.save_requested = false;
+        state.save_in_flight = true;
         let attempted = state.pending_attempted;
         state.pending_attempted = true;
         let mut pending = state.pending.clone().expect("pending save");
@@ -98,11 +117,18 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
             }
         }
         let consumed = state.pending_consumed.clone();
-        state.save = SaveStatus::Saving {
-            commit_id: pending.record.last_commit_id.clone(),
-            base_revision: pending.expected_revision,
-            material_version: entry.version(&state),
-        };
+        if entry
+            .coordinator
+            .get()
+            .and_then(|c| c.save_blocked_error())
+            .is_none()
+        {
+            state.save = SaveStatus::Saving {
+                commit_id: pending.record.last_commit_id.clone(),
+                base_revision: pending.expected_revision,
+                material_version: entry.version(&state),
+            };
+        }
         entry.changed();
         let history_store = state
             .owner
@@ -140,6 +166,7 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
     let mut sync_after_save = None;
     {
         let mut state = entry.lock();
+        state.save_in_flight = false;
         match result {
             Ok(record) => {
                 let was_initialized = state.initialized;
@@ -148,12 +175,26 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
                 state.pending = None;
                 let committed_consumed = std::mem::take(&mut state.pending_consumed);
                 state.save_requested = false;
-                state.save = SaveStatus::Saved {
-                    revision: record.revision,
-                    material_version: entry.version(&state),
-                };
+                let coord_blocked = entry.coordinator.get().and_then(|c| c.save_blocked_error());
+                if let Some(blocked_err) = coord_blocked {
+                    let commit_id = match &state.save {
+                        SaveStatus::SaveBlocked { commit_id, .. } => commit_id.clone(),
+                        _ => record.last_commit_id.clone(),
+                    };
+                    state.save = SaveStatus::SaveBlocked {
+                        error: blocked_err.clone(),
+                        commit_id,
+                        material_version: entry.version(&state),
+                    };
+                    state.error = Some(ApplicationError::SaveBlocked(blocked_err));
+                } else {
+                    state.save = SaveStatus::Saved {
+                        revision: record.revision,
+                        material_version: entry.version(&state),
+                    };
+                    state.error = None;
+                }
                 state.active = None;
-                state.error = None;
                 state.initialized = true;
                 if state.closing.is_none() {
                     state.lifecycle = Lifecycle::Open;
