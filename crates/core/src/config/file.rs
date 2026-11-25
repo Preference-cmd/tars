@@ -217,23 +217,28 @@ impl Config {
             }
         }
 
-        for (name, profile) in &config.profiles {
+        config.validate_profiles()?;
+        Ok(config)
+    }
+
+    pub(super) fn validate_profiles(&self) -> Result<(), ConfigError> {
+        for (name, profile) in &self.profiles {
             if name.trim().is_empty() {
                 return Err(ConfigError::EmptyProfile);
             }
             model::resolve(
                 Some(profile),
                 DefinitionOverrides::default(),
-                &config.mcp_servers,
-                &config.prelude_defaults,
-                config.code_execution_defaults.as_ref(),
+                &self.mcp_servers,
+                &self.prelude_defaults,
+                self.code_execution_defaults.as_ref(),
             )?;
         }
-        config.selected(None)?;
-        Ok(config)
+        self.selected(None)?;
+        Ok(())
     }
 
-    fn parse_toml(text: &str, source: &Path) -> Result<Self, ConfigError> {
+    pub(super) fn parse_toml(text: &str, source: &Path) -> Result<Self, ConfigError> {
         let raw: FileConfig = toml::from_str(text).map_err(|error: toml::de::Error| {
             let offset = error.span().map_or(0, |span| span.start).min(text.len());
             let prefix = &text[..text.floor_char_boundary(offset)];
@@ -477,6 +482,26 @@ impl Config {
             .iter()
             .map(|(name, profile)| (name.clone(), profile.to_model_profile(name)))
             .collect()
+    }
+
+    pub(crate) fn default_profile(&self) -> Option<&str> {
+        self.default_profile.as_deref()
+    }
+
+    pub(crate) fn prelude_skill_dirs(&self) -> Option<&[PathBuf]> {
+        self.prelude_defaults.skill_dirs.as_deref()
+    }
+
+    pub(crate) fn prelude_include_workspace_skills(&self) -> Option<bool> {
+        self.prelude_defaults.include_workspace_skills
+    }
+
+    pub(crate) fn prelude_agent_dirs(&self) -> Option<&[PathBuf]> {
+        self.prelude_defaults.agent_dirs.as_deref()
+    }
+
+    pub(crate) fn prelude_include_workspace_agents(&self) -> Option<bool> {
+        self.prelude_defaults.include_workspace_agents
     }
 }
 

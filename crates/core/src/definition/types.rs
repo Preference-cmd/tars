@@ -25,6 +25,17 @@ pub enum Provider {
     Anthropic,
 }
 
+impl Provider {
+    /// Canonical kebab-case wire protocol name used in TOML and CLI arguments.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAiChat => "openai-chat",
+            Self::OpenAiResponses => "openai-responses",
+            Self::Anthropic => "anthropic",
+        }
+    }
+}
+
 /// A resolvable credential reference, never a persisted plaintext credential.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
