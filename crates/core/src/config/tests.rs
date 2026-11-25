@@ -971,6 +971,24 @@ fn invalid_tool_names_are_derived_from_the_single_builtin_list() {
 }
 
 #[test]
+fn parse_tools_and_toml_profile_resolve_find_files() {
+    use crate::definition::WorkspaceTool;
+    assert_eq!(
+        super::parse_tools("find_files").unwrap(),
+        vec![WorkspaceTool::FindFiles]
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("workspace");
+    std::fs::create_dir(&root).unwrap();
+    let file = directory.path().join("config.toml");
+    let text = format!("{CONFIG}\nworkspace_root = \"workspace\"\ntools = [\"find_files\"]\n");
+    std::fs::write(&file, text).unwrap();
+    let config = Config::load(ConfigSource::File(file)).unwrap();
+    let definition = config.definition(None, Default::default()).unwrap();
+    assert_eq!(definition.tools, vec![WorkspaceTool::FindFiles]);
+}
+
+#[test]
 fn command_profile_resolves_defaults_and_network_override() {
     use crate::definition::{CommandNetwork, CommandSettings, WorkspaceTool};
     let directory = tempfile::tempdir().unwrap();

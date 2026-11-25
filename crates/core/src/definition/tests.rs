@@ -931,7 +931,7 @@ fn workspace_and_builtin_tool_names_roundtrip_exhaustively() {
         assert_eq!(BuiltinTool::from_name(name), Some(tool));
         assert!(BuiltinTool::is_builtin_name(name));
     }
-    assert_eq!(builtin_names.len(), 9);
+    assert_eq!(builtin_names.len(), 10);
     assert!(!BuiltinTool::is_builtin_name("mcp_fx_echo"));
     assert!(!BuiltinTool::is_builtin_name(""));
 }

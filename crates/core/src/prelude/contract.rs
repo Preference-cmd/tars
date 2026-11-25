@@ -37,7 +37,7 @@ pub const BASE_HOST_CONTRACT: &str = "\
 You are running inside the TARS agent host. Follow these host invariants throughout the session:
 
 1. Workspace boundary:
-- Built-in workspace tools (`list_directory`, `read_file`, `search_text`, `write_file`, `edit_file`, `run_command`) operate only within the session's configured `workspace_root` (see `<env>`).
+- Built-in workspace tools (`list_directory`, `read_file`, `search_text`, `find_files`, `write_file`, `edit_file`, `run_command`) operate only within the session's configured `workspace_root` (see `<env>`).
 - Do not attempt to bypass workspace boundaries or read host configuration, session records, or external directories with workspace file tools.
 
 2. Sandbox, permissions, and trust boundaries:

@@ -21,6 +21,7 @@ pub(crate) struct BuiltinBindings {
     pub(crate) list_directory: bool,
     pub(crate) read_file: bool,
     pub(crate) search_text: bool,
+    pub(crate) find_files: bool,
     pub(crate) recall: bool,
 }
 
@@ -31,18 +32,19 @@ impl BuiltinBindings {
             list_directory: workspace_tools.contains(&WorkspaceTool::ListDirectory),
             read_file: workspace_tools.contains(&WorkspaceTool::ReadFile),
             search_text: workspace_tools.contains(&WorkspaceTool::SearchText),
+            find_files: workspace_tools.contains(&WorkspaceTool::FindFiles),
             recall: has_recall,
         }
     }
 
     /// Whether at least one built-in read-only tool is available.
     pub(crate) fn any(&self) -> bool {
-        self.list_directory || self.read_file || self.search_text || self.recall
+        self.list_directory || self.read_file || self.search_text || self.find_files || self.recall
     }
 
     /// Ordered list of bound built-in read-only tool names.
     pub(crate) fn bound_names(&self) -> Vec<&'static str> {
-        let mut names = Vec::with_capacity(4);
+        let mut names = Vec::with_capacity(5);
         if self.list_directory {
             names.push(WorkspaceTool::ListDirectory.name());
         }
@@ -51,6 +53,9 @@ impl BuiltinBindings {
         }
         if self.search_text {
             names.push(WorkspaceTool::SearchText.name());
+        }
+        if self.find_files {
+            names.push(WorkspaceTool::FindFiles.name());
         }
         if self.recall {
             names.push(BuiltinTool::Recall.name());
@@ -170,6 +175,7 @@ impl SubcallHost {
             "list_directory" => self.bindings.list_directory,
             "read_file" => self.bindings.read_file,
             "search_text" => self.bindings.search_text,
+            "find_files" => self.bindings.find_files,
             "recall" => self.bindings.recall,
             _ => false,
         };
@@ -374,6 +380,7 @@ impl SubcallSession {
             "list_directory" => self.host.bindings.list_directory,
             "read_file" => self.host.bindings.read_file,
             "search_text" => self.host.bindings.search_text,
+            "find_files" => self.host.bindings.find_files,
             "recall" => self.host.bindings.recall,
             _ => false,
         };
@@ -433,7 +440,7 @@ impl SubcallSession {
         };
 
         let result = match name {
-            "list_directory" | "read_file" | "search_text" => {
+            "list_directory" | "read_file" | "search_text" | "find_files" => {
                 let Some(wt) = self.host.workspace_tools.as_ref() else {
                     return Err(SubcallError::Rejected(
                         "workspace tools are not available".to_owned(),

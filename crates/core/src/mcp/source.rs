@@ -500,6 +500,10 @@ mod tests {
             Some("name collision")
         );
         assert_eq!(
+            skip_reason_for("mcp_fx_", &config, "find_files"),
+            Some("name collision")
+        );
+        assert_eq!(
             skip_reason_for("mcp_fx_", &config, "load_skill"),
             Some("name collision")
         );

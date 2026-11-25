@@ -1186,3 +1186,108 @@ return {
     assert_eq!(out["rejectedWriteCall"], true);
     assert_eq!(out["rejectedUnknownDesc"], true);
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ptc_find_files_works_when_bound_and_rejects_when_unbound() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
+    std::fs::write(dir.path().join("README.md"), "# readme\n").unwrap();
+    let ws = crate::workspace::Workspace::open(&dir.path().canonicalize().unwrap()).unwrap();
+    let wt = WorkspaceTools::with_write_limits(
+        ws,
+        WorkspaceToolLimits::default(),
+        Default::default(),
+        ToolResources::new(4),
+    );
+    let settings = CodeExecutionSettings::default();
+
+    // 1. Bound `find_files`: 0-arg `find_files()`, object `find_files({ pattern })`,
+    //    and `tools.call("find_files", ...)` all work.
+    let host_bound = SubcallHost::new(
+        settings,
+        BuiltinBindings::from_session(&[WorkspaceTool::FindFiles], false),
+        Some(wt.clone()),
+        None,
+    );
+    let call = make_call(
+        "run_code",
+        json!({
+            "code": r#"
+const list = await tools.list();
+const all = await find_files();
+const rs = await find_files({ pattern: "*.rs" });
+const viaCall = await tools.call("find_files", { path: "src", pattern: "*.rs" });
+const pos = await find_files("src", "*.rs");
+return {
+    names: list.map(t => t.name),
+    allFiles: all.files,
+    rsFiles: rs.files,
+    viaCallFiles: viaCall.files,
+    posFiles: pos.files,
+};
+"#
+        }),
+    );
+    let reporter = test_reporter(std::slice::from_ref(&call));
+    let tool = RunCodeTool::new(host_bound, settings, reporter.clone());
+    let payload = tool
+        .execute(
+            &call,
+            &CallControl::new(CancellationToken::new(), None),
+            None,
+        )
+        .await;
+    reporter.drain().await;
+    assert_eq!(
+        payload.status,
+        ToolResultStatus::Succeeded,
+        "{:?}",
+        payload.output.content
+    );
+    let out: Value =
+        serde_json::from_str(payload.output.content["output"].as_str().unwrap()).unwrap();
+    assert_eq!(out["names"], json!(["find_files"]));
+    assert_eq!(out["allFiles"], json!(["README.md", "src/lib.rs"]));
+    assert_eq!(out["rsFiles"], json!(["src/lib.rs"]));
+    assert_eq!(out["viaCallFiles"], json!(["src/lib.rs"]));
+    assert_eq!(out["posFiles"], json!(["src/lib.rs"]));
+
+    // 2. Unbound `find_files` (only `read_file` bound): rejected inside `run_code`.
+    let host_unbound = SubcallHost::new(
+        settings,
+        BuiltinBindings::from_session(&[WorkspaceTool::ReadFile], false),
+        Some(wt),
+        None,
+    );
+    let call_unbound = make_call(
+        "run_code",
+        json!({
+            "code": r#"
+const list = await tools.list();
+let descRejected = false;
+try { await tools.describe("find_files"); } catch (e) { descRejected = true; }
+let callRejected = false;
+try { await tools.call("find_files", {}); } catch (e) { callRejected = true; }
+return { names: list.map(t => t.name), descRejected, callRejected };
+"#
+        }),
+    );
+    let reporter2 = test_reporter(std::slice::from_ref(&call_unbound));
+    let tool2 = RunCodeTool::new(host_unbound, settings, reporter2.clone());
+    let payload2 = tool2
+        .execute(
+            &call_unbound,
+            &CallControl::new(CancellationToken::new(), None),
+            None,
+        )
+        .await;
+    reporter2.drain().await;
+    assert_eq!(payload2.status, ToolResultStatus::Succeeded);
+    let out2: Value =
+        serde_json::from_str(payload2.output.content["output"].as_str().unwrap()).unwrap();
+    assert_eq!(out2["names"], json!(["read_file"]));
+    assert_eq!(out2["descRejected"], true);
+    assert_eq!(out2["callRejected"], true);
+}

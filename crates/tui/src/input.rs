@@ -71,7 +71,7 @@ pub(crate) const FIELD_NAMES: [&str; 11] = [
     "Credential environment variable",
     "Timeout seconds (1..86400)",
     "Workspace root (optional; does not enable tools)",
-    "Tools (comma-separated list_directory,read_file,search_text,write_file,edit_file,run_command)",
+    "Tools (comma-separated list_directory,read_file,search_text,find_files,write_file,edit_file,run_command)",
     "Permission mode (read-only | ask | accept-edits | full-access)",
     "MCP servers (comma-separated ids from mcp.json)",
     "Prompt cache (on | off)",

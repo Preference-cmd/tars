@@ -391,6 +391,7 @@ pub(super) fn is_builtin_tool(tool_name: &str) -> bool {
                 WorkspaceTool::ListDirectory
                 | WorkspaceTool::ReadFile
                 | WorkspaceTool::SearchText
+                | WorkspaceTool::FindFiles
                 | WorkspaceTool::WriteFile
                 | WorkspaceTool::EditFile
                 | WorkspaceTool::RunCommand,
@@ -428,7 +429,10 @@ pub(super) fn warning_kind(tool_name: &str) -> Option<RepairWarningKind> {
         Some(BuiltinTool::Workspace(WorkspaceTool::RunCommand)) => Some(RepairWarningKind::Command),
         Some(
             BuiltinTool::Workspace(
-                WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText,
+                WorkspaceTool::ListDirectory
+                | WorkspaceTool::ReadFile
+                | WorkspaceTool::SearchText
+                | WorkspaceTool::FindFiles,
             )
             | BuiltinTool::Recall
             | BuiltinTool::LoadSkill
@@ -569,6 +573,7 @@ mod command_tests {
             WorkspaceTool::ListDirectory.name(),
             WorkspaceTool::ReadFile.name(),
             WorkspaceTool::SearchText.name(),
+            WorkspaceTool::FindFiles.name(),
         ] {
             assert!(is_builtin_tool(name), "{name} must be builtin");
             assert_eq!(warning_kind(name), None, "{name} must not warn");

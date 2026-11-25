@@ -547,6 +547,54 @@ async fn explore_narrows_subset_and_custom_escalations_are_rejected() {
     let child_reqs = gw.seen_child_requests.lock().unwrap();
     assert_eq!(child_reqs.len(), 1);
     assert!(child_reqs[0].tools.contains(&"read_file".to_owned()));
+    assert!(!child_reqs[0].tools.contains(&"find_files".to_owned()));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn explore_inherits_find_files_when_parent_enables_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    fs::create_dir_all(&ws).unwrap();
+
+    let gw = Arc::new(ScriptedAgentGateway::new());
+    gw.push_main_tool(
+        "spawn_agent",
+        json!({ "agent": "explore", "prompt": "discover files" }),
+    );
+    gw.push_main_answer("done");
+
+    let host = SessionHost::new(None);
+    host.set_test_gateway(Some(gw.clone()));
+
+    let def = ws_definition(
+        &ws,
+        vec![
+            WorkspaceTool::ReadFile,
+            WorkspaceTool::FindFiles,
+            WorkspaceTool::WriteFile,
+        ],
+        false,
+    );
+    let session = host
+        .create(PreparedCreate::prepare_transient(def, None).unwrap())
+        .await
+        .unwrap();
+    let work = session
+        .submit(SubmitRequest {
+            request_key: "t1".into(),
+            blocks: vec![text_input("explore")],
+        })
+        .unwrap()
+        .work;
+    let obs = session.wait(&work, Duration::from_secs(5)).await.unwrap();
+    assert!(matches!(obs.state, WorkState::Finished(_)));
+
+    let child_reqs = gw.seen_child_requests.lock().unwrap();
+    assert_eq!(child_reqs.len(), 1);
+    assert!(child_reqs[0].tools.contains(&"read_file".to_owned()));
+    assert!(child_reqs[0].tools.contains(&"find_files".to_owned()));
+    assert!(!child_reqs[0].tools.contains(&"write_file".to_owned()));
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

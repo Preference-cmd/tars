@@ -407,9 +407,9 @@ impl WorkspaceTools {
         *self.write_gate.lock().expect("write gate lock") = gate;
     }
 
-    /// Execute a read-only workspace tool (`list_directory`, `read_file`, or
-    /// `search_text`) as an internal subcall without emitting `ToolReporter`
-    /// progress entries or passing through `ToolBatchProcessor`.
+    /// Execute a read-only workspace tool (`list_directory`, `read_file`,
+    /// `search_text`, or `find_files`) as an internal subcall without emitting
+    /// `ToolReporter` progress entries or passing through `ToolBatchProcessor`.
     pub(crate) async fn execute_readonly_subcall(
         self: &Arc<Self>,
         kind: WorkspaceTool,
@@ -418,7 +418,10 @@ impl WorkspaceTools {
     ) -> (ToolResultStatus, serde_json::Value) {
         if !matches!(
             kind,
-            WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText
+            WorkspaceTool::ListDirectory
+                | WorkspaceTool::ReadFile
+                | WorkspaceTool::SearchText
+                | WorkspaceTool::FindFiles
         ) {
             return (
                 ToolResultStatus::Rejected,
@@ -447,7 +450,7 @@ impl WorkspaceTools {
                 self.execute_search_inner(search_params, control, None)
                     .await
             }
-            Params::List(_) | Params::Read(_) => {
+            Params::List(_) | Params::Read(_) | Params::Find(_) => {
                 self.execute_fs_readonly_inner(params, control, None).await
             }
             _ => (
@@ -1135,6 +1138,21 @@ pub(crate) fn workspace_tool_definition(
                 "include_ignored": {"type":"boolean","description":"Also search ignored files; .git, .hg, .svn and .jj stay excluded."}
             }),
         ),
+        WorkspaceTool::FindFiles => (
+            "Find regular files under a workspace-relative directory matching an optional glob \
+             pattern, honoring .gitignore and .ignore rules and skipping version-control \
+             metadata (.git, .hg, .svn, .jj). Returns workspace-relative paths sorted \
+             deterministically (BFS by depth, then lexicographically). Read-only; never follows \
+             symbolic links.",
+            json!({
+                "path": {"type":"string","maxLength":4096,"description":"Workspace-relative directory; defaults to '.' (workspace root)."},
+                "pattern": {"type":"string","minLength":1,"maxLength":256,"description":"Optional glob pattern (for example '*.rs' or 'src/**/*.rs'). Without '/', matches basename; with '/', matches relative to 'path'. If omitted, matches all regular files."},
+                "max_results": {"type":"integer","minimum":1,"maximum":limits.max_search_matches},
+                "max_depth": {"type":"integer","minimum":1,"maximum":limits.max_search_depth,"description":"Maximum directory depth from 'path' (depth 1 = immediate children)."},
+                "ignore_case": {"type":"boolean","description":"Match pattern case-insensitively (default false)."},
+                "include_ignored": {"type":"boolean","description":"Also include files matched by .gitignore/.ignore; .git, .hg, .svn and .jj stay excluded."}
+            }),
+        ),
         WorkspaceTool::WriteFile => (
             "Write full UTF-8 content to a workspace-relative file, creating missing directories or overwriting atomically.",
             json!({"path":{"type":"string","maxLength":4096},"content":{"type":"string"}}),
@@ -1175,6 +1193,7 @@ pub(crate) fn workspace_tool_definition(
     };
     let required = match kind {
         WorkspaceTool::SearchText => json!(["path", "query"]),
+        WorkspaceTool::FindFiles => json!([]),
         WorkspaceTool::WriteFile => json!(["path", "content"]),
         WorkspaceTool::EditFile => json!(["path", "edits"]),
         WorkspaceTool::RunCommand => json!(["command"]),
@@ -1191,12 +1210,13 @@ pub(crate) fn workspace_tool_definition(
 impl ManagedTool for WorkspaceToolImpl {
     fn classify(&self, arguments: &serde_json::Value) -> ToolCallIntent {
         match self.kind {
-            WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText => {
-                ToolCallIntent {
-                    class: ToolPermissionClass::KnownReadOnly,
-                    command_subject: None,
-                }
-            }
+            WorkspaceTool::ListDirectory
+            | WorkspaceTool::ReadFile
+            | WorkspaceTool::SearchText
+            | WorkspaceTool::FindFiles => ToolCallIntent {
+                class: ToolPermissionClass::KnownReadOnly,
+                command_subject: None,
+            },
             WorkspaceTool::WriteFile | WorkspaceTool::EditFile => ToolCallIntent {
                 class: ToolPermissionClass::BuiltinWrite,
                 command_subject: None,
@@ -1231,9 +1251,10 @@ impl ManagedTool for WorkspaceToolImpl {
                 self.prepare_write_or_edit(call, batch_state, control).await
             }
             WorkspaceTool::RunCommand => self.prepare_command(call),
-            WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText => {
-                Ok(PreparedCall::empty())
-            }
+            WorkspaceTool::ListDirectory
+            | WorkspaceTool::ReadFile
+            | WorkspaceTool::SearchText
+            | WorkspaceTool::FindFiles => Ok(PreparedCall::empty()),
         }
     }
 
@@ -1269,9 +1290,10 @@ impl ManagedTool for WorkspaceToolImpl {
                     target,
                 })
             }
-            WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText => {
-                None
-            }
+            WorkspaceTool::ListDirectory
+            | WorkspaceTool::ReadFile
+            | WorkspaceTool::SearchText
+            | WorkspaceTool::FindFiles => None,
         }
     }
 
@@ -1295,7 +1317,10 @@ impl ManagedTool for WorkspaceToolImpl {
                     });
                 }
             }
-            WorkspaceTool::ListDirectory | WorkspaceTool::ReadFile | WorkspaceTool::SearchText => {}
+            WorkspaceTool::ListDirectory
+            | WorkspaceTool::ReadFile
+            | WorkspaceTool::SearchText
+            | WorkspaceTool::FindFiles => {}
         }
     }
 }

@@ -461,6 +461,7 @@ pub(crate) fn assemble(
                 crate::definition::WorkspaceTool::ListDirectory
                     | crate::definition::WorkspaceTool::ReadFile
                     | crate::definition::WorkspaceTool::SearchText
+                    | crate::definition::WorkspaceTool::FindFiles
             )
         })
         .collect();

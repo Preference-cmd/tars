@@ -11,6 +11,8 @@ pub enum WorkspaceTool {
     ReadFile,
     /// Search the workspace with the sandboxed ripgrep executable.
     SearchText,
+    /// Find regular workspace-relative files matching an optional glob pattern.
+    FindFiles,
     /// Create or overwrite a bounded workspace-relative file.
     WriteFile,
     /// Replace exact text segments in a bounded workspace-relative file.
@@ -21,10 +23,11 @@ pub enum WorkspaceTool {
 
 impl WorkspaceTool {
     /// Every workspace tool, in declaration order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::ListDirectory,
         Self::ReadFile,
         Self::SearchText,
+        Self::FindFiles,
         Self::WriteFile,
         Self::EditFile,
         Self::RunCommand,
@@ -36,6 +39,7 @@ impl WorkspaceTool {
             Self::ListDirectory => "list_directory",
             Self::ReadFile => "read_file",
             Self::SearchText => "search_text",
+            Self::FindFiles => "find_files",
             Self::WriteFile => "write_file",
             Self::EditFile => "edit_file",
             Self::RunCommand => "run_command",
@@ -48,6 +52,7 @@ impl WorkspaceTool {
             "list_directory" => Some(Self::ListDirectory),
             "read_file" => Some(Self::ReadFile),
             "search_text" => Some(Self::SearchText),
+            "find_files" => Some(Self::FindFiles),
             "write_file" => Some(Self::WriteFile),
             "edit_file" => Some(Self::EditFile),
             "run_command" => Some(Self::RunCommand),
@@ -71,10 +76,11 @@ pub enum BuiltinTool {
 
 impl BuiltinTool {
     /// Every built-in tool, in canonical declaration order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Workspace(WorkspaceTool::ListDirectory),
         Self::Workspace(WorkspaceTool::ReadFile),
         Self::Workspace(WorkspaceTool::SearchText),
+        Self::Workspace(WorkspaceTool::FindFiles),
         Self::Workspace(WorkspaceTool::WriteFile),
         Self::Workspace(WorkspaceTool::EditFile),
         Self::Workspace(WorkspaceTool::RunCommand),

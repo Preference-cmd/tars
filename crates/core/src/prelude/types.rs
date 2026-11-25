@@ -139,7 +139,7 @@ impl PreludeDefinition {
 /// Active built-in capability categories advertised inside `tars:prelude:env`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CapabilityCategory {
-    /// Workspace read/list/search tools (`list_directory`, `read_file`, `search_text`).
+    /// Workspace read/list/search/find tools (`list_directory`, `read_file`, `search_text`, `find_files`).
     WorkspaceRead,
     /// Workspace write/edit tools (`write_file`, `edit_file`).
     WorkspaceWrite,
@@ -192,7 +192,8 @@ impl PreludeRuntimeState {
             match tool {
                 WorkspaceTool::ListDirectory
                 | WorkspaceTool::ReadFile
-                | WorkspaceTool::SearchText => {
+                | WorkspaceTool::SearchText
+                | WorkspaceTool::FindFiles => {
                     capabilities.insert(CapabilityCategory::WorkspaceRead);
                 }
                 WorkspaceTool::WriteFile | WorkspaceTool::EditFile => {

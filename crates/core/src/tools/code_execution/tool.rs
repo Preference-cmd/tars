@@ -101,6 +101,11 @@ pub(crate) fn run_code_tool_definition(bindings: BuiltinBindings) -> ToolDefinit
             "- `await search_text({ path, query, max_matches, regex, ignore_case, glob, context_lines, include_ignored })` -> `{ path, matches, issues, complete, truncated, limit_reason }`",
         );
     }
+    if bindings.find_files {
+        helpers.push(
+            "- `await find_files({ path, pattern, max_results, max_depth, ignore_case, include_ignored })` -> `{ path, pattern, files, scanned_dirs, complete, truncated, limit_reason, issues }`",
+        );
+    }
     if bindings.recall {
         helpers.push(
             "- `await recall({ id, query, regex, case_sensitive, offset, limit, context, role, kind })` -> string",

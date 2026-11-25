@@ -27,6 +27,7 @@ flate2.workspace = true
 tar.workspace = true
 sha2.workspace = true
 regex.workspace = true
+globset.workspace = true
 rquickjs.workspace = true
 rusqlite.workspace = true
 

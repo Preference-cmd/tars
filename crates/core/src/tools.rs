@@ -4,6 +4,7 @@ pub(crate) mod code_execution;
 mod command;
 mod diff;
 mod execute;
+mod find;
 pub(crate) mod lifecycle;
 pub(crate) mod operations;
 pub(crate) mod parameters;
@@ -36,6 +37,8 @@ mod command_acceptance_tests;
 mod command_runtime_tests;
 #[cfg(test)]
 mod command_tool_tests;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod find_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod search_acceptance_tests;
 #[cfg(test)]

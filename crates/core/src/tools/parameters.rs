@@ -41,6 +41,17 @@ pub(crate) struct SearchParams {
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct FindFilesParams {
+    pub path: Option<String>,
+    pub pattern: Option<String>,
+    pub max_results: Option<usize>,
+    pub max_depth: Option<usize>,
+    pub ignore_case: Option<bool>,
+    pub include_ignored: Option<bool>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct WriteParams {
     pub path: String,
     pub content: String,
@@ -102,6 +113,7 @@ pub(crate) enum Params {
     List(ListParams),
     Read(ReadParams),
     Search(SearchParams),
+    Find(FindFilesParams),
     Write(WriteParams),
     Edit(EditParams),
     Command(CommandParams),
@@ -129,6 +141,14 @@ impl Params {
                 "ignore_case",
                 "glob",
                 "context_lines",
+                "include_ignored",
+            ],
+            WorkspaceTool::FindFiles => &[
+                "path",
+                "pattern",
+                "max_results",
+                "max_depth",
+                "ignore_case",
                 "include_ignored",
             ],
             WorkspaceTool::WriteFile => &["path", "content"],
@@ -182,6 +202,17 @@ impl Params {
                         "glob must be a nonempty string of at most 256 bytes without NUL",
                     ));
                 }
+                "pattern"
+                    if value.as_str().is_none_or(|pattern| {
+                        pattern.is_empty()
+                            || pattern.len() > 256
+                            || pattern.contains(['\0', '\r', '\n'])
+                    }) =>
+                {
+                    return Err(Cow::Borrowed(
+                        "pattern must be a nonempty string of at most 256 bytes without NUL or newlines",
+                    ));
+                }
                 "context_lines" if value.as_u64().is_none_or(|lines| lines > 3) => {
                     return Err(Cow::Borrowed("context_lines must be between 0 and 3"));
                 }
@@ -190,7 +221,7 @@ impl Params {
                 }
                 "path" | "query" | "content" | "edits" | "command" | "workdir"
                 | "justification" | "outside_sandbox" | "regex" | "ignore_case" | "glob"
-                | "include_ignored" => {}
+                | "pattern" | "include_ignored" => {}
                 _ if value.as_u64().is_none() => {
                     return Err(Cow::Borrowed("limits must be positive integers"));
                 }
@@ -206,6 +237,9 @@ impl Params {
             WorkspaceTool::SearchText => {
                 Self::Search(SearchParams::deserialize(input).map_err(invalid)?)
             }
+            WorkspaceTool::FindFiles => {
+                Self::Find(FindFilesParams::deserialize(input).map_err(invalid)?)
+            }
             WorkspaceTool::WriteFile => {
                 Self::Write(WriteParams::deserialize(input).map_err(invalid)?)
             }
@@ -218,13 +252,21 @@ impl Params {
             Self::List(p) => &p.path,
             Self::Read(p) => &p.path,
             Self::Search(p) => &p.path,
+            Self::Find(p) => p.path.as_deref().unwrap_or("."),
             Self::Write(p) => &p.path,
             Self::Edit(p) => &p.path,
             Self::Command(_) => "",
         };
         if !matches!(params, Self::Command(_)) {
-            Workspace::components(path)
+            let components = Workspace::components(path)
                 .map_err(|_| Cow::Borrowed("invalid workspace-relative path"))?;
+            if matches!(params, Self::Find(_))
+                && let Some(vcs) = Workspace::vcs_metadata_component(&components)
+            {
+                return Err(Cow::Owned(format!(
+                    "find_files does not search version-control metadata ({vcs})"
+                )));
+            }
         }
         match &params {
             Self::List(p)
@@ -255,6 +297,28 @@ impl Params {
                 return Err(Cow::Borrowed(
                     "search query, match limit or context lines exceed configured bounds",
                 ));
+            }
+            Self::Find(p) => {
+                if p.max_results
+                    .is_some_and(|n| n == 0 || n > limits.max_search_matches)
+                {
+                    return Err(Cow::Owned(format!(
+                        "max_results must be between 1 and {}",
+                        limits.max_search_matches
+                    )));
+                }
+                if p.max_depth
+                    .is_some_and(|n| n == 0 || n > limits.max_search_depth)
+                {
+                    return Err(Cow::Owned(format!(
+                        "max_depth must be between 1 and {}",
+                        limits.max_search_depth
+                    )));
+                }
+                if let Some(pattern) = p.pattern.as_deref() {
+                    super::find::compile_user_glob(pattern, p.ignore_case.unwrap_or(false))
+                        .map_err(Cow::Owned)?;
+                }
             }
             Self::Write(p) => {
                 if p.content.len() > write_limits.max_write_bytes {

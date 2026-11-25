@@ -79,6 +79,9 @@ fn decode_js_args<'js>(
 ) -> Result<Value, String> {
     let args: Vec<JsValue<'js>> = rest.0;
     if args.is_empty() {
+        if tool_name == "find_files" {
+            return Ok(Value::Object(Map::new()));
+        }
         return Err(format!("{tool_name} requires arguments"));
     }
     if args.len() == 1 && args[0].is_object() && !args[0].is_array() && !args[0].is_null() {
@@ -117,6 +120,14 @@ fn decode_js_args<'js>(
             "ignore_case",
             "glob",
             "context_lines",
+            "include_ignored",
+        ],
+        "find_files" => &[
+            "path",
+            "pattern",
+            "max_results",
+            "max_depth",
+            "ignore_case",
             "include_ignored",
         ],
         _ => return Err(format!("unknown tool '{tool_name}'")),

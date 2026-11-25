@@ -389,3 +389,48 @@ async fn concurrent_close_and_host_drop_do_not_resurrect_terminal_directory_slot
     session.entry.notify();
     until(|| session.status().lifecycle == Lifecycle::Closed).await;
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn sqlite_reopen_preserves_saved_tools_without_implicitly_adding_find_files() {
+    use crate::definition::WorkspaceTool;
+
+    let store_dir = tempfile::tempdir().unwrap();
+    let ws_dir = tempfile::tempdir().unwrap();
+    let host1 = SessionHost::new(Some(store_dir.path().into()));
+    normal_fixture(&host1);
+
+    let mut def = definition();
+    def.workspace_root = Some(ws_dir.path().canonicalize().unwrap());
+    def.tools = vec![WorkspaceTool::ListDirectory, WorkspaceTool::ReadFile];
+
+    let session = host1
+        .create(PreparedCreate::persistent(def.clone(), Context::new()))
+        .await
+        .unwrap();
+    let target = session.target();
+    let conv_id = target.conversation_id().clone();
+    assert_eq!(session.definition().tools, def.tools);
+
+    host1.close(&target, ClosePolicy::Save).await.unwrap();
+    drop(host1);
+
+    let host2 = SessionHost::new(Some(store_dir.path().into()));
+    normal_fixture(&host2);
+    let reopened = host2.open(conv_id).await.unwrap();
+    assert_eq!(
+        reopened.definition().tools,
+        vec![WorkspaceTool::ListDirectory, WorkspaceTool::ReadFile]
+    );
+    assert!(
+        !reopened
+            .definition()
+            .tools
+            .contains(&WorkspaceTool::FindFiles)
+    );
+
+    host2
+        .close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}

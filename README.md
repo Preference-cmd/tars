@@ -71,7 +71,7 @@ printf 'Continue analyzing the material' | ./target/release/tars run \
 | Capability | macOS | Linux | Windows |
 | --- | --- | --- | --- |
 | Core runtime, CLI (`tars`), TUI (`tars-tui`), persistent sessions, MCP | Verified in CI | Verified in CI | Not currently in CI (unverified) |
-| Workspace file tools (`list_directory`, `read_file`, `write_file`, `edit_file`) | Supported | Supported | Not yet implemented |
+| Workspace file tools (`list_directory`, `read_file`, `find_files`, `write_file`, `edit_file`) | Supported | Supported | Not yet implemented |
 | Sandboxed `run_command` and `search_text` | Supported (Seatbelt) | Fail-closed (no sandbox backend yet) | Fail-closed (no sandbox backend yet) |
 
 Current gaps and roadmap items not yet implemented:

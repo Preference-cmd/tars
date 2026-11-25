@@ -586,6 +586,7 @@ fn build_narrowing_request(
                     WorkspaceTool::ReadFile
                         | WorkspaceTool::ListDirectory
                         | WorkspaceTool::SearchText
+                        | WorkspaceTool::FindFiles
                 )
             })
             .collect();

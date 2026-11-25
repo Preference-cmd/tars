@@ -11,6 +11,18 @@ pub struct Workspace {
     device: rustix::fs::Dev,
 }
 
+/// Classification of a directory entry without following symbolic links.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EntryKind {
+    /// Regular file on the pinned workspace device.
+    RegularFile,
+    /// Directory (device verified when opened via [`Workspace::child_directory`]).
+    Directory,
+    /// Symbolic link, FIFO, socket, device node, or other non-regular entry.
+    Other,
+}
+
 /// An access constraint or filesystem failure.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceError {
@@ -92,6 +104,16 @@ impl Workspace {
     /// write or search.
     pub(crate) const VCS_METADATA: [&'static str; 4] = [".git", ".hg", ".svn", ".jj"];
 
+    /// Whether a single path component names version-control metadata.
+    ///
+    /// The comparison ignores ASCII case because the default macOS filesystem
+    /// does, so `.GIT` is the same directory as `.git`.
+    pub(crate) fn is_vcs_metadata_name(name: &str) -> bool {
+        Self::VCS_METADATA
+            .iter()
+            .any(|metadata| name.eq_ignore_ascii_case(metadata))
+    }
+
     /// The first component naming version-control metadata, if any.
     ///
     /// The comparison ignores ASCII case because the default macOS filesystem
@@ -99,12 +121,39 @@ impl Workspace {
     pub(crate) fn vcs_metadata_component(components: &[String]) -> Option<&str> {
         components
             .iter()
-            .find(|name| {
-                Self::VCS_METADATA
-                    .iter()
-                    .any(|metadata| name.eq_ignore_ascii_case(metadata))
-            })
+            .find(|name| Self::is_vcs_metadata_name(name))
             .map(String::as_str)
+    }
+
+    /// Classify a directory entry without following symbolic links.
+    ///
+    /// When the filesystem does not provide `d_type` (`FileType::Unknown`),
+    /// falls back to `statat(..., SYMLINK_NOFOLLOW)` and verifies the entry
+    /// remains on the pinned workspace device.
+    #[cfg(unix)]
+    pub(crate) fn entry_kind_nofollow(
+        &self,
+        parent: impl rustix::fd::AsFd,
+        name: &std::ffi::CStr,
+        hint: rustix::fs::FileType,
+    ) -> Result<EntryKind, WorkspaceError> {
+        use rustix::fs::{AtFlags, FileType, statat};
+        match hint {
+            FileType::RegularFile => Ok(EntryKind::RegularFile),
+            FileType::Directory => Ok(EntryKind::Directory),
+            FileType::Unknown => {
+                let stat = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(map_errno)?;
+                if stat.st_dev != self.device {
+                    return Err(WorkspaceError::Forbidden);
+                }
+                match FileType::from_raw_mode(stat.st_mode) {
+                    FileType::RegularFile => Ok(EntryKind::RegularFile),
+                    FileType::Directory => Ok(EntryKind::Directory),
+                    _ => Ok(EntryKind::Other),
+                }
+            }
+            _ => Ok(EntryKind::Other),
+        }
     }
 
     #[cfg(unix)]

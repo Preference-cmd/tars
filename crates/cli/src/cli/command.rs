@@ -35,7 +35,7 @@ Run options:
   --code-execution     Enable sandboxed read-only run_code (conflicts with --no-code-execution)
   --no-code-execution  Disable run_code even when enabled in configuration
   --workspace    Root directory for workspace tools; relative to current directory
-  --tools        Comma-separated list_directory,read_file,search_text,write_file,edit_file,run_command (default empty)
+  --tools        Comma-separated list_directory,read_file,search_text,find_files,write_file,edit_file,run_command (default empty)
   --command-network  Command network: none or open (default none)
   --mcp          Comma-separated ids from mcp.json (default: profile; empty disables)
   --permission-mode  read-only | ask | accept-edits | full-access (default: profile or ask)

@@ -1638,3 +1638,74 @@ fn mc05_deleted_micro_compact_record_reports_unreadable_without_divider() {
         ]
     );
 }
+
+#[test]
+fn find_files_micro_compact_formats_compact_tool_label() {
+    let make_find_pair = |args: serde_json::Value| {
+        let call_block = ContextBlock::new(
+            BlockId::new(uuid::Uuid::now_v7()),
+            BlockContent::ToolCall(ToolCallPayload::new("find_files", args)),
+            Default::default(),
+        );
+        let res_block = ContextBlock::new(
+            BlockId::new(uuid::Uuid::now_v7()),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_block.id(),
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(json!({
+                    "path": ".",
+                    "pattern": "*.rs",
+                    "files": vec![token_sized_text(2_500, "src/file.rs")],
+                    "scanned_dirs": 1,
+                    "complete": true,
+                    "truncated": false,
+                    "limit_reason": null,
+                    "issues": []
+                })),
+            )),
+            Default::default(),
+        );
+        (call_block, res_block)
+    };
+
+    let (c_both, r_both) = make_find_pair(json!({ "path": "crates/core", "pattern": "*.rs" }));
+    let (c_path, r_path) = make_find_pair(json!({ "path": "crates/tui" }));
+    let (c_pat, r_pat) = make_find_pair(json!({ "pattern": "*.toml" }));
+    let (c_none, r_none) = make_find_pair(json!({}));
+
+    let blocks = vec![
+        sys_block("sys"),
+        user_block("turn"),
+        c_both,
+        r_both,
+        c_path,
+        r_path,
+        c_pat,
+        r_pat,
+        c_none,
+        r_none,
+        user_block(&token_sized_text(4_000, "tail")),
+    ];
+    let context = Context::from_blocks(blocks).unwrap();
+    let est_before = estimate_bytes(context_bytes(&context));
+    let micro_plan = plan(
+        context.blocks(),
+        Some(20_000),
+        70,
+        &HashSet::new(),
+        est_before,
+        HistoryTrigger::Auto,
+        permissive_cold_gate(),
+    )
+    .expect("find_files results must be micro-compacted");
+    let after = micro_plan.rewrite.preview(&context).unwrap();
+
+    let stub_text = |idx: usize| match after.blocks()[idx].content() {
+        BlockContent::ToolResult(res) => res.output.content.as_str().unwrap().to_owned(),
+        other => panic!("expected ToolResult at {idx}, got {other:?}"),
+    };
+    assert!(stub_text(3).contains("find_files path=\"crates/core\" pattern=\"*.rs\" ("));
+    assert!(stub_text(5).contains("find_files path=\"crates/tui\" ("));
+    assert!(stub_text(7).contains("find_files pattern=\"*.toml\" ("));
+    assert!(stub_text(9).contains("find_files (~"));
+}

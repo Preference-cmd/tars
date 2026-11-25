@@ -63,6 +63,7 @@ fn builtin_presets_include_explore_and_general() {
                 BuiltinTool::Workspace(WorkspaceTool::ReadFile),
                 BuiltinTool::Workspace(WorkspaceTool::ListDirectory),
                 BuiltinTool::Workspace(WorkspaceTool::SearchText),
+                BuiltinTool::Workspace(WorkspaceTool::FindFiles),
                 BuiltinTool::Recall,
                 BuiltinTool::RunCode,
             ]

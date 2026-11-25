@@ -18,6 +18,7 @@ pub(super) fn builtin_presets() -> Vec<AgentPreset> {
                 BuiltinTool::Workspace(WorkspaceTool::ReadFile),
                 BuiltinTool::Workspace(WorkspaceTool::ListDirectory),
                 BuiltinTool::Workspace(WorkspaceTool::SearchText),
+                BuiltinTool::Workspace(WorkspaceTool::FindFiles),
                 BuiltinTool::Recall,
                 BuiltinTool::RunCode,
             ]),

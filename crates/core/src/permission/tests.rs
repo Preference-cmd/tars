@@ -4586,3 +4586,86 @@ async fn tl10_call_attachments_clear_on_cancel_and_reject_in_batch() {
         );
     }
 }
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_files_executes_without_approval_across_all_modes_and_chains_with_read_file() {
+    for mode in [
+        PermissionMode::ReadOnly,
+        PermissionMode::Ask,
+        PermissionMode::AcceptEdits,
+        PermissionMode::FullAccess,
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(
+            root.path().join("src/target.rs"),
+            "pub const MARKER: &str = \"find_then_read_ok\";\n",
+        )
+        .unwrap();
+
+        let replies = vec![
+            Reply::Call(
+                "find_files".into(),
+                json!({ "path": ".", "pattern": "*.rs" }),
+            ),
+            Reply::Call("read_file".into(), json!({ "path": "src/target.rs" })),
+            Reply::Answer,
+        ];
+        let fixture = Fixture::new("openai-chat", replies, None);
+        let host = SessionHost::new(None);
+        let mut def = base_definition(&fixture.endpoint, root.path());
+        def.tools = vec![WorkspaceTool::FindFiles, WorkspaceTool::ReadFile];
+        let session = host
+            .create(PreparedCreate::transient(def, Context::default()))
+            .await
+            .unwrap();
+        session.set_permission_mode(mode).unwrap();
+
+        let work = submit(&session, "find and read");
+        let obs = finish(&session, &work).await;
+        assert_eq!(obs.tools.calls.len(), 2);
+        assert_eq!(obs.tools.calls[0].tool_name, "find_files");
+        assert_eq!(obs.tools.calls[0].status, Some(ToolResultStatus::Succeeded));
+        assert_eq!(obs.tools.calls[1].tool_name, "read_file");
+        assert_eq!(obs.tools.calls[1].status, Some(ToolResultStatus::Succeeded));
+
+        let context = session.read_materials().unwrap().context;
+        let find_res = context
+            .blocks()
+            .iter()
+            .find_map(|b| match b.content() {
+                BlockContent::ToolResult(p)
+                    if p.call_block_id == obs.tools.calls[0].call_block_id =>
+                {
+                    Some(&p.output.content)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(find_res["files"], json!(["src/target.rs"]));
+
+        let read_res = context
+            .blocks()
+            .iter()
+            .find_map(|b| match b.content() {
+                BlockContent::ToolResult(p)
+                    if p.call_block_id == obs.tools.calls[1].call_block_id =>
+                {
+                    Some(&p.output.content)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            read_res["text"]
+                .as_str()
+                .unwrap()
+                .contains("find_then_read_ok")
+        );
+
+        host.close(&session.target(), ClosePolicy::DiscardLocal)
+            .await
+            .unwrap();
+    }
+}

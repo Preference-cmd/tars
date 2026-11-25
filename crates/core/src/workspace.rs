@@ -7,7 +7,7 @@ mod access;
 mod write;
 
 #[cfg(unix)]
-pub(crate) use access::map_errno;
+pub(crate) use access::{EntryKind, map_errno};
 pub use access::{Workspace, WorkspaceError};
 #[cfg_attr(not(unix), allow(unused_imports))]
 pub(crate) use write::AtomicWriteError;

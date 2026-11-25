@@ -474,6 +474,15 @@ fn format_tool_label(call: Option<&ToolCallPayload>) -> String {
         };
     }
 
+    if call.tool_name == WorkspaceTool::FindFiles.name() {
+        return match (arg_str("path"), arg_str("pattern")) {
+            (Some(path), Some(pattern)) => format!("{name} path=\"{path}\" pattern=\"{pattern}\""),
+            (Some(path), None) => format!("{name} path=\"{path}\""),
+            (None, Some(pattern)) => format!("{name} pattern=\"{pattern}\""),
+            (None, None) => name,
+        };
+    }
+
     if call.tool_name == WorkspaceTool::RunCommand.name() {
         if let Some(command) = arg_str("command") {
             return format!("{name} command=\"{command}\"");

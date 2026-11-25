@@ -78,6 +78,7 @@ pub(crate) fn run(
         Params::Search(_) => Err(OperationError::Rejected(
             "search_text must use the sandboxed search executor".into(),
         )),
+        Params::Find(p) => super::find::find_files(workspace, p, limits, control),
         Params::Write(p) => write_operation(
             workspace,
             p,
