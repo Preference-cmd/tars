@@ -4,12 +4,12 @@ TARS is an open-source, local-first AI agent written in Rust and built on [`caus
 
 ## Key features
 
-- **Multi-protocol providers:** Supports `openai-chat`, `openai-responses`, and `anthropic`, custom `--endpoint` URLs, and environment-variable-only credential references (`--api-key-env`) that are never written into session records or result reports.
-- **Defense-in-depth workspace safety:** Four permission modes (`read-only`, `ask`, `accept-edits`, `full-access`), mandatory read-before-write file safety, macOS Seatbelt OS sandboxing for `run_command` and `search_text` (no outbound network by default, protected `.git` hooks/config/modules/worktrees, denied credential locations, and read-only `.tars/`), and two-layer command approval rules (`~/.tars/permissions.toml` + trust-verified `<workspace>/.tars/permissions.toml`, merged with `deny > ask > allow` precedence).
-- **Long-session context & prompt-cache engineering:** Automatic large-output spilling, zero-LLM hot/cold micro-compaction, partial LLM working briefs with brief-chain merging, temporary frame-trimming fallback, prefix prompt caching (`--prompt-cache on|off`, default `on`), and `recall` over compacted history.
-- **Persistent, crash-safe sessions:** Local JSON store (`tars-session-v2.4`) with OS exclusive file locks, atomic commits, recovery export on save failure (`tars-recovery-<uuid>.json`), and explicit `/repair` / `session repair` continuation for interrupted tool batches.
-- **Extensible tool ecosystem:** Six workspace tools (`list_directory`, `read_file`, `search_text`, `write_file`, `edit_file`, `run_command`), persistent `recall`, multi-directory `agentskills.io` `load_skill`, opt-in QuickJS ES2020 read-only programmatic tool calling (`run_code`), and standalone `mcp.json` MCP server support (tools only; no resources, prompts, or sampling).
-- **Written in Rust:** Rust `edition = 2024` (pinned to Rust `1.96.0` via `rust-toolchain.toml`), zero `unsafe` in TARS crates, and deterministic local fixture tests without live model credentials.
+- **Multi-protocol providers:** `openai-chat`, `openai-responses`, and `anthropic` with custom endpoints and env-only API keys.
+- **Workspace safety:** Four permission modes, read-before-write guards, macOS Seatbelt sandboxing, and layered command rules.
+- **Long-session compaction:** Automatic output spilling, micro-compaction, working briefs, prompt caching, and `recall`.
+- **Persistent sessions:** Local SQLite storage with OS file locks, atomic commits, recovery export, and interrupted-turn repair.
+- **Programmatic tool calling (PTC):** Opt-in QuickJS ES2020 `run_code` sandbox for orchestrating read-only workspace tools and `recall` in one turn.
+- **Written in Rust:** Rust 2024 edition (`1.96.0`), zero `unsafe` in TARS crates, and deterministic local tests.
 
 ## Quick start
 
@@ -64,20 +64,6 @@ printf 'Continue analyzing the material' | ./target/release/tars run \
 ./target/release/tars tools status
 ./target/release/tars tools install rg
 ```
-
-## Usage overview
-
-### Interactive TUI (`tars-tui`)
-
-`tars-tui` provides a single-column Ratatui terminal interface with streaming response previews, inline confirmation panels for file writes, commands, and MCP calls, startup checks for the sandbox backend and `rg`, and lazy history expansion. Common commands and shortcuts include `/sessions`, `/mode` or `Shift-Tab`, `/rules`, `/tools`, `/compact`, `/auto_compact`, `/summary`, `/status`, and `F7` / `/repair`. See the [TUI guide](docs/tui.md).
-
-### Persistent sessions, compaction & recovery
-
-Configure `--store`, `--context-window`, `--auto-compact on|off|PERCENT`, and `--prompt-cache on|off` when creating a session (or via TOML presets), and inspect or manage sessions with `session show`, `session compact`, `session history`, and `session repair`. Records use OS exclusive `<uuid>.lock` files and a 64 MiB per-record limit; if saving fails, uncommitted materials export to `tars-recovery-<uuid>.json` (directory configurable via `--recovery-dir`) without overwriting existing files. See [Long-session compaction](docs/configuration.md#long-session-compaction), [Session lifecycle](docs/session-lifecycle.md), [Session continuation](docs/session-continuation.md), and [Compaction and history](docs/README.md#compaction-and-history).
-
-### CLI automation & workspace tools
-
-`tars run` supports `--input` or `--stdin`, `--load` / `--save`, and `--json`, with distinct exit codes (`0` completed, `1` configuration, execution, or file error, `2` argument error, `124` deadline, `130` cancelled). Workspace tools are opt-in via `--workspace DIR --tools ...` alongside `--permission-mode`, `--command-network none|open`, `--code-execution` / `--no-code-execution`, and unified prelude/skill controls (`--skill-dir`, `--no-skills`). CLI and TUI share TOML configuration (`~/.tars/`, `$TARS_HOME`, `TARS_CONFIG`, `--config`; see [config.example.toml](config.example.toml)) and `mcp.json` ([mcp.example.json](mcp.example.json)). See [Workspace tools](docs/workspace-tools.md) and [Configuration](docs/configuration.md).
 
 ## Platform support and current status
 
