@@ -9,6 +9,7 @@ TARS is an open-source, local-first AI agent written in Rust and built on [`caus
 - **Long-session compaction:** Automatic output spilling, micro-compaction, working briefs, prompt caching, and `recall`.
 - **Persistent sessions:** Local SQLite storage with OS file locks, atomic commits, recovery export, and interrupted-turn repair.
 - **Programmatic tool calling (PTC):** Opt-in QuickJS ES2020 `run_code` sandbox for orchestrating read-only workspace tools and `recall` in one turn.
+- **Multi-agent collaboration:** Built-in and `.tars/agents/*.md` sub-agents with monotonic narrowing, background tasks, and lock-free inspection.
 - **Written in Rust:** Rust 2024 edition (`1.96.0`), zero `unsafe` in TARS crates, and deterministic local tests.
 
 ## Quick start
