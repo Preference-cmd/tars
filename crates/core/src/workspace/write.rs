@@ -149,11 +149,17 @@ impl Workspace {
 
     /// Atomically write content to a file in the given parent directory.
     ///
+    /// Unlike non-workspace callers that share path-based `crate::fs_atomic`,
+    /// workspace writes stay strictly fd-relative (`openat` / `statat` /
+    /// `renameat` / `linkat`) so pinned directory handles enforce symlink and
+    /// TOCTOU safety against concurrent tree mutations.
+    ///
     /// The content goes to a randomly named temp file that is synced before the
     /// cancellation check and then renamed over the target, preserving
-    /// `existing_mode` when given. When overwriting (`expected_version` is
-    /// `Some`), target metadata is re-checked with `statat` after `check_cancel`
-    /// and immediately before `renameat`, returning `TargetChanged` on mismatch,
+    /// `existing_mode` when given, followed by a best-effort `fsync` of
+    /// `parent_dir`. When overwriting (`expected_version` is `Some`), target
+    /// metadata is re-checked with `statat` after `check_cancel` and
+    /// immediately before `renameat`, returning `TargetChanged` on mismatch,
     /// deletion, or non-regular replacement. Creating a new file uses
     /// `RenameFlags::NOREPLACE` (or a `linkat` fallback) so an existing target
     /// reports `AlreadyExists`.
@@ -270,6 +276,7 @@ impl Workspace {
         }
 
         cleanup.disarm();
+        let _ = rustix::fs::fsync(parent_dir);
         drop(file);
         Ok(version)
     }

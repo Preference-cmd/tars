@@ -12,7 +12,7 @@ use causa::kernel::{Context, ModelGateway};
 use causa::providers::{
     AnthropicMessagesGateway, OpenAiChatCompletionsGateway, OpenAiResponsesGateway,
 };
-use causa::runtime::{RetryPolicy, RetryingGateway, ToolExecutor, ToolExecutorOptions, TurnRunner};
+use causa::runtime::{RetryPolicy, ToolExecutor, ToolExecutorOptions, TurnRunner};
 use std::sync::Arc;
 
 /// Typed session assembly failure before any model call is made.
@@ -405,17 +405,31 @@ pub(crate) fn assemble(
         Some(usage) => crate::usage::UsageHub::from_session_usage(usage),
         None => crate::usage::UsageHub::new(),
     });
+    let preview_reset_slot: Arc<std::sync::Mutex<Option<super::StreamRetryHook>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let preview_reset_for_gateway = preview_reset_slot.clone();
+    let preview_reset_hook: super::StreamRetryHook = Arc::new(move |invocation_id| {
+        let hook = preview_reset_for_gateway
+            .lock()
+            .expect("preview reset slot lock")
+            .clone();
+        if let Some(hook) = hook {
+            hook(invocation_id);
+        }
+    });
     let conversation_retry = wrap_retry_and_count(
         innermost_gateway.clone(),
         crate::usage::UsagePurpose::Conversation,
         usage_hub.clone(),
         definition.max_model_attempts,
+        Some(preview_reset_hook),
     );
     let summary_gateway = wrap_retry_and_count(
         innermost_gateway,
         crate::usage::UsagePurpose::Compaction,
         usage_hub.clone(),
         definition.max_model_attempts,
+        None,
     );
     let usage = Arc::new(UsageTracker::default());
     // The summary request bypasses usage capture: its (possibly trimmed)
@@ -716,6 +730,7 @@ pub(crate) fn assemble(
     )
     .allow_builtin_repair()
     .with_approval_origin_slot(approval_origin_slot)
+    .with_preview_reset_slot(preview_reset_slot)
     .with_skills(skill_registry, loaded_skills);
     let session = match mcp {
         Some(mcp) => session.with_mcp(mcp),
@@ -750,18 +765,27 @@ pub(crate) fn assemble(
 }
 
 /// Count every attempt, then retry around the counter so each retry is
-/// counted too. The retry wrapper repeats the same request for transient and
-/// rate-limit failures, and never after output became visible.
+/// counted too. The retry wrapper repeats the same request for transient,
+/// rate-limit, and pre-`Done` mid-stream interruptions, never after `Done`.
 fn wrap_retry_and_count(
     innermost: Arc<dyn ModelGateway>,
     purpose: crate::usage::UsagePurpose,
     hub: Arc<crate::usage::UsageHub>,
     max_attempts: Option<u32>,
+    on_stream_retry: Option<super::StreamRetryHook>,
 ) -> Arc<dyn ModelGateway> {
-    let counted = crate::usage::CountingGateway::new(innermost, purpose, hub);
+    let counted: Arc<dyn ModelGateway> =
+        Arc::new(crate::usage::CountingGateway::new(innermost, purpose, hub));
     match max_attempts.filter(|attempts| *attempts > 1) {
-        Some(attempts) => Arc::new(RetryingGateway::new(counted, RetryPolicy::new(attempts))),
-        None => Arc::new(counted),
+        Some(attempts) => {
+            let mut gateway =
+                super::retry::StreamRetryGateway::new(counted, RetryPolicy::new(attempts));
+            if let Some(hook) = on_stream_retry {
+                gateway = gateway.with_on_stream_retry(hook);
+            }
+            Arc::new(gateway)
+        }
+        None => counted,
     }
 }
 

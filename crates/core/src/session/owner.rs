@@ -181,8 +181,21 @@ impl Session {
                 compaction: None,
                 protected_inputs: None,
                 usage: Arc::new(crate::usage::UsageHub::new()),
+                preview_reset_slot: None,
             }),
         }
+    }
+
+    /// Attach the shared slot used to re-emit `ProgressUpdate::ModelStarted`
+    /// when `StreamRetryGateway` starts a mid-stream retry attempt.
+    pub(crate) fn with_preview_reset_slot(
+        mut self,
+        slot: Arc<Mutex<Option<crate::assembly::StreamRetryHook>>>,
+    ) -> Self {
+        Arc::get_mut(&mut self.shared)
+            .expect("attach preview reset slot before cloning handles")
+            .preview_reset_slot = Some(slot);
+        self
     }
 
     /// Attach the session-wide usage hub before any handle is cloned.

@@ -253,6 +253,7 @@ async fn install(source: &DownloadSource, destination: &Path) -> Result<String, 
     binary
         .persist(destination)
         .map_err(|error| DownloadError::Io(error.error))?;
+    crate::fs_atomic::sync_parent_dir(directory);
     match probe_version(destination) {
         Ok(version) => Ok(version),
         Err(reason) => {

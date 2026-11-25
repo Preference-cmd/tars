@@ -15,6 +15,7 @@ pub mod config;
 pub mod definition;
 pub mod events;
 pub mod external_tools;
+pub(crate) mod fs_atomic;
 pub mod material;
 mod mcp;
 pub mod permission;

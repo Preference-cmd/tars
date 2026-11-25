@@ -1,7 +1,7 @@
 use causa::kernel::{BlockId, Context};
 use serde::Deserialize;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::Path;
 
 use super::{MaterialReference, references};
@@ -225,22 +225,16 @@ fn read(path: &Path) -> Result<Context, MaterialError> {
 }
 
 fn write(path: &Path, context: &Context, replace: bool) -> Result<u64, MaterialError> {
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let mut pending = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer_pretty(&mut pending, context)?;
-    pending.write_all(b"\n")?;
-    pending.as_file().sync_all()?;
-    let bytes = pending.as_file().metadata()?.len();
-    if replace {
-        pending.persist(path)
+    let mut bytes = serde_json::to_vec_pretty(context)?;
+    bytes.push(b'\n');
+    let mode = if replace {
+        crate::fs_atomic::ReplaceMode::Overwrite
     } else {
-        pending.persist_noclobber(path)
-    }
-    .map_err(|error| MaterialError::Io(error.error))?;
-    Ok(bytes)
+        crate::fs_atomic::ReplaceMode::CreateNew
+    };
+    Ok(crate::fs_atomic::atomic_write_bytes(
+        path, None, &bytes, mode,
+    )?)
 }
 
 #[cfg(test)]

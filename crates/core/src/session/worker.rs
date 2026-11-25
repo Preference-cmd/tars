@@ -99,6 +99,24 @@ async fn run(shared: Arc<Shared>, record: Arc<Record>, context: Context) -> Retu
     ));
     // Ordinary cancellation must let Causa return owned context and the full U.
     // Do not race and drop this future against cancellation or a deadline here.
+    let _preview_reset_guard = shared.preview_reset_slot.as_ref().map(|slot| {
+        let progress = shared.progress.clone();
+        let work = record.work.clone();
+        let hook: crate::assembly::StreamRetryHook = Arc::new(move |invocation_id| {
+            if progress.receiver_count() == 0 {
+                return;
+            }
+            let _ = progress.send(Arc::new(super::types::WorkProgress {
+                work: work.clone(),
+                invocation_id: invocation_id.clone(),
+                update: super::types::ProgressUpdate::ModelStarted,
+            }));
+        });
+        *slot.lock().expect("preview reset slot lock") = Some(hook);
+        PreviewResetGuard {
+            slot: Some(slot.clone()),
+        }
+    });
     let outcome = runner
         .run_streaming(
             record.work.turn_id.clone(),
@@ -107,10 +125,27 @@ async fn run(shared: Arc<Shared>, record: Arc<Record>, context: Context) -> Retu
             control.clone(),
         )
         .await;
+    drop(_preview_reset_guard);
     Returned {
         context: outcome.context,
         uncommitted: outcome.uncommitted_tool_batch,
         result: WorkResult::Run(outcome.result),
+    }
+}
+
+struct PreviewResetGuard {
+    slot: Option<Arc<std::sync::Mutex<Option<crate::assembly::StreamRetryHook>>>>,
+}
+
+impl Drop for PreviewResetGuard {
+    fn drop(&mut self) {
+        if let Some(slot) = &self.slot {
+            let mut guard = match slot.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *guard = None;
+        }
     }
 }
 

@@ -28,6 +28,7 @@ pub(super) struct Shared {
     pub compaction: Option<Arc<crate::compact::CompactionRuntime>>,
     pub protected_inputs: Option<Arc<crate::compact::ProtectedInputs>>,
     pub usage: Arc<crate::usage::UsageHub>,
+    pub preview_reset_slot: Option<Arc<Mutex<Option<crate::assembly::StreamRetryHook>>>>,
 }
 pub(super) struct State {
     pub context: Option<Context>,

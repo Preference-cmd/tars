@@ -2,7 +2,7 @@
 
 use super::eval::{CommandRule, RuleDecision};
 use serde::Deserialize;
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 /// Maximum size of a permissions rules file (256 KiB).
@@ -388,20 +388,13 @@ pub(crate) fn append_workspace_rules_file(
     std::fs::create_dir_all(&dot_tars).map_err(|_| WorkspaceAppendError::Failed)?;
     ensure_dot_tars_gitignore(&dot_tars).map_err(|_| WorkspaceAppendError::Failed)?;
 
-    let mut pending = tempfile::Builder::new()
-        .prefix(".permissions.toml.pending-")
-        .tempfile_in(&dot_tars)
-        .map_err(|_| WorkspaceAppendError::Failed)?;
-    pending
-        .write_all(new_text.as_bytes())
-        .map_err(|_| WorkspaceAppendError::Failed)?;
-    pending
-        .as_file()
-        .sync_all()
-        .map_err(|_| WorkspaceAppendError::Failed)?;
-    pending
-        .persist(&rules_path)
-        .map_err(|_| WorkspaceAppendError::Failed)?;
+    crate::fs_atomic::atomic_write_bytes(
+        &rules_path,
+        Some(".permissions.toml.pending-"),
+        new_text.as_bytes(),
+        crate::fs_atomic::ReplaceMode::Overwrite,
+    )
+    .map_err(|_| WorkspaceAppendError::Failed)?;
 
     store
         .write_workspace_rules_trust(workspace_root, &new_text)
