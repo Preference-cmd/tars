@@ -9,13 +9,18 @@ use std::sync::Arc;
 pub struct BackendId(&'static str);
 
 impl BackendId {
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", test)),
+        allow(dead_code)
+    )]
     pub(crate) const fn new(name: &'static str) -> Self {
         Self(name)
     }
 
     /// The macOS Seatbelt backend.
     pub const SEATBELT: Self = Self::new("seatbelt");
+    /// The Linux Bubblewrap backend.
+    pub const BWRAP: Self = Self::new("bwrap");
     /// The placeholder used when a platform has no backend.
     pub const UNAVAILABLE: Self = Self::new("unavailable");
     /// The recording backend used by tests and the `test-support` feature.
@@ -284,22 +289,34 @@ impl Launch {
         Ok(())
     }
 
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", test)),
+        allow(dead_code)
+    )]
     pub(crate) fn program(&self) -> &Path {
         &self.program
     }
 
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", test)),
+        allow(dead_code)
+    )]
     pub(crate) fn launch_args(&self) -> &[OsString] {
         &self.args
     }
 
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", test)),
+        allow(dead_code)
+    )]
     pub(crate) fn working_directory(&self) -> Option<&Path> {
         self.current_dir.as_deref()
     }
 
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", test)),
+        allow(dead_code)
+    )]
     pub(crate) fn environment(&self) -> &[(OsString, OsString)] {
         &self.env
     }
@@ -309,13 +326,37 @@ impl Launch {
 pub struct SandboxedCommand {
     command: tokio::process::Command,
     tree: Box<dyn TreeControl>,
+    #[cfg(target_os = "linux")]
+    inherited_fds: Vec<std::os::fd::OwnedFd>,
 }
 
 impl SandboxedCommand {
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "linux", test)),
+        allow(dead_code)
+    )]
     pub(crate) fn new(mut command: tokio::process::Command, tree: Box<dyn TreeControl>) -> Self {
         command.kill_on_drop(true);
-        Self { command, tree }
+        Self {
+            command,
+            tree,
+            #[cfg(target_os = "linux")]
+            inherited_fds: Vec::new(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn with_inherited_fds(
+        mut command: tokio::process::Command,
+        tree: Box<dyn TreeControl>,
+        inherited_fds: Vec<std::os::fd::OwnedFd>,
+    ) -> Self {
+        command.kill_on_drop(true);
+        Self {
+            command,
+            tree,
+            inherited_fds,
+        }
     }
 
     /// Set the stdin of the sandboxed process.
@@ -341,7 +382,14 @@ impl SandboxedCommand {
     /// This is the only way to spawn the wrapped command, so the returned
     /// handle always owns the child and its process-group cleanup.
     pub fn spawn(mut self) -> std::io::Result<ProcessTree> {
-        let child = self.command.spawn()?;
+        #[cfg(target_os = "linux")]
+        for fd in &self.inherited_fds {
+            rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::empty())?;
+        }
+        let spawn_result = self.command.spawn();
+        #[cfg(target_os = "linux")]
+        drop(self.inherited_fds);
+        let child = spawn_result?;
         self.tree.attach(child)
     }
 }
@@ -451,7 +499,11 @@ pub(crate) fn platform_backend() -> Box<dyn SandboxBackend> {
     {
         Box::new(super::seatbelt::SeatbeltBackend::new())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(super::bwrap::BwrapBackend::new())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         Box::new(super::unavailable::UnavailableBackend::new())
     }

@@ -38,14 +38,14 @@ pub enum ReadScope {
 /// policy field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SandboxPolicy {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     pub(crate) read_roots: Vec<PathBuf>,
     pub(crate) write_roots: Vec<PathBuf>,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     pub(crate) read_only_subpaths: Vec<PathBuf>,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     pub(crate) protected_entries: Vec<PathBuf>,
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     pub(crate) denied_paths: Vec<PathBuf>,
     read_scope: ReadScope,
     network: NetworkAccess,

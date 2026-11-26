@@ -166,11 +166,17 @@ pub fn launch_working_directory(launch: &Launch) -> Option<&std::path::Path> {
     launch.working_directory()
 }
 
-/// Open the macOS Seatbelt backend with an explicit home directory.
+/// Open the platform sandbox backend with an explicit home directory.
 ///
-/// The probe resolves credential denials under `home`, so a test can keep its
-/// canaries in a temporary directory instead of the real home.
-#[cfg(target_os = "macos")]
+/// On macOS this opens the Seatbelt backend; on Linux it opens the Bubblewrap
+/// backend. The probe resolves credential denials under `home`, so a test can
+/// keep its canaries in a temporary directory instead of the real home.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn open_with_home(home: PathBuf) -> Result<super::Sandbox, SandboxUnavailable> {
-    super::Sandbox::open_with(Box::new(super::seatbelt::SeatbeltBackend::with_home(home)))
+    #[cfg(target_os = "macos")]
+    let backend: Box<dyn SandboxBackend> =
+        Box::new(super::seatbelt::SeatbeltBackend::with_home(home));
+    #[cfg(target_os = "linux")]
+    let backend: Box<dyn SandboxBackend> = Box::new(super::bwrap::BwrapBackend::with_home(home));
+    super::Sandbox::open_with(backend)
 }

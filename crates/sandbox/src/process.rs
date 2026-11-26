@@ -39,7 +39,7 @@ pub struct ProcessTree {
 }
 
 impl ProcessTree {
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     pub(crate) fn new(child: Child, signaller: Box<dyn TreeSignaller>) -> Self {
         Self {
             child,
@@ -149,7 +149,7 @@ impl Drop for ProcessTree {
 }
 
 #[cfg(unix)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 pub(crate) struct ProcessGroupControl;
 
 #[cfg(unix)]
@@ -168,7 +168,7 @@ impl TreeControl for ProcessGroupControl {
 }
 
 #[cfg(unix)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 struct ProcessGroupSignaller {
     pgid: rustix::process::Pid,
 }

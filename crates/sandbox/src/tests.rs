@@ -439,7 +439,7 @@ fn sandbox_fails_closed_when_the_probe_fails() {
     assert!(calls.lock().unwrap().is_empty());
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn unavailable_backend_rejects_unconfined_launches() {
     use super::backend::SandboxBackend;
@@ -530,7 +530,7 @@ fn sandbox_rejects_a_relative_launch_before_calling_the_backend() {
     assert!(calls.lock().unwrap().is_empty());
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn unsupported_platforms_fail_closed_through_the_public_entry() {
     let error = Sandbox::open().unwrap_err();
@@ -2424,5 +2424,883 @@ echo intermediate-symlink-protected-ok
             std::fs::read_to_string(workspace.join("real_a/sibling.txt")).unwrap(),
             "sibling"
         );
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod bwrap {
+    use super::*;
+    use crate::ProcessTree;
+    use crate::backend::SandboxBackend;
+    use std::net::TcpListener;
+    use std::path::{Path, PathBuf};
+    use std::process::{ExitStatus, Stdio};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+    use tokio::io::AsyncReadExt;
+
+    const COMMAND_TIMEOUT: Duration = Duration::from_secs(20);
+
+    struct RunOutput {
+        status: ExitStatus,
+        stdout: String,
+        stderr: String,
+    }
+
+    fn open_sandbox() -> Sandbox {
+        Sandbox::open().expect("the Linux Bubblewrap backend must probe successfully")
+    }
+
+    fn canonical(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    fn base_policy(workspace: &Path) -> SandboxPolicy {
+        let ws = canonical(workspace);
+        SandboxPolicy::new(vec![ws.clone()], vec![ws]).unwrap()
+    }
+
+    fn shell_path() -> &'static str {
+        if Path::new("/bin/bash").is_file() {
+            "/bin/bash"
+        } else {
+            "/bin/sh"
+        }
+    }
+
+    fn bash_launch(script: &str, workspace: &Path, home: &Path, args: &[&Path]) -> Launch {
+        let mut launch = Launch::new(shell_path())
+            .arg("-c")
+            .arg(script)
+            .arg("tars-test")
+            .current_dir(canonical(workspace))
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("HOME", home.as_os_str())
+            .env("LANG", "C");
+        for arg in args {
+            launch = launch.arg(arg.as_os_str());
+        }
+        launch
+    }
+
+    fn configure(command: &mut SandboxedCommand) {
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    }
+
+    async fn read_output(tree: &mut ProcessTree) -> (String, String) {
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        if let Some(mut pipe) = tree.take_stdout() {
+            let _ = pipe.read_to_string(&mut stdout).await;
+        }
+        if let Some(mut pipe) = tree.take_stderr() {
+            let _ = pipe.read_to_string(&mut stderr).await;
+        }
+        (stdout, stderr)
+    }
+
+    async fn run(sandbox: &Sandbox, policy: &SandboxPolicy, launch: Launch) -> RunOutput {
+        let mut wrapped = sandbox.wrap(policy, launch).expect("wrap command");
+        configure(&mut wrapped);
+        let mut tree = wrapped.spawn().expect("spawn command");
+        let status = match tokio::time::timeout(COMMAND_TIMEOUT, tree.wait()).await {
+            Ok(result) => result.expect("wait command"),
+            Err(_) => {
+                let status = tree
+                    .terminate(Duration::from_secs(1))
+                    .await
+                    .expect("terminate timed out command");
+                let (stdout, stderr) = read_output(&mut tree).await;
+                panic!("command timed out: {status:?} stdout={stdout} stderr={stderr}");
+            }
+        };
+        let (stdout, stderr) = read_output(&mut tree).await;
+        RunOutput {
+            status,
+            stdout,
+            stderr,
+        }
+    }
+
+    fn spawn(sandbox: &Sandbox, policy: &SandboxPolicy, launch: Launch) -> ProcessTree {
+        let mut wrapped = sandbox.wrap(policy, launch).expect("wrap command");
+        configure(&mut wrapped);
+        wrapped.spawn().expect("spawn command")
+    }
+
+    async fn wait_for_file(path: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !path.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {}",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    fn read_pid(path: &Path) -> u32 {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    fn alive(pid: u32) -> bool {
+        let Some(pid) = rustix::process::Pid::from_raw(pid as i32) else {
+            return false;
+        };
+        matches!(
+            rustix::process::test_kill_process(pid),
+            Ok(()) | Err(rustix::io::Errno::PERM)
+        )
+    }
+
+    async fn wait_until_dead(pid: u32) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while alive(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "process {pid} stayed alive after cleanup"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[test]
+    fn probe_reports_the_bwrap_backend_with_all_dimensions_full() {
+        let sandbox = open_sandbox();
+        let report = sandbox.report();
+        assert_eq!(report.backend, BackendId::BWRAP);
+        assert_eq!(report.file_read, Capability::Full);
+        assert_eq!(report.file_write, Capability::Full);
+        assert_eq!(report.network, Capability::Full);
+        assert_eq!(report.signal_isolation, Capability::Full);
+        assert_eq!(report.descendant_lifecycle, Capability::Full);
+    }
+
+    #[test]
+    fn missing_executable_fails_closed() {
+        let backend =
+            super::super::bwrap::BwrapBackend::with_executable("/nonexistent/tars-bwrap-missing");
+        let error = backend.probe().unwrap_err();
+        assert_eq!(error.backend, BackendId::BWRAP);
+        assert!(error.reason.contains("not found"), "{}", error.reason);
+    }
+
+    #[test]
+    fn failed_probe_fails_closed_and_includes_userns_hint() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("bwrap");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\necho 'bwrap: setting up uid map: Permission denied' >&2\nexit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+
+        let backend = super::super::bwrap::BwrapBackend::with_executable(&executable);
+        let error = backend.probe().unwrap_err();
+        assert_eq!(error.backend, BackendId::BWRAP);
+        assert!(
+            error.reason.contains("probe failed with"),
+            "{}",
+            error.reason
+        );
+        assert!(
+            error.reason.contains("unprivileged user namespaces"),
+            "{}",
+            error.reason
+        );
+    }
+
+    #[test]
+    fn probe_fails_without_a_home_directory() {
+        let backend = super::super::bwrap::BwrapBackend::without_home();
+        let error = backend.probe().unwrap_err();
+        assert_eq!(error.backend, BackendId::BWRAP);
+        assert!(error.reason.contains("HOME is not set"), "{}", error.reason);
+    }
+
+    #[test]
+    fn probe_fails_when_credential_denials_are_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = super::super::bwrap::BwrapBackend::with_home(directory.path())
+            .without_credential_denials();
+        let error = backend.probe().unwrap_err();
+        assert!(
+            error
+                .reason
+                .contains("roots probe failed with exit status: 18"),
+            "{}",
+            error.reason
+        );
+        assert!(!error.reason.contains("PROBE-CANARY"));
+    }
+
+    #[tokio::test]
+    async fn roots_and_host_read_scopes_and_write_isolation() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let outside = base.path().join("outside");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(workspace.join("input.txt"), "workspace-data\n").unwrap();
+        std::fs::write(outside.join("secret.txt"), "outside-data\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("target.txt"), workspace.join("escape_link"))
+            .unwrap();
+
+        let outside = canonical(&outside);
+        let home = canonical(&home);
+        let sandbox = crate::test_support::open_with_home(home.clone()).unwrap();
+
+        let script = r#"set -u
+ws=$1
+outside=$2
+if ! grep -q workspace-data "$ws/input.txt"; then exit 1; fi
+printf wrote > "$ws/output.txt" || exit 2
+if printf x > "$outside/escape.txt" 2>/dev/null; then exit 3; fi
+if printf x > "$ws/escape_link" 2>/dev/null; then exit 4; fi
+if grep -q outside-data "$outside/secret.txt" 2>/dev/null; then
+  echo outside-readable
+else
+  echo outside-blocked
+fi
+"#;
+
+        let roots_policy = base_policy(&workspace);
+        let roots_out = run(
+            &sandbox,
+            &roots_policy,
+            bash_launch(script, &workspace, &home, &[&workspace, &outside]),
+        )
+        .await;
+        assert!(
+            roots_out.status.success(),
+            "stdout={} stderr={}",
+            roots_out.stdout,
+            roots_out.stderr
+        );
+        assert!(roots_out.stdout.contains("outside-blocked"));
+        assert!(!outside.join("escape.txt").exists());
+        assert!(!outside.join("target.txt").exists());
+
+        let host_policy = base_policy(&workspace).with_read_scope(ReadScope::Host);
+        let host_out = run(
+            &sandbox,
+            &host_policy,
+            bash_launch(script, &workspace, &home, &[&workspace, &outside]),
+        )
+        .await;
+        assert!(
+            host_out.status.success(),
+            "stdout={} stderr={}",
+            host_out.stdout,
+            host_out.stderr
+        );
+        assert!(host_out.stdout.contains("outside-readable"));
+        assert!(!outside.join("escape.txt").exists());
+        assert!(!outside.join("target.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn credential_denials_protect_secrets_and_workspace_equal_home() {
+        let base = tempfile::tempdir().unwrap();
+        let home = base.path().join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(home.join(".aws")).unwrap();
+        std::fs::create_dir_all(home.join(".cargo")).unwrap();
+        std::fs::create_dir_all(home.join(".local/share/keyrings")).unwrap();
+        std::fs::write(home.join(".ssh/id_ed25519"), "SECRET-SSH\n").unwrap();
+        std::fs::write(home.join(".aws/credentials"), "SECRET-AWS\n").unwrap();
+        std::fs::write(home.join(".cargo/config.toml"), "CARGO-CONFIG\n").unwrap();
+        std::fs::write(home.join(".cargo/credentials.toml"), "SECRET-CARGO\n").unwrap();
+        std::fs::write(home.join(".zsh_history"), "SECRET-HISTORY\n").unwrap();
+        std::fs::write(
+            home.join(".local/share/keyrings/login.keyring"),
+            "SECRET-KEYRING\n",
+        )
+        .unwrap();
+
+        let home = canonical(&home);
+        let sandbox = crate::test_support::open_with_home(home.clone()).unwrap();
+
+        // Test with workspace == HOME across both Roots and Host scopes.
+        let script = r#"set -u
+home=$1
+if ! grep -q CARGO-CONFIG "$home/.cargo/config.toml" 2>/dev/null; then exit 1; fi
+if grep -q SECRET-SSH "$home/.ssh/id_ed25519" 2>/dev/null; then exit 2; fi
+if grep -q SECRET-AWS "$home/.aws/credentials" 2>/dev/null; then exit 3; fi
+if grep -q SECRET-CARGO "$home/.cargo/credentials.toml" 2>/dev/null; then exit 4; fi
+if grep -q SECRET-HISTORY "$home/.zsh_history" 2>/dev/null; then exit 5; fi
+if grep -q SECRET-KEYRING "$home/.local/share/keyrings/login.keyring" 2>/dev/null; then exit 6; fi
+if printf x > "$home/.ssh/pwn" 2>/dev/null; then exit 7; fi
+if printf x > "$home/.local/share/keyrings/pwn" 2>/dev/null; then exit 8; fi
+printf ok > "$home/work.txt" || exit 9
+echo credentials-ok
+"#;
+
+        for scope in [ReadScope::Roots, ReadScope::Host] {
+            let policy = base_policy(&home).with_read_scope(scope);
+            let output = run(
+                &sandbox,
+                &policy,
+                bash_launch(script, &home, &home, &[&home]),
+            )
+            .await;
+            assert!(
+                output.status.success(),
+                "scope={scope:?} stdout={} stderr={}",
+                output.stdout,
+                output.stderr
+            );
+            assert!(output.stdout.contains("credentials-ok"));
+        }
+        assert!(!home.join(".ssh/pwn").exists());
+        assert!(!home.join(".local/share/keyrings/pwn").exists());
+        assert_eq!(
+            std::fs::read_to_string(home.join("work.txt")).unwrap(),
+            "ok"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_denied_paths_block_directories_files_and_nested_children() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(workspace.join("secret_dir/nested")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            workspace.join("secret_dir/nested/token.txt"),
+            "TOP-SECRET\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("secret_file.txt"), "FILE-SECRET\n").unwrap();
+
+        let workspace = canonical(&workspace);
+        let home = canonical(&home);
+        let sandbox = crate::test_support::open_with_home(home.clone()).unwrap();
+        let policy = base_policy(&workspace)
+            .with_denied_path(workspace.join("secret_dir"))
+            .unwrap()
+            .with_denied_path(workspace.join("secret_dir/nested"))
+            .unwrap()
+            .with_denied_path(workspace.join("secret_dir/nested/token.txt"))
+            .unwrap()
+            .with_denied_path(workspace.join("secret_file.txt"))
+            .unwrap()
+            .with_read_scope(ReadScope::Host);
+
+        let script = r#"set -u
+ws=$1
+if grep -q TOP-SECRET "$ws/secret_dir/nested/token.txt" 2>/dev/null; then exit 1; fi
+if grep -q FILE-SECRET "$ws/secret_file.txt" 2>/dev/null; then exit 2; fi
+if printf x > "$ws/secret_dir/pwn" 2>/dev/null; then exit 3; fi
+if printf x > "$ws/secret_file.txt" 2>/dev/null; then exit 4; fi
+echo denied-paths-ok
+"#;
+        let output = run(
+            &sandbox,
+            &policy,
+            bash_launch(script, &workspace, &home, &[&workspace]),
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("denied-paths-ok"));
+    }
+
+    #[tokio::test]
+    async fn git_metadata_protection_locks_hooks_config_and_rename() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(workspace.join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(workspace.join(".git/objects")).unwrap();
+        std::fs::create_dir_all(workspace.join(".git/refs/heads")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(workspace.join(".git/config"), "[core]\n").unwrap();
+        std::fs::write(workspace.join(".git/index"), "idx\n").unwrap();
+
+        let workspace = canonical(&workspace);
+        let home = canonical(&home);
+        let sandbox = crate::test_support::open_with_home(home.clone()).unwrap();
+        let policy = base_policy(&workspace)
+            .with_git_metadata_protection(&workspace)
+            .unwrap();
+
+        let script = r#"set -u
+ws=$1
+if printf x > "$ws/.git/hooks/pre-commit" 2>/dev/null; then exit 1; fi
+if printf x > "$ws/.git/config" 2>/dev/null; then exit 2; fi
+if mv "$ws/.git" "$ws/.git-moved" 2>/dev/null; then exit 3; fi
+printf obj > "$ws/.git/objects/test-obj" || exit 4
+printf ref > "$ws/.git/refs/heads/main" || exit 5
+printf idx2 > "$ws/.git/index" || exit 6
+echo git-ok
+"#;
+        let output = run(
+            &sandbox,
+            &policy,
+            bash_launch(script, &workspace, &home, &[&workspace]),
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("git-ok"));
+        assert!(!workspace.join(".git/hooks/pre-commit").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".git/config")).unwrap(),
+            "[core]\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".git/objects/test-obj")).unwrap(),
+            "obj"
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_read_only_path_enforces_existing_and_skips_missing_host_stubs() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(workspace.join("sub/deep/store")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(workspace.join("sub/deep/store/data.db"), "store-data\n").unwrap();
+
+        let workspace = canonical(&workspace);
+        let home = canonical(&home);
+        let sandbox = crate::test_support::open_with_home(home.clone()).unwrap();
+        let policy = base_policy(&workspace)
+            .with_protected_read_only_path(&workspace, workspace.join("sub/deep/store"))
+            .unwrap()
+            .with_protected_read_only_path(&workspace, workspace.join(".tars/missing.db"))
+            .unwrap();
+
+        // Decision 1A: non-existent `.tars` must NOT be pre-created on the host.
+        assert!(!workspace.join(".tars").exists());
+
+        let script = r#"set -u
+ws=$1
+if ! grep -q store-data "$ws/sub/deep/store/data.db"; then exit 1; fi
+if printf x > "$ws/sub/deep/store/data.db" 2>/dev/null; then exit 2; fi
+if printf x > "$ws/sub/deep/store/new.db" 2>/dev/null; then exit 3; fi
+if mv "$ws/sub" "$ws/sub_moved" 2>/dev/null; then exit 4; fi
+if mv "$ws/sub/deep" "$ws/sub/deep_moved" 2>/dev/null; then exit 5; fi
+if mv "$ws/sub/deep/store" "$ws/sub/deep/store_moved" 2>/dev/null; then exit 6; fi
+printf sibling > "$ws/sub/sibling.txt" || exit 7
+printf deep-sibling > "$ws/sub/deep/sibling.txt" || exit 8
+echo protected-ok
+"#;
+        let output = run(
+            &sandbox,
+            &policy,
+            bash_launch(script, &workspace, &home, &[&workspace]),
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("protected-ok"));
+        assert!(!workspace.join(".tars").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("sub/sibling.txt")).unwrap(),
+            "sibling"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("sub/deep/sibling.txt")).unwrap(),
+            "deep-sibling"
+        );
+    }
+
+    #[tokio::test]
+    async fn network_isolation_and_seccomp_unix_socket_protection() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let outside = base.path().join("outside");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let workspace = canonical(&workspace);
+        let outside = canonical(&outside);
+        let home = canonical(&home);
+
+        let accepted = Arc::new(AtomicBool::new(false));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let accepted_flag = accepted.clone();
+        let accept_task = tokio::spawn(async move {
+            for _ in 0..200 {
+                if listener.accept().is_ok() {
+                    accepted_flag.store(true, Ordering::SeqCst);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        let agent_sock = outside.join("agent.sock");
+        let _unix_listener = std::os::unix::net::UnixListener::bind(&agent_sock).unwrap();
+
+        let sandbox = crate::test_support::open_with_home(home.clone()).unwrap();
+        let script = r#"set -u
+mode=$1
+port=$2
+agent=$3
+python3 -c 'import socket, sys
+mode, port, agent = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+
+# socketpair(AF_UNIX) must work in both modes.
+a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+a.send(b"ping")
+assert b.recv(4) == b"ping"
+a.close()
+b.close()
+
+# socket(AF_UNIX) must ALWAYS be blocked by seccomp.
+try:
+    u = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    u.connect(agent)
+    u.close()
+    sys.exit(2)
+except OSError:
+    pass
+
+# Loopback TCP must fail under None and succeed under Open.
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(1.0)
+    s.connect(("127.0.0.1", port))
+    s.close()
+    if mode == "none":
+        sys.exit(3)
+except OSError:
+    if mode == "open":
+        sys.exit(4)
+
+sys.exit(0)
+' "$mode" "$port" "$agent"
+"#;
+
+        let none_policy = base_policy(&workspace).with_network(NetworkAccess::None);
+        let none_launch = Launch::new(shell_path())
+            .arg("-c")
+            .arg(script)
+            .arg("tars-net")
+            .arg("none")
+            .arg(port.to_string())
+            .arg(agent_sock.as_os_str())
+            .current_dir(&workspace)
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("HOME", home.as_os_str());
+        let none_out = run(&sandbox, &none_policy, none_launch).await;
+        assert!(
+            none_out.status.success(),
+            "none stdout={} stderr={}",
+            none_out.stdout,
+            none_out.stderr
+        );
+        assert!(!accepted.load(Ordering::SeqCst));
+
+        let open_policy = base_policy(&workspace)
+            .with_read_scope(ReadScope::Host)
+            .with_network(NetworkAccess::Open);
+        let open_launch = Launch::new(shell_path())
+            .arg("-c")
+            .arg(script)
+            .arg("tars-net")
+            .arg("open")
+            .arg(port.to_string())
+            .arg(agent_sock.as_os_str())
+            .current_dir(&workspace)
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("HOME", home.as_os_str());
+        let open_out = run(&sandbox, &open_policy, open_launch).await;
+        assert!(
+            open_out.status.success(),
+            "open stdout={} stderr={}",
+            open_out.stdout,
+            open_out.stderr
+        );
+        accept_task.await.unwrap();
+        assert!(accepted.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn signal_isolation_blocks_host_pid_and_dev_tty_is_unreadable() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let workspace = canonical(&workspace);
+        let home = canonical(&home);
+
+        let sandbox = crate::test_support::open_with_home(home.clone()).unwrap();
+        let policy = base_policy(&workspace);
+        let host_pid = std::process::id().to_string();
+        let script = r#"set -u
+host=$1
+if kill -0 "$host" 2>/dev/null; then exit 1; fi
+if (exec < /dev/tty) 2>/dev/null; then exit 2; fi
+echo isolated-ok
+"#;
+        let launch = Launch::new(shell_path())
+            .arg("-c")
+            .arg(script)
+            .arg("tars-sig")
+            .arg(host_pid)
+            .current_dir(&workspace)
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("HOME", home.as_os_str());
+        let output = run(&sandbox, &policy, launch).await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("isolated-ok"));
+    }
+
+    #[tokio::test]
+    async fn descendant_lifecycle_kills_background_and_setsid_descendants() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let workspace = canonical(&workspace);
+        let home = canonical(&home);
+
+        let sandbox = crate::test_support::open_with_home(home.clone()).unwrap();
+        let policy = base_policy(&workspace);
+
+        // 1. Background + setsid descendants inherit stdout/stderr and are killed
+        //    when the PID namespace exits (`wait`), so reading pipes to EOF
+        //    completes immediately instead of blocking for 30s.
+        let script = r#"set -u
+ws=$1
+sleep 30 &
+setsid sleep 30 &
+printf spawned > "$ws/spawned.flag"
+exit 0
+"#;
+        let mut wait_tree = spawn(
+            &sandbox,
+            &policy,
+            bash_launch(script, &workspace, &home, &[&workspace]),
+        );
+        let status = tokio::time::timeout(Duration::from_secs(5), wait_tree.wait())
+            .await
+            .expect("wait timed out")
+            .unwrap();
+        assert!(status.success());
+        tokio::time::timeout(Duration::from_secs(3), read_output(&mut wait_tree))
+            .await
+            .expect("background/setsid descendant kept stdout/stderr pipe open after wait");
+        assert!(workspace.join("spawned.flag").exists());
+
+        // 2. Terminate stops a long-running tree including setsid descendants.
+        let marker = workspace.join("ready.flag");
+        let term_script = r#"set -u
+ws=$1
+setsid sleep 30 &
+printf ready > "$ws/ready.flag"
+sleep 30
+"#;
+        let mut tree = spawn(
+            &sandbox,
+            &policy,
+            bash_launch(term_script, &workspace, &home, &[&workspace]),
+        );
+        wait_for_file(&marker).await;
+        let status = tokio::time::timeout(
+            Duration::from_secs(5),
+            tree.terminate(Duration::from_millis(200)),
+        )
+        .await
+        .expect("terminate timed out")
+        .unwrap();
+        assert!(!status.success());
+        tokio::time::timeout(Duration::from_secs(3), read_output(&mut tree))
+            .await
+            .expect("setsid descendant kept stdout/stderr pipe open after terminate");
+
+        // 3. Drop kills a running tree including setsid descendants immediately.
+        let drop_marker = workspace.join("drop_ready.flag");
+        let drop_script = r#"set -u
+ws=$1
+setsid sleep 30 &
+printf ready > "$ws/drop_ready.flag"
+sleep 30
+"#;
+        let mut drop_tree = spawn(
+            &sandbox,
+            &policy,
+            bash_launch(drop_script, &workspace, &home, &[&workspace]),
+        );
+        wait_for_file(&drop_marker).await;
+        let stdout = drop_tree.take_stdout();
+        let stderr = drop_tree.take_stderr();
+        drop(drop_tree);
+        tokio::time::timeout(Duration::from_secs(3), async move {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = stdout {
+                let _ = pipe.read_to_end(&mut buf).await;
+            }
+            if let Some(mut pipe) = stderr {
+                let _ = pipe.read_to_end(&mut buf).await;
+            }
+        })
+        .await
+        .expect("setsid descendant kept stdout/stderr pipe open after Drop");
+    }
+
+    #[tokio::test]
+    async fn unconfined_runs_without_isolation_and_terminates_process_group() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let workspace = canonical(&workspace);
+        let home = canonical(&home);
+
+        let sandbox = crate::test_support::open_with_home(home.clone()).unwrap();
+        let pid_file = workspace.join("bg.pid");
+        let script = r#"set -u
+pid_file=$1
+sleep 30 &
+echo $! > "$pid_file"
+sleep 30
+"#;
+        let mut command = sandbox
+            .unconfined(bash_launch(script, &workspace, &home, &[&pid_file]))
+            .unwrap();
+        configure(&mut command);
+        let mut tree = command.spawn().unwrap();
+        wait_for_file(&pid_file).await;
+        let bg_pid = read_pid(&pid_file);
+        assert!(alive(bg_pid));
+        let _ = tree.terminate(Duration::from_millis(200)).await.unwrap();
+        wait_until_dead(bg_pid).await;
+    }
+
+    #[tokio::test]
+    async fn outside_pointing_symlink_in_protected_read_only_path_does_not_expose_outside_under_roots()
+     {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let outside = base.path().join("outside");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(workspace.join("real_dir")).unwrap();
+        std::fs::create_dir_all(outside.join("secret_dir")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(workspace.join("real_dir/item.txt"), "ws-data\n").unwrap();
+        std::fs::write(outside.join("secret_dir/token.txt"), "OUTSIDE-SECRET\n").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret_dir"), workspace.join("ext_link")).unwrap();
+        std::os::unix::fs::symlink(workspace.join("real_dir"), workspace.join("in_link")).unwrap();
+
+        let workspace = canonical(&workspace);
+        let home = canonical(&home);
+        let sandbox = crate::test_support::open_with_home(home.clone()).unwrap();
+        let policy = base_policy(&workspace)
+            .with_protected_read_only_path(&workspace, workspace.join("ext_link"))
+            .unwrap()
+            .with_protected_read_only_path(&workspace, workspace.join("in_link"))
+            .unwrap()
+            .with_read_scope(ReadScope::Roots);
+
+        let script = r#"set -u
+ws=$1
+if grep -q OUTSIDE-SECRET "$ws/ext_link/token.txt" 2>/dev/null; then exit 1; fi
+if ! grep -q ws-data "$ws/in_link/item.txt" 2>/dev/null; then exit 2; fi
+if printf x > "$ws/real_dir/item.txt" 2>/dev/null; then exit 3; fi
+if printf x > "$ws/in_link/item.txt" 2>/dev/null; then exit 4; fi
+echo symlink-no-escape-ok
+"#;
+        let output = run(
+            &sandbox,
+            &policy,
+            bash_launch(script, &workspace, &home, &[&workspace]),
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("symlink-no-escape-ok"));
+    }
+
+    #[tokio::test]
+    async fn git_file_entry_cannot_be_written_renamed_or_deleted() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = base.path().join("workspace");
+        let home = base.path().join("home");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(workspace.join(".git"), "gitdir: /tmp/some-worktree\n").unwrap();
+
+        let workspace = canonical(&workspace);
+        let home = canonical(&home);
+        let sandbox = crate::test_support::open_with_home(home.clone()).unwrap();
+        let policy = base_policy(&workspace)
+            .with_git_metadata_protection(&workspace)
+            .unwrap();
+
+        let script = r#"set -u
+ws=$1
+if ! grep -q some-worktree "$ws/.git" 2>/dev/null; then exit 1; fi
+if printf pwn > "$ws/.git" 2>/dev/null; then exit 2; fi
+if mv "$ws/.git" "$ws/.git-moved" 2>/dev/null; then exit 3; fi
+if rm "$ws/.git" 2>/dev/null; then exit 4; fi
+echo git-file-protected-ok
+"#;
+        let output = run(
+            &sandbox,
+            &policy,
+            bash_launch(script, &workspace, &home, &[&workspace]),
+        )
+        .await;
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            output.stdout,
+            output.stderr
+        );
+        assert!(output.stdout.contains("git-file-protected-ok"));
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".git")).unwrap(),
+            "gitdir: /tmp/some-worktree\n"
+        );
+        assert!(!workspace.join(".git-moved").exists());
     }
 }

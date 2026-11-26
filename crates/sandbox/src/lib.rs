@@ -5,14 +5,17 @@
 //! that report before a command is built, and a policy the backend cannot
 //! enforce is rejected instead of falling back to an unsandboxed process.
 //!
-//! macOS uses `/usr/bin/sandbox-exec` with a generated Seatbelt profile. Other
-//! platforms have no backend yet and report an unavailable sandbox.
+//! macOS uses `/usr/bin/sandbox-exec` with a generated Seatbelt profile. Linux
+//! uses Bubblewrap (`bwrap`) with user/mount/PID/IPC/UTS/network namespaces and
+//! a safe-Rust cBPF `--seccomp` filter. Other platforms have no backend yet and
+//! report an unavailable sandbox.
 //!
 //! Seatbelt has no PID namespace. The backend starts every command in its own
 //! process group and [`ProcessTree`] kills that group after a soft grace
 //! period. A descendant that starts a new session or process group can leave
 //! the group; that residual is reported as a partial descendant-lifecycle
-//! capability.
+//! capability. Linux Bubblewrap isolates commands in a PID namespace with
+//! `--die-with-parent`, so descendants cannot escape lifecycle cleanup.
 //!
 //! This package is a TARS-internal library. It depends on neither Causa nor
 //! `tars-core`, and `tars-core` re-exports it as `sandbox` so the existing
@@ -22,14 +25,16 @@
 #![deny(missing_docs)]
 
 mod backend;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", test))]
+mod bwrap;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod credentials;
 mod policy;
 mod process;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 mod status;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod unavailable;
 
 pub use backend::{
