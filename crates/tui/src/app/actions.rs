@@ -103,6 +103,9 @@ impl App {
         entry.clear_history();
         entry.refreshing = false;
         entry.wrapping = false;
+        entry.turn_in_flight = false;
+        entry.queued_prompts.clear();
+        entry.queue_paused = false;
         entry.execution = "No work in this instance".into();
         entry.busy = Some("opening");
         let key = entry.key.clone();
@@ -138,29 +141,61 @@ impl App {
         if text.trim().is_empty() {
             return;
         }
-        self.submit_text(text, true);
+        if entry.is_turn_running() {
+            if entry.queued_prompts.len() >= super::state::MAX_QUEUED_PROMPTS {
+                entry.notice = format!(
+                    "Queue full (max {}); /queue to inspect or clear",
+                    super::state::MAX_QUEUED_PROMPTS
+                );
+                return;
+            }
+            entry.queued_prompts.push_back(text.clone());
+            entry.editor = input::editor();
+            entry.push_input_history(&text);
+            let count = entry.queued_prompts.len();
+            entry.notice = if entry.queue_paused {
+                format!("Queued message ({count} waiting, paused); /queue to manage")
+            } else {
+                format!("Queued message ({count} waiting); /queue to manage")
+            };
+            return;
+        }
+        if self.submit_text_at(self.selected, text, true).is_ok()
+            && let Some(entry) = self.entries.get_mut(self.selected)
+        {
+            entry.queue_paused = false;
+        }
     }
 
     pub(super) fn submit_text(&mut self, text: String, push_history: bool) {
+        let _ = self.submit_text_at(self.selected, text, push_history);
+    }
+
+    pub(super) fn submit_text_at(
+        &mut self,
+        index: usize,
+        text: String,
+        push_history: bool,
+    ) -> Result<(), tars_core::application::ApplicationError> {
         if !self.capacity() {
-            return;
+            return Ok(());
         }
-        let Some(entry) = self.entries.get_mut(self.selected) else {
-            return;
+        let Some(entry) = self.entries.get_mut(index) else {
+            return Ok(());
         };
         let Some(session) = entry.session.clone() else {
-            return;
+            return Ok(());
         };
         if entry.viewed_agent_id.is_some() {
             entry.notice = "Viewing child agent (read-only); run /agents main to send input".into();
-            return;
+            return Ok(());
         }
         if entry.busy.is_some() {
             entry.notice = "Input retained; wait for the current session operation".into();
-            return;
+            return Ok(());
         }
         if text.trim().is_empty() {
-            return;
+            return Ok(());
         }
         let history_entry = text.clone();
         let request = SubmitRequest {
@@ -170,21 +205,25 @@ impl App {
         let progress = session.subscribe_progress();
         match session.submit(request) {
             Err(rejected) => {
-                let hint = if matches!(
-                    rejected.reason,
-                    tars_core::application::ApplicationError::Repair(_)
-                ) {
-                    " · F7 / /repair"
-                } else {
-                    ""
-                };
-                entry.notice = format!("Input retained: {}{hint}", rejected.reason);
+                if push_history {
+                    let hint = if matches!(
+                        rejected.reason,
+                        tars_core::application::ApplicationError::Repair(_)
+                    ) {
+                        " · F7 / /repair"
+                    } else {
+                        ""
+                    };
+                    entry.notice = format!("Input retained: {}{hint}", rejected.reason);
+                }
+                Err(rejected.reason)
             }
             Ok(receipt) => {
                 if push_history {
                     entry.editor = input::editor();
                     entry.push_input_history(&history_entry);
                 }
+                entry.turn_in_flight = true;
                 entry.work = Some(receipt.work.clone());
                 entry.bind_progress(progress);
                 entry.execution = "Running".into();
@@ -204,6 +243,7 @@ impl App {
                     };
                     Message::Finished(key, receipt.work, result)
                 });
+                Ok(())
             }
         }
     }
@@ -879,6 +919,7 @@ impl App {
         self.update_approval_guard();
         self.update_workspace_trust_guard();
         self.update_repair_guard();
+        self.try_dequeue_ready();
         if self.quitting {
             for index in 0..self.entries.len() {
                 self.close(index, ClosePolicy::Save);
@@ -1106,6 +1147,338 @@ impl App {
             }
         };
         self.apply_permission_mode(next_mode);
+    }
+
+    pub(super) fn try_dequeue_ready(&mut self) {
+        if self.quitting
+            || self.confirmation.is_some()
+            || self.panel.is_some()
+            || self.form.is_some()
+            || self.onboarding.is_some()
+            || self.jobs.len() >= super::state::MAX_JOBS
+        {
+            return;
+        }
+        for index in 0..self.entries.len() {
+            let (session, eligible) = {
+                let entry = &self.entries[index];
+                let ok = !entry.queued_prompts.is_empty()
+                    && !entry.queue_paused
+                    && !entry.turn_in_flight
+                    && entry.busy.is_none()
+                    && entry.viewed_agent_id.is_none()
+                    && entry.approval_queue.is_empty()
+                    && entry.workspace_rules_trust.is_none()
+                    && entry.workspace_agents_trust.is_none()
+                    && entry.repair_job.is_none();
+                (entry.session.clone(), ok)
+            };
+            if !eligible {
+                continue;
+            }
+            let Some(session) = session else {
+                continue;
+            };
+            let status = session.status();
+            if matches!(status.save, SaveStatus::SaveBlocked { .. }) {
+                let entry = &mut self.entries[index];
+                entry.queue_paused = true;
+                let count = entry.queued_prompts.len();
+                entry.notice = format!(
+                    "Save blocked; {count} queued message(s) paused — /queue pop to edit or /queue clear"
+                );
+                self.dirty = true;
+                continue;
+            }
+            if status.lifecycle != tars_core::application::Lifecycle::Open {
+                if matches!(
+                    status.lifecycle,
+                    tars_core::application::Lifecycle::Closing
+                        | tars_core::application::Lifecycle::Closed
+                        | tars_core::application::Lifecycle::Faulted
+                        | tars_core::application::Lifecycle::Failed
+                ) {
+                    self.entries[index].queue_paused = true;
+                    self.dirty = true;
+                }
+                continue;
+            }
+            if status.active_work.is_some()
+                || matches!(
+                    status.save,
+                    SaveStatus::Saving { .. } | SaveStatus::Dirty { .. }
+                )
+            {
+                continue;
+            }
+            if session
+                .inspect_repair(None)
+                .is_ok_and(|insp| insp.diagnosis.unpaired_count > 0)
+            {
+                let entry = &mut self.entries[index];
+                entry.queue_paused = true;
+                let count = entry.queued_prompts.len();
+                entry.notice = format!(
+                    "Materials need repair; {count} queued message(s) paused — /repair or /queue pop"
+                );
+                self.dirty = true;
+                continue;
+            }
+            let Some(next) = self.entries[index].queued_prompts.pop_front() else {
+                continue;
+            };
+            match self.submit_text_at(index, next.clone(), false) {
+                Ok(()) => {
+                    self.dirty = true;
+                }
+                Err(error) => {
+                    self.entries[index].queued_prompts.push_front(next);
+                    if !matches!(
+                        error,
+                        tars_core::application::ApplicationError::Saving
+                            | tars_core::application::ApplicationError::Session(
+                                tars_core::session::SessionError::Busy { .. }
+                            )
+                    ) {
+                        let entry = &mut self.entries[index];
+                        entry.queue_paused = true;
+                        let count = entry.queued_prompts.len();
+                        let hint =
+                            if matches!(error, tars_core::application::ApplicationError::Repair(_))
+                            {
+                                " · F7 / /repair"
+                            } else {
+                                ""
+                            };
+                        entry.notice = format!(
+                            "Auto-submit paused ({error}{hint}); {count} queued message(s) waiting — /queue pop or /queue clear"
+                        );
+                    }
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
+    pub(super) fn rename_command(&mut self, arg: &str) {
+        if !self.capacity() {
+            return;
+        }
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            self.notice = "Open a session first to rename it".into();
+            return;
+        };
+        if entry.session.is_none() {
+            entry.notice = "Open a session first to rename it".into();
+            return;
+        }
+        if entry.viewed_agent_id.is_some() {
+            entry.notice = "Viewing child agent (read-only); run /agents main to rename".into();
+            return;
+        }
+        if entry.busy.is_some() {
+            entry.notice = "Wait for the current session operation before renaming".into();
+            return;
+        }
+        if arg.is_empty() {
+            let current = entry
+                .title()
+                .map(|t| {
+                    format!(
+                        " (current: \"{}\")",
+                        tars_core::permission::escape_untrusted_text(&t)
+                    )
+                })
+                .unwrap_or_default();
+            entry.notice = format!("Usage: /rename <title> | /rename --clear{current}");
+            return;
+        }
+        let raw_title = if arg == "--clear" { None } else { Some(arg) };
+        let validated = match tars_core::validate_session_title(raw_title) {
+            Ok(title) => title,
+            Err(err) => {
+                entry.notice = format!("Invalid title: {err}");
+                return;
+            }
+        };
+        let key = entry.key.clone();
+        let id: tars_core::session::ConversationId = entry.id().into();
+        let host = self.host.clone();
+        self.spawn_job(
+            Some(key.clone()),
+            super::jobs::JobKind::Rename,
+            async move {
+                let result = host.rename(id, validated).await;
+                Message::Renamed(key, result)
+            },
+        );
+    }
+
+    pub(super) fn fork_command(&mut self, arg: &str) {
+        if !self.capacity() {
+            return;
+        }
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            self.notice = "Open a saved idle session first to fork it".into();
+            return;
+        };
+        let Some(session) = entry.session.clone() else {
+            entry.notice = "Open a saved idle session first to fork it".into();
+            return;
+        };
+        if entry.viewed_agent_id.is_some() {
+            entry.notice = "Viewing child agent (read-only); run /agents main to fork".into();
+            return;
+        }
+        if entry.busy.is_some() || entry.is_turn_running() {
+            entry.notice = "Wait for the current turn or operation to finish before forking".into();
+            return;
+        }
+        let status = session.status();
+        match &status.save {
+            SaveStatus::NotTracked => {
+                entry.notice = "Temporary sessions cannot be forked".into();
+                return;
+            }
+            SaveStatus::SaveBlocked { .. } => {
+                entry.notice =
+                    "Cannot fork while session save is blocked; retry or export first".into();
+                return;
+            }
+            SaveStatus::Dirty { .. } | SaveStatus::Saving { .. } => {
+                entry.notice = "Session is still saving; try /fork again in a moment".into();
+                return;
+            }
+            SaveStatus::Saved { .. } => {}
+        }
+        let raw_title = (!arg.is_empty()).then_some(arg);
+        let validated = match tars_core::validate_session_title(raw_title) {
+            Ok(title) => title,
+            Err(err) => {
+                entry.notice = format!("Invalid fork title: {err}");
+                return;
+            }
+        };
+        entry.busy = Some("forking");
+        entry.notice = "Forking session...".into();
+        let key = entry.key.clone();
+        let source_id: tars_core::session::ConversationId = entry.id().into();
+        let host = self.host.clone();
+        self.spawn_job(Some(key.clone()), super::jobs::JobKind::Fork, async move {
+            let result = host.fork(source_id, validated).await;
+            let listing = if let Ok(ref new_id) = result {
+                host.list().await.ok().and_then(|list| {
+                    list.into_iter()
+                        .find(|item| item.conversation_id == *new_id)
+                })
+            } else {
+                None
+            };
+            Message::Forked(key, result, listing.map(Box::new))
+        });
+    }
+
+    pub(super) fn delete_session(&mut self, id: String) {
+        if !self.capacity() {
+            return;
+        }
+        if self
+            .entries
+            .iter()
+            .any(|e| e.id() == id && (e.session.is_some() || e.busy.is_some()))
+            || self.host.lookup(&id.as_str().into()).is_some()
+        {
+            self.notice = "Close this session before deleting (/close)".into();
+            return;
+        }
+        let key = if let Some(entry) = self.entries.iter_mut().find(|e| e.id() == id) {
+            entry.busy = Some("deleting");
+            Some(entry.key.clone())
+        } else {
+            None
+        };
+        let host = self.host.clone();
+        let conv_id: tars_core::session::ConversationId = id.clone().into();
+        self.spawn_job(key, super::jobs::JobKind::Delete, async move {
+            let result = host.delete(conv_id).await;
+            Message::Deleted(id, result)
+        });
+    }
+
+    pub(super) fn request_external_edit(&mut self) {
+        if self.startup.is_some()
+            || self.quitting
+            || self.confirmation.is_some()
+            || self.panel.is_some()
+            || self.form.is_some()
+            || self.onboarding.is_some()
+        {
+            return;
+        }
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            self.notice = "Open a session first to edit a prompt externally".into();
+            return;
+        };
+        if entry.workspace_rules_trust.is_some()
+            || entry.workspace_agents_trust.is_some()
+            || !entry.approval_queue.is_empty()
+        {
+            return;
+        }
+        if entry.session.is_none() {
+            entry.notice = "Open a session first to edit a prompt externally".into();
+            return;
+        }
+        if entry.viewed_agent_id.is_some() {
+            entry.notice = "Viewing child agent (read-only); run /agents main to edit".into();
+            return;
+        }
+        if entry.busy.is_some() {
+            entry.notice = "Wait for the current session operation before editing".into();
+            return;
+        }
+        self.pending_external_edit = Some(super::state::PendingExternalEdit {
+            key: entry.key.clone(),
+            initial: entry.editor.lines().join("\n"),
+        });
+    }
+
+    pub(super) fn apply_external_edit_result(
+        &mut self,
+        key: &super::state::Key,
+        result: Result<String, String>,
+    ) {
+        self.dirty = true;
+        let Some(entry) = self.entry_mut(key) else {
+            return;
+        };
+        match result {
+            Ok(new_text) => {
+                input::set_editor_text(&mut entry.editor, &new_text, false);
+                entry.reset_history_cursor();
+                entry.notice = if new_text.trim().is_empty() {
+                    "External edit cleared draft".into()
+                } else {
+                    "Updated draft from external editor".into()
+                };
+            }
+            Err(error) => {
+                entry.notice = error;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_pending_external_edit_with<F>(&mut self, runner: F) -> bool
+    where
+        F: FnOnce(&str) -> Result<String, String>,
+    {
+        let Some(pending) = self.pending_external_edit.take() else {
+            return false;
+        };
+        let result = runner(&pending.initial);
+        self.apply_external_edit_result(&pending.key, result);
+        true
     }
 }
 

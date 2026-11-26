@@ -100,7 +100,10 @@ fn complete_slash_command(
             escape_untrusted_text(prefix)
         )),
         [cmd] => {
-            let takes_args = matches!(*cmd, "mode" | "auto_compact" | "agents" | "rules");
+            let takes_args = matches!(
+                *cmd,
+                "mode" | "auto_compact" | "agents" | "rules" | "queue" | "rename" | "fork"
+            );
             let replacement = if takes_args {
                 format!("/{cmd} ")
             } else {

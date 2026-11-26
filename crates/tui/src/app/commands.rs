@@ -47,6 +47,13 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("new", "Create a session with model settings"),
     ("sessions", "Find and open a saved or active session"),
     ("agents", "List session agents and switch transcript view"),
+    ("queue", "Inspect, pop, or clear queued prompts"),
+    ("rename", "Rename or clear the current session title"),
+    ("fork", "Fork the current idle session into a new session"),
+    (
+        "edit",
+        "Edit the current prompt draft in $VISUAL or $EDITOR",
+    ),
     ("mode", "Show or change the permission mode"),
     (
         "rules",
@@ -139,19 +146,26 @@ impl App {
         });
     }
     pub(super) fn request_quit(&mut self) {
-        if self.form.is_some() || self.entries.iter().any(|e| e.has_draft()) {
-            self.confirmation = Some(Confirmation::Quit);
+        let has_drafts =
+            self.form.is_some() || self.entries.iter().any(super::state::Entry::has_draft);
+        let has_queue = self.entries.iter().any(|e| !e.queued_prompts.is_empty());
+        if has_drafts || has_queue {
+            self.confirmation = Some(Confirmation::Quit {
+                has_drafts,
+                has_queue,
+            });
         } else {
             self.quitting = true;
         }
     }
     pub(super) fn request_close(&mut self) {
-        if self
-            .entries
-            .get(self.selected)
-            .is_some_and(|e| e.has_draft())
+        if let Some(entry) = self.entries.get(self.selected)
+            && (entry.has_draft() || !entry.queued_prompts.is_empty())
         {
-            self.confirmation = Some(Confirmation::Close);
+            self.confirmation = Some(Confirmation::Close {
+                has_draft: entry.has_draft(),
+                has_queue: !entry.queued_prompts.is_empty(),
+            });
         } else {
             self.close(self.selected, ClosePolicy::Save);
         }
@@ -202,6 +216,22 @@ impl App {
                     self.switch_agent_by_selector(arg);
                 }
             }
+            "queue" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("queue").unwrap_or("").trim();
+                self.queue_command(arg);
+            }
+            "rename" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("rename").unwrap_or("").trim();
+                self.rename_command(arg);
+            }
+            "fork" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("fork").unwrap_or("").trim();
+                self.fork_command(arg);
+            }
+            "edit" => self.request_external_edit(),
             "mode" => {
                 let clean = query.trim_start_matches('/').trim();
                 let arg = if let Some(rest) = clean.strip_prefix("mode") {
@@ -257,10 +287,15 @@ impl App {
                 title: "Keyboard shortcuts".into(),
                 kind: InfoKind::Plain,
                 scroll: 0,
-                lines: ["Enter / Ctrl-S   Send input", "Ctrl-J / Alt-Enter   New line",
+                lines: ["Enter / Ctrl-S   Send input (or queue while a turn is running)", "Ctrl-J / Alt-Enter   New line",
+                    "Ctrl-G / /edit   Edit draft in external $VISUAL or $EDITOR",
                     "↑ / ↓   Prompt history (at top/bottom line)",
                     "Tab   Complete /command or @workspace/path",
                     "Shift-Tab   Cycle mode (ask -> accept-edits -> read-only)",
+                    "/queue [list | pop | clear]   Inspect, pop to editor, or clear queued prompts",
+                    "/rename <title> | --clear   Set or clear the current session title",
+                    "/fork [title]   Fork current idle session into a new independent session",
+                    "Ctrl-D / Delete (in /sessions)   Delete a closed session with confirmation",
                     "/doctor   Check configuration, credentials, storage, sandbox and tools",
                     "/init   Analyze the workspace and create or update AGENTS.md",
                     "/agents [name|id|main]   List session agents (x cancels running, Enter switches)",
@@ -385,6 +420,80 @@ impl App {
             "quit" => self.request_quit(),
             _ => unreachable!("commands are a closed local set"),
         }
+    }
+
+    fn queue_command(&mut self, arg: &str) {
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            self.notice = "Open or select a session first".into();
+            return;
+        };
+        if arg.is_empty() || arg.eq_ignore_ascii_case("list") {
+            let count = entry.queued_prompts.len();
+            let mut lines = Vec::new();
+            if count == 0 {
+                lines.push("No queued prompts for this session.".into());
+            } else {
+                lines.push(if entry.queue_paused {
+                    "Status: PAUSED (previous turn did not complete cleanly; /queue pop or /queue clear)"
+                        .into()
+                } else {
+                    "Status: active (auto-sends FIFO after current turn completes cleanly)"
+                        .into()
+                });
+                lines.push(String::new());
+                for (idx, prompt) in entry.queued_prompts.iter().enumerate() {
+                    let preview = crate::render::format_queue_preview(prompt, 160);
+                    lines.push(format!("{}. {preview}", idx + 1));
+                }
+            }
+            lines.push(String::new());
+            lines.push("/queue list   Show queued prompts".into());
+            lines.push("/queue pop    Move the next queued prompt into the editor".into());
+            lines.push("/queue clear  Discard all queued prompts".into());
+            self.panel = Some(Panel::Info {
+                title: format!("Queued prompts ({count})"),
+                kind: InfoKind::Plain,
+                lines,
+                scroll: 0,
+            });
+            return;
+        }
+        if arg.eq_ignore_ascii_case("pop") {
+            if entry.has_draft() {
+                entry.notice = "Editor has an unsubmitted draft; clear it before /queue pop".into();
+                self.dirty = true;
+                return;
+            }
+            if let Some(next) = entry.queued_prompts.pop_front() {
+                input::set_editor_text(&mut entry.editor, &next, false);
+                entry.reset_history_cursor();
+                if entry.queued_prompts.is_empty() {
+                    entry.queue_paused = false;
+                }
+                entry.notice = format!(
+                    "Popped queued prompt into editor ({} remaining)",
+                    entry.queued_prompts.len()
+                );
+            } else {
+                entry.notice = "Queue is empty".into();
+            }
+            self.dirty = true;
+            return;
+        }
+        if arg.eq_ignore_ascii_case("clear") {
+            let count = entry.queued_prompts.len();
+            entry.queued_prompts.clear();
+            entry.queue_paused = false;
+            entry.notice = if count == 0 {
+                "Queue is already empty".into()
+            } else {
+                format!("Cleared {count} queued prompt(s)")
+            };
+            self.dirty = true;
+            return;
+        }
+        entry.notice = "Usage: /queue [list | pop | clear]".into();
+        self.dirty = true;
     }
 
     fn rules_command(&mut self, arg: &str) {
@@ -952,6 +1061,26 @@ impl App {
                 query.pop();
                 *selected = 0;
             }
+            KeyCode::Delete
+                if !commands
+                    && key.kind == KeyEventKind::Press
+                    && let Some(&index) = matches.get(*selected)
+                    && self.request_delete_session_at(index) =>
+            {
+                return;
+            }
+            KeyCode::Char('d' | 'D')
+                if !commands
+                    && key.kind == KeyEventKind::Press
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+                    && let Some(&index) = matches.get(*selected)
+                    && self.request_delete_session_at(index) =>
+            {
+                return;
+            }
             KeyCode::Char(c)
                 if !key.modifiers.intersects(
                     crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT,
@@ -963,6 +1092,33 @@ impl App {
             _ => {}
         }
         self.panel = Some(panel);
+    }
+
+    fn request_delete_session_at(&mut self, index: usize) -> bool {
+        let Some(entry) = self.entries.get(index) else {
+            return false;
+        };
+        if entry.session.is_some()
+            || entry.busy.is_some()
+            || self.host.lookup(&entry.id().into()).is_some()
+        {
+            self.notice = "Close this session before deleting (/close)".into();
+            return false;
+        }
+        let short = entry.id().get(..8).unwrap_or(entry.id());
+        let label = match entry.title() {
+            Some(title) => format!(
+                "{} ({short})",
+                tars_core::permission::escape_untrusted_text(&title)
+            ),
+            None => format!(
+                "{} ({short})",
+                tars_core::permission::escape_untrusted_text(entry.model())
+            ),
+        };
+        let id = entry.id().to_owned();
+        self.confirmation = Some(Confirmation::DeleteSession { id, label });
+        true
     }
 }
 

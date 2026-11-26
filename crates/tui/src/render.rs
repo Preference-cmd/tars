@@ -3,4 +3,6 @@ mod panels;
 mod splash;
 mod surface;
 
-pub(crate) use surface::{ACCENT, MUTED, conversation_height, draw, transcript_width};
+pub(crate) use surface::{
+    ACCENT, MUTED, conversation_height, draw, format_queue_preview, transcript_width,
+};

@@ -243,7 +243,16 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
             return;
         }
     };
-    let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area);
+    let rows = if commands {
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area)
+    } else {
+        Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(area)
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -282,7 +291,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
                 let model = entry.model();
                 let time_str = tars_core::format_timestamp_utc(entry.updated_at_ms());
                 let first_line = match entry.title() {
-                    Some(title) => format!("{title}  ·  {time_str}"),
+                    Some(title) => format!(
+                        "{}  ·  {time_str}",
+                        tars_core::permission::escape_untrusted_text(&title)
+                    ),
                     None => format!("{model}  ·  {time_str}"),
                 };
                 ListItem::new(vec![
@@ -318,6 +330,13 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
                 .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
             rows[1],
             &mut state,
+        );
+    }
+    if !commands {
+        frame.render_widget(
+            Paragraph::new("↑↓ select · Enter open · Ctrl-D/Del delete · Esc back")
+                .style(Style::default().fg(MUTED)),
+            rows[2],
         );
     }
 }
@@ -479,18 +498,47 @@ pub(super) fn onboarding(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 pub(super) fn confirm(frame: &mut Frame<'_>, confirmation: &crate::app::Confirmation, area: Rect) {
     use crate::app::Confirmation;
-    let (title, text) = match confirmation {
-        Confirmation::Quit => (
-            "Save and quit?",
-            "Unsubmitted drafts will be lost. Sessions will be saved before exiting.",
-        ),
-        Confirmation::Close => (
-            "Save and close?",
-            "This draft will be lost. The session will be saved before closing.",
-        ),
+    let (title, text): (&str, String) = match confirmation {
+        Confirmation::Quit {
+            has_drafts,
+            has_queue,
+        } => {
+            let body = match (*has_drafts, *has_queue) {
+                (true, true) => {
+                    "Unsubmitted drafts and queued messages will be lost. Sessions will be saved before exiting."
+                }
+                (false, true) => {
+                    "Queued messages will be lost. Sessions will be saved before exiting."
+                }
+                _ => "Unsubmitted drafts will be lost. Sessions will be saved before exiting.",
+            };
+            ("Save and quit?", body.into())
+        }
+        Confirmation::Close {
+            has_draft,
+            has_queue,
+        } => {
+            let body = match (*has_draft, *has_queue) {
+                (true, true) => {
+                    "This draft and queued messages will be lost. The session will be saved before closing."
+                }
+                (false, true) => {
+                    "Queued messages for this session will be lost. The session will be saved before closing."
+                }
+                _ => "This draft will be lost. The session will be saved before closing.",
+            };
+            ("Save and close?", body.into())
+        }
         Confirmation::Discard => (
             "Discard local content?",
-            "Unsaved materials and draft will be lost. Existing commits are NOT rolled back.",
+            "Unsaved materials and draft will be lost. Existing commits are NOT rolled back."
+                .into(),
+        ),
+        Confirmation::DeleteSession { label, .. } => (
+            "Delete session?",
+            format!(
+                "Session {label}: this permanently deletes the saved session, its history, and spilled artifacts."
+            ),
         ),
     };
     let rows = Layout::vertical([

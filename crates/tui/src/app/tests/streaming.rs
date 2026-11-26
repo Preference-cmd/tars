@@ -374,7 +374,7 @@ async fn rejected_submit_keeps_the_existing_progress_receiver_and_draft() {
         .unwrap();
     app.poll_progress();
     app.event(Event::Paste("second retained input".into()));
-    app.event(ctrl('s'));
+    let _ = app.submit_text_at(0, "second retained input".into(), true);
     assert!(app.entries[0].notice.starts_with("Input retained"));
     sender
         .send(event(&work, 0, text(" still subscribed")))

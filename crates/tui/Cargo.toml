@@ -19,8 +19,8 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 serde_json.workspace = true
 pulldown-cmark.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["net", "io-util"] }
 rusqlite.workspace = true

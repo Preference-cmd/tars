@@ -17,7 +17,42 @@ impl App {
         loop {
             tokio::select! {
                 event = events.next() => match event {
-                    Some(Ok(event)) => self.event(event),
+                    Some(Ok(event)) => {
+                        self.event(event);
+                        if let Some(pending) = self.pending_external_edit.take() {
+                            let edit_result = match crate::input::editor::resolve_editor_command() {
+                                Ok(cmd) => {
+                                    drop(events);
+                                    let res = match crate::terminal::run_with_suspended_terminal(
+                                        terminal,
+                                        || {
+                                            crate::input::editor::edit_prompt_with_command(
+                                                &cmd,
+                                                &pending.initial,
+                                            )
+                                        },
+                                    ) {
+                                        Ok(res) => res,
+                                        Err(io_err) => {
+                                            Err(format!("Terminal suspend/resume failed: {io_err}"))
+                                        }
+                                    };
+                                    events = EventStream::new();
+                                    res
+                                }
+                                Err(err) => Err(err),
+                            };
+                            self.apply_external_edit_result(&pending.key, edit_result);
+                            let size = terminal.size()?;
+                            self.view_width = render::transcript_width(size.width);
+                            self.view_height = size.height;
+                            self.refresh_size_flags();
+                            self.viewport_height =
+                                render::conversation_height(size.height, size.width, self);
+                            terminal.draw(|frame| render::draw(frame, self))?;
+                            self.dirty = false;
+                        }
+                    }
                     Some(Err(error)) => return Err(error),
                     None => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "terminal input closed")),
                 },
@@ -143,9 +178,10 @@ impl App {
             }
             match key.code {
                 KeyCode::Char('y') => match confirmation {
-                    Confirmation::Quit => self.quitting = true,
-                    Confirmation::Close => self.close(self.selected, ClosePolicy::Save),
+                    Confirmation::Quit { .. } => self.quitting = true,
+                    Confirmation::Close { .. } => self.close(self.selected, ClosePolicy::Save),
                     Confirmation::Discard => self.close(self.selected, ClosePolicy::DiscardLocal),
+                    Confirmation::DeleteSession { id, .. } => self.delete_session(id),
                 },
                 KeyCode::Char('n') | KeyCode::Esc => {}
                 _ => self.confirmation = Some(confirmation),
@@ -415,6 +451,8 @@ impl App {
             self.retry();
         } else if input::control(key, 'e') {
             self.export();
+        } else if input::control(key, 'g') {
+            self.request_external_edit();
         } else if input::control(key, 'd') {
             self.confirmation = Some(Confirmation::Discard);
         } else if input::control(key, 'w') {
@@ -422,7 +460,7 @@ impl App {
         } else if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
                 key.code,
-                KeyCode::Char('q' | 's' | 'c' | 'r' | 'e' | 'd' | 'w')
+                KeyCode::Char('q' | 's' | 'c' | 'r' | 'e' | 'g' | 'd' | 'w')
             )
         {
             // Repeated command keys never fall through into text editing.

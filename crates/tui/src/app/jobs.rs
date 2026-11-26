@@ -105,6 +105,13 @@ pub(super) enum Message {
     Retried(Key, Result<SaveStatus, ApplicationError>),
     Exported(Key, Result<(String, bool), String>),
     Closed(Key, Result<CloseOutcome, ApplicationError>),
+    Renamed(Key, Result<Option<String>, ApplicationError>),
+    Forked(
+        Key,
+        Result<tars_core::session::ConversationId, ApplicationError>,
+        Option<Box<SessionListing>>,
+    ),
+    Deleted(String, Result<(), ApplicationError>),
     AgentOperationCancelled(Key, String, Result<bool, ApplicationError>),
     /// The startup sandbox check finished.
     StartupSandbox(
@@ -131,6 +138,9 @@ pub(super) enum JobKind {
     Close,
     Retry,
     Export,
+    Rename,
+    Fork,
+    Delete,
     Materials,
     AgentMaterials,
     HistoryRead,
@@ -335,6 +345,7 @@ impl App {
                     entry.busy = None;
                     match result {
                         Ok(session) => {
+                            entry.turn_in_flight = false;
                             entry.approvals_rx = Some(session.connect_approvals());
                             entry.session_events_rx = Some(session.subscribe_events());
                             entry.active_bg_count = session.active_finite_background_tasks();
@@ -405,9 +416,11 @@ impl App {
                 }
             }
             Message::Finished(key, work, result) => {
+                let mut should_try_dequeue = false;
                 if let Some(entry) = self.entry_mut(&key)
                     && entry.work.as_ref() == Some(&work)
                 {
+                    entry.turn_in_flight = false;
                     if let Ok((_, tools)) = &result {
                         entry.tools.reconcile(tools);
                     }
@@ -417,19 +430,55 @@ impl App {
                     entry.approval_scroll = 0;
                     entry.scroll = None;
                     let outcome = result.as_ref().map(|(result, _)| WorkOutcome::of(result));
+                    let completed = matches!(&outcome, Ok(o) if o.kind == "completed");
+                    let outcome_kind = outcome.as_ref().ok().map(|o| o.kind);
                     entry.execution = outcome
                         .as_ref()
                         .map(|outcome| outcome.summary.clone())
                         .unwrap_or_else(|_| "Observation failed".to_owned());
+                    let outcome_msg = outcome.as_ref().ok().and_then(outcome_notice);
                     if let Err(error) = result {
                         entry.notice = error;
-                    } else if let Some(notice) = outcome.as_ref().ok().and_then(outcome_notice) {
+                    } else if let Some(notice) = outcome_msg {
                         entry.notice = notice;
                     } else if entry.notice.starts_with("Input accepted")
                         || entry.notice.starts_with("Cancellation requested")
                     {
                         entry.notice.clear();
                     }
+                    if !entry.queued_prompts.is_empty() {
+                        let status = entry.session.as_ref().map(ManagedSession::status);
+                        let save_blocked = status
+                            .as_ref()
+                            .is_some_and(|s| matches!(s.save, SaveStatus::SaveBlocked { .. }));
+                        let needs_repair = entry.session.as_ref().is_some_and(|s| {
+                            s.inspect_repair(None)
+                                .is_ok_and(|insp| insp.diagnosis.unpaired_count > 0)
+                        });
+                        if !completed || save_blocked || needs_repair {
+                            entry.queue_paused = true;
+                            let count = entry.queued_prompts.len();
+                            let reason = match outcome_kind {
+                                None => "observation failed",
+                                Some(kind) if !completed => kind,
+                                _ if save_blocked => "save blocked",
+                                _ => "needs repair",
+                            };
+                            let suffix = format!(
+                                "{count} queued message(s) paused — /queue pop to edit or /queue clear"
+                            );
+                            if entry.notice.is_empty() {
+                                entry.notice = format!("Turn ended ({reason}); {suffix}");
+                            } else {
+                                entry.notice = format!("{}; {suffix}", entry.notice);
+                            }
+                        } else if !entry.queue_paused {
+                            should_try_dequeue = true;
+                        }
+                    }
+                }
+                if should_try_dequeue {
+                    self.try_dequeue_ready();
                 }
             }
             Message::Materials(key, result) => {
@@ -701,6 +750,115 @@ impl App {
                     };
                 }
             }
+            Message::Renamed(key, result) => {
+                if let Some(entry) = self.entry_mut(&key) {
+                    match result {
+                        Ok(updated) => {
+                            entry.title = updated.clone();
+                            if let Some(session) = &entry.session {
+                                entry.updated_at_ms = session.updated_at_ms();
+                            }
+                            entry.notice = match updated {
+                                Some(title) => format!(
+                                    "Renamed session to \"{}\"",
+                                    tars_core::permission::escape_untrusted_text(&title)
+                                ),
+                                None => "Cleared session title".into(),
+                            };
+                        }
+                        Err(error) => {
+                            entry.notice = format!("Rename failed: {error}");
+                        }
+                    }
+                }
+            }
+            Message::Forked(key, result, listing) => {
+                let fallback = self.entry_mut(&key).map(|entry| {
+                    if entry.busy == Some("forking") {
+                        entry.busy = None;
+                    }
+                    (
+                        entry.model.clone(),
+                        entry.prompt_cache,
+                        entry.code_execution,
+                    )
+                });
+                match result {
+                    Ok(new_id) => {
+                        let new_id_str = new_id.as_str().to_owned();
+                        let short = new_id_str.get(..8).unwrap_or(&new_id_str).to_owned();
+                        if self.entries.iter().all(|e| e.id() != new_id_str) {
+                            let (model, title, updated_at_ms, prompt_cache, code_execution) =
+                                match listing.and_then(|item| item.record.ok()) {
+                                    Some(summary) => (
+                                        summary.definition.model,
+                                        summary.title,
+                                        summary.updated_at_ms,
+                                        summary.definition.prompt_cache,
+                                        summary.definition.code_execution,
+                                    ),
+                                    None => {
+                                        let (m, pc, ce) = fallback
+                                            .unwrap_or_else(|| ("unknown".into(), true, None));
+                                        (m, None, 0, pc, ce)
+                                    }
+                                };
+                            let mut entry = Entry::new(new_id_str.clone(), model);
+                            entry.title = title;
+                            if updated_at_ms > 0 {
+                                entry.updated_at_ms = updated_at_ms;
+                            }
+                            entry.prompt_cache = prompt_cache;
+                            entry.code_execution = code_execution;
+                            self.entries.push(entry);
+                        }
+                        if let Some(pos) = self.entries.iter().position(|e| e.id() == new_id_str) {
+                            self.selected = pos;
+                            self.refresh_size_flags();
+                            self.open();
+                            self.update_approval_guard();
+                            self.update_workspace_trust_guard();
+                        }
+                        self.notice = format!("Forked session {short}");
+                    }
+                    Err(error) => {
+                        if let Some(entry) = self.entry_mut(&key) {
+                            entry.notice = format!("Fork failed: {error}");
+                        } else {
+                            self.notice = format!("Fork failed: {error}");
+                        }
+                    }
+                }
+            }
+            Message::Deleted(id, result) => {
+                if let Some(entry) = self.entries.iter_mut().find(|e| e.id() == id)
+                    && entry.busy == Some("deleting")
+                {
+                    entry.busy = None;
+                }
+                let short = id.get(..8).unwrap_or(&id).to_owned();
+                match result {
+                    Ok(()) => {
+                        if let Some(pos) = self.entries.iter().position(|e| e.id() == id) {
+                            self.entries.remove(pos);
+                            if self.entries.is_empty() {
+                                self.selected = 0;
+                            } else if pos < self.selected {
+                                self.selected -= 1;
+                            } else if self.selected >= self.entries.len() {
+                                self.selected = self.entries.len() - 1;
+                            }
+                            self.refresh_size_flags();
+                            self.update_approval_guard();
+                            self.update_workspace_trust_guard();
+                        }
+                        self.notice = format!("Deleted session {short}");
+                    }
+                    Err(error) => {
+                        self.notice = format!("Delete failed: {error}");
+                    }
+                }
+            }
             Message::Closed(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     entry.busy = None;
@@ -725,6 +883,9 @@ impl App {
                             entry.workspace_agents_trust = None;
                             entry.prepared = None;
                             entry.work = None;
+                            entry.turn_in_flight = false;
+                            entry.queued_prompts.clear();
+                            entry.queue_paused = false;
                             entry.execution = "No work in this instance".into();
                             entry.clear_progress();
                             entry.clear_history();
@@ -861,9 +1022,24 @@ impl App {
                             clear_busy(entry, "exporting");
                             entry.notice = message.clone();
                         }
+                        JobKind::Rename => {
+                            entry.notice = message.clone();
+                        }
+                        JobKind::Fork => {
+                            clear_busy(entry, "forking");
+                            entry.notice = message.clone();
+                        }
+                        JobKind::Delete => {
+                            clear_busy(entry, "deleting");
+                            entry.notice = message.clone();
+                        }
                         JobKind::Work => {
                             // The core work may still run; only the local
                             // observation adapter is gone.
+                            entry.turn_in_flight = false;
+                            if !entry.queued_prompts.is_empty() {
+                                entry.queue_paused = true;
+                            }
                             entry.notice = message.clone();
                         }
                     }

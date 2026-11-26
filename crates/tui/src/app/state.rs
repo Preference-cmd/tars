@@ -20,6 +20,7 @@ use tokio::task::JoinSet;
 // Limits UI-owned in-flight work/results; core separately limits active instances.
 pub(super) const MAX_JOBS: usize = 64;
 pub(super) const MAX_INPUT_HISTORY: usize = 100;
+pub(crate) const MAX_QUEUED_PROMPTS: usize = 8;
 
 /// How long keys are ignored after sensitive confirmation content appears or
 /// changes without a key press, so keys typed for something else do not decide it.
@@ -320,6 +321,9 @@ pub(crate) struct Entry {
     pub(super) prepared: Option<PreparedCreate>,
     pub busy: Option<&'static str>,
     pub work: Option<WorkRef>,
+    pub(crate) turn_in_flight: bool,
+    pub(crate) queued_prompts: VecDeque<String>,
+    pub(crate) queue_paused: bool,
     pub execution: String,
     pub status: String,
     pub notice: String,
@@ -379,6 +383,9 @@ impl Entry {
             prepared: None,
             busy: None,
             work: None,
+            turn_in_flight: false,
+            queued_prompts: VecDeque::new(),
+            queue_paused: false,
             execution: "No work in this instance".into(),
             status: "Stored; F3 to open".into(),
             notice: String::new(),
@@ -455,6 +462,15 @@ impl Entry {
         self.editor.lines().iter().any(|line| !line.is_empty())
     }
 
+    pub(crate) fn is_turn_running(&self) -> bool {
+        self.busy.is_none()
+            && (self.turn_in_flight
+                || self
+                    .session
+                    .as_ref()
+                    .is_some_and(|s| s.status().active_work.is_some()))
+    }
+
     pub(crate) fn reset_history_cursor(&mut self) {
         self.history_cursor = None;
         self.history_saved_draft.clear();
@@ -511,9 +527,15 @@ impl Entry {
     }
 }
 pub(crate) enum Confirmation {
-    Quit,
-    Close,
+    Quit { has_drafts: bool, has_queue: bool },
+    Close { has_draft: bool, has_queue: bool },
     Discard,
+    DeleteSession { id: String, label: String },
+}
+
+pub(super) struct PendingExternalEdit {
+    pub(super) key: Key,
+    pub(super) initial: String,
 }
 pub(crate) struct App {
     pub host: SessionHost,
@@ -559,6 +581,8 @@ pub(crate) struct App {
     pub(crate) search_reason: Option<String>,
     /// User-level permissions file path (`~/.tars/permissions.toml`), or `None` when `--no-config`.
     pub(crate) user_rules_path: Option<std::path::PathBuf>,
+    /// Deferred external `$EDITOR` request executed by `App::run` outside `EventStream`.
+    pub(super) pending_external_edit: Option<PendingExternalEdit>,
 }
 impl App {
     pub fn new(options: Options) -> Self {
@@ -616,6 +640,7 @@ impl App {
             external_tools: None,
             search_reason: None,
             user_rules_path,
+            pending_external_edit: None,
         }
     }
     pub(super) fn entry_mut(&mut self, key: &Key) -> Option<&mut Entry> {

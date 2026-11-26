@@ -28,10 +28,37 @@ fn input_height(app: &App, width: u16, height: u16) -> u16 {
     });
     (rows + 2).min(height.saturating_sub(9).max(3))
 }
+fn queue_bar_height(app: &App) -> u16 {
+    u16::from(
+        app.entries
+            .get(app.selected)
+            .is_some_and(|e| !e.queued_prompts.is_empty()),
+    )
+}
+
+pub(crate) fn format_queue_preview(text: &str, max_chars: usize) -> String {
+    let collapsed: String = text
+        .chars()
+        .map(|c| match c {
+            '\n' | '\r' | '\t' => ' ',
+            other => other,
+        })
+        .collect();
+    let escaped = tars_core::permission::escape_untrusted_text(collapsed.trim());
+    let mut chars = escaped.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
+}
+
 pub(crate) fn conversation_height(height: u16, width: u16, app: &App) -> usize {
+    let queue_rows = queue_bar_height(app);
     usize::from(
         height
-            .saturating_sub(3 + input_height(app, width, height) + 5)
+            .saturating_sub(3 + queue_rows + input_height(app, width, height) + 5)
             .max(1),
     )
 }
@@ -70,11 +97,12 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         return;
     }
     let body = inset(area);
+    let queue_rows = queue_bar_height(app);
     let regions = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(1),
         Constraint::Length(input_height(app, area.width, area.height)),
-        Constraint::Length(5),
+        Constraint::Length(5 + queue_rows),
     ])
     .split(body);
     let entry = app.entries.get(app.selected);
@@ -99,19 +127,26 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                     || "Local sessions  ·  /new to begin".into(),
                     |e| {
                         let short = e.id().get(..8).unwrap_or(e.id());
+                        let session_label = match e.title() {
+                            Some(title) => format!(
+                                "Session {short} ({})",
+                                tars_core::permission::escape_untrusted_text(&title)
+                            ),
+                            None => format!("Session {short}"),
+                        };
                         if let Some(agent_id) = &e.viewed_agent_id {
                             let label = e
                                 .viewed_agent_label
                                 .as_deref()
                                 .unwrap_or(agent_id.as_str());
                             format!(
-                                "Session {short}  ·  agent: {} (read-only)  ·  /agents main · /sessions to switch",
+                                "{session_label}  ·  agent: {} (read-only)  ·  /agents main · /sessions to switch",
                                 tars_core::permission::escape_untrusted_text(label),
                             )
                         } else if e.session.is_some() {
-                            format!("Session {short}  ·  /sessions to switch  ·  /agents")
+                            format!("{session_label}  ·  /sessions to switch  ·  /agents")
                         } else {
-                            format!("Session {short}  ·  /sessions to switch")
+                            format!("{session_label}  ·  /sessions to switch")
                         }
                     },
                 ),
@@ -465,11 +500,20 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let entry = app.entries.get(app.selected);
     let message = if let Some(confirmation) = &app.confirmation {
         match confirmation {
-            Confirmation::Quit => "Unsubmitted drafts will be lost. Save sessions and quit? y / n",
-            Confirmation::Close => "Unsubmitted draft will be lost. Save and close? y / n",
+            Confirmation::Quit {
+                has_queue: true, ..
+            } => "Unsubmitted drafts/queued messages will be lost. Save sessions and quit? y / n",
+            Confirmation::Quit { .. } => {
+                "Unsubmitted drafts will be lost. Save sessions and quit? y / n"
+            }
+            Confirmation::Close {
+                has_queue: true, ..
+            } => "Unsubmitted draft/queued messages will be lost. Save and close? y / n",
+            Confirmation::Close { .. } => "Unsubmitted draft will be lost. Save and close? y / n",
             Confirmation::Discard => {
                 "Discard local unsaved content? Existing commits are NOT rolled back. y / n"
             }
+            Confirmation::DeleteSession { .. } => "Permanently delete the selected session? y / n",
         }
     } else if app.quitting {
         "Saving and closing sessions; waiting for actual completion..."
@@ -484,12 +528,50 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         "Enter send · Ctrl-J newline · / commands · Esc interrupt"
     };
-    let sections = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(1),
-        Constraint::Min(1),
-    ])
-    .split(area);
+    let has_queue = entry.is_some_and(|e| !e.queued_prompts.is_empty());
+    let (hint_area, status_area, notice_area) = if has_queue {
+        let sections = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(area);
+        if let Some(e) = entry {
+            let count = e.queued_prompts.len();
+            let front = e.queued_prompts.front().map(String::as_str).unwrap_or("");
+            let (prefix, suffix) = if e.queue_paused {
+                (
+                    format!("Queued ({count}, paused): "),
+                    " · /queue pop | /queue clear",
+                )
+            } else {
+                (format!("Queued ({count}): "), " · /queue")
+            };
+            let avail = usize::from(sections[0].width)
+                .saturating_sub(prefix.len() + suffix.len() + 1)
+                .clamp(8, 48);
+            let preview = format_queue_preview(front, avail);
+            let queue_line = format!("{prefix}{preview}{suffix}");
+            frame.render_widget(
+                Paragraph::new(queue_line).style(Style::default().fg(if e.queue_paused {
+                    Color::Yellow
+                } else {
+                    MUTED
+                })),
+                sections[0],
+            );
+        }
+        (sections[1], sections[2], sections[3])
+    } else {
+        let sections = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(area);
+        (sections[0], sections[1], sections[2])
+    };
     frame.render_widget(
         Paragraph::new(message)
             .wrap(Wrap { trim: false })
@@ -498,7 +580,7 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             } else {
                 MUTED
             })),
-        sections[0],
+        hint_area,
     );
     if let Some(e) = entry {
         let mut spans = vec![
@@ -556,7 +638,7 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ));
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), sections[1]);
+        frame.render_widget(Paragraph::new(Line::from(spans)), status_area);
     } else {
         frame.render_widget(
             Paragraph::new(format!(
@@ -564,7 +646,7 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 app.entries.len()
             ))
             .style(Style::default().fg(MUTED)),
-            sections[1],
+            status_area,
         );
     }
 
@@ -639,7 +721,7 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Paragraph::new(notice)
             .wrap(Wrap { trim: false })
             .style(Style::default().fg(if warning { Color::Yellow } else { MUTED })),
-        sections[2],
+        notice_area,
     );
 }
 

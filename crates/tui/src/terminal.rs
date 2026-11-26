@@ -44,6 +44,67 @@ fn restore() {
     let _ = ratatui::try_restore();
 }
 
+pub(crate) fn suspend_for_external_editor() -> io::Result<()> {
+    use std::io::Write;
+    execute!(
+        io::stdout(),
+        DisableBracketedPaste,
+        crossterm::terminal::LeaveAlternateScreen,
+        Show
+    )?;
+    crossterm::terminal::disable_raw_mode()?;
+    io::stdout().flush()
+}
+
+pub(crate) fn resume_after_external_editor(terminal: &mut DefaultTerminal) -> io::Result<()> {
+    use std::io::Write;
+    let raw = crossterm::terminal::enable_raw_mode();
+    let screen = execute!(
+        io::stdout(),
+        crossterm::terminal::EnterAlternateScreen,
+        EnableBracketedPaste,
+        crossterm::cursor::Hide
+    );
+    let flush = io::stdout().flush();
+    let clear = terminal.clear();
+    raw.and(screen).and(flush).and(clear)
+}
+
+struct RestoreTerminalOnDrop<'a> {
+    terminal: Option<&'a mut DefaultTerminal>,
+}
+
+impl RestoreTerminalOnDrop<'_> {
+    fn restore_now(&mut self) -> io::Result<()> {
+        if let Some(terminal) = self.terminal.take() {
+            resume_after_external_editor(terminal)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for RestoreTerminalOnDrop<'_> {
+    fn drop(&mut self) {
+        if let Some(terminal) = self.terminal.take() {
+            let _ = resume_after_external_editor(terminal);
+        }
+    }
+}
+
+pub(crate) fn run_with_suspended_terminal<T>(
+    terminal: &mut DefaultTerminal,
+    f: impl FnOnce() -> T,
+) -> io::Result<T> {
+    let mut guard = RestoreTerminalOnDrop {
+        terminal: Some(terminal),
+    };
+    suspend_for_external_editor()?;
+    let result = f();
+    guard.restore_now()?;
+    Ok(result)
+}
+
 impl Screen {
     pub fn enter() -> io::Result<Self> {
         let terminal = match ratatui::try_init() {

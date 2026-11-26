@@ -11,6 +11,7 @@ use tars_core::{
 };
 
 mod complete;
+pub(crate) mod editor;
 mod graphemes;
 mod onboarding;
 pub(crate) use complete::{CompleteResult, complete_editor, set_editor_text};
