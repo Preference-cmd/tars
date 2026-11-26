@@ -260,7 +260,7 @@ jobs:
           "$bin" tools status --no-config
 
           ls -lh "$bin" "dist/${archive}"
-          ldd --version | head -n 1
+          ldd --version | sed -n '1p'
           ldd "$bin"
           echo "GLIBC symbols referenced:"
           readelf --version-info "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -uV || true
