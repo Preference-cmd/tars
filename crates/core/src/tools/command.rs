@@ -630,7 +630,19 @@ mod tests {
         .await;
         assert_eq!(signal.status, ToolResultStatus::Succeeded);
         assert_eq!(signal.content["exit_code"], 143);
-        assert_eq!(signal.content["signal"], 15);
+        if cfg!(target_os = "macos") {
+            assert_eq!(signal.content["signal"], 15);
+        } else if cfg!(target_os = "linux") {
+            // Under Linux `bwrap --unshare-pid`, `bwrap` runs as PID 1 inside
+            // the PID namespace, reaps the signalled inner shell (PID 2), and
+            // exits normally with status `128 + signal`, so the host sees
+            // `exit_code == 143` without a host-level `signal`.
+            assert!(
+                signal.content.get("signal").is_none(),
+                "unexpected signal field: {:?}",
+                signal.content
+            );
+        }
     }
 
     #[tokio::test]
