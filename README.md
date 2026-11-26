@@ -1,6 +1,6 @@
 # TARS
 
-TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI subcommands (`run`, `session`, `tools`). TARS is in early-stage development (`0.0.0`, built from source via Cargo).
+TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI subcommands (`run`, `session`, `tools`). TARS is in early-stage development (pre-`v0.1.0` release candidate; build from source via Cargo until `v0.1.0` is published).
 
 ## Key features
 

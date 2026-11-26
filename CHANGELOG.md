@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known limitations
 
-- **Prebuilt releases**: Workspace version remains `0.0.0`; no tagged prebuilt release (`v0.1.0`) is published yet. Build from source via Cargo until the first tagged release is published.
+- **Prebuilt releases**: Formal `v0.1.0` is not yet published; current `v0.1.0-rc.*` pre-release tags are for release-pipeline and installer verification, while building from source via Cargo remains the default until `v0.1.0` is published.
 - **Windows support**: Windows workspace tools, sandbox backend (`run_command` / `search_text`), and Windows CI are not yet implemented or verified.
 - **Desktop GUI**: Not yet built.
 - **Distribution & signing**: No Homebrew tap, Cargo-binstall metadata, or Apple Developer ID signing / notarization yet.
