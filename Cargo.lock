@@ -2443,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "tars-cli"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "causa",
  "flate2",
@@ -2459,7 +2459,7 @@ dependencies = [
 
 [[package]]
 name = "tars-core"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "async-trait",
  "causa",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "tars-sandbox"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "rustix",
  "tempfile",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "tars-tui"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "causa",
  "crossterm",
