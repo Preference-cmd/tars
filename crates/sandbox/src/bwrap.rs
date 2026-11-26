@@ -565,6 +565,15 @@ pub(crate) fn build_args(
                         visible_roots.push(path.to_path_buf());
                     }
                 }
+            }
+            push_unary(&mut args, "--proc", "/proc");
+            push_unary(&mut args, "--dev", "/dev");
+            push_unary(&mut args, "--tmpfs", "/tmp");
+            push_unary(&mut args, "--tmpfs", "/run");
+            if policy.system_baseline() {
+                if policy.network() == NetworkAccess::Open {
+                    mount_open_network_dns(&mut args, &mut mounted_run_paths)?;
+                }
                 if let Some(home_dir) = &canonical_home {
                     for relative in HOME_TOOLCHAIN_READ_PATHS {
                         let candidate = home_dir.join(relative);
@@ -574,13 +583,6 @@ pub(crate) fn build_args(
                         }
                     }
                 }
-            }
-            push_unary(&mut args, "--proc", "/proc");
-            push_unary(&mut args, "--dev", "/dev");
-            push_unary(&mut args, "--tmpfs", "/tmp");
-            push_unary(&mut args, "--tmpfs", "/run");
-            if policy.system_baseline() && policy.network() == NetworkAccess::Open {
-                mount_open_network_dns(&mut args, &mut mounted_run_paths)?;
             }
 
             for root in sorted_by_depth(&policy.read_roots) {
@@ -727,6 +729,7 @@ pub(crate) fn build_args(
         args.push(dir.as_os_str().to_os_string());
         args.push(OsString::from("--chmod"));
         args.push(OsString::from("0000"));
+        args.push(dir.as_os_str().to_os_string());
         emitted_denied_dirs.push(dir);
     }
 
@@ -982,20 +985,53 @@ mod tests {
         // Decision 1A: missing protected path must not be created on disk.
         assert!(!ws.join("missing").exists());
 
-        // Host scope: `$HOME/.ssh` IS visible so `--tmpfs $HOME/.ssh --chmod 0000`
+        // Host scope: `$HOME/.ssh` IS visible so `--tmpfs $HOME/.ssh --chmod 0000 $HOME/.ssh`
         // is emitted, and nested `$HOME/.ssh/id_ed25519` must NOT be mounted inside it.
         let host_policy = policy.with_read_scope(ReadScope::Host);
         let host_args = build_args(&host_policy, &launch, Some(&home), 8, true).unwrap();
         assert!(!find_subslice(&host_args, &["--tmpfs", "/tmp"]));
         assert!(find_subslice(
             &host_args,
-            &["--tmpfs", ssh_str, "--chmod", "0000"]
+            &["--tmpfs", ssh_str, "--chmod", "0000", ssh_str]
         ));
         let ssh_key = home.join(".ssh/id_ed25519");
         assert!(!find_subslice(
             &host_args,
             &["--ro-bind", "/dev/null", ssh_key.to_str().unwrap()]
         ));
+    }
+
+    #[test]
+    fn build_args_mounts_tmpfs_tmp_before_home_toolchain_under_tmp() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let home = dir.path().join("home");
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(home.join(".cargo")).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        let home = std::fs::canonicalize(&home).unwrap();
+        let ws = std::fs::canonicalize(&ws).unwrap();
+
+        let policy = SandboxPolicy::new(vec![ws.clone()], vec![ws.clone()]).unwrap();
+        let launch = Launch::new("/bin/true").current_dir(&ws);
+        let args = build_args(&policy, &launch, Some(&home), 14, true).unwrap();
+
+        let tmpfs_tmp_pos = args
+            .windows(2)
+            .position(|window| window[0] == "--tmpfs" && window[1] == "/tmp")
+            .expect("ReadScope::Roots must mount --tmpfs /tmp");
+        let cargo_dir = home.join(".cargo");
+        let cargo_pos = args
+            .windows(3)
+            .position(|window| {
+                window[0] == "--ro-bind"
+                    && window[1] == cargo_dir.as_os_str()
+                    && window[2] == cargo_dir.as_os_str()
+            })
+            .expect("home .cargo directory must be mounted");
+        assert!(
+            tmpfs_tmp_pos < cargo_pos,
+            "--tmpfs /tmp must precede --ro-bind for $HOME/.cargo"
+        );
     }
 
     #[test]
@@ -1022,16 +1058,18 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "--unshare-net"));
 
         let ssh_dir = home.join(".ssh");
+        let ssh_str = ssh_dir.to_str().unwrap();
         assert!(find_subslice(
             &args,
-            &["--tmpfs", ssh_dir.to_str().unwrap(), "--chmod", "0000"]
+            &["--tmpfs", ssh_str, "--chmod", "0000", ssh_str]
         ));
         let nested_dir = home.join("nested");
+        let nested_str = nested_dir.to_str().unwrap();
         let inner_dir = home.join("nested/inner");
         let secret_file = home.join("nested/inner/secret");
         assert!(find_subslice(
             &args,
-            &["--tmpfs", nested_dir.to_str().unwrap(), "--chmod", "0000"]
+            &["--tmpfs", nested_str, "--chmod", "0000", nested_str]
         ));
         assert!(!find_subslice(
             &args,

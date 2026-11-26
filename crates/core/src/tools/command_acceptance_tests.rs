@@ -130,6 +130,7 @@ fn read_pid(path: &Path) -> String {
     pid
 }
 
+#[cfg(not(target_os = "linux"))]
 fn alive(pid: &str) -> bool {
     Command::new("/bin/kill")
         .args(["-0", pid])
@@ -139,6 +140,7 @@ fn alive(pid: &str) -> bool {
 }
 
 /// Wait for a command child to disappear; a survivor is killed and fails.
+#[cfg(not(target_os = "linux"))]
 async fn wait_dead(pid: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while alive(pid) {
@@ -150,9 +152,34 @@ async fn wait_dead(pid: &str) {
     }
 }
 
+/// Verify the background child launched (`child.pid` is numeric) and stopped
+/// running after sandbox cleanup.
+///
+/// On macOS Seatbelt the child shares the host PID namespace, so `/bin/kill -0`
+/// probes it directly. On Linux Bubblewrap `--unshare-pid` gives the child a
+/// namespace-local PID (such as `2`), so we verify the `SIGTERM`-ignoring
+/// child's `child.heartbeat` stops growing after namespace teardown.
+async fn verify_child_dead(base: &Path) {
+    let child = read_pid(&base.join("child.pid"));
+    #[cfg(target_os = "linux")]
+    {
+        let _ = child;
+        let heartbeat = base.join("child.heartbeat");
+        let before = std::fs::metadata(&heartbeat).map(|m| m.len()).unwrap_or(0);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let after = std::fs::metadata(&heartbeat).map(|m| m.len()).unwrap_or(0);
+        assert_eq!(
+            after, before,
+            "background child continued writing heartbeat after cleanup ({before} -> {after})"
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    wait_dead(&child).await;
+}
+
 const LONG_COMMAND: &str = r#"echo partial
 trap '' TERM
-/bin/bash -c 'trap "" TERM; while :; do sleep 1; done' &
+/bin/bash -c 'trap "" TERM; while :; do printf x >> child.heartbeat; sleep 0.05; done' &
 echo $! > child.pid
 wait
 "#;
@@ -445,8 +472,7 @@ async fn timeout_kills_the_command_group_and_keeps_partial_output() {
             .contains("partial")
     );
     assert!(started.elapsed() < Duration::from_secs(5));
-    let child = read_pid(&base.path().join("child.pid"));
-    wait_dead(&child).await;
+    verify_child_dead(base.path()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -469,12 +495,12 @@ async fn cancellation_kills_the_command_group() {
         tokio::spawn(async move { execute(&tool_for_task, &call_for_task, &call_control).await });
 
     wait_for_file(&base.path().join("child.pid")).await;
-    let child = read_pid(&base.path().join("child.pid"));
+    wait_for_file(&base.path().join("child.heartbeat")).await;
     cancellation.cancel();
     let result = task.await.unwrap();
     assert_eq!(result.status, ToolResultStatus::Cancelled);
     assert_eq!(result.output.content["may_have_partially_executed"], true);
-    wait_dead(&child).await;
+    verify_child_dead(base.path()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -493,14 +519,14 @@ async fn dropping_the_command_future_kills_the_group() {
         tokio::spawn(async move { execute(&tool_for_task, &call_for_task, &call_control).await });
 
     wait_for_file(&base.path().join("child.pid")).await;
-    let child = read_pid(&base.path().join("child.pid"));
+    wait_for_file(&base.path().join("child.heartbeat")).await;
     task.abort();
     assert!(
         matches!(task.await, Err(error) if error.is_cancelled()),
         "the aborted command task must be cancelled"
     );
     tokio::time::sleep(Duration::from_millis(200)).await;
-    wait_dead(&child).await;
+    verify_child_dead(base.path()).await;
 }
 
 #[tokio::test]

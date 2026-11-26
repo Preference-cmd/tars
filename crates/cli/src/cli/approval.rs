@@ -809,7 +809,7 @@ mod tests {
             CommandSettings, CredentialRef, Provider, SessionDefinition, WorkspaceTool,
             WorkspaceToolLimits,
         };
-        use tars_core::session::{SubmitRequest, WorkState};
+        use tars_core::session::{SubmitRequest, WorkResult, WorkState};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
@@ -954,7 +954,9 @@ mod tests {
             .unwrap();
         let mut rx = session.connect_approvals();
         let approver_task = tokio::task::spawn_blocking(move || {
-            let req = rx.blocking_recv().unwrap();
+            let req = rx
+                .blocking_recv()
+                .expect("approval channel closed before receiving request");
             let mut reader = Cursor::new(b"w\n".as_slice());
             let mut writer = Vec::new();
             let prompt_open = AtomicBool::new(false);
@@ -979,17 +981,33 @@ mod tests {
                 blocks: vec![text_input("run echo")],
             })
             .unwrap();
-        loop {
+        let result = loop {
             let obs = session
                 .wait(&receipt.work, std::time::Duration::from_secs(10))
                 .await
                 .unwrap();
-            if matches!(obs.state, WorkState::Finished(_)) {
-                break;
+            if let WorkState::Finished(result) = obs.state {
+                break result;
             }
+        };
+        if let Some(status) = session.command_status() {
+            assert!(
+                status.is_available(),
+                "sandbox must be available for cli approval test: {status}"
+            );
         }
-        approver_task.await.unwrap();
-        server.await.unwrap();
+        assert!(
+            matches!(&*result, WorkResult::Run(_)),
+            "work finished without running approval flow: {result:?}"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), approver_task)
+            .await
+            .expect("approver task timed out without receiving an approval request")
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), server)
+            .await
+            .expect("mock HTTP server timed out")
+            .unwrap();
 
         assert_eq!(
             std::fs::read_to_string(workspace.join(".tars/.gitignore")).unwrap(),
