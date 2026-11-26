@@ -850,9 +850,11 @@ async fn idle_wakeup_debounce_coalesce_and_max_auto_wakeups_limit() {
     session.wait_saved().await.unwrap();
 
     // B) Two siblings sharing coalesce_key finish within debounce window -> 1 wakeup + older dropped!
+    // Use a 2s window so heavy CI CPU contention cannot fire sib1's debounce
+    // before sib2 commits; once sib2 finishes, 0 active siblings still wakes immediately.
     session.set_coordinator_config(CoordinatorConfig {
         max_auto_wakeups: 2,
-        sibling_debounce: Duration::from_millis(250),
+        sibling_debounce: Duration::from_secs(2),
         ..CoordinatorConfig::default()
     });
     let mut r_s1 = spawn_req(&root_id, "sib1", "p1");
