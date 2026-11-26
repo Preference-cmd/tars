@@ -52,18 +52,10 @@ fn grapheme_wrapping_never_splits_combining_marks_or_zwj_sequences() {
         }),
         3,
     );
-    let values: Vec<_> = rows
-        .ranges
-        .iter()
-        .map(|r| &rows.transcript.text[r.clone()])
-        .collect();
+    let values: Vec<_> = (0..rows.len()).map(|i| rows.row_text(i).unwrap()).collect();
     assert_eq!(values, ["中e\u{301}", "👩‍💻", "文", "abc"]);
     let rows = Rows::wrap(rows.transcript.clone(), 1);
-    assert!(
-        rows.ranges
-            .iter()
-            .any(|r| &rows.transcript.text[r.clone()] == "👩‍💻")
-    );
+    assert!((0..rows.len()).any(|i| rows.row_text(i).as_deref() == Some("👩‍💻")));
 }
 #[test]
 fn paste_controls_and_form_validation_keep_actions_explicit() {

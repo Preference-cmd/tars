@@ -1,8 +1,32 @@
 use causa::kernel::{BlockContent, ContentPart, Context, ContextBlock};
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+};
 use std::ops::Range;
 use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+
+/// Formatted tool JSON body together with structural line offsets for any
+/// expanded unified diff section.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FormattedToolJson {
+    pub text: String,
+    pub diff_header_line: Option<usize>,
+    pub diff_lines: Option<Range<usize>>,
+}
+
+/// Structural per-item line metadata for [`InfoKind::Tools`](crate::app::InfoKind::Tools)
+/// so untrusted tool output can never spoof or break diff/header styling.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ToolDetailMeta {
+    pub header_line: Option<usize>,
+    pub diff_header_lines: Vec<usize>,
+    pub diff_ranges: Vec<Range<usize>>,
+    /// `(line_index, is_warning)` for status/boundary notes (`Yellow` when `true`, `MUTED` when `false`).
+    pub note_lines: Vec<(usize, bool)>,
+}
 
 /// Metadata for a committed tool result whose full output spilled to `.artifacts/`.
 #[derive(Clone, Debug)]
@@ -11,13 +35,30 @@ pub(crate) struct SpilledToolDetail {
     pub status: causa::kernel::ToolResultStatus,
     pub artifact_id: String,
     pub size_bytes: usize,
-    pub preview_json: String,
+    pub preview: FormattedToolJson,
+}
+
+/// Logical transcript segment controlling whether Markdown parsing applies.
+///
+/// Only assistant-authored message bodies (including expanded context summary
+/// briefs) use [`TranscriptSegment::MarkdownBody`]; user input, system prompts,
+/// tool summaries, expanded raw XML blocks, and folded/status notices remain
+/// unparsed plain text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TranscriptSegment {
+    UserHeader,
+    RoleHeader(String),
+    MutedNotice(String),
+    MarkdownBody(String),
+    PlainBody(String),
 }
 
 #[derive(Default)]
 pub(crate) struct Transcript {
     pub text: String,
+    pub segments: Vec<TranscriptSegment>,
     pub tool_details: Vec<String>,
+    pub tool_detail_meta: Vec<ToolDetailMeta>,
     pub tool_artifacts: Vec<Option<SpilledToolDetail>>,
     /// Full text of the current Context's summary blocks (the brief chain), when it has any.
     ///
@@ -108,8 +149,11 @@ impl Transcript {
                         head.summary = Some(body);
                     }
                 }
-                head.text
-                    .push_str("● Context summary · collapsed · /summary shows the full text\n\n");
+                let notice = "● Context summary · collapsed · /summary shows the full text";
+                head.text.push_str(notice);
+                head.text.push_str("\n\n");
+                head.segments
+                    .push(TranscriptSegment::MutedNotice(notice.to_owned()));
             }
             // Put-back U, stripped replies, and ToolChange in history_run are NOT rendered in current material:
             // the history expansion shows their originals.
@@ -118,7 +162,9 @@ impl Transcript {
         // 3. Current part (blocks after history_run)
         let tail = Self::build(current_part, true, true);
         head.text.push_str(&tail.text);
+        head.segments.extend(tail.segments);
         head.tool_details.extend(tail.tool_details);
+        head.tool_detail_meta.extend(tail.tool_detail_meta);
         head.tool_artifacts.extend(tail.tool_artifacts);
         if let Some(tail_summary) = tail.summary {
             if let Some(existing) = &mut head.summary {
@@ -140,7 +186,9 @@ impl Transcript {
 
     fn build(blocks: &[ContextBlock], collapse_summary: bool, collapse_prelude: bool) -> Self {
         let mut text = String::new();
+        let mut segments = Vec::new();
         let mut tool_details = Vec::new();
+        let mut tool_detail_meta = Vec::new();
         let mut tool_artifacts = Vec::new();
         let mut summary_text: Option<String> = None;
         let mut index = 0;
@@ -179,7 +227,10 @@ impl Transcript {
                     }
                 }
                 let unit = if count == 1 { "block" } else { "blocks" };
-                text.push_str(&format!("● Session prelude · {count} {unit} · folded\n\n"));
+                let notice = format!("● Session prelude · {count} {unit} · folded");
+                text.push_str(&notice);
+                text.push_str("\n\n");
+                segments.push(TranscriptSegment::MutedNotice(notice));
                 continue;
             }
             if collapse_prelude
@@ -189,7 +240,10 @@ impl Transcript {
                 let section = source
                     .strip_prefix(tars_core::prelude::PRELUDE_UPDATE_PREFIX)
                     .unwrap_or(source);
-                text.push_str(&format!("● Prelude updated ({section}) · folded\n\n"));
+                let notice = format!("● Prelude updated ({section}) · folded");
+                text.push_str(&notice);
+                text.push_str("\n\n");
+                segments.push(TranscriptSegment::MutedNotice(display(&notice)));
                 index += 1;
                 continue;
             }
@@ -203,12 +257,13 @@ impl Transcript {
                     }
                 )
             {
-                match tars_core::skills::skill_block_name(block) {
-                    Some(name) => {
-                        text.push_str(&format!("● Skill preserved ({name}) · folded\n\n"));
-                    }
-                    None => text.push_str("● Skill preserved · folded\n\n"),
-                }
+                let notice = match tars_core::skills::skill_block_name(block) {
+                    Some(name) => format!("● Skill preserved ({name}) · folded"),
+                    None => "● Skill preserved · folded".to_owned(),
+                };
+                text.push_str(&notice);
+                text.push_str("\n\n");
+                segments.push(TranscriptSegment::MutedNotice(display(&notice)));
                 index += 1;
                 continue;
             }
@@ -223,7 +278,11 @@ impl Transcript {
                         raw.push_str(&value.0);
                     }
                 }
-                text.push_str(&format_task_notifications_compact(&raw));
+                for notice in format_task_notifications_compact(&raw) {
+                    text.push_str(&notice);
+                    text.push_str("\n\n");
+                    segments.push(TranscriptSegment::MutedNotice(display(&notice)));
+                }
                 index += 1;
                 continue;
             }
@@ -243,109 +302,182 @@ impl Transcript {
                     summary_text = Some(body);
                 }
                 if collapse_summary {
-                    text.push_str(
-                        "● Context summary · collapsed · /summary shows the full text\n\n",
-                    );
+                    let notice = "● Context summary · collapsed · /summary shows the full text";
+                    text.push_str(notice);
+                    text.push_str("\n\n");
+                    segments.push(TranscriptSegment::MutedNotice(notice.to_owned()));
                     index += 1;
                     continue;
                 }
             }
             match block.meta().source.as_deref() {
-                Some("user") => text.push_str("❯ You\n"),
-                Some(_) if is_summary => text.push_str("● Context summary\n"),
+                Some("user") => {
+                    text.push_str("❯ You\n");
+                    segments.push(TranscriptSegment::UserHeader);
+                }
+                Some(_) if is_summary => {
+                    text.push_str("● Context summary\n");
+                    segments.push(TranscriptSegment::RoleHeader("● Context summary".into()));
+                }
                 Some(source) if tars_core::prelude::is_prelude_prefix_source(source) => {
                     let section = source
                         .strip_prefix(tars_core::prelude::PRELUDE_SOURCE_PREFIX)
                         .unwrap_or(source);
-                    text.push_str(&format!("● Session prelude ({section}) · {source}\n"));
+                    let header = format!("● Session prelude ({section}) · {source}");
+                    text.push_str(&header);
+                    text.push('\n');
+                    segments.push(TranscriptSegment::RoleHeader(display(&header)));
                 }
                 Some(source) if tars_core::prelude::is_prelude_update_source(source) => {
                     let section = source
                         .strip_prefix(tars_core::prelude::PRELUDE_UPDATE_PREFIX)
                         .unwrap_or(source);
-                    text.push_str(&format!("● Prelude update ({section}) · {source}\n"));
+                    let header = format!("● Prelude update ({section}) · {source}");
+                    text.push_str(&header);
+                    text.push('\n');
+                    segments.push(TranscriptSegment::RoleHeader(display(&header)));
                 }
                 Some(source) if source == tars_core::skills::SKILL_SOURCE => {
-                    if let Some(name) = tars_core::skills::skill_block_name(block) {
-                        text.push_str(&format!("● Skill ({name}) · {source}\n"));
+                    let header = if let Some(name) = tars_core::skills::skill_block_name(block) {
+                        format!("● Skill ({name}) · {source}")
                     } else {
-                        text.push_str(&format!("● Skill · {source}\n"));
-                    }
+                        format!("● Skill · {source}")
+                    };
+                    text.push_str(&header);
+                    text.push('\n');
+                    segments.push(TranscriptSegment::RoleHeader(display(&header)));
                 }
                 Some(source) if source == tars_core::events::TASK_NOTIFICATION_SOURCE => {
-                    text.push_str(&format!("● Task notification · {source}\n"));
+                    let header = format!("● Task notification · {source}");
+                    text.push_str(&header);
+                    text.push('\n');
+                    segments.push(TranscriptSegment::RoleHeader(display(&header)));
                 }
                 Some(source) => {
-                    text.push_str("● ");
-                    text.push_str(source);
+                    let header = format!("● {source}");
+                    text.push_str(&header);
                     text.push('\n');
+                    segments.push(TranscriptSegment::RoleHeader(display(&header)));
                 }
-                None => text.push_str("●\n"),
+                None => {
+                    text.push_str("●\n");
+                    segments.push(TranscriptSegment::RoleHeader("●".into()));
+                }
             }
             match block.content() {
-                BlockContent::Message { parts, .. } => {
-                    for part in parts {
-                        match part {
-                            ContentPart::Text(value) => text.push_str(&value.0),
-                            ContentPart::Media(_) => text.push_str("[media reference]"),
-                            ContentPart::Sealed(_) => {}
+                BlockContent::Message { role, parts } => {
+                    let is_markdown = *role == causa::kernel::Role::Assistant || is_summary;
+                    if is_markdown {
+                        let mut md_buf = String::new();
+                        for part in parts {
+                            match part {
+                                ContentPart::Text(value) => {
+                                    text.push_str(&value.0);
+                                    md_buf.push_str(&value.0);
+                                }
+                                ContentPart::Media(_) => {
+                                    text.push_str("[media reference]");
+                                    if !md_buf.is_empty() {
+                                        segments.push(TranscriptSegment::MarkdownBody(display(
+                                            &std::mem::take(&mut md_buf),
+                                        )));
+                                    }
+                                    segments.push(TranscriptSegment::PlainBody(
+                                        "[media reference]".into(),
+                                    ));
+                                }
+                                ContentPart::Sealed(_) => {}
+                            }
+                        }
+                        if !md_buf.is_empty() {
+                            segments.push(TranscriptSegment::MarkdownBody(display(&md_buf)));
+                        }
+                    } else {
+                        let mut plain_buf = String::new();
+                        for part in parts {
+                            match part {
+                                ContentPart::Text(value) => {
+                                    text.push_str(&value.0);
+                                    plain_buf.push_str(&value.0);
+                                }
+                                ContentPart::Media(_) => {
+                                    text.push_str("[media reference]");
+                                    plain_buf.push_str("[media reference]");
+                                }
+                                ContentPart::Sealed(_) => {}
+                            }
+                        }
+                        if !plain_buf.is_empty() {
+                            segments.push(TranscriptSegment::PlainBody(display(&plain_buf)));
                         }
                     }
                 }
                 BlockContent::ToolCall(call) => {
-                    text.push_str(&format!(
-                        "Tool {} · recorded declaration · {}\n/tools expands actual material",
-                        display(&call.tool_name),
+                    let tool_name = display_single_line(&call.tool_name);
+                    let body = format!(
+                        "Tool {tool_name} · recorded declaration · {}\n/tools expands actual material",
                         block.id().0
+                    );
+                    text.push_str(&body);
+                    segments.push(TranscriptSegment::PlainBody(body));
+                    let mut builder = ToolDetailBuilder::new();
+                    builder.push_header(&format!("Declaration {} · {tool_name}", block.id().0));
+                    builder.push_plain(&display(
+                        &serde_json::to_string_pretty(&call.arguments).unwrap_or_default(),
                     ));
-                    tool_details.push(format!(
-                        "Declaration {} · {}\n{}",
-                        block.id().0,
-                        display(&call.tool_name),
-                        display(&serde_json::to_string_pretty(&call.arguments).unwrap_or_default())
-                    ));
+                    let (detail_text, detail_meta) = builder.finish();
+                    tool_details.push(detail_text);
+                    tool_detail_meta.push(detail_meta);
                     tool_artifacts.push(None);
                 }
                 BlockContent::ToolResult(result) => {
                     let preview_summary = tool_result_summary(&result.output.content);
-                    let preview_json =
-                        display(&serde_json::to_string_pretty(result).unwrap_or_default());
+                    let preview = format_tool_result_payload(result);
                     if let Some(artifact) = &result.output.artifact {
+                        let artifact_id = display_single_line(&artifact.id);
                         let kind_label = if artifact.id.starts_with("artifact:") {
                             "spilled preview"
                         } else {
                             "cleared preview"
                         };
-                        text.push_str(&format!(
-                            "Tool result · {:?} · {} · {kind_label} ({})\n{}\n/tools expands full output",
-                            result.status,
-                            result.call_block_id.0,
-                            display(&artifact.id),
-                            preview_summary
+                        let body = format!(
+                            "Tool result · {:?} · {} · {kind_label} ({artifact_id})\n{}\n/tools expands full output",
+                            result.status, result.call_block_id.0, preview_summary
+                        );
+                        text.push_str(&body);
+                        segments.push(TranscriptSegment::PlainBody(body));
+                        let mut builder = ToolDetailBuilder::new();
+                        builder.push_header(&format!(
+                            "Result for {} · {:?} · {artifact_id}",
+                            result.call_block_id.0, result.status
                         ));
-                        tool_details.push(format!(
-                            "Result for {} · {:?} · {}\n{}",
-                            result.call_block_id.0,
-                            result.status,
-                            display(&artifact.id),
-                            preview_json
-                        ));
+                        builder.push_formatted_json(&preview);
+                        let (detail_text, detail_meta) = builder.finish();
+                        tool_details.push(detail_text);
+                        tool_detail_meta.push(detail_meta);
                         tool_artifacts.push(Some(SpilledToolDetail {
                             call_block_id: result.call_block_id,
                             status: result.status.clone(),
                             artifact_id: artifact.id.clone(),
                             size_bytes: artifact.size_bytes,
-                            preview_json,
+                            preview,
                         }));
                     } else {
-                        text.push_str(&format!(
+                        let body = format!(
                             "Tool result · {:?} · {}\n{}\n/tools expands actual material",
                             result.status, result.call_block_id.0, preview_summary
+                        );
+                        text.push_str(&body);
+                        segments.push(TranscriptSegment::PlainBody(body));
+                        let mut builder = ToolDetailBuilder::new();
+                        builder.push_header(&format!(
+                            "Result for {} · {:?}",
+                            result.call_block_id.0, result.status
                         ));
-                        tool_details.push(format!(
-                            "Result for {} · {:?}\n{}",
-                            result.call_block_id.0, result.status, preview_json
-                        ));
+                        builder.push_formatted_json(&preview);
+                        let (detail_text, detail_meta) = builder.finish();
+                        tool_details.push(detail_text);
+                        tool_detail_meta.push(detail_meta);
                         tool_artifacts.push(None);
                     }
                 }
@@ -360,7 +492,9 @@ impl Transcript {
         let text = tars_core::permission::escape_untrusted_text(&text).replace('\t', "    ");
         Self {
             text,
+            segments,
             tool_details,
+            tool_detail_meta,
             tool_artifacts,
             summary: summary_text,
             history_range: 0..0,
@@ -394,6 +528,12 @@ fn tool_result_summary(content: &serde_json::Value) -> String {
 pub(crate) fn display(value: &str) -> String {
     tars_core::permission::escape_untrusted_text(value).replace('\t', "    ")
 }
+
+/// Escape untrusted text and collapse line breaks into spaces for single-line headers/labels.
+pub(crate) fn display_single_line(value: &str) -> String {
+    display(value).replace('\n', " ")
+}
+
 fn summary(value: &str) -> String {
     let clean = display(value).replace('\n', " ");
     let mut end = clean.len().min(160);
@@ -407,8 +547,167 @@ fn summary(value: &str) -> String {
     )
 }
 
-fn format_task_notifications_compact(raw: &str) -> String {
-    let mut out = String::new();
+/// Structural builder for `/tools` detail items so line indices in [`ToolDetailMeta`]
+/// match the formatted item text 1:1 without string-prefix heuristics.
+pub(crate) struct ToolDetailBuilder {
+    text: String,
+    line_count: usize,
+    meta: ToolDetailMeta,
+}
+
+impl ToolDetailBuilder {
+    pub(crate) fn new() -> Self {
+        Self {
+            text: String::new(),
+            line_count: 0,
+            meta: ToolDetailMeta::default(),
+        }
+    }
+
+    fn push_block(&mut self, block: &str) -> Range<usize> {
+        let start = self.line_count;
+        let lines_in_block = block.split('\n').count();
+        if !self.text.is_empty() {
+            self.text.push('\n');
+        }
+        self.text.push_str(block);
+        self.line_count += lines_in_block;
+        start..self.line_count
+    }
+
+    pub(crate) fn push_header(&mut self, header: &str) {
+        let clean = display_single_line(header);
+        let range = self.push_block(&clean);
+        self.meta.header_line = Some(range.start);
+    }
+
+    pub(crate) fn push_note(&mut self, note: &str, is_warning: bool) {
+        let clean = display_single_line(note);
+        let range = self.push_block(&clean);
+        self.meta.note_lines.push((range.start, is_warning));
+    }
+
+    pub(crate) fn push_blank(&mut self) {
+        self.push_block("");
+    }
+
+    pub(crate) fn push_plain(&mut self, body: &str) {
+        self.push_block(body);
+    }
+
+    pub(crate) fn push_formatted_json(&mut self, formatted: &FormattedToolJson) {
+        let range = self.push_block(&formatted.text);
+        if let Some(rel_hdr) = formatted.diff_header_line {
+            self.meta.diff_header_lines.push(range.start + rel_hdr);
+        }
+        if let Some(rel_diff) = &formatted.diff_lines {
+            self.meta
+                .diff_ranges
+                .push((range.start + rel_diff.start)..(range.start + rel_diff.end));
+        }
+    }
+
+    pub(crate) fn finish(self) -> (String, ToolDetailMeta) {
+        (self.text, self.meta)
+    }
+}
+
+/// Return `true` when `value` (at top level or under `output.content`) contains
+/// a non-empty string `"diff"` field.
+pub(crate) fn has_non_empty_diff(value: &serde_json::Value) -> bool {
+    extract_diff_target(value).is_some()
+}
+
+fn extract_diff_target(value: &serde_json::Value) -> Option<(Option<&str>, &str)> {
+    if let Some(obj) = value.as_object()
+        && let Some(diff) = obj.get("diff").and_then(|v| v.as_str())
+        && !diff.is_empty()
+    {
+        let path = obj
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|p| !p.trim().is_empty());
+        return Some((path, diff));
+    }
+    if let Some(content) = value
+        .get("output")
+        .and_then(|o| o.get("content"))
+        .and_then(|c| c.as_object())
+        && let Some(diff) = content.get("diff").and_then(|v| v.as_str())
+        && !diff.is_empty()
+    {
+        let path = content
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|p| !p.trim().is_empty());
+        return Some((path, diff));
+    }
+    None
+}
+
+/// Format a tool result JSON value, expanding any embedded `"diff"` string field
+/// into readable multi-line unified diff text while recording exact diff line
+/// offsets and keeping metadata readable.
+pub(crate) fn format_tool_output_json(value: &serde_json::Value) -> FormattedToolJson {
+    let Some((path, diff)) = extract_diff_target(value) else {
+        return FormattedToolJson {
+            text: display(&serde_json::to_string_pretty(value).unwrap_or_default()),
+            diff_header_line: None,
+            diff_lines: None,
+        };
+    };
+    let path_owned = path.map(str::to_owned);
+    let stripped = diff
+        .strip_suffix("\r\n")
+        .or_else(|| diff.strip_suffix('\n'))
+        .unwrap_or(diff);
+    let normalized = if stripped.contains("\r\n") {
+        stripped.replace("\r\n", "\n")
+    } else {
+        stripped.to_owned()
+    };
+    let mut cloned = value.clone();
+    if let Some(obj) = cloned.as_object_mut()
+        && obj.get("diff").and_then(|v| v.as_str()).is_some()
+    {
+        obj.remove("diff");
+    } else if let Some(content) = cloned
+        .get_mut("output")
+        .and_then(|o| o.get_mut("content"))
+        .and_then(|c| c.as_object_mut())
+    {
+        content.remove("diff");
+    }
+    let meta = display(&serde_json::to_string_pretty(&cloned).unwrap_or_default());
+    let meta_line_count = meta.split('\n').count();
+    let header = match path_owned {
+        Some(path) => format!("Diff ({}):", display_single_line(&path)),
+        None => "Diff:".to_owned(),
+    };
+    let diff_body = display(&normalized);
+    let diff_line_count = diff_body.split('\n').count();
+    let diff_header_line = meta_line_count;
+    let diff_start = diff_header_line + 1;
+    FormattedToolJson {
+        text: format!("{meta}\n{header}\n{diff_body}"),
+        diff_header_line: Some(diff_header_line),
+        diff_lines: Some(diff_start..(diff_start + diff_line_count)),
+    }
+}
+
+fn format_tool_result_payload(result: &causa::kernel::ToolResultPayload) -> FormattedToolJson {
+    match serde_json::to_value(result) {
+        Ok(value) => format_tool_output_json(&value),
+        Err(_) => FormattedToolJson {
+            text: display(&serde_json::to_string_pretty(result).unwrap_or_default()),
+            diff_header_line: None,
+            diff_lines: None,
+        },
+    }
+}
+
+fn format_task_notifications_compact(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let mut rest = raw;
     let mut found_envelope = false;
     while let Some(start) = rest.find("<task-notification") {
@@ -426,23 +725,23 @@ fn format_task_notifications_compact(raw: &str) -> String {
             None => (content_start, ""),
         };
         found_envelope = true;
-        append_compact_task_notification(&mut out, attrs, body);
+        out.push(format_compact_task_notification(attrs, body));
         rest = next_rest;
     }
     if !found_envelope {
-        out.push_str("● Task notification\n");
+        let mut entry = String::from("● Task notification");
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
-            out.push_str("  ");
-            out.push_str(&summary(trimmed));
-            out.push('\n');
+            entry.push_str("\n  ");
+            entry.push_str(&summary(trimmed));
         }
-        out.push('\n');
+        out.push(entry);
     }
     out
 }
 
-fn append_compact_task_notification(out: &mut String, attrs: &str, body: &str) {
+fn format_compact_task_notification(attrs: &str, body: &str) -> String {
+    let mut out = String::new();
     let agent = xml_attr(attrs, "agent_name")
         .or_else(|| xml_attr(attrs, "agent"))
         .or_else(|| xml_tag(body, "agent_name"))
@@ -472,7 +771,7 @@ fn append_compact_task_notification(out: &mut String, attrs: &str, body: &str) {
         .unwrap_or_default();
 
     out.push_str(&format!(
-        "● Task notification · {agent_label}{status_part}{op_part}\n"
+        "● Task notification · {agent_label}{status_part}{op_part}"
     ));
 
     let snippet = xml_tag(body, "summary")
@@ -484,12 +783,11 @@ fn append_compact_task_notification(out: &mut String, attrs: &str, body: &str) {
     if let Some(snippet) = snippet {
         let preview = summary(snippet.trim());
         if !preview.is_empty() {
-            out.push_str("  ");
+            out.push_str("\n  ");
             out.push_str(&preview);
-            out.push('\n');
         }
     }
-    out.push('\n');
+    out
 }
 
 fn xml_attr(attrs: &str, name: &str) -> Option<String> {
@@ -587,39 +885,290 @@ pub(crate) fn detail_rows(lines: &[String], width: u16) -> impl Iterator<Item = 
         })
 }
 
+/// Render `/tools` detail entries using structural [`ToolDetailMeta`] line ranges
+/// (zero string-prefix heuristics) and wrap to `width` display columns so drawing
+/// and scroll bounds match 1:1.
+pub(crate) fn tools_detail_lines(
+    items: &[String],
+    meta: &[ToolDetailMeta],
+    width: u16,
+) -> Vec<Line<'static>> {
+    use crate::render::{ACCENT, MUTED};
+    let max_width = usize::from(width.max(1));
+    let mut out = Vec::new();
+    for (item_idx, item) in items.iter().enumerate() {
+        let item_meta = meta.get(item_idx);
+        for (line_idx, raw_line) in item.split('\n').enumerate() {
+            let line = display(raw_line);
+            let styled_line = if item_meta.is_some_and(|m| m.header_line == Some(line_idx)) {
+                Line::from(vec![Span::styled(
+                    line,
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                )])
+            } else if item_meta.is_some_and(|m| m.diff_header_lines.contains(&line_idx)) {
+                Line::from(vec![Span::styled(
+                    line,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )])
+            } else if let Some((_, is_warning)) = item_meta
+                .and_then(|m| m.note_lines.iter().find(|(i, _)| *i == line_idx))
+                .copied()
+            {
+                let color = if is_warning { Color::Yellow } else { MUTED };
+                Line::from(vec![Span::styled(line, Style::default().fg(color))])
+            } else if item_meta.is_some_and(|m| m.diff_ranges.iter().any(|r| r.contains(&line_idx)))
+            {
+                crate::markdown::highlight_diff_line(&line)
+            } else {
+                Line::raw(line)
+            };
+            out.extend(crate::markdown::wrap_styled_line(
+                styled_line,
+                max_width,
+                &[],
+            ));
+        }
+    }
+    out
+}
+
+/// Render an [`InfoKind`](crate::app::InfoKind) panel body at `width` so
+/// drawing and scroll-bound calculations stay 1:1.
+pub(crate) fn info_panel_lines(
+    kind: &crate::app::InfoKind,
+    lines: &[String],
+    width: u16,
+) -> Vec<Line<'static>> {
+    match kind {
+        crate::app::InfoKind::Plain => detail_rows(lines, width)
+            .map(|row| Line::from(row.to_owned()))
+            .collect(),
+        crate::app::InfoKind::Markdown => {
+            crate::markdown::render_markdown(&lines.join("\n"), width)
+        }
+        crate::app::InfoKind::Tools(meta) => tools_detail_lines(lines, meta, width),
+    }
+}
+
+/// Exact row count for an [`InfoKind`](crate::app::InfoKind) panel at `width`.
+pub(crate) fn info_panel_row_count(
+    kind: &crate::app::InfoKind,
+    lines: &[String],
+    width: u16,
+) -> usize {
+    match kind {
+        crate::app::InfoKind::Plain => detail_rows(lines, width).count(),
+        crate::app::InfoKind::Markdown | crate::app::InfoKind::Tools(_) => {
+            info_panel_lines(kind, lines, width).len()
+        }
+    }
+}
+
 pub(crate) struct Rows {
     pub transcript: Arc<Transcript>,
     pub width: u16,
-    pub ranges: Vec<Range<usize>>,
+    pub lines: Vec<Line<'static>>,
 }
 impl Rows {
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    pub fn line(&self, index: usize) -> Option<&Line<'static>> {
+        self.lines.get(index)
+    }
+
+    pub fn row_text(&self, index: usize) -> Option<String> {
+        let line = self.lines.get(index)?;
+        let mut out = String::new();
+        for span in &line.spans {
+            out.push_str(&span.content);
+        }
+        Some(out)
+    }
+
     // Run on the blocking pool on new materials/width, never for every frame.
     pub fn wrap(transcript: Arc<Transcript>, width: u16) -> Self {
-        let max = usize::from(width.max(1));
-        let mut ranges = Vec::new();
-        let mut start = 0;
-        let mut columns = 0;
-        for (offset, grapheme) in transcript.text.grapheme_indices(true) {
-            if grapheme == "\n" {
-                ranges.push(start..offset);
-                start = offset + 1;
-                columns = 0;
-                continue;
+        let lines = if transcript.segments.is_empty() {
+            if transcript.text.is_empty() {
+                Vec::new()
+            } else {
+                wrap_legacy_text(&transcript.text, width)
             }
-            let cells = grapheme.width();
-            if columns > 0 && columns + cells > max {
-                ranges.push(start..offset);
-                start = offset;
-                columns = 0;
-            }
-            columns += cells;
-        }
-        ranges.push(start..transcript.text.len());
+        } else {
+            wrap_segments(&transcript.segments, width)
+        };
         Self {
             transcript,
             width,
-            ranges,
+            lines,
         }
+    }
+}
+
+fn wrap_segments(segments: &[TranscriptSegment], width: u16) -> Vec<Line<'static>> {
+    use crate::render::{ACCENT, MUTED};
+    let max_width = usize::from(width.max(1));
+    let user_header_style = Style::default().fg(ACCENT).add_modifier(Modifier::BOLD);
+    let muted_style = Style::default().fg(MUTED);
+    let mut out = Vec::new();
+
+    for (idx, segment) in segments.iter().enumerate() {
+        let next_is_body = matches!(
+            segments.get(idx + 1),
+            Some(TranscriptSegment::PlainBody(_) | TranscriptSegment::MarkdownBody(_))
+        );
+        match segment {
+            TranscriptSegment::UserHeader => {
+                out.extend(crate::markdown::wrap_styled_line(
+                    Line::from(vec![Span::styled("❯ You", user_header_style)]),
+                    max_width,
+                    &[],
+                ));
+                if !next_is_body {
+                    push_blank_separator(&mut out);
+                }
+            }
+            TranscriptSegment::RoleHeader(header) => {
+                for line in header.split('\n') {
+                    out.extend(crate::markdown::wrap_styled_line(
+                        Line::from(vec![Span::styled(line.to_owned(), muted_style)]),
+                        max_width,
+                        &[],
+                    ));
+                }
+                if !next_is_body {
+                    push_blank_separator(&mut out);
+                }
+            }
+            TranscriptSegment::MutedNotice(notice) => {
+                for line in notice.split('\n') {
+                    out.extend(crate::markdown::wrap_styled_line(
+                        Line::from(vec![Span::styled(line.to_owned(), muted_style)]),
+                        max_width,
+                        &[],
+                    ));
+                }
+                push_blank_separator(&mut out);
+            }
+            TranscriptSegment::PlainBody(body) => {
+                wrap_plain_body(body, max_width, &mut out);
+                if !next_is_body {
+                    push_blank_separator(&mut out);
+                }
+            }
+            TranscriptSegment::MarkdownBody(body) => {
+                out.extend(crate::markdown::render_markdown(body, width));
+                if !next_is_body {
+                    push_blank_separator(&mut out);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn is_blank_line(line: &Line<'_>) -> bool {
+    line.spans.is_empty() || line.spans.iter().all(|s| s.content.is_empty())
+}
+
+fn push_blank_separator(lines: &mut Vec<Line<'static>>) {
+    if !lines.is_empty() && !lines.last().is_some_and(is_blank_line) {
+        lines.push(Line::default());
+    }
+}
+
+fn wrap_plain_body(body: &str, max_width: usize, out: &mut Vec<Line<'static>>) {
+    for raw_line in body.split('\n') {
+        wrap_grapheme_line(raw_line, max_width, Style::default(), out);
+    }
+}
+
+fn wrap_grapheme_line(line: &str, max_width: usize, style: Style, out: &mut Vec<Line<'static>>) {
+    if line.is_empty() {
+        out.push(Line::default());
+        return;
+    }
+    let mut start = 0;
+    let mut columns = 0;
+    for (offset, grapheme) in line.grapheme_indices(true) {
+        let cells = grapheme.width();
+        if columns > 0 && columns + cells > max_width {
+            out.push(Line::styled(line[start..offset].to_owned(), style));
+            start = offset;
+            columns = 0;
+        }
+        columns += cells;
+    }
+    out.push(Line::styled(line[start..].to_owned(), style));
+}
+
+fn wrap_legacy_text(text: &str, width: u16) -> Vec<Line<'static>> {
+    let max_width = usize::from(width.max(1));
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut columns = 0;
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        if grapheme == "\n" {
+            let slice = &text[start..offset];
+            if slice.is_empty() {
+                out.push(Line::default());
+            } else {
+                out.push(Line::styled(
+                    slice.to_owned(),
+                    legacy_conversation_style(slice),
+                ));
+            }
+            start = offset + 1;
+            columns = 0;
+            continue;
+        }
+        let cells = grapheme.width();
+        if columns > 0 && columns + cells > max_width {
+            let slice = &text[start..offset];
+            out.push(Line::styled(
+                slice.to_owned(),
+                legacy_conversation_style(slice),
+            ));
+            start = offset;
+            columns = 0;
+        }
+        columns += cells;
+    }
+    let tail = &text[start..];
+    if tail.is_empty() {
+        out.push(Line::default());
+    } else {
+        out.push(Line::styled(
+            tail.to_owned(),
+            legacy_conversation_style(tail),
+        ));
+    }
+    out
+}
+
+fn legacy_conversation_style(text: &str) -> Style {
+    use crate::render::{ACCENT, MUTED};
+    if text.starts_with("❯ ") {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else if text.starts_with("── ")
+        || text.starts_with("↑ ")
+        || text.starts_with("loading earlier conversation")
+        || text.starts_with("this history record cannot be read")
+        || text.starts_with("start of conversation")
+        || text.starts_with("● Context summary")
+        || text.starts_with("● Task notification")
+    {
+        Style::default().fg(MUTED)
+    } else {
+        Style::default()
     }
 }
 
@@ -1064,5 +1613,352 @@ mod tests {
             transcript.text
         );
         assert!(transcript.text.contains('…'), "{}", transcript.text);
+    }
+
+    #[test]
+    fn md05_segmented_isolation_parses_only_assistant_and_expanded_summary_bodies() {
+        use super::{Rows, TranscriptSegment};
+        use crate::render::{ACCENT, MUTED};
+        use causa::kernel::{
+            BlockMeta, ToolCallPayload, ToolOutput, ToolResultPayload, ToolResultStatus,
+        };
+        use ratatui::style::{Color, Modifier};
+        use std::sync::Arc;
+
+        let md_payload =
+            "# Heading\n\n**bold**\n\n```rust\nlet x = 1;\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |";
+        let sys = ContextBlock::text(
+            causa::runtime::new_block_id(),
+            Role::System,
+            "# System Heading\n**sys_bold**",
+        );
+        let user = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, md_payload),
+            BlockMeta::from_source("user"),
+        );
+        let call_id = causa::runtime::new_block_id();
+        let tool_call = ContextBlock::new(
+            call_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "write_file",
+                serde_json::json!({"path": "a.rs"}),
+            )),
+            Default::default(),
+        );
+        let tool_res = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "note": "# NotHeading **not_bold**"
+                })),
+            )),
+            Default::default(),
+        );
+        let assistant = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::Assistant, md_payload),
+            BlockMeta::from_source("assistant"),
+        );
+
+        let context =
+            Context::from_blocks(vec![sys, user, tool_call, tool_res, assistant]).unwrap();
+        let transcript = Arc::new(Transcript::from_materials(&context, &[]));
+
+        // Only the assistant block produced MarkdownBody; everything else is PlainBody/headers.
+        let md_count = transcript
+            .segments
+            .iter()
+            .filter(|s| matches!(s, TranscriptSegment::MarkdownBody(_)))
+            .count();
+        assert_eq!(md_count, 1, "{:?}", transcript.segments);
+        assert!(transcript.segments.contains(&TranscriptSegment::UserHeader));
+        assert!(
+            transcript
+                .segments
+                .contains(&TranscriptSegment::PlainBody(md_payload.to_owned()))
+        );
+
+        let rows = Rows::wrap(transcript, 80);
+        let all_row_text: Vec<String> =
+            (0..rows.len()).map(|i| rows.row_text(i).unwrap()).collect();
+
+        // User/System/Tool lines must retain literal `#`, `**`, and ```` ```rust ```` with default style.
+        let sys_line_idx = all_row_text
+            .iter()
+            .position(|l| l == "# System Heading")
+            .expect("system heading kept verbatim");
+        assert!(
+            rows.line(sys_line_idx)
+                .unwrap()
+                .spans
+                .iter()
+                .all(|s| s.style == ratatui::style::Style::default())
+        );
+
+        let user_heading_idx = all_row_text
+            .iter()
+            .position(|l| l == "# Heading")
+            .expect("user # Heading kept verbatim");
+        assert!(
+            rows.line(user_heading_idx)
+                .unwrap()
+                .spans
+                .iter()
+                .all(|s| s.style == ratatui::style::Style::default())
+        );
+        let user_bold_idx = all_row_text
+            .iter()
+            .position(|l| l == "**bold**")
+            .expect("user **bold** kept verbatim");
+        assert!(
+            rows.line(user_bold_idx)
+                .unwrap()
+                .spans
+                .iter()
+                .all(|s| s.style == ratatui::style::Style::default())
+        );
+        assert!(all_row_text.iter().any(|l| l == "```rust"));
+        assert!(all_row_text.iter().any(|l| l == "| A | B |"));
+
+        // User header uses ACCENT + BOLD; assistant header uses MUTED.
+        let user_hdr = rows
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content == "❯ You"))
+            .unwrap();
+        assert!(
+            user_hdr.spans.iter().any(
+                |s| s.style.fg == Some(ACCENT) && s.style.add_modifier.contains(Modifier::BOLD)
+            )
+        );
+        let asst_hdr = rows
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content == "● assistant"))
+            .unwrap();
+        assert!(asst_hdr.spans.iter().any(|s| s.style.fg == Some(MUTED)));
+
+        // Assistant Markdown heading/bold/code/table are rendered with rich styles.
+        let asst_heading = rows
+            .lines
+            .iter()
+            .find(|l| {
+                l.spans.iter().any(|s| {
+                    s.content.contains("Heading")
+                        && s.style.fg == Some(ACCENT)
+                        && s.style
+                            .add_modifier
+                            .contains(Modifier::BOLD | Modifier::UNDERLINED)
+                })
+            })
+            .expect("assistant heading styled");
+        assert!(!asst_heading.spans.iter().any(|s| s.content.contains('#')));
+
+        assert!(rows.lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == "bold" && s.style.add_modifier.contains(Modifier::BOLD))
+        }));
+        assert!(rows.lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == "let" && s.style.fg == Some(Color::Magenta))
+        }));
+        assert!(all_row_text.iter().any(|l| l.contains('┌')));
+    }
+
+    #[test]
+    fn md05_assistant_mixed_text_and_media_preserves_media_reference_cleanly() {
+        use super::{Rows, TranscriptSegment};
+        use causa::kernel::{BlockMeta, ContentPart, MediaRef, TextPayload};
+        use ratatui::style::Modifier;
+        use std::sync::Arc;
+
+        let assistant = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::Message {
+                role: Role::Assistant,
+                parts: vec![
+                    ContentPart::Text(TextPayload::new("# Chart\n\nSee image:")),
+                    ContentPart::Media(MediaRef::new("image/png", "img-1")),
+                    ContentPart::Text(TextPayload::new("And **summary**.")),
+                ],
+            },
+            BlockMeta::from_source("assistant"),
+        );
+        let context = Context::from_blocks(vec![assistant]).unwrap();
+        let transcript = Arc::new(Transcript::from_materials(&context, &[]));
+        assert!(transcript.text.contains("[media reference]"));
+        assert_eq!(
+            transcript.segments,
+            vec![
+                TranscriptSegment::RoleHeader("● assistant".into()),
+                TranscriptSegment::MarkdownBody("# Chart\n\nSee image:".into()),
+                TranscriptSegment::PlainBody("[media reference]".into()),
+                TranscriptSegment::MarkdownBody("And **summary**.".into()),
+            ]
+        );
+        let rows = Rows::wrap(transcript, 80);
+        let row_texts: Vec<String> = (0..rows.len()).map(|i| rows.row_text(i).unwrap()).collect();
+        assert!(row_texts.iter().any(|l| l == "Chart"));
+        assert!(row_texts.iter().any(|l| l == "See image:"));
+        assert!(row_texts.iter().any(|l| l == "[media reference]"));
+        assert!(rows.lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == "summary" && s.style.add_modifier.contains(Modifier::BOLD))
+        }));
+    }
+
+    #[test]
+    fn md05_expanded_history_prelude_skill_task_notification_and_summary_isolation() {
+        use super::{Rows, TranscriptSegment};
+        use causa::kernel::BlockMeta;
+        use ratatui::style::Modifier;
+        use std::sync::Arc;
+
+        let prelude = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::System, "# RawPrelude\n**not_bold_prelude**"),
+            BlockMeta::from_source(tars_core::prelude::PRELUDE_BASE_SOURCE),
+        );
+        let skill = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(
+                Role::User,
+                "<skill_content name=\"s1\" sha256=\"abc\"># RawSkill\n**not_bold_skill**</skill_content>",
+            ),
+            BlockMeta::from_source(tars_core::skills::SKILL_SOURCE),
+        );
+        let task_notif = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(
+                Role::User,
+                "<task-notification agent_name=\"a1\" status=\"completed\"># RawTask\n**not_bold_task**</task-notification>",
+            ),
+            BlockMeta::from_source(tars_core::events::TASK_NOTIFICATION_SOURCE),
+        );
+        // Real compaction summary blocks use Role::User + SUMMARY_SOURCE, yet are
+        // assistant-written Markdown briefs and must render as Markdown when expanded.
+        let summary_block = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, "## Expanded Brief\n\n- **Goal**: ship"),
+            BlockMeta::from_source(tars_core::compact::SUMMARY_SOURCE),
+        );
+
+        let transcript = Arc::new(Transcript::from_history_blocks(&[
+            prelude,
+            skill,
+            task_notif,
+            summary_block,
+        ]));
+        let md_segments: Vec<&str> = transcript
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                TranscriptSegment::MarkdownBody(b) => Some(b.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(md_segments, vec!["## Expanded Brief\n\n- **Goal**: ship"]);
+
+        let rows = Rows::wrap(transcript, 80);
+        let row_texts: Vec<String> = (0..rows.len()).map(|i| rows.row_text(i).unwrap()).collect();
+        assert!(row_texts.iter().any(|l| l == "# RawPrelude"));
+        assert!(row_texts.iter().any(|l| l == "**not_bold_prelude**"));
+        assert!(row_texts.iter().any(|l| l.contains("# RawSkill")));
+        assert!(row_texts.iter().any(|l| l.contains("# RawTask")));
+        assert!(row_texts.iter().any(|l| l == "Expanded Brief"));
+        assert!(rows.lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == "Goal" && s.style.add_modifier.contains(Modifier::BOLD))
+        }));
+    }
+
+    #[test]
+    fn md08_tool_result_diff_expansion_and_styling() {
+        use super::tools_detail_lines;
+        use crate::render::{ACCENT, MUTED};
+        use causa::kernel::{
+            BlockMeta, ToolCallPayload, ToolOutput, ToolResultPayload, ToolResultStatus,
+        };
+        use ratatui::style::{Color, Modifier};
+
+        let call_id = causa::runtime::new_block_id();
+        let call = ContextBlock::new(
+            call_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "edit_file",
+                serde_json::json!({ "path": "src/lib.rs" }),
+            )),
+            BlockMeta::default(),
+        );
+        let res = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "path": "src/lib.rs",
+                    "action": "updated",
+                    "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n-old_line\n+new_line\n context\n",
+                })),
+            )),
+            BlockMeta::default(),
+        );
+        let ctx = Context::from_blocks(vec![call, res]).unwrap();
+        let transcript = Transcript::from_materials(&ctx, &[]);
+        assert_eq!(transcript.tool_details.len(), 2);
+        let detail = &transcript.tool_details[1];
+        assert!(detail.contains("Diff (src/lib.rs):"), "{detail}");
+        assert!(detail.contains("+new_line"), "{detail}");
+        assert!(!detail.contains("\\n+new_line"), "{detail}");
+
+        let styled = tools_detail_lines(&transcript.tool_details, &transcript.tool_detail_meta, 80);
+        assert!(styled.iter().any(|l| {
+            l.spans.iter().any(|s| {
+                s.content.starts_with("Declaration ")
+                    && s.style.fg == Some(ACCENT)
+                    && s.style.add_modifier.contains(Modifier::BOLD)
+            })
+        }));
+        assert!(styled.iter().any(|l| {
+            l.spans.iter().any(|s| {
+                s.content.starts_with("Result for ")
+                    && s.style.fg == Some(ACCENT)
+                    && s.style.add_modifier.contains(Modifier::BOLD)
+            })
+        }));
+        assert!(styled.iter().any(|l| {
+            l.spans.iter().any(|s| {
+                s.content == "Diff (src/lib.rs):"
+                    && s.style.fg == Some(Color::Cyan)
+                    && s.style.add_modifier.contains(Modifier::BOLD)
+            })
+        }));
+        assert!(styled.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == "--- a/src/lib.rs" && s.style.fg == Some(MUTED))
+        }));
+        assert!(styled.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == "@@ -1,2 +1,2 @@" && s.style.fg == Some(Color::Cyan))
+        }));
+        assert!(styled.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == "-old_line" && s.style.fg == Some(Color::Red))
+        }));
+        assert!(styled.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == "+new_line" && s.style.fg == Some(Color::Green))
+        }));
     }
 }

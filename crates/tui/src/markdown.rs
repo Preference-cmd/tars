@@ -12,7 +12,7 @@ mod render;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use highlight::highlight_diff_line;
 #[cfg_attr(not(test), allow(unused_imports))]
-pub(crate) use highlight::{MAX_HIGHLIGHT_BYTES, highlight_code, highlight_diff_line};
-#[cfg_attr(not(test), allow(unused_imports))]
+pub(crate) use highlight::{MAX_HIGHLIGHT_BYTES, highlight_code};
 pub(crate) use render::{render_markdown, wrap_styled_line};

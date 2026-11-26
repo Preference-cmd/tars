@@ -174,8 +174,8 @@ impl Entry {
     pub fn committed_rows(&self) -> usize {
         self.history_rows
             .as_ref()
-            .map_or(0, |rows| rows.ranges.len())
-            + self.rows.as_ref().map_or(0, |rows| rows.ranges.len())
+            .map_or(0, crate::transcript::Rows::len)
+            + self.rows.as_ref().map_or(0, crate::transcript::Rows::len)
     }
 
     pub fn conversation_len(&self) -> usize {

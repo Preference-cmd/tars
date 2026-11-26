@@ -8,7 +8,7 @@
 //! rewrite made during the session supplies its records in memory; the view
 //! rebuilds from the new history run and replays known records synchronously.
 
-use crate::transcript::Transcript;
+use crate::transcript::{Rows, Transcript, TranscriptSegment};
 use causa::kernel::{BlockId, ContextBlock};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -308,7 +308,7 @@ impl HistoryView {
     }
 
     fn compose(&self) -> Transcript {
-        let mut text = if self.loading.is_some() {
+        let header = if self.loading.is_some() {
             "loading earlier conversation".to_owned()
         } else if self.finished {
             "start of conversation".to_owned()
@@ -319,7 +319,9 @@ impl HistoryView {
                 count => format!("↑ {count} earlier records"),
             }
         };
+        let mut text = header.clone();
         text.push_str("\n\n");
+        let mut segments = vec![TranscriptSegment::MutedNotice(header)];
         for piece in &self.pieces {
             match piece {
                 Piece::Rows(transcript) => {
@@ -330,21 +332,33 @@ impl HistoryView {
                     if !text.ends_with("\n\n") {
                         text.push('\n');
                     }
+                    segments.extend(transcript.segments.iter().cloned());
                 }
-                Piece::Divider { trigger, estimates } => match estimates {
-                    Some((before, after)) => text.push_str(&format!(
-                        "── Compacted ({}, {} → {}) ──\n\n",
-                        trigger.name(),
-                        estimate_label(*before),
-                        estimate_label(*after)
-                    )),
-                    None => text.push_str(&format!("── Compacted ({}) ──\n\n", trigger.name())),
-                },
-                Piece::Unreadable => text.push_str("this history record cannot be read\n\n"),
+                Piece::Divider { trigger, estimates } => {
+                    let divider = match estimates {
+                        Some((before, after)) => format!(
+                            "── Compacted ({}, {} → {}) ──",
+                            trigger.name(),
+                            estimate_label(*before),
+                            estimate_label(*after)
+                        ),
+                        None => format!("── Compacted ({}) ──", trigger.name()),
+                    };
+                    text.push_str(&divider);
+                    text.push_str("\n\n");
+                    segments.push(TranscriptSegment::MutedNotice(divider));
+                }
+                Piece::Unreadable => {
+                    let msg = "this history record cannot be read";
+                    text.push_str(msg);
+                    text.push_str("\n\n");
+                    segments.push(TranscriptSegment::MutedNotice(msg.to_owned()));
+                }
             }
         }
         Transcript {
             text,
+            segments,
             ..Transcript::default()
         }
     }
@@ -388,8 +402,8 @@ impl super::Entry {
             self.scroll_anchor = None;
             return;
         };
-        let history_len = self.history_rows.as_ref().map_or(0, |r| r.ranges.len());
-        let current_len = self.rows.as_ref().map_or(0, |r| r.ranges.len());
+        let history_len = self.history_rows.as_ref().map_or(0, Rows::len);
+        let current_len = self.rows.as_ref().map_or(0, Rows::len);
         let total = history_len + current_len;
         if total == 0 || scroll >= total {
             self.scroll_anchor = None;
@@ -398,13 +412,9 @@ impl super::Entry {
 
         let get_row = |idx: usize| -> Option<String> {
             if idx < history_len {
-                let rows = self.history_rows.as_ref()?;
-                let range = rows.ranges.get(idx)?.clone();
-                Some(rows.transcript.text[range].to_string())
+                self.history_rows.as_ref()?.row_text(idx)
             } else if idx < total {
-                let rows = self.rows.as_ref()?;
-                let range = rows.ranges.get(idx - history_len)?.clone();
-                Some(rows.transcript.text[range].to_string())
+                self.rows.as_ref()?.row_text(idx - history_len)
             } else {
                 None
             }
@@ -437,19 +447,15 @@ impl super::Entry {
         if self.scroll != Some(anchor.index) {
             return;
         }
-        let history_len = self.history_rows.as_ref().map_or(0, |r| r.ranges.len());
-        let current_len = self.rows.as_ref().map_or(0, |r| r.ranges.len());
+        let history_len = self.history_rows.as_ref().map_or(0, Rows::len);
+        let current_len = self.rows.as_ref().map_or(0, Rows::len);
         let total = history_len + current_len;
 
-        let get_row = |idx: usize| -> Option<&str> {
+        let get_row = |idx: usize| -> Option<String> {
             if idx < history_len {
-                let rows = self.history_rows.as_ref()?;
-                let range = rows.ranges.get(idx)?.clone();
-                Some(&rows.transcript.text[range])
+                self.history_rows.as_ref()?.row_text(idx)
             } else if idx < total {
-                let rows = self.rows.as_ref()?;
-                let range = rows.ranges.get(idx - history_len)?.clone();
-                Some(&rows.transcript.text[range])
+                self.rows.as_ref()?.row_text(idx - history_len)
             } else {
                 None
             }
@@ -464,11 +470,9 @@ impl super::Entry {
             if pos + anchor.rows.len() > total {
                 continue;
             }
-            let matches = anchor
-                .rows
-                .iter()
-                .enumerate()
-                .all(|(offset, expected)| get_row(pos + offset) == Some(expected.as_str()));
+            let matches = anchor.rows.iter().enumerate().all(|(offset, expected)| {
+                get_row(pos + offset).as_deref() == Some(expected.as_str())
+            });
             if matches {
                 let dist = pos.abs_diff(anchor.index);
                 if dist < best_dist {

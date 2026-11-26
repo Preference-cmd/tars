@@ -12,7 +12,7 @@ mod state;
 
 #[allow(unused_imports)]
 pub(crate) use clock::Clock;
-pub(crate) use commands::{COMMANDS, Panel, matching_commands};
+pub(crate) use commands::{COMMANDS, InfoKind, Panel, matching_commands};
 pub(crate) use startup::Startup;
 pub(crate) use state::{App, Confirmation, Entry, WorkspaceTrustLine, WorkspaceTrustLineKind};
 

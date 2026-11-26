@@ -4,7 +4,6 @@
 
 mod app;
 mod input;
-#[cfg_attr(not(test), allow(dead_code))] // Wired into Transcript/Rows and detail panels in Phase 2.
 mod markdown;
 mod options;
 mod preview;

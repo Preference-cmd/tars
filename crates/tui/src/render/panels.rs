@@ -224,6 +224,7 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
         Panel::Sessions { query, selected } => (query, *selected, false),
         Panel::Info {
             title,
+            kind,
             lines,
             scroll,
         } => {
@@ -233,10 +234,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
                     .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
                 regions[0],
             );
-            let lines: Vec<_> = crate::transcript::detail_rows(lines, regions[1].width)
+            let lines: Vec<_> = crate::transcript::info_panel_lines(kind, lines, regions[1].width)
+                .into_iter()
                 .skip(*scroll)
                 .take(usize::from(regions[1].height))
-                .map(Line::from)
                 .collect();
             frame.render_widget(Paragraph::new(lines), regions[1]);
             return;

@@ -93,7 +93,13 @@ pub(super) enum Message {
     Materials(Key, Result<MaterialView, String>),
     AgentMaterials(Key, String, Result<Arc<Transcript>, AgentMaterialsError>),
     HistoryLoaded(Key, String, Result<HistoryRecord, String>),
-    ToolArtifactsLoaded(Key, Option<MaterialVersion>, Vec<String>, usize),
+    ToolArtifactsLoaded(
+        Key,
+        Option<MaterialVersion>,
+        Vec<String>,
+        Vec<crate::transcript::ToolDetailMeta>,
+        usize,
+    ),
     Compacted(Key, Result<CompactedReload, String>),
     Wrapped(Key, Rows, Option<Rows>),
     Retried(Key, Result<SaveStatus, ApplicationError>),
@@ -540,7 +546,7 @@ impl App {
                     }
                 }
             }
-            Message::ToolArtifactsLoaded(key, version, lines, reads) => {
+            Message::ToolArtifactsLoaded(key, version, lines, meta, reads) => {
                 #[cfg(not(test))]
                 let _ = reads;
                 if let Some(entry) = self.entry_mut(&key) {
@@ -555,12 +561,21 @@ impl App {
                             .is_some_and(|selected| selected.key == key)
                         && let Some(super::commands::Panel::Info {
                             title,
+                            kind,
                             lines: panel_lines,
-                            ..
+                            scroll,
                         }) = &mut self.panel
                         && title == "Recorded tool materials · viewing never executes"
                     {
                         *panel_lines = lines;
+                        *kind = super::commands::InfoKind::Tools(meta);
+                        let max = crate::transcript::info_panel_row_count(
+                            kind,
+                            panel_lines,
+                            self.view_width,
+                        )
+                        .saturating_sub(1);
+                        *scroll = (*scroll).min(max);
                     }
                 }
             }
@@ -611,10 +626,7 @@ impl App {
                     if accepted {
                         entry.rows = Some(rows);
                     }
-                    let previous = entry
-                        .history_rows
-                        .as_ref()
-                        .map_or(0, |rows| rows.ranges.len());
+                    let previous = entry.history_rows.as_ref().map_or(0, Rows::len);
                     match history_rows {
                         Some(history_rows) => {
                             let current = entry.history.display();
@@ -622,7 +634,7 @@ impl App {
                                 Arc::ptr_eq(&history_rows.transcript, display)
                             }) && history_rows.width == width
                             {
-                                let added = history_rows.ranges.len().saturating_sub(previous);
+                                let added = history_rows.len().saturating_sub(previous);
                                 entry.history_rows = Some(history_rows);
                                 if added > 0
                                     && let Some(anchor) = entry.history_anchor.take()
@@ -671,6 +683,7 @@ impl App {
                     title,
                     lines: panel_lines,
                     scroll,
+                    ..
                 }) = &mut self.panel
                     && title == super::commands::DOCTOR_PANEL_TITLE
                 {
@@ -764,6 +777,7 @@ impl App {
                         title,
                         lines: panel_lines,
                         scroll,
+                        ..
                     }) = &mut self.panel
                         && title == super::commands::DOCTOR_PANEL_TITLE
                     {

@@ -328,6 +328,7 @@ impl App {
         }
         self.panel = Some(super::commands::Panel::Info {
             title: super::commands::DOCTOR_PANEL_TITLE.into(),
+            kind: super::commands::InfoKind::Plain,
             lines: vec!["Running diagnostics...".into()],
             scroll: 0,
         });

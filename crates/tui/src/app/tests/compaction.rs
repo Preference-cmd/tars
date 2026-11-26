@@ -919,8 +919,7 @@ async fn automatic_compaction_during_work_preserves_scroll_position_on_live_rebu
     // Get the exact line of text the user is viewing at target_row.
     let viewed_text_before = {
         let rows = app.entries[0].rows.as_ref().unwrap();
-        let range = rows.ranges[target_row].clone();
-        rows.transcript.text[range].to_string()
+        rows.row_text(target_row).unwrap()
     };
     assert!(!viewed_text_before.trim().is_empty());
 
@@ -941,15 +940,13 @@ async fn automatic_compaction_during_work_preserves_scroll_position_on_live_rebu
     let new_history_len = app.entries[0]
         .history_rows
         .as_ref()
-        .map_or(0, |r| r.ranges.len());
+        .map_or(0, crate::transcript::Rows::len);
     let viewed_text_after = if new_scroll < new_history_len {
         let rows = app.entries[0].history_rows.as_ref().unwrap();
-        let range = rows.ranges[new_scroll].clone();
-        rows.transcript.text[range].to_string()
+        rows.row_text(new_scroll).unwrap()
     } else {
         let rows = app.entries[0].rows.as_ref().unwrap();
-        let range = rows.ranges[new_scroll - new_history_len].clone();
-        rows.transcript.text[range].to_string()
+        rows.row_text(new_scroll - new_history_len).unwrap()
     };
 
     assert_eq!(viewed_text_after, viewed_text_before);
@@ -990,13 +987,13 @@ async fn material_view_with_same_index_does_not_drop_in_flight_history_anchor() 
         let history_len = app.entries[0]
             .history_rows
             .as_ref()
-            .map_or(0, |r| r.ranges.len());
+            .map_or(0, crate::transcript::Rows::len);
         if 5 < history_len {
             let hr = app.entries[0].history_rows.as_ref().unwrap();
-            hr.transcript.text[hr.ranges[5].clone()].to_string()
+            hr.row_text(5).unwrap()
         } else {
             let r = app.entries[0].rows.as_ref().unwrap();
-            r.transcript.text[r.ranges[5 - history_len].clone()].to_string()
+            r.row_text(5 - history_len).unwrap()
         }
     };
 
@@ -1031,13 +1028,13 @@ async fn material_view_with_same_index_does_not_drop_in_flight_history_anchor() 
     let history_len_after = app.entries[0]
         .history_rows
         .as_ref()
-        .map_or(0, |r| r.ranges.len());
+        .map_or(0, crate::transcript::Rows::len);
     let viewed_text_after = if scroll_after < history_len_after {
         let hr = app.entries[0].history_rows.as_ref().unwrap();
-        hr.transcript.text[hr.ranges[scroll_after].clone()].to_string()
+        hr.row_text(scroll_after).unwrap()
     } else {
         let r = app.entries[0].rows.as_ref().unwrap();
-        r.transcript.text[r.ranges[scroll_after - history_len_after].clone()].to_string()
+        r.row_text(scroll_after - history_len_after).unwrap()
     };
     assert_eq!(viewed_text_after, viewed_text_before);
 }
@@ -1258,9 +1255,11 @@ async fn test_mc07_tui_micro_compact_zero_reads_on_open_tools_on_demand_and_scro
 
     let anchor_row = {
         let rows = app1.entries[0].rows.as_ref().unwrap();
-        rows.ranges
-            .iter()
-            .position(|r| rows.transcript.text[r.clone()].contains("MC07_ANCHOR_ROW"))
+        (0..rows.len())
+            .position(|i| {
+                rows.row_text(i)
+                    .is_some_and(|t| t.contains("MC07_ANCHOR_ROW"))
+            })
             .expect("anchor row in initial transcript")
     };
     let pre_transcript = app1.entries[0].transcript.clone();
@@ -1349,7 +1348,9 @@ async fn test_mc07_tui_micro_compact_zero_reads_on_open_tools_on_demand_and_scro
         "MC07_ANCHOR_ROW index must shift when earlier tool results collapse/rewrap"
     );
     assert!(
-        new_rows.transcript.text[new_rows.ranges[scrolled_row].clone()].contains("MC07_ANCHOR_ROW"),
+        new_rows
+            .row_text(scrolled_row)
+            .is_some_and(|t| t.contains("MC07_ANCHOR_ROW")),
         "scroll anchor must remain pinned to MC07_ANCHOR_ROW (old={anchor_row}, new={scrolled_row})"
     );
 

@@ -73,10 +73,15 @@ impl App {
             {
                 entry.preview.layout(self.view_width);
             }
-            if let Some(super::Panel::Info { lines, scroll, .. }) = &mut self.panel {
+            if let Some(super::Panel::Info {
+                kind,
+                lines,
+                scroll,
+                ..
+            }) = &mut self.panel
+            {
                 *scroll = (*scroll).min(
-                    crate::transcript::detail_rows(lines, self.view_width)
-                        .count()
+                    crate::transcript::info_panel_row_count(kind, lines, self.view_width)
                         .saturating_sub(1),
                 );
             }

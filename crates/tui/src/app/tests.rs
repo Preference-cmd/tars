@@ -23,6 +23,7 @@ mod command;
 mod compaction;
 mod ergonomics;
 mod history;
+mod markdown;
 mod multi_agent;
 mod onboarding_doctor_init;
 mod prompt_cache;

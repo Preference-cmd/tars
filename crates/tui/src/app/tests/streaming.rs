@@ -345,15 +345,12 @@ fn incremental_wrap_matches_full_grapheme_layout_across_split_unicode() {
             }),
             6,
         );
-        let visible = full.ranges.len()
+        let visible = full.len()
             - usize::from(
-                full.ranges.len() > 1 && full.ranges.last().is_some_and(std::ops::Range::is_empty),
+                full.len() > 1 && full.row_text(full.len() - 1).is_some_and(|s| s.is_empty()),
             );
-        for (index, range) in full.ranges.iter().take(visible).enumerate() {
-            assert_eq!(
-                preview.line(index + 1),
-                &full.transcript.text[range.clone()]
-            );
+        for index in 0..visible {
+            assert_eq!(preview.line(index + 1), full.row_text(index).unwrap());
         }
         assert_eq!(preview.line_count(), visible + 1);
     }
@@ -578,7 +575,7 @@ fn warning_headers_share_scroll_geometry_and_pages_never_skip_body_rows() {
     app.poll_progress();
     app.entries[0].preview.lost = 2;
     app.viewport_height = 12;
-    let history = app.entries[0].rows.as_ref().unwrap().ranges.len();
+    let history = app.entries[0].rows.as_ref().unwrap().len();
     let auto = app.entries[0].viewport(12);
     assert!(auto.sticky);
     assert_eq!(auto.reserved, 2);

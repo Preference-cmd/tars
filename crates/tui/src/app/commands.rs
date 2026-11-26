@@ -3,6 +3,14 @@ use crate::input;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use tars_core::application::ClosePolicy;
 
+/// Presentation mode for [`Panel::Info`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InfoKind {
+    Plain,
+    Markdown,
+    Tools(Vec<crate::transcript::ToolDetailMeta>),
+}
+
 pub(crate) enum Panel {
     Commands {
         query: String,
@@ -14,6 +22,7 @@ pub(crate) enum Panel {
     },
     Info {
         title: String,
+        kind: InfoKind,
         lines: Vec<String>,
         scroll: usize,
     },
@@ -245,7 +254,9 @@ impl App {
             "doctor" => self.run_doctor(),
             "init" => self.run_init(),
             "help" => self.panel = Some(Panel::Info {
-                title: "Keyboard shortcuts".into(), scroll: 0,
+                title: "Keyboard shortcuts".into(),
+                kind: InfoKind::Plain,
+                scroll: 0,
                 lines: ["Enter / Ctrl-S   Send input", "Ctrl-J / Alt-Enter   New line",
                     "↑ / ↓   Prompt history (at top/bottom line)",
                     "Tab   Complete /command or @workspace/path",
@@ -358,7 +369,12 @@ impl App {
                     }
                 }
                 lines.push(self.notice.clone());
-                self.panel = Some(Panel::Info { title: "Session details".into(), lines, scroll: 0 });
+                self.panel = Some(Panel::Info {
+                    title: "Session details".into(),
+                    kind: InfoKind::Plain,
+                    lines,
+                    scroll: 0,
+                });
             }
             "open" => self.open(),
             "cancel" => self.cancel(),
@@ -455,6 +471,7 @@ impl App {
 
             self.panel = Some(Panel::Info {
                 title: "Command permission rules".into(),
+                kind: InfoKind::Plain,
                 lines,
                 scroll: 0,
             });
@@ -533,6 +550,7 @@ impl App {
                 let usage = session.context_usage();
                 self.panel = Some(Panel::Info {
                     title: "Automatic compaction".into(),
+                    kind: InfoKind::Plain,
                     lines: auto_compact_lines(&settings, usage),
                     scroll: 0,
                 });
@@ -591,6 +609,7 @@ impl App {
             .collect();
         self.panel = Some(Panel::Info {
             title: "Context summary · full text".into(),
+            kind: InfoKind::Markdown,
             lines,
             scroll: 0,
         });
@@ -601,6 +620,7 @@ impl App {
         let Some(entry) = self.entries.get(self.selected) else {
             self.panel = Some(Panel::Info {
                 title: TOOLS_PANEL_TITLE.into(),
+                kind: InfoKind::Tools(vec![crate::transcript::ToolDetailMeta::default()]),
                 lines: vec![
                     "No committed tool materials. Returned pending results may not be committed."
                         .into(),
@@ -612,38 +632,52 @@ impl App {
         let has_spilled = entry.transcript.tool_artifacts.iter().any(Option::is_some);
         if !has_spilled {
             let mut lines = entry.transcript.tool_details.clone();
+            let mut meta = entry.transcript.tool_detail_meta.clone();
             if lines.is_empty() {
                 lines.push(
                     "No committed tool materials. Returned pending results may not be committed."
                         .into(),
                 );
+                meta.push(crate::transcript::ToolDetailMeta::default());
             }
             self.panel = Some(Panel::Info {
                 title: TOOLS_PANEL_TITLE.into(),
+                kind: InfoKind::Tools(meta),
                 lines,
                 scroll: 0,
             });
             return;
         }
         let Some(session) = entry.session.clone() else {
-            let lines = entry
+            let mut lines = Vec::with_capacity(entry.transcript.tool_details.len());
+            let mut meta = Vec::with_capacity(entry.transcript.tool_details.len());
+            for ((detail, detail_meta), artifact) in entry
                 .transcript
                 .tool_details
                 .iter()
+                .zip(entry.transcript.tool_detail_meta.iter())
                 .zip(entry.transcript.tool_artifacts.iter())
-                .map(|(detail, artifact)| match artifact {
-                    Some(spilled) => format!(
-                        "Result for {} · {:?} · {}\nFull artifact cannot be read (session is not open); showing model-facing preview:\n{}",
-                        spilled.call_block_id.0,
-                        spilled.status,
-                        crate::transcript::display(&spilled.artifact_id),
-                        spilled.preview_json
-                    ),
-                    None => detail.clone(),
-                })
-                .collect();
+            {
+                match artifact {
+                    Some(spilled) => {
+                        let (text, item_meta) = build_spilled_tool_item(
+                            spilled,
+                            "Full artifact cannot be read (session is not open); showing model-facing preview:",
+                            true,
+                            None,
+                        );
+                        lines.push(text);
+                        meta.push(item_meta);
+                    }
+                    None => {
+                        lines.push(detail.clone());
+                        meta.push(detail_meta.clone());
+                    }
+                }
+            }
             self.panel = Some(Panel::Info {
                 title: TOOLS_PANEL_TITLE.into(),
+                kind: InfoKind::Tools(meta),
                 lines,
                 scroll: 0,
             });
@@ -651,26 +685,35 @@ impl App {
         };
 
         let mut initial_lines = Vec::with_capacity(entry.transcript.tool_details.len());
-        for (detail, artifact) in entry
+        let mut initial_meta = Vec::with_capacity(entry.transcript.tool_details.len());
+        for ((detail, detail_meta), artifact) in entry
             .transcript
             .tool_details
             .iter()
+            .zip(entry.transcript.tool_detail_meta.iter())
             .zip(entry.transcript.tool_artifacts.iter())
         {
             match artifact {
-                Some(spilled) => initial_lines.push(format!(
-                    "Result for {} · {:?} · {}\nLoading full output from {}...\n{}",
-                    spilled.call_block_id.0,
-                    spilled.status,
-                    crate::transcript::display(&spilled.artifact_id),
-                    crate::transcript::display(&spilled.artifact_id),
-                    spilled.preview_json
-                )),
-                None => initial_lines.push(detail.clone()),
+                Some(spilled) => {
+                    let artifact_id = crate::transcript::display_single_line(&spilled.artifact_id);
+                    let (text, item_meta) = build_spilled_tool_item(
+                        spilled,
+                        &format!("Loading full output from {artifact_id}..."),
+                        false,
+                        None,
+                    );
+                    initial_lines.push(text);
+                    initial_meta.push(item_meta);
+                }
+                None => {
+                    initial_lines.push(detail.clone());
+                    initial_meta.push(detail_meta.clone());
+                }
             }
         }
         self.panel = Some(Panel::Info {
             title: TOOLS_PANEL_TITLE.into(),
+            kind: InfoKind::Tools(initial_meta),
             lines: initial_lines,
             scroll: 0,
         });
@@ -681,52 +724,78 @@ impl App {
         self.spawn_job(Some(key.clone()), super::jobs::JobKind::ToolArtifacts, async move {
             let result = super::jobs::blocking(move || {
                 let mut lines = Vec::with_capacity(transcript.tool_details.len());
+                let mut meta = Vec::with_capacity(transcript.tool_details.len());
                 let mut reads = 0usize;
-                for (detail, artifact) in transcript
+                for ((detail, detail_meta), artifact) in transcript
                     .tool_details
                     .iter()
+                    .zip(transcript.tool_detail_meta.iter())
                     .zip(transcript.tool_artifacts.iter())
                 {
                     match artifact {
                         Some(spilled) => {
                             reads += 1;
+                            let artifact_id =
+                                crate::transcript::display_single_line(&spilled.artifact_id);
                             let model_note = if spilled.artifact_id.starts_with("artifact:") {
                                 "Model sees spilled preview only"
                             } else {
                                 "Model sees cleared preview only"
                             };
                             match session.read_artifact(&spilled.artifact_id) {
-                                Ok(full_text) => lines.push(format!(
-                                    "Result for {} · {:?} · {}\n{model_note} · full output from {} ({} bytes):\n{}\n\nModel-facing preview:\n{}",
-                                    spilled.call_block_id.0,
-                                    spilled.status,
-                                    crate::transcript::display(&spilled.artifact_id),
-                                    crate::transcript::display(&spilled.artifact_id),
-                                    spilled.size_bytes,
-                                    crate::transcript::display(&full_text),
-                                    spilled.preview_json,
-                                )),
-                                Err(error) => lines.push(format!(
-                                    "Result for {} · {:?} · {}\nFull artifact cannot be read ({}); showing model-facing preview:\n{}",
-                                    spilled.call_block_id.0,
-                                    spilled.status,
-                                    crate::transcript::display(&spilled.artifact_id),
-                                    crate::transcript::display(&error.to_string()),
-                                    spilled.preview_json,
-                                )),
+                                Ok(full_text) => {
+                                    let (text, item_meta) = build_spilled_tool_item(
+                                        spilled,
+                                        &format!(
+                                            "{model_note} · full output from {artifact_id} ({} bytes):",
+                                            spilled.size_bytes
+                                        ),
+                                        false,
+                                        Some(&full_text),
+                                    );
+                                    lines.push(text);
+                                    meta.push(item_meta);
+                                }
+                                Err(error) => {
+                                    let err = crate::transcript::display_single_line(&error.to_string());
+                                    let (text, item_meta) = build_spilled_tool_item(
+                                        spilled,
+                                        &format!(
+                                            "Full artifact cannot be read ({err}); showing model-facing preview:"
+                                        ),
+                                        true,
+                                        None,
+                                    );
+                                    lines.push(text);
+                                    meta.push(item_meta);
+                                }
                             }
                         }
-                        None => lines.push(detail.clone()),
+                        None => {
+                            lines.push(detail.clone());
+                            meta.push(detail_meta.clone());
+                        }
                     }
                 }
-                (lines, reads)
+                (lines, meta, reads)
             })
             .await;
-            let (lines, reads) = match result {
-                Ok(pair) => pair,
-                Err(error) => (vec![format!("Failed to load tool artifacts: {error}")], 0),
+            let (lines, meta, reads) = match result {
+                Ok(tuple) => tuple,
+                Err(error) => {
+                    let mut builder = crate::transcript::ToolDetailBuilder::new();
+                    builder.push_note(
+                        &format!(
+                            "Failed to load tool artifacts: {}",
+                            crate::transcript::display_single_line(&error.to_string())
+                        ),
+                        true,
+                    );
+                    let (text, item_meta) = builder.finish();
+                    (vec![text], vec![item_meta], 0)
+                }
             };
-            super::jobs::Message::ToolArtifactsLoaded(key, version, lines, reads)
+            super::jobs::Message::ToolArtifactsLoaded(key, version, lines, meta, reads)
         });
     }
     pub(super) fn panel_key(&mut self, key: KeyEvent) {
@@ -833,9 +902,13 @@ impl App {
             }
             Panel::Commands { query, selected } => (query, selected, true),
             Panel::Sessions { query, selected } => (query, selected, false),
-            Panel::Info { scroll, lines, .. } => {
-                let max = crate::transcript::detail_rows(lines, self.view_width)
-                    .count()
+            Panel::Info {
+                kind,
+                scroll,
+                lines,
+                ..
+            } => {
+                let max = crate::transcript::info_panel_row_count(kind, lines, self.view_width)
                     .saturating_sub(1);
                 match key.code {
                     KeyCode::Down => *scroll = scroll.saturating_add(1).min(max),
@@ -891,6 +964,35 @@ impl App {
         }
         self.panel = Some(panel);
     }
+}
+
+fn build_spilled_tool_item(
+    spilled: &crate::transcript::SpilledToolDetail,
+    status_note: &str,
+    note_is_warning: bool,
+    full_text: Option<&str>,
+) -> (String, crate::transcript::ToolDetailMeta) {
+    let artifact_id = crate::transcript::display_single_line(&spilled.artifact_id);
+    let mut builder = crate::transcript::ToolDetailBuilder::new();
+    builder.push_header(&format!(
+        "Result for {} · {:?} · {artifact_id}",
+        spilled.call_block_id.0, spilled.status
+    ));
+    builder.push_note(status_note, note_is_warning);
+    if let Some(full_text) = full_text {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(full_text)
+            && crate::transcript::has_non_empty_diff(&value)
+        {
+            let formatted = crate::transcript::format_tool_output_json(&value);
+            builder.push_formatted_json(&formatted);
+        } else {
+            builder.push_plain(&crate::transcript::display(full_text));
+        }
+        builder.push_blank();
+        builder.push_note("Model-facing preview:", false);
+    }
+    builder.push_formatted_json(&spilled.preview);
+    builder.finish()
 }
 
 fn format_rule_entry(rule: &tars_core::permission::CommandRule) -> String {

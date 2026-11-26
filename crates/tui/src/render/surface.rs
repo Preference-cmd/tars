@@ -9,8 +9,8 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-pub(super) const ACCENT: Color = Color::Rgb(215, 147, 114);
-pub(super) const MUTED: Color = Color::DarkGray;
+pub(crate) const ACCENT: Color = Color::Rgb(215, 147, 114);
+pub(crate) const MUTED: Color = Color::DarkGray;
 
 pub(crate) fn transcript_width(width: u16) -> u16 {
     width.saturating_sub(4).max(1)
@@ -202,8 +202,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         let history = entry
             .history_rows
             .as_ref()
-            .map_or(0, |rows| rows.ranges.len());
-        let current = entry.rows.as_ref().map_or(0, |rows| rows.ranges.len());
+            .map_or(0, crate::transcript::Rows::len);
+        let current = entry.rows.as_ref().map_or(0, crate::transcript::Rows::len);
         let committed = history + current;
         let height = usize::from(regions[1].height);
         let viewport = entry.viewport(height);
@@ -264,13 +264,21 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                 break;
             }
             if index < history {
-                let rows = entry.history_rows.as_ref().unwrap();
-                let text = &rows.transcript.text[rows.ranges[index].clone()];
-                lines.push(Line::styled(text, conversation_style(text)));
+                if let Some(line) = entry
+                    .history_rows
+                    .as_ref()
+                    .and_then(|rows| rows.line(index))
+                {
+                    lines.push(line.clone());
+                }
             } else if index < committed {
-                let rows = entry.rows.as_ref().unwrap();
-                let text = &rows.transcript.text[rows.ranges[index - history].clone()];
-                lines.push(Line::styled(text, conversation_style(text)));
+                if let Some(line) = entry
+                    .rows
+                    .as_ref()
+                    .and_then(|rows| rows.line(index - history))
+                {
+                    lines.push(line.clone());
+                }
             } else if show_live_root && index >= committed + entry.preview.line_count() {
                 if let Some(text) = tool_lines.get(index - committed - entry.preview.line_count()) {
                     lines.push(Line::styled(text.clone(), Style::default().fg(MUTED)));
@@ -372,23 +380,6 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                 ..body
             },
         );
-    }
-}
-/// One row of committed conversation, styled by what the row is.
-fn conversation_style(text: &str) -> Style {
-    if text.starts_with("❯ ") {
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-    } else if text.starts_with("── ")
-        || text.starts_with("↑ ")
-        || text.starts_with("loading earlier conversation")
-        || text.starts_with("this history record cannot be read")
-        || text.starts_with("start of conversation")
-        || text.starts_with("● Context summary")
-        || text.starts_with("● Task notification")
-    {
-        Style::default().fg(MUTED)
-    } else {
-        Style::default()
     }
 }
 

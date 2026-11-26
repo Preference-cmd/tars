@@ -58,6 +58,7 @@ fn complete_multiline_tool_details_scroll_unicode_to_the_last_row_and_resize() {
     app.event(Event::Resize(100, 30));
     app.panel = Some(crate::app::Panel::Info {
         title: "Recorded tool materials".into(),
+        kind: crate::app::InfoKind::Tools(vec![Default::default()]),
         lines: vec![format!(
             "FIRST_TOOL_LINE\n{}\nFINAL_TOOL_LINE",
             "中文 👩‍💻 e\u{301} ".repeat(500)
