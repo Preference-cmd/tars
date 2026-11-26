@@ -62,7 +62,7 @@ The examples below assume `tars` is on your `PATH` (use `./target/release/tars` 
 
 ### Interactive TUI
 
-Launch `tars` directly in an interactive terminal (zero-config default store under `~/.tars/data` or `$TARS_HOME/data`, with a guided first-run setup panel when unconfigured; press `Esc` to skip or use `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/mode`, `/compact`, `/help`):
+Launch `tars` directly in an interactive terminal (zero-config default store under `~/.tars/data` or `$TARS_HOME/data`, with a guided first-run setup panel when unconfigured; press `Esc` to skip or use `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/queue`, `/rename`, `/fork`, `/edit`, `/mode`, `/compact`, `/help`):
 
 ```sh
 tars
@@ -90,8 +90,11 @@ tars session run "$SESSION_ID" --store ./tars-data \
   --input 'Continue this session' --json
 tars session list --store ./tars-data --json
 tars session show "$SESSION_ID" --store ./tars-data --json
+tars session rename "$SESSION_ID" --store ./tars-data --title 'Design review' --json
+tars session fork "$SESSION_ID" --store ./tars-data --title 'Alternative branch' --json
 tars session compact "$SESSION_ID" --store ./tars-data
 tars session history "$SESSION_ID" --store ./tars-data --last 3
+tars session delete "$SESSION_ID" --store ./tars-data --json
 ```
 
 ### Optional `rg` setup for `search_text`
