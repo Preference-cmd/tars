@@ -1,6 +1,6 @@
 # TARS
 
-TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI subcommands (`run`, `session`, `tools`). TARS is in early-stage development (pre-`v0.1.0` release candidate; build from source via Cargo until `v0.1.0` is published).
+TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI subcommands (`run`, `session`, `tools`). TARS is in early-stage development (`v0.1.0` prebuilt macOS/Linux binaries available via GitHub Releases, or build from source via Cargo).
 
 ## Key features
 
@@ -14,9 +14,41 @@ TARS is an open-source, local-first AI agent written in Rust and built on [`caus
 
 ## Quick start
 
-**Prerequisites:** Rust `1.96.0` (pinned by `rust-toolchain.toml`).
+### Install prebuilt binary (macOS & Linux)
 
-Until the first tagged release (`v0.1.0`) is published, build the unified `tars` binary from source via Cargo (`.github/workflows/release.yml`, `[profile.dist]`, and `install.sh` are in place for upcoming tagged releases):
+Install the `v0.1.0` release binary with the POSIX installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Preference-cmd/tars/v0.1.0/install.sh | sh
+```
+
+To pin a version or install into a custom directory (pass flags after `sh -s --`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Preference-cmd/tars/v0.1.0/install.sh | sh -s -- --version v0.1.0 --install-dir ~/.local/bin
+```
+
+`install.sh` installs by default into `~/.local/bin` (ensure it is on your `PATH`), performs idempotent atomic upgrades, enforces mandatory `SHA256SUMS.txt` verification and archive path-traversal checks, and never modifies shell rc files (`~/.zshrc`, `~/.bashrc`, `~/.profile`).
+
+Supported prebuilt targets:
+
+- **macOS:** `aarch64-apple-darwin`, `x86_64-apple-darwin` (note: macOS binaries are not yet Apple Developer ID signed or notarized)
+- **Linux:** `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (`glibc >= 2.35`, built on `ubuntu:22.04`)
+
+Manual archive verification (checksum & SLSA build provenance):
+
+```sh
+# macOS
+shasum -a 256 -c SHA256SUMS.txt --ignore-missing
+# Linux
+sha256sum -c SHA256SUMS.txt --ignore-missing
+# GitHub CLI SLSA provenance attestation
+gh attestation verify tars-v0.1.0-<target>.tar.gz --repo Preference-cmd/tars
+```
+
+### Build from source
+
+**Prerequisites:** Rust `1.96.0` (pinned by `rust-toolchain.toml`).
 
 ```sh
 cargo build --workspace --locked --release
@@ -26,38 +58,40 @@ This produces `./target/release/tars` (`target\release\tars.exe` on Windows).
 
 Set a provider API key in your shell (`OPENAI_API_KEY` for OpenAI protocols or `ANTHROPIC_API_KEY` for Anthropic).
 
+The examples below assume `tars` is on your `PATH` (use `./target/release/tars` when running a local source build).
+
 ### Interactive TUI
 
 Launch `tars` directly in an interactive terminal (zero-config default store under `~/.tars/data` or `$TARS_HOME/data`, with a guided first-run setup panel when unconfigured; press `Esc` to skip or use `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/mode`, `/compact`, `/help`):
 
 ```sh
-./target/release/tars
+tars
 # Or with an explicit config file, or isolated --no-config --store:
-./target/release/tars --config /path/to/config.toml
-./target/release/tars --no-config --store ./tars-data
+tars --config /path/to/config.toml
+tars --no-config --store ./tars-data
 # Inspect all interactive options, slash commands, and CLI subcommands:
-./target/release/tars -h
+tars -h
 ```
 
 ### CLI one-shot & persistent sessions
 
 ```sh
 # One-shot execution with explicit material saving
-./target/release/tars run --provider openai-responses --model "$MODEL_ID" \
+tars run --provider openai-responses --model "$MODEL_ID" \
   --input 'Explain this design' --save materials.json
-printf 'Continue analyzing the material' | ./target/release/tars run \
+printf 'Continue analyzing the material' | tars run \
   --provider openai-responses --model "$MODEL_ID" --stdin \
   --load materials.json --save materials.json --json
 
 # Persistent sessions (creation itself does not call the model)
-./target/release/tars session create --store ./tars-data \
+tars session create --store ./tars-data \
   --provider openai-chat --model "$MODEL_ID" --json
-./target/release/tars session run "$SESSION_ID" --store ./tars-data \
+tars session run "$SESSION_ID" --store ./tars-data \
   --input 'Continue this session' --json
-./target/release/tars session list --store ./tars-data --json
-./target/release/tars session show "$SESSION_ID" --store ./tars-data --json
-./target/release/tars session compact "$SESSION_ID" --store ./tars-data
-./target/release/tars session history "$SESSION_ID" --store ./tars-data --last 3
+tars session list --store ./tars-data --json
+tars session show "$SESSION_ID" --store ./tars-data --json
+tars session compact "$SESSION_ID" --store ./tars-data
+tars session history "$SESSION_ID" --store ./tars-data --last 3
 ```
 
 ### Optional `rg` setup for `search_text`
@@ -65,8 +99,8 @@ printf 'Continue analyzing the material' | ./target/release/tars run \
 `search_text` uses external `rg` (ripgrep), which is not bundled and is never downloaded silently. By default (`[external_tools] rg = "auto"`), TARS checks a SHA-256-verified managed copy first, falls back to a compatible `rg >= 14` on `PATH`, and otherwise prompts before downloading the pinned `15.2.0` release (macOS `aarch64`/`x86_64`, Linux `x86_64`/`aarch64`). Inspect status or install manually:
 
 ```sh
-./target/release/tars tools status
-./target/release/tars tools install rg
+tars tools status
+tars tools install rg
 ```
 
 ## Platform support and current status
@@ -79,7 +113,7 @@ printf 'Continue analyzing the material' | ./target/release/tars run \
 
 Current gaps and roadmap items not yet implemented:
 
-- Published prebuilt release archives (the release workflow and `install.sh` are in place for upcoming `v0.1.0` tags; current installation before the first tagged release remains source build via Cargo) and package-manager installers (Homebrew tap, Cargo-binstall) / Apple notarization
+- Package-manager installers (Homebrew tap, Cargo-binstall), Windows prebuilt archives, and Apple Developer ID signing / notarization
 - Windows workspace tools and sandbox backend for `run_command` and `search_text` (and restoring Windows CI)
 - Desktop GUI
 - Live verification against third-party model and MCP endpoints (current tests cover local HTTP and MCP fixtures)
@@ -99,7 +133,7 @@ Dependencies flow strictly one way (`tars-cli` → `tars-tui` → `tars-core` �
 
 ## Documentation
 
-- [Changelog](CHANGELOG.md) — unreleased changes and known limitations
+- [Changelog](CHANGELOG.md) — release history and known limitations
 - [Current implementation](docs/README.md) — code layout, module boundaries, and local verification checks
 - [Shared configuration](docs/configuration.md) — TOML schema, presets, compaction, prelude/skills, external tools, and MCP
 - [Workspace tools](docs/workspace-tools.md) — file safety, permission modes, command rules, platform sandboxes (Seatbelt/Bubblewrap), `run_code`, and record migration

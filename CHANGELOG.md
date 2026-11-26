@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-26
+
 ### Added
 
 - **Unified `tars` binary & TUI UX**: Single `tars` entry point combining interactive terminal mode (first-run setup wizard, `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/mode`, `/compact`, `/summary`, `/tools`, `/status`, `/help`) with scriptable CLI subcommands (`run`, `session`, `tools`).
@@ -19,9 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP client support**: Standalone `mcp.json` configuration with `${VAR}` expansion, stdio/HTTP transports, `McpToolAnnotations` classification, and per-tool approval policy.
 - **Release pipeline & POSIX installer**: Added `[profile.dist]` in `Cargo.toml`, `.github/workflows/release.yml` (4-target native builds with `ubuntu:22.04` container glibc 2.35 baseline on Linux, whitelist archive checks, `SHA256SUMS.txt`, SLSA build provenance, and `workflow_dispatch` dry-run), and `install.sh` with mandatory SHA-256 verification and atomic replacement.
 
+### Fixed
+
+- **External `rg` version probe on Linux**: Added a bounded retry for transient `ETXTBSY` (`ExecutableFileBusy`) errors when probing freshly written or installed `rg` binaries.
+
 ### Known limitations
 
-- **Prebuilt releases**: Formal `v0.1.0` is not yet published; current `v0.1.0-rc.*` pre-release tags are for release-pipeline and installer verification, while building from source via Cargo remains the default until `v0.1.0` is published.
-- **Windows support**: Windows workspace tools, sandbox backend (`run_command` / `search_text`), and Windows CI are not yet implemented or verified.
+- **Linux glibc baseline**: Prebuilt Linux release archives are built in `ubuntu:22.04` containers and require `glibc >= 2.35` (for example, Ubuntu 22.04+ or Debian 12+); older distributions should build from source.
+- **Windows support**: Windows workspace tools, sandbox backend (`run_command` / `search_text`), prebuilt archives, and Windows CI are not yet implemented or verified.
 - **Desktop GUI**: Not yet built.
 - **Distribution & signing**: No Homebrew tap, Cargo-binstall metadata, or Apple Developer ID signing / notarization yet.
