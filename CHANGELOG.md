@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TUI rich-text GFM Markdown rendering (`pulldown-cmark` 0.13, `default-features = false`)**: Committed `Role::Assistant` messages (in the active transcript, expanded compaction history, and `/agents` read-only child views) render headings (`H1`–`H6`), nested inline styles (`bold`, `italic`, `strikethrough`, `code`), deduplicated links & image fallbacks, ordered/unordered/task lists with hanging-indent wrapping, nested blockquotes, adaptive horizontal rules, dynamic-width boxed tables (degrading cleanly to stacked cards below 20 columns), and framed code blocks using terminal-neutral styling, while isolating user prompts, tool summaries, system blocks, and raw XML as plain text and preserving `Rows` blocking-pool caching, `ScrollAnchor` stability, `O(1)` tail streaming `Preview`, and double-boundary untrusted text escaping.
+- **Pure-Rust single-pass lexical syntax highlighter**: Zero-unsafe `O(n)` code-block and diff highlighter supporting 11 language groups (`rust`/`rs`, `typescript`/`ts`/`tsx`/`javascript`/`js`/`jsx`, `python`/`py`, `go`, `sh`/`bash`/`zsh`/`shell`, `json`/`jsonc`, `toml`, `yaml`/`yml`, `sql`, `c`/`cpp`/`c++`/`h`/`hpp`, and `diff`/`patch`), falling back linearly to plain text for unknown languages or blocks over `64 KiB`.
+- **`/tools` & `/summary` detail panel readability**: `/tools` (F6) colors record headers and structurally expands and highlights unified diffs embedded in `write_file`/`edit_file` outputs (including lazily loaded spilled artifacts, immune to string-prefix spoofing) while staying strictly read-only; `/summary` renders the context summary chain as GFM Markdown.
+
 ## [0.1.0] - 2026-11-26
 
 ### Added
