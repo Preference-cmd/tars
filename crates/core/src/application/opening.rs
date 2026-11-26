@@ -389,6 +389,15 @@ pub(super) async fn initialize(
     state.workspace_agents_snapshot = workspace_agents_snapshot;
     state.trusted_workspace_agents = trusted_workspace_agents;
     state.saved = saved;
+    let (def_auto, def_thresh) = {
+        let def_ref = state.definition.as_ref().expect("published definition");
+        (def_ref.auto_compact, def_ref.compact_threshold)
+    };
+    state.saved_effective_mode = Some(current_mode);
+    state.saved_compaction_settings = Some((
+        auto_compact.unwrap_or(def_auto),
+        compact_threshold.unwrap_or(def_thresh),
+    ));
     if state.closing.is_some() {
         state
             .handle

@@ -185,8 +185,54 @@ impl SavedSessionRecord {
     }
 }
 
-/// Longest session title, in characters.
+/// Longest auto-derived session title, in characters.
 const MAX_TITLE_CHARS: usize = 80;
+
+/// Maximum length of an explicit or derived session title, in Unicode scalar values.
+pub const MAX_SESSION_TITLE_CHARS: usize = 160;
+
+/// Validate and normalize an optional session title.
+///
+/// `None` explicitly clears the title. `Some(raw)` trims leading and trailing
+/// whitespace and rejects empty strings, control characters (`char::is_control`),
+/// or titles longer than [`MAX_SESSION_TITLE_CHARS`] Unicode scalar values.
+pub fn validate_session_title(title: Option<&str>) -> Result<Option<String>, StoreError> {
+    let Some(raw) = title else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(StoreError::InvalidTitle(
+            "session title must not be empty or blank".into(),
+        ));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(StoreError::InvalidTitle(
+            "session title must not contain control characters".into(),
+        ));
+    }
+    let char_count = trimmed.chars().count();
+    if char_count > MAX_SESSION_TITLE_CHARS {
+        return Err(StoreError::InvalidTitle(format!(
+            "session title exceeds {MAX_SESSION_TITLE_CHARS} characters ({char_count})"
+        )));
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
+/// Derive `<source_title> (fork)` safely bounded to [`MAX_SESSION_TITLE_CHARS`].
+pub(super) fn derive_fork_title(source_title: Option<&str>) -> Option<String> {
+    const SUFFIX: &str = " (fork)";
+    let source = source_title?;
+    let sanitized: String = source.trim().chars().filter(|c| !c.is_control()).collect();
+    let sanitized = sanitized.trim();
+    if sanitized.is_empty() {
+        return None;
+    }
+    let max_prefix_chars = MAX_SESSION_TITLE_CHARS.saturating_sub(SUFFIX.chars().count());
+    let prefix: String = sanitized.chars().take(max_prefix_chars).collect();
+    Some(format!("{prefix}{SUFFIX}"))
+}
 
 /// Title and last-activity time of the last stored record of a session.
 ///

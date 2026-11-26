@@ -18,6 +18,9 @@ Usage: tars session create --store <directory> --provider <protocol> --model <id
        tars session compact <conversation-id> --store <directory> [--json]
        tars session history <conversation-id> --store <directory> [--agent <id-or-name>] [--last N] [--json]
        tars session repair <conversation-id> --store <directory> [--dry-run | --apply --expected-revision N] [--json]
+       tars session rename <conversation-id> --store <directory> (--title <text> | --clear) [--json]
+       tars session delete <conversation-id> --store <directory> [--json]
+       tars session fork <conversation-id> --store <directory> [--title <text>] [--json]
        tars session export-materials --record <file> --output <new-file>
        tars session import-legacy --record <file> --store <directory> [--json]
 
@@ -91,6 +94,13 @@ History options:
   --agent             Expand history for one agent by UUID agent_id or unique name
   --last N            Print only the newest N blocks
 
+Rename options:
+  --title             New session title (1–160 characters, no control characters)
+  --clear             Clear the saved session title (conflicts with --title)
+
+Fork options:
+  --title             Optional title for the forked session (default: \"<source> (fork)\")
+
 Common options:
   --store             Local store directory (or configured store)
   --config            Shared TOML configuration file
@@ -119,6 +129,9 @@ record. A busy session is refused, and materials with unpaired declarations
 must be repaired first.
 History prints the expanded full conversation with block status; --last N
 prints only the newest N blocks; --json prints one block per line.
+Rename updates or clears the saved title of an unlocked session.
+Delete permanently removes an unlocked session and its owned rows while preserving workspace trust.
+Fork creates a physically isolated copy of a session's entry materials, history, and artifacts at revision 1.
 Material export and --load import contain only the current Context, never the
 history records.
 

@@ -177,7 +177,11 @@ async fn drive(host: &Arc<HostInner>, entry: &Arc<Entry>) {
         }
         let close = {
             let state = entry.lock();
-            state.closing.filter(|_| state.close_in_flight)
+            if state.forking > 0 {
+                None
+            } else {
+                state.closing.filter(|_| state.close_in_flight)
+            }
         };
         if let Some(policy) = close {
             #[cfg(test)]

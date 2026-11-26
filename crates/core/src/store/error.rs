@@ -112,6 +112,12 @@ pub enum StoreError {
     /// A session with this identity already exists in the store.
     #[error("session already exists: {0}")]
     AlreadyExists(String),
+    /// The requested session does not exist in the store.
+    #[error("session not found: {0}")]
+    NotFound(String),
+    /// A session title failed validation.
+    #[error("invalid session title: {0}")]
+    InvalidTitle(String),
     /// An I/O stage failed; replacement-stage and later failures need confirmation.
     #[error("commit failed at {stage:?}: {source}")]
     CommitIo {

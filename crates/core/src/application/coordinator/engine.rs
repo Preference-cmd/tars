@@ -707,6 +707,7 @@ impl SessionCoordinator {
     ) -> bool {
         if entry_state.lifecycle != Lifecycle::Open
             || entry_state.closing.is_some()
+            || entry_state.forking > 0
             || matches!(entry_state.save, SaveStatus::SaveBlocked { .. })
             || entry_state.fault.is_some()
             || state.save_blocked.is_some()
@@ -2535,6 +2536,11 @@ impl SessionCoordinator {
         if let SaveStatus::SaveBlocked { error, .. } = &state.save {
             return Err(ApplicationError::SaveBlocked(error.clone()).into());
         }
+        if state.forking > 0 {
+            return Err(
+                ApplicationError::ForkNotReady("session is currently being forked".into()).into(),
+            );
+        }
         Ok(())
     }
 
@@ -3968,6 +3974,7 @@ impl SessionCoordinator {
             let mut entry_state = entry.lock();
             if entry_state.lifecycle != Lifecycle::Open
                 || entry_state.closing.is_some()
+                || entry_state.forking > 0
                 || matches!(entry_state.save, SaveStatus::SaveBlocked { .. })
                 || entry_state.fault.is_some()
             {
@@ -4381,6 +4388,7 @@ fn passes_agent_guards(
             || entry_state.pending.is_some()
             || entry_state.save_requested
             || entry_state.compacting
+            || entry_state.forking > 0
         {
             return false;
         }

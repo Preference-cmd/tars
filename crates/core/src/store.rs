@@ -22,6 +22,7 @@ pub(crate) use multi_agent::{
     OperationTerminalUpdate, OutboxCommitRequest, OutboxCommitResult, ReadAgentPage,
     ReopenReconcileSummary, StoredAgentRow, StoredOperationRow,
 };
+pub use record::{MAX_SESSION_TITLE_CHARS, validate_session_title};
 pub(crate) use record::{PreparedCommit, RecordMetadata, SavedSessionRecord, WireSessionUsage};
 pub(crate) use sqlite::{
     CommitResolution, MAX_RECORD_BYTES, PendingWriterKind, SessionStore, Writer,

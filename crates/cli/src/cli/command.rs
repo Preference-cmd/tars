@@ -6,7 +6,7 @@ const HELP: &str = "TARS — agent application
 
 Usage: tars [interactive options]
        tars run --provider <protocol> --model <id> (--input <text> | --stdin) [options]
-       tars session <create | run | list | show | compact | history | repair | export-materials | import-legacy> [options]
+       tars session <create | run | list | show | compact | history | repair | rename | delete | fork | export-materials | import-legacy> [options]
        tars tools <status | install> [options]
 
 Interactive mode (default when stdin and stdout are terminals):
@@ -135,6 +135,9 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                             | "compact"
                             | "history"
                             | "repair"
+                            | "rename"
+                            | "delete"
+                            | "fork"
                             | "export-materials"
                             | "import-legacy"
                     )

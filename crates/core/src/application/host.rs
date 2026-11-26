@@ -584,6 +584,164 @@ impl SessionHost {
         )
         .await
     }
+    /// Rename (set or clear) a session's title (`WF01`).
+    ///
+    /// If `id` is currently open in this host, delegates to [`ManagedSession::rename`]
+    /// and awaits settlement if idle or saving. Otherwise updates the store record
+    /// atomically under its OS advisory lock.
+    pub async fn rename(
+        &self,
+        id: ConversationId,
+        title: Option<String>,
+    ) -> Result<Option<String>, ApplicationError> {
+        let validated = crate::store::validate_session_title(title.as_deref())
+            .map_err(map_workflow_store_error)?;
+        let open_entry = {
+            let entries = self
+                .inner
+                .entries
+                .lock()
+                .expect("directory has no callbacks");
+            entries.get(&id).cloned()
+        };
+        if let Some(entry) = open_entry {
+            let managed = ManagedSession {
+                entry: entry.clone(),
+            };
+            let updated = managed.rename(validated)?;
+            let should_wait = {
+                let state = entry.lock();
+                state.persistent
+                    && state.active.is_none()
+                    && !state.compacting
+                    && (state.save_requested || state.save_in_flight)
+            };
+            if should_wait {
+                managed.wait_saved().await?;
+            }
+            return Ok(updated);
+        }
+        let store = self
+            .inner
+            .store
+            .clone()
+            .ok_or(ApplicationError::StoreUnavailable)?;
+        let raw_id = id.as_str().to_owned();
+        let record = super::saving::io_semaphore(&self.inner.io, move || {
+            store
+                .rename_session(&raw_id, validated.as_deref())
+                .map_err(map_workflow_store_error)
+        })
+        .await?;
+        Ok(record.title)
+    }
+
+    /// Permanently delete an inactive saved session (`WF02`).
+    ///
+    /// Refuses with [`ApplicationError::SessionActive`] if `id` is currently open
+    /// in this host, or [`ApplicationError::SessionLocked`] if another process holds
+    /// its OS advisory lock. Preserves `workspace_trust`.
+    pub async fn delete(&self, id: ConversationId) -> Result<(), ApplicationError> {
+        {
+            let entries = self
+                .inner
+                .entries
+                .lock()
+                .expect("directory has no callbacks");
+            if entries.contains_key(&id) {
+                return Err(ApplicationError::SessionActive(id.as_str().to_owned()));
+            }
+        }
+        let store = self
+            .inner
+            .store
+            .clone()
+            .ok_or(ApplicationError::StoreUnavailable)?;
+        let raw_id = id.as_str().to_owned();
+        super::saving::io_semaphore(&self.inner.io, move || {
+            store
+                .delete_session(&raw_id)
+                .map_err(map_workflow_store_error)
+        })
+        .await
+    }
+
+    /// Fork a cleanly idle, saved session into a physically isolated new session (`WF03`).
+    ///
+    /// When `source_id` is open in this host, refuses if it is busy, compacting,
+    /// transient, save-blocked, has unsaved changes/renames, active child operations,
+    /// or unpaired declarations needing repair. When `source_id` is not open in this
+    /// host, fails closed with [`ApplicationError::SessionLocked`] if another process
+    /// holds its OS advisory lock.
+    pub async fn fork(
+        &self,
+        source_id: ConversationId,
+        title: Option<String>,
+    ) -> Result<ConversationId, ApplicationError> {
+        let validated_title = crate::store::validate_session_title(title.as_deref())
+            .map_err(map_workflow_store_error)?;
+        let store = self
+            .inner
+            .store
+            .clone()
+            .ok_or(ApplicationError::StoreUnavailable)?;
+        let open_entry = {
+            let entries = self
+                .inner
+                .entries
+                .lock()
+                .expect("directory has no callbacks");
+            entries.get(&source_id).cloned()
+        };
+        let (_writer_guard, _fork_guard, require_source_unlocked) = if let Some(entry) = open_entry
+        {
+            let writer_guard = entry.writer_gate.clone().try_lock_owned().map_err(|_| {
+                ApplicationError::ForkNotReady("session writer is currently busy".into())
+            })?;
+            let (context, history, artifacts) = {
+                let mut state = entry.lock();
+                verify_fork_ready(&entry, &mut state, &source_id)?;
+                let owner = state.owner.as_mut().ok_or(ApplicationError::InstanceGone)?;
+                let history = owner.history_entries();
+                let artifacts = owner.compaction().and_then(|c| c.history());
+                let context = owner.with_context(|ctx| ctx.clone())?;
+                (context, history, artifacts)
+            };
+            super::repair::admission_check(&context, &history, artifacts.as_deref())
+                .map_err(|err| ApplicationError::ForkNotReady(err.to_string()))?;
+            let fork_guard = {
+                let mut state = entry.lock();
+                verify_fork_ready(&entry, &mut state, &source_id)?;
+                state.forking = state
+                    .forking
+                    .checked_add(1)
+                    .ok_or_else(|| ApplicationError::Faulted("fork counter overflow".into()))?;
+                ForkGuard {
+                    entry: entry.clone(),
+                }
+            };
+            (Some(writer_guard), Some(fork_guard), false)
+        } else {
+            (None, None, true)
+        };
+
+        let new_id = ConversationId::from(uuid::Uuid::now_v7().to_string());
+        let src = source_id.as_str().to_owned();
+        let dst = new_id.as_str().to_owned();
+        super::saving::io_semaphore(&self.inner.io, move || {
+            store
+                .fork_session_with_lock_check(
+                    &src,
+                    &dst,
+                    validated_title.as_deref(),
+                    require_source_unlocked,
+                )
+                .map_err(map_workflow_store_error)
+        })
+        .await?;
+        Ok(new_id)
+    }
+
     /// Locate an opening or active instance without returning mutable access.
     pub fn lookup(&self, id: &ConversationId) -> Option<SessionStatus> {
         self.inner
@@ -760,6 +918,103 @@ impl Drop for SessionHost {
                 coord.begin_session_shutdown();
             }
         }
+    }
+}
+
+struct ForkGuard {
+    entry: Arc<Entry>,
+}
+
+impl Drop for ForkGuard {
+    fn drop(&mut self) {
+        let mut state = self.entry.lock();
+        state.forking = state.forking.saturating_sub(1);
+        drop(state);
+        self.entry.notify();
+    }
+}
+
+fn verify_fork_ready(
+    entry: &Entry,
+    state: &mut super::entry::State,
+    source_id: &ConversationId,
+) -> Result<(), ApplicationError> {
+    if state.lifecycle != Lifecycle::Open {
+        return Err(match state.lifecycle {
+            Lifecycle::Closing => ApplicationError::Closing,
+            Lifecycle::Closed => ApplicationError::Closed,
+            Lifecycle::Faulted => state
+                .fault
+                .clone()
+                .or_else(|| state.error.clone())
+                .unwrap_or_else(|| ApplicationError::Faulted("session is faulted".into())),
+            _ => ApplicationError::ForkNotReady(format!(
+                "session {} is not open",
+                source_id.as_str()
+            )),
+        });
+    }
+    if state.closing.is_some() {
+        return Err(ApplicationError::Closing);
+    }
+    if !state.persistent {
+        return Err(ApplicationError::ForkNotReady(
+            "transient sessions cannot be forked".into(),
+        ));
+    }
+    if let SaveStatus::SaveBlocked { error, .. } = &state.save {
+        return Err(ApplicationError::SaveBlocked(error.clone()));
+    }
+    if let Some(coord) = entry.coordinator.get()
+        && let Some(err) = coord.save_blocked_error()
+    {
+        return Err(ApplicationError::SaveBlocked(err));
+    }
+    if state.active.is_some() {
+        return Err(ApplicationError::ForkNotReady(
+            "session has active work in progress".into(),
+        ));
+    }
+    if state.compacting {
+        return Err(ApplicationError::ForkNotReady(
+            "session is currently compacting".into(),
+        ));
+    }
+    if state.forking > 0 {
+        return Err(ApplicationError::ForkNotReady(
+            "session is currently being forked".into(),
+        ));
+    }
+    if state.pending.is_some()
+        || state.save_in_flight
+        || state.save_requested
+        || !matches!(state.save, SaveStatus::Saved { .. })
+    {
+        return Err(ApplicationError::ForkNotReady(
+            "session has unsaved changes or a save in flight".into(),
+        ));
+    }
+    if state.has_uncommitted_metadata_or_settings() {
+        return Err(ApplicationError::ForkNotReady(
+            "session has uncommitted title or settings changes".into(),
+        ));
+    }
+    if let Some(coord) = entry.coordinator.get()
+        && (coord.has_pending_child_saves() || coord.has_active_execution_with_entry(state))
+    {
+        return Err(ApplicationError::ForkNotReady(
+            "session has active child operations or pending child saves".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn map_workflow_store_error(err: crate::store::StoreError) -> ApplicationError {
+    match err {
+        crate::store::StoreError::NotFound(_) => ApplicationError::NotFound,
+        crate::store::StoreError::Occupied(id) => ApplicationError::SessionLocked(id),
+        crate::store::StoreError::InvalidTitle(msg) => ApplicationError::InvalidTitle(msg),
+        other => ApplicationError::Store(Arc::new(other)),
     }
 }
 

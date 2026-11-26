@@ -47,6 +47,33 @@ pub(super) async fn finish(host: &Arc<HostInner>, entry: &Arc<Entry>, policy: Cl
         if state.closing != Some(policy) {
             return false;
         }
+        if state.forking > 0 {
+            return false;
+        }
+        if policy == ClosePolicy::Save
+            && state.persistent
+            && state.fault.is_none()
+            && child_save_blocked.is_none()
+            && state.pending.is_none()
+            && state.active.is_none()
+            && !state.compacting
+            && !state.save_in_flight
+            && matches!(state.save, SaveStatus::Saved { .. })
+            && state.has_uncommitted_metadata_or_settings()
+        {
+            match saving::prepare(entry, &mut state) {
+                Ok(()) => {
+                    entry.notify();
+                    return false;
+                }
+                Err(error) => {
+                    state.error = Some(error);
+                    state.close_in_flight = false;
+                    entry.changed();
+                    return false;
+                }
+            }
+        }
         if policy == ClosePolicy::Save && state.persistent {
             let error = if state.fault.is_some() {
                 state.fault.clone()

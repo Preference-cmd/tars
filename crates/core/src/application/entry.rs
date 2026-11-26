@@ -55,6 +55,8 @@ pub(crate) struct State {
     pub last_root_work: Option<WorkRef>,
     /// A manual compaction is between its material snapshot and its edit.
     pub compacting: bool,
+    /// Number of active in-flight `SessionHost::fork` operations reading this open session.
+    pub forking: usize,
     pub pending: Option<Arc<PreparedCommit>>,
     pub pending_consumed: ConsumedInboxEvents,
     pub save_requested: bool,
@@ -70,6 +72,12 @@ pub(crate) struct State {
     pub trusted_workspace_agents: Vec<AgentPreset>,
     /// Title and last-activity time of the last stored record.
     pub saved: crate::store::RecordMetadata,
+    /// Explicit live title override set by `ManagedSession::rename` (`None` = preserve auto-derive).
+    pub desired_title: Option<Option<String>>,
+    /// Effective permission mode of the last stored (or reopened-downgraded) record.
+    pub saved_effective_mode: Option<crate::policy::PermissionMode>,
+    /// Effective compaction settings `(auto_compact, compact_threshold)` of the last stored record.
+    pub saved_compaction_settings: Option<(bool, u8)>,
     /// Non-fatal prelude diagnostics recorded during creation or last submit.
     pub prelude_diagnostics: Vec<crate::prelude::PreludeDiagnostic>,
 }
@@ -126,6 +134,7 @@ impl Entry {
                 root_work_seq: 0,
                 last_root_work: None,
                 compacting: false,
+                forking: 0,
                 pending: None,
                 pending_consumed: ConsumedInboxEvents::default(),
                 save_requested: false,
@@ -140,6 +149,9 @@ impl Entry {
                 workspace_agents_snapshot: None,
                 trusted_workspace_agents: Vec::new(),
                 saved,
+                desired_title: None,
+                saved_effective_mode: None,
+                saved_compaction_settings: None,
                 prelude_diagnostics,
             }),
             changed: Notify::new(),
@@ -225,6 +237,11 @@ impl Entry {
         if state.compacting {
             return Err(ApplicationError::Compacting);
         }
+        if state.forking > 0 {
+            return Err(ApplicationError::ForkNotReady(
+                "session is currently being forked".into(),
+            ));
+        }
         if let Some(work) = &state.active {
             // The application barrier deliberately survives low Finished.
             let handle = state.handle.as_ref().expect("active owner");
@@ -234,5 +251,33 @@ impl Entry {
             };
         }
         Ok(())
+    }
+}
+
+impl State {
+    /// Whether live title, permission mode, or compaction settings differ from the last
+    /// saved/opened snapshot and still need a commit.
+    pub fn has_uncommitted_metadata_or_settings(&self) -> bool {
+        if self
+            .desired_title
+            .as_ref()
+            .is_some_and(|desired| desired != &self.saved.title)
+        {
+            return true;
+        }
+        if let (Some(permissions), Some(saved_mode)) =
+            (&self.permissions, self.saved_effective_mode)
+            && permissions.get().0 != saved_mode
+        {
+            return true;
+        }
+        if let (Some(runtime), Some(saved_comp)) = (
+            self.owner.as_ref().and_then(|owner| owner.compaction()),
+            self.saved_compaction_settings,
+        ) && runtime.settings() != saved_comp
+        {
+            return true;
+        }
+        false
     }
 }

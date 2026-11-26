@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CommitStage, PreparedCommit, SavedSessionRecord, StoreError,
-    record::{RECORD_FORMAT, WireSessionUsage, canonical_uuid},
+    record::{
+        RECORD_FORMAT, WireSessionUsage, canonical_uuid, derive_fork_title, validate_session_title,
+    },
     schema::{self, ImmediateTx},
 };
 use crate::compact::HistoryRecordEntry;
@@ -222,6 +224,267 @@ impl SessionStore {
         }
         result.sort_by(|a, b| a.conversation_id.cmp(&b.conversation_id));
         Ok(result)
+    }
+
+    /// Atomically set or clear the title of an unlocked saved session (`WF01`).
+    ///
+    /// Fails closed with [`StoreError::Occupied`] when another writer holds the
+    /// session's OS advisory lock, or [`StoreError::NotFound`] when the store
+    /// database or session row does not exist (never creating `tars.db`).
+    pub(crate) fn rename_session(
+        &self,
+        id: &str,
+        title: Option<&str>,
+    ) -> Result<SavedSessionRecord, StoreError> {
+        canonical_uuid(id)?;
+        let validated_title = validate_session_title(title)?;
+        if !self.db_path.exists() {
+            return Err(StoreError::NotFound(id.to_owned()));
+        }
+        let lock_file_path = lock_path(&self.locks_dir, id);
+        let lock_existed = lock_file_path.exists();
+        fs::create_dir_all(&self.locks_dir)?;
+        let lock = open_lock(&self.locks_dir, id)?;
+        acquire_lock(&lock, id)?;
+        let mut lock_guard =
+            AdvisoryLockGuard::new(lock, (!lock_existed).then_some(lock_file_path));
+
+        let conn = schema::open_read_write(&self.db_path)?;
+        let tx = ImmediateTx::begin(&conn)?;
+        let Some((existing, entry_agent_id)) = read_session_record_with_entry_agent(&conn, id)?
+        else {
+            return Err(StoreError::NotFound(id.to_owned()));
+        };
+        let new_revision = existing
+            .revision
+            .checked_add(1)
+            .ok_or(StoreError::InvalidRevision)?;
+        let revision_i64 = i64::try_from(new_revision)
+            .map_err(|_| StoreError::InvalidDatabase("revision overflows i64".into()))?;
+        let last_commit_id = uuid::Uuid::now_v7().to_string();
+        let now_ms = crate::time::current_time_ms().max(existing.updated_at_ms);
+        let updated_at_ms_i64 = i64::try_from(now_ms)
+            .map_err(|_| StoreError::InvalidDatabase("updated_at_ms overflows i64".into()))?;
+
+        conn.execute(
+            "UPDATE sessions
+             SET title = ?1, revision = ?2, last_commit_id = ?3, updated_at_ms = ?4
+             WHERE session_id = ?5",
+            params![
+                validated_title,
+                revision_i64,
+                last_commit_id,
+                updated_at_ms_i64,
+                id,
+            ],
+        )?;
+        conn.execute(
+            "UPDATE agents
+             SET updated_at_ms = ?1
+             WHERE session_id = ?2 AND agent_id = ?3",
+            params![updated_at_ms_i64, id, entry_agent_id],
+        )?;
+        tx.commit()?;
+        lock_guard.set_cleanup_path(None);
+
+        read_session_record(&conn, id)?.ok_or_else(|| {
+            StoreError::InvalidDatabase(format!("renamed session {id} missing after commit"))
+        })
+    }
+
+    /// Permanently delete an unlocked saved session and its owned rows (`WF02`).
+    ///
+    /// Unbinds `operations.parent_operation_id` before deleting the `sessions` row
+    /// so nested child operations (`depth >= 2`) cascade cleanly without foreign-key
+    /// failures. Never touches `workspace_trust`. Best-effort removes `<locks_dir>/<id>.lock`
+    /// after releasing the OS lock.
+    pub(crate) fn delete_session(&self, id: &str) -> Result<(), StoreError> {
+        canonical_uuid(id)?;
+        if !self.db_path.exists() {
+            return Err(StoreError::NotFound(id.to_owned()));
+        }
+        let lock_file_path = lock_path(&self.locks_dir, id);
+        let lock_existed = lock_file_path.exists();
+        fs::create_dir_all(&self.locks_dir)?;
+        let lock = open_lock(&self.locks_dir, id)?;
+        acquire_lock(&lock, id)?;
+        let mut lock_guard =
+            AdvisoryLockGuard::new(lock, (!lock_existed).then_some(lock_file_path.clone()));
+
+        let conn = schema::open_read_write(&self.db_path)?;
+        let tx = ImmediateTx::begin(&conn)?;
+        conn.execute(
+            "UPDATE operations SET parent_operation_id = NULL WHERE session_id = ?1",
+            params![id],
+        )?;
+        let affected = conn.execute("DELETE FROM sessions WHERE session_id = ?1", params![id])?;
+        if affected == 0 {
+            return Err(StoreError::NotFound(id.to_owned()));
+        }
+        if affected != 1 {
+            return Err(StoreError::InvalidDatabase(format!(
+                "expected 1 deleted session row for {id}, got {affected}"
+            )));
+        }
+        tx.commit()?;
+        drop(conn);
+        lock_guard.set_cleanup_path(Some(lock_file_path));
+        drop(lock_guard);
+        Ok(())
+    }
+
+    /// Fork an unlocked saved session into a physically isolated new session (`WF03`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn fork_session(
+        &self,
+        source_id: &str,
+        new_id: &str,
+        title: Option<&str>,
+    ) -> Result<SavedSessionRecord, StoreError> {
+        self.fork_session_with_lock_check(source_id, new_id, title, true)
+    }
+
+    /// Fork a saved session into `new_id`, optionally verifying that `source_id`'s OS lock
+    /// is currently unheld (`require_source_unlocked = true` for external/unopened callers;
+    /// `false` when the calling host holds the lock and already verified idle/saved state).
+    pub(crate) fn fork_session_with_lock_check(
+        &self,
+        source_id: &str,
+        new_id: &str,
+        title: Option<&str>,
+        require_source_unlocked: bool,
+    ) -> Result<SavedSessionRecord, StoreError> {
+        canonical_uuid(source_id)?;
+        canonical_uuid(new_id)?;
+        if source_id == new_id {
+            return Err(StoreError::InvalidIdentity(
+                "source and target session identities must differ".into(),
+            ));
+        }
+        let explicit_title = validate_session_title(title)?;
+        if !self.db_path.exists() {
+            return Err(StoreError::NotFound(source_id.to_owned()));
+        }
+        if require_source_unlocked && check_lock_active(&self.locks_dir, source_id)? {
+            return Err(StoreError::Occupied(source_id.to_owned()));
+        }
+
+        let new_lock_path = lock_path(&self.locks_dir, new_id);
+        let new_lock_existed = new_lock_path.exists();
+        fs::create_dir_all(&self.locks_dir)?;
+        let new_lock = open_lock(&self.locks_dir, new_id)?;
+        acquire_lock(&new_lock, new_id)?;
+        let mut lock_guard =
+            AdvisoryLockGuard::new(new_lock, (!new_lock_existed).then_some(new_lock_path));
+
+        let conn = schema::open_read_write(&self.db_path)?;
+        let tx = ImmediateTx::begin(&conn)?;
+        let new_exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM sessions WHERE session_id = ?1",
+                params![new_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if new_exists.is_some() {
+            return Err(StoreError::AlreadyExists(new_id.to_owned()));
+        }
+
+        let Some((existing, source_entry_agent_id)) =
+            read_session_record_with_entry_agent(&conn, source_id)?
+        else {
+            return Err(StoreError::NotFound(source_id.to_owned()));
+        };
+
+        let forked_title = explicit_title.or_else(|| derive_fork_title(existing.title.as_deref()));
+        let permission_mode = match existing.permission_mode {
+            Some(PermissionMode::FullAccess)
+                if existing.definition.initial_permission_mode() != PermissionMode::FullAccess =>
+            {
+                Some(PermissionMode::Ask)
+            }
+            other => other,
+        };
+        let now_ms = crate::time::current_time_ms();
+        let last_commit_id = uuid::Uuid::now_v7().to_string();
+        let new_record = SavedSessionRecord {
+            format: RECORD_FORMAT.into(),
+            conversation_id: new_id.to_owned(),
+            revision: 1,
+            last_commit_id,
+            definition: existing.definition,
+            context: existing.context,
+            title: forked_title,
+            updated_at_ms: now_ms,
+            permission_mode,
+            auto_compact: existing.auto_compact,
+            compact_threshold: existing.compact_threshold,
+            history: existing.history,
+            usage: None,
+        };
+        new_record.validate(new_id)?;
+        let serialized = serialize_record_columns(&new_record)?;
+        upsert_session_and_entry_agent(&conn, &new_record, &serialized)?;
+
+        {
+            let mut stmt = conn.prepare(
+                "SELECT record_id, seq, kind, summary_json, document_json
+                 FROM history_records
+                 WHERE session_id = ?1 AND agent_id = ?2
+                 ORDER BY seq ASC",
+            )?;
+            let mut rows = stmt.query(params![source_id, &source_entry_agent_id])?;
+            let mut insert_stmt = conn.prepare(
+                "INSERT INTO history_records (
+                    session_id, agent_id, record_id, seq, kind, summary_json, document_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            while let Some(row) = rows.next()? {
+                let record_id: String = row.get(0)?;
+                let seq: i64 = row.get(1)?;
+                let kind: String = row.get(2)?;
+                let summary_json: String = row.get(3)?;
+                let document_json: String = row.get(4)?;
+                if document_json.len() > crate::compact::history::MAX_HISTORY_BYTES {
+                    return Err(StoreError::HistoryTooLarge {
+                        limit: crate::compact::history::MAX_HISTORY_BYTES,
+                    });
+                }
+                let mut doc: crate::compact::HistoryRecord = serde_json::from_str(&document_json)?;
+                doc.validate(source_id, &record_id)?;
+                doc.conversation_id = new_id.to_owned();
+                let new_document_json = serde_json::to_string(&doc)?;
+                if new_document_json.len() > crate::compact::history::MAX_HISTORY_BYTES {
+                    return Err(StoreError::HistoryTooLarge {
+                        limit: crate::compact::history::MAX_HISTORY_BYTES,
+                    });
+                }
+                insert_stmt.execute(params![
+                    new_id,
+                    new_id,
+                    record_id,
+                    seq,
+                    kind,
+                    summary_json,
+                    new_document_json,
+                ])?;
+            }
+        }
+
+        conn.execute(
+            "INSERT INTO artifacts (session_id, agent_id, artifact_id, content)
+             SELECT ?1, ?1, artifact_id, content
+             FROM artifacts
+             WHERE session_id = ?2 AND agent_id = ?3",
+            params![new_id, source_id, &source_entry_agent_id],
+        )?;
+
+        tx.commit()?;
+        lock_guard.set_cleanup_path(None);
+
+        read_session_record(&conn, new_id)?.ok_or_else(|| {
+            StoreError::InvalidDatabase(format!("forked session {new_id} missing after commit"))
+        })
     }
 
     #[cfg(test)]
@@ -816,6 +1079,13 @@ pub(super) fn read_session_record(
     conn: &Connection,
     id: &str,
 ) -> Result<Option<SavedSessionRecord>, StoreError> {
+    read_session_record_with_entry_agent(conn, id).map(|opt| opt.map(|(record, _)| record))
+}
+
+fn read_session_record_with_entry_agent(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<(SavedSessionRecord, String)>, StoreError> {
     let raw = conn
         .query_row(
             "SELECT
@@ -844,7 +1114,11 @@ pub(super) fn read_session_record(
             RawSessionRow::from_row,
         )
         .optional()?;
-    raw.map(|row| decode_session_row(row, id)).transpose()
+    raw.map(|row| {
+        let entry_agent_id = row.entry_agent_id.clone();
+        decode_session_row(row, id).map(|record| (record, entry_agent_id))
+    })
+    .transpose()
 }
 
 fn decode_session_row(
@@ -960,24 +1234,60 @@ fn commit_error(stage: CommitStage, source: io::Error) -> StoreError {
     }
 }
 
+fn lock_path(locks_dir: &Path, id: &str) -> PathBuf {
+    locks_dir.join(format!("{id}.lock"))
+}
+
+struct AdvisoryLockGuard {
+    file: Option<File>,
+    cleanup_path: Option<PathBuf>,
+}
+
+impl AdvisoryLockGuard {
+    fn new(file: File, cleanup_path: Option<PathBuf>) -> Self {
+        Self {
+            file: Some(file),
+            cleanup_path,
+        }
+    }
+
+    fn set_cleanup_path(&mut self, path: Option<PathBuf>) {
+        self.cleanup_path = path;
+    }
+}
+
+impl Drop for AdvisoryLockGuard {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = file.unlock();
+        }
+        if let Some(path) = self.cleanup_path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 fn open_lock(locks_dir: &Path, id: &str) -> Result<File, StoreError> {
     Ok(OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(locks_dir.join(format!("{id}.lock")))?)
+        .open(lock_path(locks_dir, id))?)
 }
 
 fn check_lock_active(locks_dir: &Path, id: &str) -> Result<bool, StoreError> {
-    let path = locks_dir.join(format!("{id}.lock"));
+    let path = lock_path(locks_dir, id);
     let file = match OpenOptions::new().read(true).write(true).open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error.into()),
     };
     match acquire_lock(&file, id) {
-        Ok(()) => Ok(false),
+        Ok(()) => {
+            let _ = file.unlock();
+            Ok(false)
+        }
         Err(StoreError::Occupied(_)) => Ok(true),
         Err(error) => Err(error),
     }

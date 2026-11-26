@@ -74,6 +74,23 @@ pub(crate) enum SessionCommand {
         recovery_dir: PathBuf,
         json: bool,
     },
+    Rename {
+        store: PathBuf,
+        id: String,
+        title: Option<String>,
+        json: bool,
+    },
+    Delete {
+        store: PathBuf,
+        id: String,
+        json: bool,
+    },
+    Fork {
+        store: PathBuf,
+        id: String,
+        title: Option<String>,
+        json: bool,
+    },
 }
 
 impl SessionCommand {
@@ -101,7 +118,10 @@ impl SessionCommand {
                     .ok_or("--output is required")?,
             });
         }
-        let id = if matches!(command, "run" | "repair" | "compact" | "history" | "show") {
+        let id = if matches!(
+            command,
+            "run" | "repair" | "compact" | "history" | "show" | "rename" | "delete" | "fork"
+        ) {
             let (id, rest) = args.split_first().ok_or("conversation ID is required")?;
             args = rest;
             Some(
@@ -114,7 +134,17 @@ impl SessionCommand {
         };
         if !matches!(
             command,
-            "create" | "run" | "list" | "repair" | "compact" | "history" | "show" | "import-legacy"
+            "create"
+                | "run"
+                | "list"
+                | "repair"
+                | "compact"
+                | "history"
+                | "show"
+                | "rename"
+                | "delete"
+                | "fork"
+                | "import-legacy"
         ) {
             return Err("unknown session command".into());
         }
@@ -130,12 +160,14 @@ impl SessionCommand {
         let mut trust_workspace_agents = false;
         let mut apply = false;
         let mut dry_run = false;
+        let mut clear = false;
         let mut args = args.iter();
         while let Some(flag) = args.next() {
             let flag = flag.to_str().ok_or("option must be UTF-8")?;
             match flag {
                 "--json" if !json => json = true,
                 "--no-config" if !no_config => no_config = true,
+                "--clear" if command == "rename" && !clear => clear = true,
                 "--trust-workspace-rules"
                     if matches!(command, "create" | "run") && !trust_workspace_rules =>
                 {
@@ -205,6 +237,9 @@ impl SessionCommand {
                     insert(&mut values, flag, &mut args)?;
                 }
                 "--agent" if matches!(command, "show" | "history") => {
+                    insert(&mut values, flag, &mut args)?;
+                }
+                "--title" if matches!(command, "rename" | "fork") => {
                     insert(&mut values, flag, &mut args)?;
                 }
                 "--permission-mode" if matches!(command, "create" | "run") => {
@@ -370,6 +405,29 @@ impl SessionCommand {
                 agent: string("--agent")?,
                 json,
             }),
+            "rename" => {
+                let title = string("--title")?;
+                if clear == title.is_some() {
+                    return Err("choose exactly one of --title or --clear".into());
+                }
+                Ok(Self::Rename {
+                    store,
+                    id: id.expect("rename ID parsed"),
+                    title,
+                    json,
+                })
+            }
+            "delete" => Ok(Self::Delete {
+                store,
+                id: id.expect("delete ID parsed"),
+                json,
+            }),
+            "fork" => Ok(Self::Fork {
+                store,
+                id: id.expect("fork ID parsed"),
+                title: string("--title")?,
+                json,
+            }),
             "import-legacy" => Ok(Self::ImportLegacy {
                 record: values
                     .get("--record")
@@ -391,7 +449,11 @@ fn insert<'a>(
     let value = args
         .next()
         .ok_or_else(|| CliError::argument("option needs a value"))?;
-    if (value.is_empty() && !matches!(flag, "--tools" | "--mcp" | "--system" | "--dynamic-context"))
+    if (value.is_empty()
+        && !matches!(
+            flag,
+            "--tools" | "--mcp" | "--system" | "--dynamic-context" | "--title"
+        ))
         || values.insert(flag, value).is_some()
     {
         return Err(CliError::argument("empty or duplicate option"));

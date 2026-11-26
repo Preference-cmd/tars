@@ -1455,3 +1455,593 @@ fn import_legacy_v2_4_rejects_symlinked_directories_and_child_files() {
         assert!(!store.db_path().exists());
     }
 }
+
+#[test]
+fn wf01_validate_session_title_rules_and_limits() {
+    assert_eq!(validate_session_title(None).unwrap(), None);
+    assert_eq!(
+        validate_session_title(Some("  Hello World  ")).unwrap(),
+        Some("Hello World".to_owned())
+    );
+    let max_ascii = "a".repeat(MAX_SESSION_TITLE_CHARS);
+    assert_eq!(
+        validate_session_title(Some(&max_ascii)).unwrap(),
+        Some(max_ascii)
+    );
+    let max_unicode = "é".repeat(MAX_SESSION_TITLE_CHARS);
+    assert_eq!(
+        validate_session_title(Some(&max_unicode)).unwrap(),
+        Some(max_unicode)
+    );
+
+    for bad in [
+        "",
+        "   ",
+        "\t\n\r",
+        "line1\nline2",
+        "line1\rline2",
+        "col1\tcol2",
+        "esc\x1b[31m",
+        "nul\x00byte",
+        "del\x7fchar",
+        "nel\u{0085}char",
+        &"a".repeat(MAX_SESSION_TITLE_CHARS + 1),
+        &"é".repeat(MAX_SESSION_TITLE_CHARS + 1),
+    ] {
+        assert!(
+            matches!(
+                validate_session_title(Some(bad)),
+                Err(StoreError::InvalidTitle(_))
+            ),
+            "expected InvalidTitle for {bad:?}"
+        );
+    }
+}
+
+#[test]
+fn wf01_store_rename_session_set_clear_and_counterexamples() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("store"));
+    let missing_id = Uuid::now_v7().to_string();
+
+    // Missing store must return NotFound without creating tars.db.
+    assert!(matches!(
+        store.rename_session(&missing_id, Some("Title")),
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(!store.db_path().exists());
+
+    // Seed a session.
+    let id = Uuid::now_v7().to_string();
+    let writer = store.acquire_writer(&id).unwrap();
+    let initial = op(&id, None, "initial");
+    writer.commit(&initial).unwrap();
+    drop(writer);
+
+    // Nonexistent session in existing store returns NotFound without creating stray lock.
+    assert!(matches!(
+        store.rename_session(&missing_id, Some("Title")),
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(
+        !store
+            .locks_dir()
+            .join(format!("{missing_id}.lock"))
+            .exists()
+    );
+
+    // Invalid UUID and invalid titles fail without mutating DB.
+    assert!(matches!(
+        store.rename_session("not-a-uuid", Some("Title")),
+        Err(StoreError::InvalidIdentity(_))
+    ));
+    for bad in ["   ", "bad\ntitle", "bad\x1btitle", &"x".repeat(161)] {
+        assert!(matches!(
+            store.rename_session(&id, Some(bad)),
+            Err(StoreError::InvalidTitle(_))
+        ));
+    }
+    let unchanged = store.read_saved(&id).unwrap().unwrap();
+    assert_eq!(unchanged.revision, 1);
+    assert_eq!(unchanged.title, None);
+
+    // Valid rename sets title, bumps revision and updated_at_ms.
+    let renamed = store.rename_session(&id, Some("  My Session  ")).unwrap();
+    assert_eq!(renamed.title.as_deref(), Some("My Session"));
+    assert_eq!(renamed.revision, 2);
+    assert!(renamed.updated_at_ms >= unchanged.updated_at_ms);
+    assert_eq!(store.read_saved(&id).unwrap().unwrap(), renamed);
+
+    // Clear title sets None and bumps revision again.
+    let cleared = store.rename_session(&id, None).unwrap();
+    assert_eq!(cleared.title, None);
+    assert_eq!(cleared.revision, 3);
+    assert_eq!(store.read_saved(&id).unwrap().unwrap(), cleared);
+
+    // Occupied lock fails closed without modifying DB.
+    let held_writer = store.acquire_writer(&id).unwrap();
+    assert!(matches!(
+        store.rename_session(&id, Some("Blocked")),
+        Err(StoreError::Occupied(_))
+    ));
+    drop(held_writer);
+    let after_occupied = store.read_saved(&id).unwrap().unwrap();
+    assert_eq!(after_occupied.revision, 3);
+    assert_eq!(after_occupied.title, None);
+}
+
+#[test]
+fn wf02_store_delete_session_cascades_nested_ops_and_preserves_workspace_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("store"));
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let missing_id = Uuid::now_v7().to_string();
+
+    // Missing store returns NotFound without creating tars.db.
+    assert!(matches!(
+        store.delete_session(&missing_id),
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(!store.db_path().exists());
+
+    // Create target session S1 with nested depth >= 2 operations, child agents,
+    // inbox events, history_records, artifacts, and an unrelated session S2 + workspace_trust.
+    let s1 = Uuid::now_v7().to_string();
+    let s2 = Uuid::now_v7().to_string();
+    let writer1 = store.acquire_writer(&s1).unwrap();
+    writer1.commit(&op(&s1, None, "s1")).unwrap();
+
+    // Seed depth 1 and depth 2 child operations + child agents.
+    let child1_id = Uuid::now_v7().to_string();
+    let child2_id = Uuid::now_v7().to_string();
+    let op1_id = Uuid::now_v7().to_string();
+    let op2_id = Uuid::now_v7().to_string();
+    let def = definition();
+    let new_agent = |aid: &str, name: &str| super::NewAgentRow {
+        agent_id: aid.to_owned(),
+        name: name.to_owned(),
+        preset_name: Some("explore".into()),
+        interaction: crate::events::AgentInteraction::Reusable,
+        definition_json: serde_json::to_string(&def).unwrap(),
+        context_json: serde_json::to_string(&Context::new()).unwrap(),
+        history_index_json: "[]".into(),
+        usage_json: None,
+        created_at_ms: 2_000,
+        updated_at_ms: 2_000,
+    };
+    writer1
+        .admit_operation(&super::AdmitOperationRequest {
+            commit_id: Uuid::now_v7().to_string(),
+            operation_id: op1_id.clone(),
+            target_agent_id: child1_id.clone(),
+            parent_operation_id: None,
+            parent_agent_id: Some(s1.clone()),
+            source_block_id: Some(Uuid::now_v7().to_string()),
+            dedup_fingerprint: Some("fp-1".into()),
+            execution_mode: crate::events::OperationExecutionMode::Background,
+            on_parent_complete: crate::events::OnParentComplete::Continue,
+            depth: 1,
+            input_json: "{\"p\":1}".into(),
+            created_at_ms: 2_000,
+            new_agent: Some(new_agent(&child1_id, "c1")),
+        })
+        .unwrap();
+    writer1
+        .admit_operation(&super::AdmitOperationRequest {
+            commit_id: Uuid::now_v7().to_string(),
+            operation_id: op2_id.clone(),
+            target_agent_id: child2_id.clone(),
+            parent_operation_id: Some(op1_id.clone()),
+            parent_agent_id: Some(child1_id.clone()),
+            source_block_id: Some(Uuid::now_v7().to_string()),
+            dedup_fingerprint: Some("fp-2".into()),
+            execution_mode: crate::events::OperationExecutionMode::Sync,
+            on_parent_complete: crate::events::OnParentComplete::Cancel,
+            depth: 2,
+            input_json: "{\"p\":2}".into(),
+            created_at_ms: 3_000,
+            new_agent: Some(new_agent(&child2_id, "c2")),
+        })
+        .unwrap();
+
+    // Seed inbox event, history record, and artifact on s1.
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    conn.execute(
+        "INSERT INTO agent_events (
+            session_id, target_agent_id, priority, source_kind, source_id,
+            coalesce_key, wake_policy, payload_json, state, claimed_op_id, created_at_ms
+         ) VALUES (?1, ?2, 'normal', 'timer', 't1', NULL, 'wake_if_idle', '{}', 'pending', NULL, 4000)",
+        params![&s1, &s1],
+    )
+    .unwrap();
+    drop(conn);
+    let hist_store = crate::compact::history::HistoryStore::new_strict_for_agent(
+        store.root(),
+        &s1,
+        &s1,
+        Vec::new(),
+    );
+    let art_id = hist_store.persist_spilled_artifact(b"spilled s1").unwrap();
+    let rec_id = Uuid::now_v7().to_string();
+    let orig_block = ContextBlock::new(
+        new_block_id(),
+        BlockContent::text(causa::kernel::Role::User, "orig"),
+        BlockMeta::default(),
+    );
+    hist_store
+        .write(&crate::compact::HistoryRecord {
+            format: crate::compact::history::HISTORY_FORMAT.into(),
+            conversation_id: s1.clone(),
+            record_id: rec_id.clone(),
+            created_at_ms: 2_000,
+            trigger: crate::compact::HistoryTrigger::Manual,
+            kind: crate::compact::RewriteKind::Summarize,
+            estimate_before: 100,
+            estimate_after: 20,
+            replacements: vec![crate::compact::RangeReplacement {
+                range: 0..1,
+                originals: vec![orig_block],
+                inserted_ids: vec![new_block_id()],
+            }],
+        })
+        .unwrap();
+
+    // Seed workspace_trust and unrelated session S2.
+    store
+        .write_workspace_rules_trust(&workspace, "version = 1\n")
+        .unwrap();
+    store
+        .write_workspace_agents_trust(&workspace, "explore.md=deadbeef\n")
+        .unwrap();
+    let writer2 = store.acquire_writer(&s2).unwrap();
+    writer2.commit(&op(&s2, None, "s2")).unwrap();
+    drop(writer2);
+
+    // Occupied lock must fail closed.
+    assert!(matches!(
+        store.delete_session(&s1),
+        Err(StoreError::Occupied(_))
+    ));
+    assert!(store.read_saved(&s1).unwrap().is_some());
+    drop(writer1);
+
+    // Invalid UUID and missing ID fail cleanly.
+    assert!(matches!(
+        store.delete_session("bad-uuid"),
+        Err(StoreError::InvalidIdentity(_))
+    ));
+    assert!(matches!(
+        store.delete_session(&missing_id),
+        Err(StoreError::NotFound(_))
+    ));
+
+    // Delete S1: cascades all owned rows including depth-2 operation, removes lock, keeps S2 & trust.
+    store.delete_session(&s1).unwrap();
+    assert_eq!(store.read_saved(&s1).unwrap(), None);
+    assert!(!store.locks_dir().join(format!("{s1}.lock")).exists());
+
+    let conn = schema::open_read_only(store.db_path()).unwrap().unwrap();
+    for table in [
+        "sessions",
+        "agents",
+        "operations",
+        "agent_events",
+        "history_records",
+        "artifacts",
+    ] {
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?1"),
+                params![&s1],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "expected 0 rows in {table} for deleted session");
+    }
+    assert!(store.read_saved(&s2).unwrap().is_some());
+    assert_eq!(
+        store
+            .read_workspace_rules_trust(&workspace)
+            .unwrap()
+            .as_deref(),
+        Some("version = 1\n")
+    );
+    assert_eq!(
+        store
+            .read_workspace_agents_trust(&workspace)
+            .unwrap()
+            .as_deref(),
+        Some("explore.md=deadbeef\n")
+    );
+    let _ = art_id;
+}
+
+#[test]
+fn wf03_store_fork_session_isolates_history_artifacts_and_downgrades_permissions() {
+    use crate::policy::PermissionMode;
+    use causa::kernel::{
+        ArtifactKind, ArtifactRef, Role, ToolCallPayload, ToolOutput, ToolResultPayload,
+        ToolResultStatus,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("store"));
+    let s1 = Uuid::now_v7().to_string();
+    let s2 = Uuid::now_v7().to_string();
+
+    // Missing store -> NotFound without creating tars.db.
+    assert!(matches!(
+        store.fork_session(&s1, &s2, None),
+        Err(StoreError::NotFound(_))
+    ));
+    assert!(!store.db_path().exists());
+
+    let writer1 = store.acquire_writer(&s1).unwrap();
+    let initial = op(&s1, None, "seed");
+    writer1.commit(&initial).unwrap();
+
+    // Persist a spilled artifact and a history record referencing an original block.
+    let hist_store = crate::compact::history::HistoryStore::new_strict_for_agent(
+        store.root(),
+        &s1,
+        &s1,
+        Vec::new(),
+    );
+    let spilled_id = hist_store
+        .persist_spilled_artifact(b"spilled artifact body")
+        .unwrap();
+
+    let orig_call_id = new_block_id();
+    let orig_call_block = ContextBlock::new(
+        orig_call_id,
+        BlockContent::ToolCall(ToolCallPayload::new(
+            "read_file",
+            serde_json::json!({"path":"a.txt"}),
+        )),
+        BlockMeta::default(),
+    );
+    let orig_res_id = new_block_id();
+    let orig_res_block = ContextBlock::new(
+        orig_res_id,
+        BlockContent::ToolResult(ToolResultPayload::new(
+            orig_call_id,
+            ToolResultStatus::Succeeded,
+            ToolOutput::new(serde_json::json!({"ok":true})),
+        )),
+        BlockMeta::default(),
+    );
+    let summary_block = ContextBlock::new(
+        new_block_id(),
+        BlockContent::text(Role::User, "summary"),
+        BlockMeta::from_source(crate::compact::SUMMARY_SOURCE),
+    );
+    let rec_id = Uuid::now_v7().to_string();
+    let history_doc = crate::compact::HistoryRecord {
+        format: crate::compact::history::HISTORY_FORMAT.into(),
+        conversation_id: s1.clone(),
+        record_id: rec_id.clone(),
+        created_at_ms: 2_000,
+        trigger: crate::compact::HistoryTrigger::Manual,
+        kind: crate::compact::RewriteKind::Summarize,
+        estimate_before: 500,
+        estimate_after: 100,
+        replacements: vec![crate::compact::RangeReplacement {
+            range: 0..2,
+            originals: vec![orig_call_block, orig_res_block],
+            inserted_ids: vec![summary_block.id()],
+        }],
+    };
+    hist_store.write(&history_doc).unwrap();
+    let hist_entry = history_doc.index_entry();
+
+    // Context in S1 references both `<rec_id>/<orig_res_id>` and `artifact:<spilled_id>`.
+    let ctx_call_id = new_block_id();
+    let ctx_call2_id = new_block_id();
+    let mut spilled_out = ToolOutput::new(serde_json::json!({"truncated":true}));
+    spilled_out.artifact = Some(ArtifactRef::new(
+        format!("artifact:{spilled_id}"),
+        21,
+        ArtifactKind::FullOutput,
+        true,
+    ));
+    let mut rec_out = ToolOutput::new(serde_json::json!({"ref":true}));
+    rec_out.artifact = Some(ArtifactRef::new(
+        format!("{rec_id}/{}", orig_res_id.0),
+        10,
+        ArtifactKind::FullOutput,
+        true,
+    ));
+    let s1_context = Context::from_blocks(vec![
+        summary_block,
+        ContextBlock::new(
+            ctx_call_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "read_file",
+                serde_json::json!({"path":"b.txt"}),
+            )),
+            BlockMeta::default(),
+        ),
+        ContextBlock::new(
+            new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                ctx_call_id,
+                ToolResultStatus::Succeeded,
+                spilled_out,
+            )),
+            BlockMeta::default(),
+        ),
+        ContextBlock::new(
+            ctx_call2_id,
+            BlockContent::ToolCall(ToolCallPayload::new("recall", serde_json::json!({}))),
+            BlockMeta::default(),
+        ),
+        ContextBlock::new(
+            new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                ctx_call2_id,
+                ToolResultStatus::Succeeded,
+                rec_out,
+            )),
+            BlockMeta::default(),
+        ),
+    ])
+    .unwrap();
+
+    let mut def = definition();
+    def.permission_mode = Some(PermissionMode::Ask);
+    let mut usage = crate::usage::SessionUsage::default();
+    usage.conversation.calls.succeeded = 1;
+    usage.conversation.tokens.input_tokens = 10;
+    usage.conversation.tokens.output_tokens = 5;
+    usage.input_rounds = 1;
+    let long_title = "T".repeat(MAX_SESSION_TITLE_CHARS);
+    let rev2 = PreparedCommit::new(
+        Some(1),
+        SavedSessionRecord::new_with_compaction(
+            s1.clone(),
+            Uuid::now_v7().to_string(),
+            Some(1),
+            def,
+            s1_context,
+            Some(PermissionMode::FullAccess),
+            Some(false),
+            Some(55),
+            vec![hist_entry],
+            Some(usage),
+            Some(long_title),
+            3_000,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    writer1.commit(&rev2).unwrap();
+
+    // Seed a child agent, operation, and agent_event on S1 that must NOT be cloned.
+    let child_id = Uuid::now_v7().to_string();
+    let op_id = Uuid::now_v7().to_string();
+    writer1
+        .admit_operation(&super::AdmitOperationRequest {
+            commit_id: Uuid::now_v7().to_string(),
+            operation_id: op_id,
+            target_agent_id: child_id.clone(),
+            parent_operation_id: None,
+            parent_agent_id: Some(s1.clone()),
+            source_block_id: Some(Uuid::now_v7().to_string()),
+            dedup_fingerprint: Some("fp".into()),
+            execution_mode: crate::events::OperationExecutionMode::Background,
+            on_parent_complete: crate::events::OnParentComplete::Continue,
+            depth: 1,
+            input_json: "{}".into(),
+            created_at_ms: 4_000,
+            new_agent: Some(super::NewAgentRow {
+                agent_id: child_id,
+                name: "child".into(),
+                preset_name: None,
+                interaction: crate::events::AgentInteraction::Reusable,
+                definition_json: serde_json::to_string(&definition()).unwrap(),
+                context_json: serde_json::to_string(&Context::new()).unwrap(),
+                history_index_json: "[]".into(),
+                usage_json: None,
+                created_at_ms: 4_000,
+                updated_at_ms: 4_000,
+            }),
+        })
+        .unwrap();
+
+    // Rejects when source is locked, self-fork, bad UUID, or bad title.
+    assert!(matches!(
+        store.fork_session(&s1, &s2, None),
+        Err(StoreError::Occupied(_))
+    ));
+    drop(writer1);
+    assert!(matches!(
+        store.fork_session(&s1, &s1, None),
+        Err(StoreError::InvalidIdentity(_))
+    ));
+    assert!(matches!(
+        store.fork_session("bad", &s2, None),
+        Err(StoreError::InvalidIdentity(_))
+    ));
+    assert!(matches!(
+        store.fork_session(&s1, &s2, Some("bad\ntitle")),
+        Err(StoreError::InvalidTitle(_))
+    ));
+
+    // Fork S1 -> S2 with derived title (truncated safely to 160 chars).
+    let forked = store.fork_session(&s1, &s2, None).unwrap();
+    assert_eq!(forked.conversation_id, s2);
+    assert_eq!(forked.revision, 1);
+    assert_eq!(forked.usage, None);
+    assert_eq!(forked.permission_mode, Some(PermissionMode::Ask));
+    assert_eq!(forked.auto_compact, Some(false));
+    assert_eq!(forked.compact_threshold, Some(55));
+    let forked_title = forked.title.as_deref().unwrap();
+    assert!(forked_title.ends_with(" (fork)"));
+    assert_eq!(forked_title.chars().count(), MAX_SESSION_TITLE_CHARS);
+
+    // Target already exists -> AlreadyExists.
+    assert!(matches!(
+        store.fork_session(&s1, &s2, Some("Duplicate")),
+        Err(StoreError::AlreadyExists(_))
+    ));
+
+    // Verify no child agents, operations, or agent_events were cloned to S2.
+    assert_eq!(store.list_agents(&s2).unwrap().len(), 1);
+    assert_eq!(store.list_operations(&s2).unwrap().len(), 0);
+    assert_eq!(store.list_pending_inbox_events(&s2, &s2).unwrap().len(), 0);
+
+    // Delete S1 completely, then verify S2's HistoryStore still validates and reads both history & artifacts!
+    store.delete_session(&s1).unwrap();
+    let s2_hist =
+        crate::compact::history::HistoryStore::open_read_only_for_agent(store.root(), &s2, &s2);
+    let read_doc = s2_hist.read(&rec_id).unwrap();
+    assert_eq!(read_doc.conversation_id, s2);
+    let s2_hist_indexed = crate::compact::history::HistoryStore::new_strict_for_agent(
+        store.root(),
+        &s2,
+        &s2,
+        forked.history.clone(),
+    );
+    let orig_block = s2_hist_indexed
+        .read_original_block(&rec_id, orig_res_id)
+        .unwrap();
+    assert_eq!(orig_block.id(), orig_res_id);
+    let art_bytes = s2_hist_indexed
+        .read_spilled_artifact(&spilled_id, None)
+        .unwrap();
+    assert_eq!(art_bytes, b"spilled artifact body");
+
+    // Verify a session created with initial FullAccess keeps FullAccess on fork.
+    let s3 = Uuid::now_v7().to_string();
+    let s4 = Uuid::now_v7().to_string();
+    let w3 = store.acquire_writer(&s3).unwrap();
+    let mut full_def = definition();
+    full_def.permission_mode = Some(PermissionMode::FullAccess);
+    w3.commit(
+        &PreparedCommit::new(
+            None,
+            SavedSessionRecord::new(
+                s3.clone(),
+                Uuid::now_v7().to_string(),
+                None,
+                full_def,
+                context("full"),
+                Some(PermissionMode::FullAccess),
+                None,
+                1_000,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    drop(w3);
+    let forked_full = store.fork_session(&s3, &s4, Some("Explicit")).unwrap();
+    assert_eq!(forked_full.title.as_deref(), Some("Explicit"));
+    assert_eq!(forked_full.permission_mode, None);
+    assert_eq!(
+        forked_full.definition.initial_permission_mode(),
+        PermissionMode::FullAccess
+    );
+}

@@ -487,6 +487,18 @@ pub enum ApplicationError {
     /// Requested persistent record does not exist.
     #[error("saved conversation not found")]
     NotFound,
+    /// Another writer or process currently holds the session's OS lock.
+    #[error("session is locked by another writer: {0}")]
+    SessionLocked(String),
+    /// The session is currently open or active in this host.
+    #[error("session is active in this host; close it first: {0}")]
+    SessionActive(String),
+    /// A session title failed validation.
+    #[error("invalid session title: {0}")]
+    InvalidTitle(String),
+    /// An open session cannot be forked in its current state.
+    #[error("session cannot be forked right now: {0}")]
+    ForkNotReady(String),
     /// Referenced child operation does not exist in this session.
     #[error("unknown operation: {0}")]
     UnknownOperation(String),

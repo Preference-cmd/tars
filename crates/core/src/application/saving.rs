@@ -33,7 +33,12 @@ pub(super) fn next_metadata(
         .pending
         .as_ref()
         .map_or(0, |pending| pending.record.updated_at_ms);
-    state.saved.next(context, floor)
+    let (derived_title, updated_at_ms) = state.saved.next(context, floor);
+    let title = match &state.desired_title {
+        Some(explicit) => explicit.clone(),
+        None => derived_title,
+    };
+    (title, updated_at_ms)
 }
 
 pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), ApplicationError> {
@@ -172,6 +177,20 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
                 let was_initialized = state.initialized;
                 state.revision = Some(record.revision);
                 state.saved = crate::store::RecordMetadata::of(&record);
+                let initial_mode = state
+                    .definition
+                    .as_ref()
+                    .map(crate::definition::SessionDefinition::initial_permission_mode)
+                    .unwrap_or(crate::policy::PermissionMode::Ask);
+                state.saved_effective_mode = Some(record.permission_mode.unwrap_or(initial_mode));
+                if let Some(definition) = &state.definition {
+                    state.saved_compaction_settings = Some((
+                        record.auto_compact.unwrap_or(definition.auto_compact),
+                        record
+                            .compact_threshold
+                            .unwrap_or(definition.compact_threshold),
+                    ));
+                }
                 state.pending = None;
                 let committed_consumed = std::mem::take(&mut state.pending_consumed);
                 state.save_requested = false;
@@ -210,53 +229,17 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
                     record.session_usage(),
                     committed_consumed,
                 ));
-                if state.persistent {
-                    let initial_mode = state
-                        .definition
-                        .as_ref()
-                        .map(crate::definition::SessionDefinition::initial_permission_mode)
-                        .unwrap_or(crate::policy::PermissionMode::Ask);
-                    let committed_mode = record.permission_mode.unwrap_or(initial_mode);
-                    let current_mode = state
-                        .permissions
-                        .as_ref()
-                        .map(|p| p.get().0)
-                        .unwrap_or(initial_mode);
-                    if current_mode != committed_mode
-                        && state.active.is_none()
-                        && state.closing != Some(ClosePolicy::DiscardLocal)
-                    {
-                        if let Err(error) = prepare(entry, &mut state) {
-                            state.lifecycle = Lifecycle::Faulted;
-                            state.error = Some(error);
-                            state.fault = state.error.clone();
-                        } else {
-                            entry.wake.notify_one();
-                        }
-                    }
-                    // A running setting changed while this commit was in flight;
-                    // the next fixed snapshot carries it, like the permission mode.
-                    if let Some(definition) = state.definition.clone()
-                        && let Some(runtime) = state.owner.as_ref().and_then(|o| o.compaction())
-                    {
-                        let (auto_compact, compact_threshold) = runtime.settings();
-                        let committed_auto = record.auto_compact.unwrap_or(definition.auto_compact);
-                        let committed_threshold = record
-                            .compact_threshold
-                            .unwrap_or(definition.compact_threshold);
-                        if (auto_compact != committed_auto
-                            || compact_threshold != committed_threshold)
-                            && state.active.is_none()
-                            && state.closing != Some(ClosePolicy::DiscardLocal)
-                        {
-                            if let Err(error) = prepare(entry, &mut state) {
-                                state.lifecycle = Lifecycle::Faulted;
-                                state.error = Some(error);
-                                state.fault = state.error.clone();
-                            } else {
-                                entry.wake.notify_one();
-                            }
-                        }
+                if state.persistent
+                    && state.active.is_none()
+                    && state.closing != Some(ClosePolicy::DiscardLocal)
+                    && state.has_uncommitted_metadata_or_settings()
+                {
+                    if let Err(error) = prepare(entry, &mut state) {
+                        state.lifecycle = Lifecycle::Faulted;
+                        state.error = Some(error);
+                        state.fault = state.error.clone();
+                    } else {
+                        entry.wake.notify_one();
                     }
                 }
             }

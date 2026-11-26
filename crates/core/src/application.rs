@@ -18,7 +18,9 @@ mod types;
 
 pub use crate::assembly::AssemblyError;
 pub use crate::mcp::McpStartError;
-pub use crate::store::{CommitStage, LegacyImportSummary, StoreError};
+pub use crate::store::{
+    CommitStage, LegacyImportSummary, MAX_SESSION_TITLE_CHARS, StoreError, validate_session_title,
+};
 pub use crate::usage::{
     CallCounts, CallUsage, LastCall, PurposeUsage, SessionUsage, UsageFigures, UsagePurpose,
     UsageTotals, WorkUsage, session_usage_lines,

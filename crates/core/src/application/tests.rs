@@ -16,6 +16,7 @@ mod saving;
 mod skills;
 pub(crate) mod support;
 mod usage;
+mod workflow;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "../../tests/common/workspace_http.rs"]
 pub(crate) mod workspace_http;

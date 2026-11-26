@@ -31,6 +31,7 @@ pub(crate) mod tools;
 pub mod usage;
 pub mod workspace;
 
+pub use application::{MAX_SESSION_TITLE_CHARS, validate_session_title};
 pub use mcp::{McpServerStatus, McpSkippedTool, McpStartError};
 pub use time::{created_at_from_id, format_timestamp_utc};
 pub use workspace::WorkspaceError;

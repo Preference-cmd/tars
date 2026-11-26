@@ -87,6 +87,11 @@ impl ManagedSession {
         if state.owner.is_none() {
             return Err(ApplicationError::InstanceGone);
         }
+        if state.forking > 0 {
+            return Err(ApplicationError::ForkNotReady(
+                "session is currently being forked".into(),
+            ));
+        }
         let permissions = state
             .permissions
             .as_ref()
@@ -97,6 +102,8 @@ impl ManagedSession {
             && state.persistent
             && state.active.is_none()
             && state.pending.is_none()
+            && !state.compacting
+            && !matches!(state.save, SaveStatus::SaveBlocked { .. })
             && state.lifecycle == Lifecycle::Open
         {
             saving::prepare(&self.entry, &mut state)?;
@@ -192,9 +199,65 @@ impl ManagedSession {
     pub fn status(&self) -> SessionStatus {
         self.entry.status()
     }
-    /// Title of the last stored record, taken from the first user message.
+    /// Current session title: live explicit rename if set, otherwise the last stored title.
     pub fn title(&self) -> Option<String> {
-        self.entry.lock().saved.title.clone()
+        let state = self.entry.lock();
+        match &state.desired_title {
+            Some(title) => title.clone(),
+            None => state.saved.title.clone(),
+        }
+    }
+
+    /// Set or clear (`None`) this open session's title (`WF01`).
+    ///
+    /// Validates the title first via [`crate::store::validate_session_title`].
+    /// On an idle persistent session, immediately prepares a save commit; if a
+    /// turn or earlier save is in flight, records the desired title so it is
+    /// reconciled and persisted as soon as the in-flight operation completes.
+    pub fn rename(&self, title: Option<String>) -> Result<Option<String>, ApplicationError> {
+        let validated = crate::store::validate_session_title(title.as_deref())
+            .map_err(super::host::map_workflow_store_error)?;
+        let mut state = self.entry.lock();
+        if state.lifecycle == Lifecycle::Closed {
+            return Err(ApplicationError::Closed);
+        }
+        if state.lifecycle == Lifecycle::Closing {
+            return Err(ApplicationError::Closing);
+        }
+        if let Some(fault) = &state.fault {
+            return Err(fault.clone());
+        }
+        if state.lifecycle == Lifecycle::Faulted {
+            return Err(state
+                .error
+                .clone()
+                .unwrap_or_else(|| ApplicationError::Faulted("session is faulted".into())));
+        }
+        if state.owner.is_none() {
+            return Err(ApplicationError::InstanceGone);
+        }
+        if state.forking > 0 {
+            return Err(ApplicationError::ForkNotReady(
+                "session is currently being forked".into(),
+            ));
+        }
+        let prev_title = match &state.desired_title {
+            Some(current) => current.clone(),
+            None => state.saved.title.clone(),
+        };
+        state.desired_title = Some(validated.clone());
+        if prev_title != validated
+            && state.persistent
+            && state.active.is_none()
+            && state.pending.is_none()
+            && !state.compacting
+            && !matches!(state.save, SaveStatus::SaveBlocked { .. })
+            && state.lifecycle == Lifecycle::Open
+        {
+            saving::prepare(&self.entry, &mut state)?;
+            self.entry.notify();
+        }
+        Ok(validated)
     }
     /// Creation timestamp in milliseconds since Unix epoch, if derived from UUIDv7 ID.
     pub fn created_at_ms(&self) -> Option<u64> {
@@ -860,6 +923,20 @@ impl ManagedSession {
             }
             self.entry.notify();
         } else if state.pending.is_none() && matches!(state.save, SaveStatus::SaveBlocked { .. }) {
+            if state
+                .desired_title
+                .as_ref()
+                .is_some_and(|desired| desired != &state.saved.title)
+                && state.active.is_none()
+                && state.lifecycle == Lifecycle::Open
+            {
+                saving::prepare(&self.entry, &mut state)?;
+                if allow_close && state.closing.is_some() {
+                    state.close_in_flight = true;
+                }
+                self.entry.notify();
+                return Ok(());
+            }
             if let Some(rev) = state.revision {
                 state.save = SaveStatus::Saved {
                     revision: rev,
@@ -1030,6 +1107,11 @@ impl ManagedSession {
         if state.lifecycle == Lifecycle::Closing {
             return Err(ApplicationError::Closing);
         }
+        if state.forking > 0 {
+            return Err(ApplicationError::ForkNotReady(
+                "session is currently being forked".into(),
+            ));
+        }
         let runtime = state
             .owner
             .as_ref()
@@ -1041,6 +1123,8 @@ impl ManagedSession {
         if state.persistent
             && state.active.is_none()
             && state.pending.is_none()
+            && !state.compacting
+            && !matches!(state.save, SaveStatus::SaveBlocked { .. })
             && state.lifecycle == Lifecycle::Open
         {
             saving::prepare(&self.entry, &mut state)?;
@@ -1739,6 +1823,26 @@ impl Drop for CompactingGuard<'_> {
     fn drop(&mut self) {
         let mut state = self.entry.lock();
         state.compacting = false;
+        if state.persistent
+            && state.active.is_none()
+            && state.pending.is_none()
+            && !state.save_in_flight
+            && !matches!(state.save, SaveStatus::SaveBlocked { .. })
+            && (state.lifecycle == Lifecycle::Open || state.closing == Some(ClosePolicy::Save))
+            && state.closing != Some(ClosePolicy::DiscardLocal)
+            && state.forking == 0
+            && state.has_uncommitted_metadata_or_settings()
+        {
+            if let Err(error) = saving::prepare(self.entry, &mut state) {
+                state.lifecycle = Lifecycle::Faulted;
+                state.error = Some(error);
+                state.fault = state.error.clone();
+                state.close_in_flight = state.closing == Some(ClosePolicy::DiscardLocal);
+            } else {
+                self.entry.notify();
+                return;
+            }
+        }
         self.entry.changed();
     }
 }

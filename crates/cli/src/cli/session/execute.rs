@@ -143,6 +143,19 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 super::repair::run(store, id, apply, expected_revision, recovery_dir, json).await,
                 false,
             ),
+            SessionCommand::Rename {
+                store,
+                id,
+                title,
+                json,
+            } => (rename(store, id, title, json).await, false),
+            SessionCommand::Delete { store, id, json } => (delete(store, id, json).await, false),
+            SessionCommand::Fork {
+                store,
+                id,
+                title,
+                json,
+            } => (fork(store, id, title, json).await, false),
             SessionCommand::ImportLegacy {
                 record,
                 store,
@@ -181,6 +194,89 @@ async fn import_legacy(record: PathBuf, store: PathBuf, json_output: bool) -> Ex
             }
         }
         Err(error) => early_failure(json_output, &application_error_message(&error)),
+    }
+}
+
+async fn rename(store: PathBuf, id: String, title: Option<String>, json_output: bool) -> ExitCode {
+    let host = managed_execution::definition_host(store);
+    let conv_id: tars_core::session::ConversationId = id.clone().into();
+    let updated_title = match host.rename(conv_id.clone(), title).await {
+        Ok(title) => title,
+        Err(error) => return early_failure(json_output, &application_error_message(&error)),
+    };
+    let inspection = match host.inspect(&conv_id).await {
+        Ok(inspection) => inspection,
+        Err(error) => return early_failure(json_output, &application_error_message(&error)),
+    };
+    if json_output {
+        output(&format!(
+            "{}\n",
+            json!({
+                "conversation_id": id,
+                "title": updated_title,
+                "revision": inspection.revision,
+            })
+        ))
+    } else {
+        let label = updated_title.as_deref().unwrap_or("(cleared)");
+        output(&format!(
+            "Renamed session {id}: {label} (revision {})\n",
+            inspection.revision
+        ))
+    }
+}
+
+async fn delete(store: PathBuf, id: String, json_output: bool) -> ExitCode {
+    let host = managed_execution::definition_host(store);
+    match host.delete(id.clone().into()).await {
+        Ok(()) => {
+            if json_output {
+                output(&format!(
+                    "{}\n",
+                    json!({
+                        "conversation_id": id,
+                        "deleted": true,
+                    })
+                ))
+            } else {
+                output(&format!("Deleted session {id}\n"))
+            }
+        }
+        Err(error) => early_failure(json_output, &application_error_message(&error)),
+    }
+}
+
+async fn fork(store: PathBuf, id: String, title: Option<String>, json_output: bool) -> ExitCode {
+    let host = managed_execution::definition_host(store);
+    let new_id = match host.fork(id.clone().into(), title).await {
+        Ok(new_id) => new_id,
+        Err(error) => return early_failure(json_output, &application_error_message(&error)),
+    };
+    let inspection = match host.inspect(&new_id).await {
+        Ok(inspection) => inspection,
+        Err(error) => return early_failure(json_output, &application_error_message(&error)),
+    };
+    if json_output {
+        output(&format!(
+            "{}\n",
+            json!({
+                "source_conversation_id": id,
+                "conversation_id": new_id.as_str(),
+                "title": inspection.title,
+                "revision": inspection.revision,
+            })
+        ))
+    } else {
+        let title_suffix = inspection
+            .title
+            .as_deref()
+            .map(|t| format!(" · title: {t}"))
+            .unwrap_or_default();
+        output(&format!(
+            "Forked session {id} -> {}{title_suffix} (revision {})\n",
+            new_id.as_str(),
+            inspection.revision
+        ))
     }
 }
 
