@@ -31,7 +31,7 @@ pub(crate) use lifecycle::{
 pub use resources::ToolMetrics;
 pub use resources::ToolResources;
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod command_acceptance_tests;
 #[cfg(test)]
 mod command_runtime_tests;
@@ -39,7 +39,7 @@ mod command_runtime_tests;
 mod command_tool_tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod find_tests;
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod search_acceptance_tests;
 #[cfg(test)]
 mod search_tool_tests;

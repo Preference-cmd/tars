@@ -723,3 +723,121 @@ fn command_exists_without_spawning_checks_path_executables_and_rejects_nonexec_o
     ));
     assert!(!command_exists_without_spawning("good-tool", None));
 }
+
+#[test]
+fn doctor_gives_actionable_linux_bwrap_and_auto_rg_hints() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config::load(ConfigSource::Disabled).unwrap();
+    let ext = ExternalTools::resolve_with(&cfg, &ToolEnvironment::default());
+
+    let missing_bwrap = SandboxStatus::Unavailable(tars_sandbox::test_support::unavailable(
+        BackendId::BWRAP,
+        "bwrap executable not found; install bubblewrap (e.g. apt install bubblewrap)",
+    ));
+    let report_missing = run_diagnostics(&DoctorInput {
+        version: "0.2.0-test",
+        config: &cfg,
+        config_path: None,
+        config_disabled: true,
+        profile: None,
+        store_dir: &dir.path().join("data"),
+        recovery_dir: dir.path(),
+        workspace_root: None,
+        active_tools: None,
+        sandbox: Some(&missing_bwrap),
+        external_tools: Some(&ext),
+        user_rules_path: None,
+    });
+    let sb_missing = report_missing
+        .items
+        .iter()
+        .find(|item| item.category == "sandbox")
+        .unwrap();
+    assert_eq!(sb_missing.status, DoctorStatus::Warn);
+    assert!(
+        sb_missing
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.contains("apt install bubblewrap")),
+        "{:?}",
+        sb_missing.hint
+    );
+    let rg_auto = report_missing
+        .items
+        .iter()
+        .find(|item| item.category == "external_tools")
+        .unwrap();
+    assert_eq!(rg_auto.status, DoctorStatus::Warn);
+    assert!(
+        rg_auto
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.contains("tars tools install rg") && h.contains("PATH")),
+        "{:?}",
+        rg_auto.hint
+    );
+
+    let userns_bwrap = SandboxStatus::Unavailable(tars_sandbox::test_support::unavailable(
+        BackendId::BWRAP,
+        "Roots probe failed: bwrap: setting up uid map: Permission denied (userns)",
+    ));
+    let report_userns = run_diagnostics(&DoctorInput {
+        version: "0.2.0-test",
+        config: &cfg,
+        config_path: None,
+        config_disabled: true,
+        profile: None,
+        store_dir: &dir.path().join("data"),
+        recovery_dir: dir.path(),
+        workspace_root: None,
+        active_tools: None,
+        sandbox: Some(&userns_bwrap),
+        external_tools: Some(&ext),
+        user_rules_path: None,
+    });
+    let sb_userns = report_userns
+        .items
+        .iter()
+        .find(|item| item.category == "sandbox")
+        .unwrap();
+    assert!(
+        sb_userns
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.contains("AppArmor") && h.contains("user namespaces")),
+        "{:?}",
+        sb_userns.hint
+    );
+
+    let generic_bwrap = SandboxStatus::Unavailable(tars_sandbox::test_support::unavailable(
+        BackendId::BWRAP,
+        "HOME is not set; credential denials require a home directory",
+    ));
+    let report_generic = run_diagnostics(&DoctorInput {
+        version: "0.2.0-test",
+        config: &cfg,
+        config_path: None,
+        config_disabled: true,
+        profile: None,
+        store_dir: &dir.path().join("data"),
+        recovery_dir: dir.path(),
+        workspace_root: None,
+        active_tools: None,
+        sandbox: Some(&generic_bwrap),
+        external_tools: Some(&ext),
+        user_rules_path: None,
+    });
+    let sb_generic = report_generic
+        .items
+        .iter()
+        .find(|item| item.category == "sandbox")
+        .unwrap();
+    assert!(
+        sb_generic
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.contains("bwrap") && h.contains("user namespaces")),
+        "{:?}",
+        sb_generic.hint
+    );
+}

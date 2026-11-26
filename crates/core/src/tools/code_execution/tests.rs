@@ -342,7 +342,7 @@ return {
             WorkspaceTool::WriteFile,
             WorkspaceTool::EditFile,
         ];
-        if cfg!(target_os = "macos") {
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
             tools.push(WorkspaceTool::RunCommand);
         }
         let mut def = base_definition(Some(dir.path()), tools);

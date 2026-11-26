@@ -24,7 +24,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tars_core::{
     config::Config,
-    external_tools::{ExternalTools, RIPGREP_VERSION, ToolSource, ToolStatus, install_managed_rg},
+    external_tools::{
+        ExternalTools, RIPGREP_VERSION, ToolSource, ToolStatus, install_managed_rg, ripgrep_asset,
+    },
     sandbox::{Sandbox, SandboxStatus},
 };
 use tokio::time::Instant as TokioInstant;
@@ -460,9 +462,12 @@ impl App {
             self.settle_startup(None);
             return;
         }
-        if matches!(tools.status.source, ToolSource::Managed) {
-            // Only the managed copy can be installed; a system or configured
-            // path is the user's own file and is never downloaded over.
+        if matches!(tools.status.source, ToolSource::Auto | ToolSource::Managed)
+            && ripgrep_asset().is_some()
+        {
+            // Only the managed copy can be installed (under `auto` or `managed`
+            // on a platform with a pinned release); a system or configured path
+            // is the user's own file and is never downloaded over.
             if let Some(startup) = self.startup.as_mut() {
                 startup.phase = Phase::Asking;
                 startup.guard.arm(self.clock.now(), CONFIRM_GUARD_WINDOW);

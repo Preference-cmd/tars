@@ -218,7 +218,7 @@ fn unsupported_platform_rejects_enabled_workspace_but_still_assembles_empty_cata
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn command_runtime_is_allowed_on_reopen_but_not_on_create_without_a_backend() {
     let directory = tempfile::tempdir().unwrap();
@@ -227,12 +227,17 @@ fn command_runtime_is_allowed_on_reopen_but_not_on_create_without_a_backend() {
     chosen.workspace_root = Some(directory.path().canonicalize().unwrap());
     chosen.tools = vec![crate::definition::WorkspaceTool::RunCommand];
     chosen.command = Some(crate::definition::CommandSettings::default());
+    let unavailable = tars_sandbox::test_support::unavailable(
+        tars_sandbox::BackendId::UNAVAILABLE,
+        "no sandbox backend on test platform",
+    );
     assert!(matches!(
         assemble(
             &chosen,
             "id".into(),
             Context::default(),
-            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)),
+            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16))
+                .with_test_command_sandbox(Err(unavailable.clone())),
             crate::permission::PermissionMode::Ask,
             None,
             false,
@@ -244,7 +249,8 @@ fn command_runtime_is_allowed_on_reopen_but_not_on_create_without_a_backend() {
             &chosen,
             "id".into(),
             Context::default(),
-            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)),
+            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16))
+                .with_test_command_sandbox(Err(unavailable)),
             crate::permission::PermissionMode::Ask,
             None,
             true,
@@ -253,7 +259,7 @@ fn command_runtime_is_allowed_on_reopen_but_not_on_create_without_a_backend() {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn command_creation_without_a_backend_names_the_build_platform() {
     let directory = tempfile::tempdir().unwrap();
@@ -407,12 +413,10 @@ async fn a_failed_search_probe_keeps_the_session_open_and_rejects_every_call() {
     );
 }
 
-/// Non-macOS: creating a session that selects `search_text` must not fail the
-/// way `run_command` creation does. Linux has workspace access, so creation
-/// succeeds and every call is rejected by the search runtime. Windows has no
-/// workspace access at all, so no workspace-tool session can be assembled
-/// there; that pre-existing platform limit is what this branch asserts.
-#[cfg(not(target_os = "macos"))]
+/// Platforms without a workspace/sandbox implementation (e.g. Windows):
+/// creating a session with `search_text` rejects workspace opening rather than
+/// failing with `CommandUnavailable`.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[tokio::test]
 async fn search_creation_without_a_backend_keeps_the_session_open() {
     use crate::permission::PermissionMode;
@@ -427,43 +431,11 @@ async fn search_creation_without_a_backend_keeps_the_session_open() {
         None,
         false,
     );
-    #[cfg(target_os = "linux")]
-    {
-        let session = assembled
-            .expect("a platform without a sandbox backend must still create a search session")
-            .session;
-        let shared = session.workspace_tools().expect("workspace tools");
-        let invocation = search_call(serde_json::json!({"path": ".", "query": "needle"}));
-        let tool = shared
-            .bind_for_test(
-                &[crate::definition::WorkspaceTool::SearchText],
-                search_reporter(std::slice::from_ref(&invocation)),
-            )
-            .pop()
-            .unwrap();
-        let output = tool
-            .execute(
-                &invocation,
-                &CallControl::new(CancellationToken::new(), None),
-                None,
-            )
-            .await;
-        assert_eq!(output.status, causa::kernel::ToolResultStatus::Rejected);
-        let reason = output.output.content["error"].as_str().unwrap();
-        assert!(
-            reason.contains("requires a platform sandbox backend"),
-            "{reason}"
-        );
-        assert!(reason.contains(std::env::consts::OS), "{reason}");
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        assert!(matches!(
-            assembled,
-            Err(super::provider::AssemblyError::Workspace(error))
-                if matches!(&*error, crate::workspace::WorkspaceError::UnsupportedPlatform)
-        ));
-    }
+    assert!(matches!(
+        assembled,
+        Err(super::provider::AssemblyError::Workspace(error))
+            if matches!(&*error, crate::workspace::WorkspaceError::UnsupportedPlatform)
+    ));
 }
 
 #[cfg(unix)]
@@ -505,7 +477,7 @@ async fn the_host_hands_resolved_external_tools_to_the_search_runtime() {
         shared.search().is_some(),
         "selecting search_text must bind the search runtime"
     );
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let runtime = shared.search().unwrap();
         let params = crate::tools::parameters::SearchParams {

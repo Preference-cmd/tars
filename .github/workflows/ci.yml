@@ -45,8 +45,29 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo clippy --workspace --locked --all-targets -- -D warnings
       # Tests are split in code: common suites run on every platform, while
-      # workspace tools and SIGINT need Unix and Seatbelt needs macOS, so those
-      # suites only compile where the platform supports them.
+      # workspace tools and SIGINT need Unix and sandboxed execution runs
+      # Seatbelt on macOS and Bubblewrap (`bwrap`) on Linux.
+      - name: Install Bubblewrap (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+          abi <abi/4.0>,
+          include <tunables/global>
+
+          profile bwrap /usr/bin/bwrap flags=(unconfined) {
+            userns,
+
+            # Site-specific additions and overrides. See local/README for details.
+            include if exists <local/bwrap>
+          }
+          EOF
+          if command -v apparmor_parser >/dev/null 2>&1 && [ -d /sys/kernel/security/apparmor ]; then
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap
+          fi
+          bwrap --unshare-user --unshare-pid --unshare-net --ro-bind / / /bin/true
       - name: Tests (common + platform-specific)
         run: cargo test --workspace --locked
       - run: cargo build --workspace --locked --release

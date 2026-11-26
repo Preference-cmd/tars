@@ -24,10 +24,11 @@ pub struct RipgrepAsset {
 
 /// The pinned ripgrep archives, one per supported platform.
 ///
-/// P0 lists the two macOS targets that have a sandbox backend; Linux and
-/// Windows entries are added together with their sandbox backends. The hashes
-/// are the official `.sha256` values of the GitHub release and were checked
-/// against the downloaded archives when this table was written.
+/// Lists the macOS (`aarch64`, `x86_64`) and Linux (`x86_64`, `aarch64`)
+/// targets that have a sandbox backend; Windows entries will be added together
+/// with a Windows sandbox backend. The hashes are the official `.sha256` values
+/// of the GitHub release and were checked against the downloaded archives when
+/// this table was written.
 pub const RIPGREP_ASSETS: &[RipgrepAsset] = &[
     RipgrepAsset {
         target: "aarch64-apple-darwin",
@@ -40,6 +41,18 @@ pub const RIPGREP_ASSETS: &[RipgrepAsset] = &[
         url: "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-apple-darwin.tar.gz",
         sha256: "af7825fcc69a2afc7a7aea55fc9af90e26421d8f20fe59df32e233c0b8a231c1",
         binary_sha256: "0c9a0066db0d26b640777db88045b0ccdd58509a746700e43e1c4ff8707a5ed0",
+    },
+    RipgrepAsset {
+        target: "x86_64-unknown-linux-musl",
+        url: "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz",
+        sha256: "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c",
+        binary_sha256: "e62198eb19b136b88c330af83647b5a962cb99b6b1f066758568f12de1974849",
+    },
+    RipgrepAsset {
+        target: "aarch64-unknown-linux-gnu",
+        url: "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-aarch64-unknown-linux-gnu.tar.gz",
+        sha256: "a740b91c82eaf9914cfedd353572f2791cbe0162c84101ee0951058f4dcbc90d",
+        binary_sha256: "e36d0eb52e70696bdf1781392722e05a21bb91d3b7b762ef5ec20e5df2ec687b",
     },
 ];
 
@@ -56,6 +69,10 @@ pub fn ripgrep_target() -> Option<&'static str> {
         "aarch64-apple-darwin"
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
         "x86_64-apple-darwin"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "x86_64-unknown-linux-musl"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "aarch64-unknown-linux-gnu"
     } else {
         return None;
     };
@@ -73,9 +90,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_lists_only_the_two_macos_assets_with_full_hashes() {
+    fn manifest_lists_macos_and_linux_assets_with_full_hashes() {
         assert_eq!(RIPGREP_VERSION, "15.2.0");
-        assert_eq!(RIPGREP_ASSETS.len(), 2);
+        assert_eq!(RIPGREP_ASSETS.len(), 4);
         for asset in RIPGREP_ASSETS {
             assert!(
                 asset
@@ -102,6 +119,10 @@ mod tests {
             assert_eq!(ripgrep_target(), Some("aarch64-apple-darwin"));
         } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
             assert_eq!(ripgrep_target(), Some("x86_64-apple-darwin"));
+        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            assert_eq!(ripgrep_target(), Some("x86_64-unknown-linux-musl"));
+        } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+            assert_eq!(ripgrep_target(), Some("aarch64-unknown-linux-gnu"));
         } else {
             assert_eq!(ripgrep_target(), None);
         }

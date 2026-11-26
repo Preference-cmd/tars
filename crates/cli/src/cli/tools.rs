@@ -36,7 +36,7 @@ status never downloads. install rg downloads only after the question is
 answered yes or --yes is given; a non-interactive run without --yes refuses.
 The managed copy is ripgrep 15.2.0 from github.com/BurntSushi/ripgrep,
 verified against the SHA-256 compiled into TARS. The `[external_tools] rg`
-setting selects managed (default), system, or an absolute executable path.
+setting selects auto (default), managed, system, or an absolute executable path.
 Run `tars tools status` to see where the executable comes from and what to do
 when it is unavailable.
 ";
@@ -178,9 +178,9 @@ fn install(yes: bool, selection: &Selection) -> ExitCode {
             display_path(rg.path.as_deref())
         ));
     }
-    if !matches!(rg.source, ToolSource::Managed) {
+    if !matches!(rg.source, ToolSource::Auto | ToolSource::Managed) {
         return command_failure(CliError::configuration(format!(
-            "rg is configured as {}; set [external_tools] rg = \"managed\" to install the managed copy",
+            "rg is configured as {}; set [external_tools] rg = \"auto\" or \"managed\" to install the managed copy",
             rg.source
         )));
     }

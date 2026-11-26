@@ -477,21 +477,36 @@ async fn install_refuses_a_configured_non_managed_source_without_networking() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64")
+))]
 #[tokio::test]
-async fn install_refuses_to_guess_a_data_directory() {
-    let config = Config::load(ConfigSource::Disabled).unwrap();
-    let error = install_managed_rg_with(&config, &ToolEnvironment::default())
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(error, InstallError::NoDataDirectory),
-        "unexpected error: {error:?}"
-    );
-    assert!(error.to_string().contains("TARS_HOME"));
+async fn install_refuses_to_guess_a_data_directory_for_auto_and_managed() {
+    for config in [
+        Config::load(ConfigSource::Disabled).unwrap(),
+        config_with_rg("managed"),
+    ] {
+        let error = install_managed_rg_with(&config, &ToolEnvironment::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, InstallError::NoDataDirectory),
+            "unexpected error for {}: {error:?}",
+            config.ripgrep_source()
+        );
+        assert!(error.to_string().contains("TARS_HOME"));
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64")
+)))]
 #[tokio::test]
 async fn install_reports_a_missing_platform_archive() {
     let config = Config::load(ConfigSource::Disabled).unwrap();
@@ -506,4 +521,39 @@ async fn install_reports_a_missing_platform_archive() {
         matches!(error, InstallError::UnsupportedPlatform),
         "unexpected error: {error:?}"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn install_preserves_configured_source_for_auto_and_managed() {
+    let script = b"#!/bin/sh\necho \"ripgrep 15.2.0\"\n";
+    let archive = tar_gz(&[Entry::File(&rg_entry("ripgrep-15.2.0-test-target"), script)]);
+    let served = archive.clone();
+    let handler: Handler = Arc::new(move |_, _| Reply::ok(served.clone()));
+    let fixture = start(handler).await;
+    let mut install_source = source(&fixture, "/rg.tar.gz", &archive);
+    install_source.binary_sha256 = digest(script);
+
+    let asset = RipgrepAsset {
+        target: TEST_TARGET,
+        url: "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/test.tar.gz",
+        sha256: "",
+        binary_sha256: "",
+    };
+
+    for (raw, expected_source) in [("auto", ToolSource::Auto), ("managed", ToolSource::Managed)] {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_rg(raw);
+        let environment = ToolEnvironment {
+            tars_home: Some(dir.path().to_path_buf()),
+            ..ToolEnvironment::default()
+        };
+        let status = install_managed_rg_with_source(&config, &environment, &asset, &install_source)
+            .await
+            .unwrap();
+        assert!(status.is_ready());
+        assert_eq!(status.source, expected_source);
+        assert_eq!(status.version.as_deref(), Some("15.2.0"));
+        assert!(status.ready_path().is_some_and(|p| p.is_file()));
+    }
 }

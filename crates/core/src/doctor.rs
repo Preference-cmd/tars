@@ -13,7 +13,7 @@ use crate::definition::{
 };
 use crate::external_tools::{ExternalTools, ToolSource};
 use crate::permission::rules::load_rules_file;
-use crate::sandbox::{Sandbox, SandboxStatus};
+use crate::sandbox::{BackendId, Sandbox, SandboxStatus};
 use crate::skills::SkillDiscovery;
 use crate::store::schema;
 use std::collections::BTreeSet;
@@ -797,6 +797,36 @@ fn check_workspace_and_tools(
     }
 }
 
+fn sandbox_unavailable_hint(sandbox: &SandboxStatus) -> String {
+    let SandboxStatus::Unavailable(err) = sandbox else {
+        return String::new();
+    };
+    let reason = err.reason.as_str();
+    let is_bwrap = err.backend == BackendId::BWRAP;
+    let missing_bwrap = reason.contains("bwrap executable not found")
+        || (reason.contains("bubblewrap") && reason.contains("not found"));
+    if missing_bwrap {
+        return "install bubblewrap (e.g. `sudo apt install bubblewrap`); command execution and ripgrep search fail closed until bwrap is available".to_owned();
+    }
+    let mentions_userns_or_apparmor = [
+        "AppArmor",
+        "userns",
+        "uid map",
+        "RTM_NEWADDR",
+        "Operation not permitted",
+        "Permission denied",
+    ]
+    .iter()
+    .any(|needle| reason.contains(needle));
+    if (is_bwrap || cfg!(target_os = "linux")) && mentions_userns_or_apparmor {
+        return "unprivileged user namespaces appear restricted for bwrap; on Ubuntu 24.04+ load an AppArmor userns profile for /usr/bin/bwrap or verify kernel.apparmor_restrict_unprivileged_userns".to_owned();
+    }
+    if is_bwrap || cfg!(target_os = "linux") {
+        return "ensure `bubblewrap` (`bwrap`) and unprivileged user namespaces are available; command execution and ripgrep search fail closed when sandbox is unavailable".to_owned();
+    }
+    "command execution and ripgrep search fail closed when sandbox is unavailable".to_owned()
+}
+
 fn check_sandbox(sandbox: &SandboxStatus, items: &mut Vec<DoctorItem>) {
     if sandbox.is_available() {
         push_item(
@@ -814,10 +844,7 @@ fn check_sandbox(sandbox: &SandboxStatus, items: &mut Vec<DoctorItem>) {
             "Sandbox",
             DoctorStatus::Warn,
             sandbox.to_string(),
-            Some(
-                "command execution and ripgrep search fail closed when sandbox is unavailable"
-                    .into(),
-            ),
+            Some(sandbox_unavailable_hint(sandbox)),
         );
     }
 }
@@ -851,6 +878,9 @@ fn check_external_tools(input: &DoctorInput<'_>, items: &mut Vec<DoctorItem>) {
         );
     } else {
         let hint = match rg.source {
+            ToolSource::Auto => {
+                Some("run `tars tools install rg` or install ripgrep >= 14 on PATH".to_owned())
+            }
             ToolSource::Managed => Some("run `tars tools install rg`".to_owned()),
             ToolSource::System => Some(
                 "install ripgrep >= 14 on PATH or switch [external_tools] rg = \"managed\""

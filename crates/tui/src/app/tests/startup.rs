@@ -123,6 +123,96 @@ fn ready_tools(dir: &Path) -> ToolCheck {
     }
 }
 
+/// An `auto` source with no managed or system `rg`: prompts on supported
+/// platforms (or settles unavailable on platforms without a pinned archive).
+fn auto_unavailable(dir: &Path) -> ToolCheck {
+    let config = Config::load(ConfigSource::Disabled).unwrap();
+    let tools = ExternalTools::resolve_with(
+        &config,
+        &ToolEnvironment::default().with_tars_home(dir.join("auto-empty-home")),
+    );
+    assert_eq!(
+        tools.rg().source,
+        tars_core::external_tools::ToolSource::Auto
+    );
+    assert!(tools.rg().unavailable_reason().is_some());
+    ToolCheck {
+        status: tools.rg().clone(),
+        tools,
+    }
+}
+
+/// An `auto` source that falls back to a valid `rg >= 14` on `PATH`.
+#[cfg(unix)]
+fn auto_ready_from_path(dir: &Path) -> ToolCheck {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("auto-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let rg = bin.join("rg");
+    std::fs::write(&rg, "#!/bin/sh\necho 'ripgrep 15.2.0'\n").unwrap();
+    let mut permissions = std::fs::metadata(&rg).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&rg, permissions).unwrap();
+    let config = Config::load(ConfigSource::Disabled).unwrap();
+    let tools = ExternalTools::resolve_with(
+        &config,
+        &ToolEnvironment::default()
+            .with_tars_home(dir.join("auto-path-home"))
+            .with_path(bin),
+    );
+    assert_eq!(
+        tools.rg().source,
+        tars_core::external_tools::ToolSource::Auto
+    );
+    assert!(tools.rg().is_ready(), "{:?}", tools.rg());
+    ToolCheck {
+        status: tools.rg().clone(),
+        tools,
+    }
+}
+
+/// An `auto` source with a corrupted managed binary on disk and a valid `rg`
+/// on `PATH`: must fail closed instead of falling back to `PATH`.
+#[cfg(unix)]
+fn auto_corrupted_managed_with_path(dir: &Path) -> Option<ToolCheck> {
+    use std::os::unix::fs::PermissionsExt;
+    let env_home = dir.join("auto-corrupt-home");
+    let bin = dir.join("auto-corrupt-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path_rg = bin.join("rg");
+    std::fs::write(&path_rg, "#!/bin/sh\necho 'ripgrep 15.2.0'\n").unwrap();
+    let mut permissions = std::fs::metadata(&path_rg).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path_rg, permissions).unwrap();
+
+    let env = ToolEnvironment::default()
+        .with_tars_home(env_home)
+        .with_path(bin);
+    let managed_path = tars_core::external_tools::managed_rg_path(&env)?;
+    std::fs::create_dir_all(managed_path.parent().unwrap()).unwrap();
+    std::fs::write(&managed_path, b"corrupted-binary-contents").unwrap();
+
+    let config = Config::load(ConfigSource::Disabled).unwrap();
+    let tools = ExternalTools::resolve_with(&config, &env);
+    assert_eq!(
+        tools.rg().source,
+        tars_core::external_tools::ToolSource::Auto
+    );
+    assert!(
+        !tools.rg().is_ready(),
+        "corrupted managed rg must not fall back to PATH"
+    );
+    assert!(
+        tools.rg().unavailable_reason().unwrap().contains("SHA-256"),
+        "{:?}",
+        tools.rg()
+    );
+    Some(ToolCheck {
+        status: tools.rg().clone(),
+        tools,
+    })
+}
+
 struct Fake {
     sandbox: SandboxCheck,
     initial: ToolCheck,
@@ -415,4 +505,62 @@ async fn quit_during_the_splash_stops_the_checks_and_exits() {
     assert!(app.quitting);
     until(&mut app, |app| app.done).await;
     assert!(app.startup.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn auto_with_valid_system_rg_enters_without_asking_to_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Fake::new(sandbox_ready(), auto_ready_from_path(dir.path()));
+    let mut app = test_app(dir.path(), &fake);
+    app.begin_startup();
+    until(&mut app, |app| app.startup.is_none()).await;
+    assert_eq!(fake.install_calls(), 0);
+    assert!(app.search_reason.is_none());
+    assert!(app.external_tools.is_some());
+    assert!(!screen(&app).contains("Download ripgrep"));
+}
+
+#[tokio::test]
+async fn auto_with_neither_managed_nor_system_rg_prompts_when_asset_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = Fake::new(sandbox_ready(), auto_unavailable(dir.path()));
+    let mut app = test_app(dir.path(), &fake);
+    app.begin_startup();
+    if tars_core::external_tools::ripgrep_asset().is_some() {
+        until(&mut app, asking).await;
+        assert!(
+            screen(&app).contains("Download ripgrep 15.2.0"),
+            "{}",
+            screen(&app)
+        );
+    } else {
+        until(&mut app, |app| app.startup.is_none()).await;
+        assert_eq!(fake.install_calls(), 0);
+        assert!(app.search_reason.is_some());
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn auto_with_corrupted_managed_binary_fails_closed_instead_of_using_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(check) = auto_corrupted_managed_with_path(dir.path()) else {
+        return;
+    };
+    let fake = Fake::new(sandbox_ready(), check);
+    let mut app = test_app(dir.path(), &fake);
+    app.begin_startup();
+    until(&mut app, asking).await;
+    let splash = screen(&app);
+    assert!(splash.contains("SHA-256"), "{splash}");
+    app.advance_clock(crate::app::state::CONFIRM_GUARD_WINDOW);
+    app.event(key(KeyCode::Char('n')));
+    until(&mut app, |app| app.startup.is_none()).await;
+    assert_eq!(fake.install_calls(), 0);
+    assert!(
+        app.search_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("SHA-256"))
+    );
 }

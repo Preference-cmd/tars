@@ -1,4 +1,4 @@
-//! Real macOS Seatbelt acceptance for the bound `run_command` tool (SC04-SC07).
+//! Real platform sandbox acceptance for the bound `run_command` tool (SC04-SC07).
 //!
 //! These tests drive the tool, not `CommandRuntime` directly, so the parameter,
 //! permission-free execution path and output payload are exercised together.
@@ -43,7 +43,7 @@ fn settings(network: CommandNetwork) -> CommandSettings {
 
 fn bound_tool(root: &Path, network: CommandNetwork, calls: &[ToolCallContext]) -> Arc<dyn Tool> {
     let runtime = CommandRuntime::bind(root, settings(network), None)
-        .expect("the macOS Seatbelt backend must probe successfully");
+        .expect("the platform sandbox backend must probe successfully");
     bind_runtime(root, network, runtime, calls)
 }
 
@@ -170,6 +170,14 @@ async fn file_boundaries_hold_through_run_command() {
     std::os::unix::fs::symlink(&outside, root.join("out-link")).unwrap();
 
     let abs = outside.join("abs.txt");
+    let missing_git_checks = if cfg!(target_os = "macos") {
+        // On macOS Seatbelt, missing `.git` creation is denied; on Linux `bwrap`
+        // (Decision 1A), non-existent `.git` leaves are not pre-created on the host.
+        "if printf x > .git/hooks/x 2>/dev/null; then echo git-write-allowed; exit 72; fi\n\
+         if mkdir .git 2>/dev/null; then echo git-created; exit 73; fi\n"
+    } else {
+        ""
+    };
     let script = format!(
         r#"set -u
 printf one > inside.txt || exit 60
@@ -184,9 +192,7 @@ if printf pwn > ../outside/rel.txt 2>/dev/null; then echo parent-write-allowed; 
 if rm ../outside/rel.txt 2>/dev/null; then echo parent-delete-allowed; exit 69; fi
 if mv ../outside/escape.txt ../outside/moved.txt 2>/dev/null; then echo parent-rename-allowed; exit 70; fi
 if printf pwn > out-link/escape.txt 2>/dev/null; then echo symlink-write-allowed; exit 71; fi
-if printf x > .git/hooks/x 2>/dev/null; then echo git-write-allowed; exit 72; fi
-if mkdir .git 2>/dev/null; then echo git-created; exit 73; fi
-echo boundaries-ok
+{missing_git_checks}echo boundaries-ok
 "#,
         abs = abs.display()
     );
@@ -300,7 +306,7 @@ impl Listener {
 async fn network_none_denies_loopback_and_dns_while_open_allows_loopback() {
     assert!(
         Path::new("/usr/bin/curl").exists(),
-        "the macOS acceptance suite requires /usr/bin/curl"
+        "the command acceptance suite requires /usr/bin/curl"
     );
     let base = tempfile::tempdir().unwrap();
     let root = base.path().join("workspace");
@@ -519,7 +525,7 @@ async fn host_read_scope_denies_credentials_and_the_session_store_through_the_to
     std::fs::write(storage.join("record.json"), "STORAGE-SECRET\n").unwrap();
 
     let sandbox = tars_sandbox::test_support::open_with_home(home.clone())
-        .expect("the synthetic home must support the seatbelt probe");
+        .expect("the synthetic home must support the platform sandbox probe");
     let runtime = CommandRuntime::bind_with_sandbox(
         &root,
         settings(CommandNetwork::None),
@@ -534,7 +540,7 @@ if ! grep -q PROBE-CONFIG '{home}/.cargo/config.toml' 2>/dev/null; then echo con
 for path in '{home}/.cargo/credentials.toml' '{home}/.ssh/id_ed25519' '{home}/.aws/credentials' '{home}/.zsh_history'; do
   if grep -q PROBE-CANARY "$path" 2>/dev/null; then echo credential-leaked; exit 3; fi
 done
-if /usr/bin/head -c 0 /dev/tty >/dev/null 2>&1; then echo dev-tty-open; exit 4; fi
+if head -c 0 /dev/tty >/dev/null 2>&1; then echo dev-tty-open; exit 4; fi
 if grep -q STORAGE-SECRET '{storage}/record.json' 2>/dev/null; then echo storage-leaked; exit 5; fi
 if printf x > '{storage}/new' 2>/dev/null; then echo storage-write-allowed; exit 6; fi
 if printf x > '{outside}/escape' 2>/dev/null; then echo outside-write-allowed; exit 7; fi
@@ -586,7 +592,7 @@ fn git_available() -> bool {
 async fn git_operations_work_while_metadata_stays_protected() {
     assert!(
         git_available(),
-        "the macOS acceptance suite requires /usr/bin/git"
+        "the command acceptance suite requires /usr/bin/git"
     );
     let base = tempfile::tempdir().unwrap();
     let root = base.path().join("workspace");
@@ -659,11 +665,14 @@ echo git-ok
     assert!(!root.join("moved").exists());
 }
 
+// Decision 1A: Linux `bwrap` does not pre-create missing `.git` stubs on the host,
+// so blocking `git init` in a fresh workspace without `.git` applies only to macOS Seatbelt.
+#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn git_init_is_blocked_in_a_fresh_workspace() {
     assert!(
         git_available(),
-        "the macOS acceptance suite requires /usr/bin/git"
+        "the command acceptance suite requires /usr/bin/git"
     );
     let base = tempfile::tempdir().unwrap();
     let root = base.path().join("workspace");

@@ -197,7 +197,7 @@ impl WorkspaceTools {
     pub(crate) fn command_settings(&self) -> CommandSettings {
         self.command_settings
     }
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
     pub(crate) fn command(&self) -> Option<&Arc<super::CommandRuntime>> {
         self.command.as_ref()
     }
@@ -390,7 +390,7 @@ impl WorkspaceTools {
 
     /// Number of times `run_command` JSON parameters were decoded on this tool set.
     #[cfg(test)]
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub(crate) fn command_decode_count(&self) -> usize {
         self.command_decode_count
             .load(std::sync::atomic::Ordering::SeqCst)

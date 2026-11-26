@@ -268,9 +268,12 @@ impl App {
         self.user_rules_path = user_rules_path;
         self.host = host;
 
-        let tools = workspace_root
-            .as_ref()
-            .map(|_| tars_core::config::default_tools_for_current_platform());
+        let tools = workspace_root.as_ref().map(|_| {
+            self.sandbox_status
+                .as_ref()
+                .map(|status| tars_core::config::default_tools_for_sandbox(status.is_available()))
+                .unwrap_or_else(tars_core::config::default_tools_for_current_platform)
+        });
         let definition = match self.options.config.definition(
             self.options.profile.as_deref(),
             tars_core::config::DefinitionOverrides {

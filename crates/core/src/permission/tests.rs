@@ -2247,7 +2247,7 @@ fn command_definition(endpoint: &str, root: &Path) -> SessionDefinition {
     definition
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn call_command(arguments: serde_json::Value) -> ScriptedToolCall {
     ScriptedToolCall {
         name: "run_command".into(),
@@ -2255,7 +2255,7 @@ fn call_command(arguments: serde_json::Value) -> ScriptedToolCall {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn command_result(
     session: &ManagedSession,
     observation: &WorkObservation,
@@ -2279,7 +2279,7 @@ fn command_result(
     payload.output.content
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_full_access_stays_sandboxed() {
     let root = tempfile::tempdir().unwrap();
@@ -2335,7 +2335,7 @@ async fn command_full_access_stays_sandboxed() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_ask_allows_and_denies_with_the_command_subject() {
     let root = tempfile::tempdir().unwrap();
@@ -2436,7 +2436,7 @@ async fn command_ask_allows_and_denies_with_the_command_subject() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_read_only_refuses_before_asking() {
     let root = tempfile::tempdir().unwrap();
@@ -2476,7 +2476,7 @@ async fn command_read_only_refuses_before_asking() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_invalid_workdir_and_missing_route_are_rejected_without_prompt() {
     let root = tempfile::tempdir().unwrap();
@@ -2534,7 +2534,7 @@ async fn command_invalid_workdir_and_missing_route_are_rejected_without_prompt()
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_timeout_and_cancel_are_reported_and_stop_work() {
     let root = tempfile::tempdir().unwrap();
@@ -2613,7 +2613,7 @@ async fn command_timeout_and_cancel_are_reported_and_stop_work() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_command_rejection_is_not_warned_by_repair() {
     let root = tempfile::tempdir().unwrap();
@@ -2752,7 +2752,7 @@ async fn queued_command_rejection_is_not_warned_by_repair() {
         .unwrap();
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_tool_creation_fails_on_unsupported_platform() {
     let root = tempfile::tempdir().unwrap();
@@ -2778,7 +2778,7 @@ async fn command_tool_creation_fails_on_unsupported_platform() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn command_settings_survive_save_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -2807,7 +2807,7 @@ async fn command_settings_survive_save_and_reopen() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn call_command_outside(command: &str, justification: &str) -> ScriptedToolCall {
     call_command(json!({
         "command": command,
@@ -2816,7 +2816,7 @@ fn call_command_outside(command: &str, justification: &str) -> ScriptedToolCall 
     }))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_outside_sandbox_full_access_runs_and_clears_environment() {
     let root = tempfile::tempdir().unwrap();
@@ -2873,7 +2873,7 @@ async fn command_outside_sandbox_full_access_runs_and_clears_environment() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_outside_sandbox_ask_allows_and_denies_with_the_subject() {
     let root = tempfile::tempdir().unwrap();
@@ -2975,7 +2975,7 @@ async fn command_outside_sandbox_ask_allows_and_denies_with_the_subject() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_outside_sandbox_accept_edits_asks_and_allows_with_a_route() {
     let root = tempfile::tempdir().unwrap();
@@ -3041,7 +3041,7 @@ async fn command_outside_sandbox_accept_edits_asks_and_allows_with_a_route() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_outside_sandbox_read_only_rejects_without_prompt() {
     let root = tempfile::tempdir().unwrap();
@@ -3089,7 +3089,7 @@ async fn command_outside_sandbox_read_only_rejects_without_prompt() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_outside_sandbox_requires_a_valid_justification() {
     let root = tempfile::tempdir().unwrap();
@@ -3166,7 +3166,7 @@ async fn command_outside_sandbox_requires_a_valid_justification() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_outside_sandbox_accept_edits_without_a_route_rejects_only_the_outside_call() {
     let root = tempfile::tempdir().unwrap();
@@ -3231,7 +3231,7 @@ async fn command_outside_sandbox_accept_edits_without_a_route_rejects_only_the_o
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_accept_edits_runs_sandboxed_commands() {
     let root = tempfile::tempdir().unwrap();
@@ -3273,7 +3273,7 @@ async fn command_accept_edits_runs_sandboxed_commands() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malformed_outside_flag_in_accept_edits_is_gated_as_outside() {
     let root = tempfile::tempdir().unwrap();
@@ -3317,7 +3317,7 @@ async fn malformed_outside_flag_in_accept_edits_is_gated_as_outside() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_accept_edits_runs_sandboxed_commands_with_the_open_setting() {
     let root = tempfile::tempdir().unwrap();
@@ -3361,19 +3361,19 @@ async fn command_accept_edits_runs_sandboxed_commands_with_the_open_setting() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_cancel_repair_adopts_and_never_reruns() {
     command_cancel_repair_case(false).await;
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn outside_command_cancel_repair_warns_and_never_reruns() {
     command_cancel_repair_case(true).await;
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn command_cancel_repair_case(outside: bool) {
     let root = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
@@ -3854,7 +3854,7 @@ async fn rc03_orchestrator_evaluates_modes_rules_and_routes_consistently() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rc03_end_to_end_command_rules_execution_and_grants() {
     use crate::permission::rules::{
@@ -4182,7 +4182,7 @@ fn tl05_mcp_trust_boundary_enforces_frozen_approval_over_hints() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tl06_run_command_decodes_and_checks_exactly_once_per_execution() {
     let root = tempfile::tempdir().unwrap();
@@ -4395,7 +4395,7 @@ async fn tl07_t5_staging_clears_across_rejections_cancels_and_execution() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tl07_t5_rule_denied_command_leaves_staging_empty_and_skips_prepare() {
     use crate::permission::rules::{CommandRule, CommandRuleSet, RuleDecision};
@@ -4443,7 +4443,7 @@ async fn tl07_t5_rule_denied_command_leaves_staging_empty_and_skips_prepare() {
         .unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tl08_allow_for_session_applies_to_subsequent_calls_in_same_batch() {
     use crate::permission::rules::CommandRuleSet;

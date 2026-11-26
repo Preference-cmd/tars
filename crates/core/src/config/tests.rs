@@ -1095,20 +1095,28 @@ fn compaction_profile_fields_resolve_and_invalid_values_are_refused() {
 }
 
 #[test]
-fn external_tools_section_selects_the_ripgrep_source_and_defaults_to_managed() {
+fn external_tools_section_selects_the_ripgrep_source_and_defaults_to_auto() {
     use crate::external_tools::ToolSource;
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.toml");
 
     std::fs::write(&path, "version = 1\n").unwrap();
     let config = Config::load(ConfigSource::File(path.clone())).unwrap();
-    assert_eq!(config.ripgrep_source(), &ToolSource::Managed);
+    assert_eq!(config.ripgrep_source(), &ToolSource::Auto);
     assert_eq!(
         Config::load(ConfigSource::Disabled)
             .unwrap()
             .ripgrep_source(),
-        &ToolSource::Managed
+        &ToolSource::Auto
     );
+
+    std::fs::write(&path, "version = 1\n[external_tools]\nrg = \"auto\"\n").unwrap();
+    let config = Config::load(ConfigSource::File(path.clone())).unwrap();
+    assert_eq!(config.ripgrep_source(), &ToolSource::Auto);
+
+    std::fs::write(&path, "version = 1\n[external_tools]\nrg = \"managed\"\n").unwrap();
+    let config = Config::load(ConfigSource::File(path.clone())).unwrap();
+    assert_eq!(config.ripgrep_source(), &ToolSource::Managed);
 
     std::fs::write(&path, "version = 1\n[external_tools]\nrg = \"system\"\n").unwrap();
     let config = Config::load(ConfigSource::File(path.clone())).unwrap();
@@ -1132,7 +1140,7 @@ fn external_tools_section_selects_the_ripgrep_source_and_defaults_to_managed() {
 
     std::fs::write(&path, "version = 1\n[external_tools]\n").unwrap();
     let config = Config::load(ConfigSource::File(path.clone())).unwrap();
-    assert_eq!(config.ripgrep_source(), &ToolSource::Managed);
+    assert_eq!(config.ripgrep_source(), &ToolSource::Auto);
 
     for text in [
         "version = 1\n[external_tools]\nrg = \"relative/rg\"\n",
@@ -1144,6 +1152,7 @@ fn external_tools_section_selects_the_ripgrep_source_and_defaults_to_managed() {
             .expect_err("must reject")
             .to_string();
         assert!(message.contains("[external_tools] rg"), "{message}");
+        assert!(message.contains("\"auto\""), "{message}");
     }
 
     for text in [

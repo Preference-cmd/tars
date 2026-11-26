@@ -434,7 +434,7 @@ fn the_configured_output_limit_and_effort_reach_the_request() {
     assert_eq!(body["output_config"]["effort"], "low");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn command_sandbox_status_is_reported_on_stderr_but_not_in_json() {
     let workspace = tempfile::tempdir().unwrap();
@@ -453,10 +453,12 @@ fn command_sandbox_status_is_reported_on_stderr_but_not_in_json() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("TARS: command sandbox: seatbelt: descendant lifecycle partial ("),
-        "{stderr}"
-    );
+    let expected = if cfg!(target_os = "macos") {
+        "TARS: command sandbox: seatbelt: descendant lifecycle partial ("
+    } else {
+        "TARS: command sandbox: bwrap: all dimensions full"
+    };
+    assert!(stderr.contains(expected), "{stderr}");
     assert!(!stderr.contains("file read full"), "{stderr}");
     let run_report = report(&output);
     assert_eq!(run_report["status"], "completed");

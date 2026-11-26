@@ -124,7 +124,7 @@ impl CommandRuntime {
     }
 
     #[cfg(test)]
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub(crate) fn check_count(&self) -> usize {
         self.check_count.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -508,7 +508,7 @@ impl OutputCapture {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use crate::definition::CommandSettings;
@@ -700,9 +700,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let runtime = CommandRuntime::bind(root.path(), CommandSettings::default(), None).unwrap();
 
-        // When `.tars` does not exist yet, creating it (including case variants on
-        // macOS) is denied while normal workspace writes succeed.
-        let missing_script = r#"set -u
+        if cfg!(target_os = "macos") {
+            // When `.tars` does not exist yet, macOS Seatbelt denies creating
+            // it (including case variants) while normal workspace writes succeed.
+            // On Linux `bwrap`, non-existent `.tars` leaves are not pre-created on
+            // the host (Decision 1A).
+            let missing_script = r#"set -u
 if mkdir .tars 2>/dev/null; then exit 1; fi
 if mkdir .TARS 2>/dev/null; then exit 2; fi
 if printf x > .tars 2>/dev/null; then exit 3; fi
@@ -711,26 +714,27 @@ if mkdir -p .tars/skills/a 2>/dev/null; then exit 5; fi
 printf ok > normal.txt || exit 6
 echo missing-tars-ok
 "#;
-        let missing = run(
-            &runtime,
-            params(missing_script, None),
-            Duration::from_secs(5),
-            64 * 1024,
-        )
-        .await;
-        assert_eq!(missing.status, ToolResultStatus::Succeeded, "{missing:?}");
-        assert_eq!(missing.content["exit_code"], 0, "{missing:?}");
-        assert!(
-            missing.content["output"]
-                .as_str()
-                .unwrap()
-                .contains("missing-tars-ok")
-        );
-        assert!(!root.path().join(".tars").exists());
-        assert_eq!(
-            std::fs::read_to_string(root.path().join("normal.txt")).unwrap(),
-            "ok"
-        );
+            let missing = run(
+                &runtime,
+                params(missing_script, None),
+                Duration::from_secs(5),
+                64 * 1024,
+            )
+            .await;
+            assert_eq!(missing.status, ToolResultStatus::Succeeded, "{missing:?}");
+            assert_eq!(missing.content["exit_code"], 0, "{missing:?}");
+            assert!(
+                missing.content["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains("missing-tars-ok")
+            );
+            assert!(!root.path().join(".tars").exists());
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("normal.txt")).unwrap(),
+                "ok"
+            );
+        }
 
         // Once `.tars/skills/...` exists, reading it succeeds while modifying,
         // creating, renaming or deleting `.tars` or its contents fails.
@@ -741,19 +745,25 @@ echo missing-tars-ok
         )
         .unwrap();
         let runtime = CommandRuntime::bind(root.path(), CommandSettings::default(), None).unwrap();
-        let existing_script = r#"set -u
+        let case_checks = if cfg!(target_os = "macos") {
+            "if printf pwn > .TARS/skills/alpha/SKILL.md 2>/dev/null; then exit 3; fi\n\
+             if printf pwn > .TARS/new.txt 2>/dev/null; then exit 5; fi\n"
+        } else {
+            ""
+        };
+        let existing_script = format!(
+            r#"set -u
 if ! grep -q 'name: alpha' .tars/skills/alpha/SKILL.md; then exit 1; fi
 if printf pwn > .tars/skills/alpha/SKILL.md 2>/dev/null; then exit 2; fi
-if printf pwn > .TARS/skills/alpha/SKILL.md 2>/dev/null; then exit 3; fi
-if printf pwn > .tars/new.txt 2>/dev/null; then exit 4; fi
-if printf pwn > .TARS/new.txt 2>/dev/null; then exit 5; fi
+{case_checks}if printf pwn > .tars/new.txt 2>/dev/null; then exit 4; fi
 if mv .tars .tars_moved 2>/dev/null; then exit 6; fi
 if rm -rf .tars 2>/dev/null; then exit 7; fi
 echo existing-tars-ok
-"#;
+"#
+        );
         let existing = run(
             &runtime,
-            params(existing_script, None),
+            params(&existing_script, None),
             Duration::from_secs(5),
             64 * 1024,
         )

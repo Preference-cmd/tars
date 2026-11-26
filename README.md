@@ -5,7 +5,7 @@ TARS is an open-source, local-first AI agent written in Rust and built on [`caus
 ## Key features
 
 - **Multi-protocol providers:** `openai-chat`, `openai-responses`, and `anthropic` with custom endpoints and env-only API keys.
-- **Workspace safety:** Four permission modes, read-before-write guards, macOS Seatbelt sandboxing, and layered command rules.
+- **Workspace safety:** Four permission modes, read-before-write guards, macOS Seatbelt and Linux Bubblewrap (`bwrap` + `seccomp-BPF`) sandboxing, and layered command rules.
 - **Long-session compaction:** Automatic output spilling, micro-compaction, working briefs, prompt caching, and `recall`.
 - **Persistent sessions:** Local SQLite storage with OS file locks, atomic commits, recovery export, and interrupted-turn repair.
 - **Programmatic tool calling (PTC):** Opt-in QuickJS ES2020 `run_code` sandbox for orchestrating read-only workspace tools and `recall` in one turn.
@@ -62,7 +62,7 @@ printf 'Continue analyzing the material' | ./target/release/tars run \
 
 ### Optional `rg` setup for `search_text`
 
-`search_text` uses external `rg` (ripgrep), which is not bundled and is never downloaded silently. Inspect status or install the pinned `15.2.0` release (consent-gated and SHA-256 verified):
+`search_text` uses external `rg` (ripgrep), which is not bundled and is never downloaded silently. By default (`[external_tools] rg = "auto"`), TARS checks a SHA-256-verified managed copy first, falls back to a compatible `rg >= 14` on `PATH`, and otherwise prompts before downloading the pinned `15.2.0` release (macOS `aarch64`/`x86_64`, Linux `x86_64`/`aarch64`). Inspect status or install manually:
 
 ```sh
 ./target/release/tars tools status
@@ -75,12 +75,12 @@ printf 'Continue analyzing the material' | ./target/release/tars run \
 | --- | --- | --- | --- |
 | Core runtime, CLI & TUI (`tars`), persistent sessions, MCP | Verified in CI | Verified in CI | Not currently in CI (unverified) |
 | Workspace file tools (`list_directory`, `read_file`, `find_files`, `write_file`, `edit_file`) | Supported | Supported | Not yet implemented |
-| Sandboxed `run_command` and `search_text` | Supported (Seatbelt) | Fail-closed (no sandbox backend yet) | Fail-closed (no sandbox backend yet) |
+| Sandboxed `run_command` and `search_text` | Supported (Seatbelt) | Supported (Bubblewrap `bwrap` + `seccomp-BPF`, requires unprivileged userns) | Fail-closed (no sandbox backend yet) |
 
 Current gaps and roadmap items not yet implemented:
 
 - Prebuilt binaries and package-manager installers (currently source build via Cargo only)
-- Linux and Windows sandbox backends for `run_command` and `search_text` (and restoring Windows CI)
+- Windows workspace tools and sandbox backend for `run_command` and `search_text` (and restoring Windows CI)
 - Desktop GUI
 - Live verification against third-party model and MCP endpoints (current tests cover local HTTP and MCP fixtures)
 
@@ -89,7 +89,7 @@ Current gaps and roadmap items not yet implemented:
 | Crate | Package | Role |
 | --- | --- | --- |
 | `crates/core` | `tars-core` | Shared session host, configuration, tools, permission policy, compaction, and store |
-| `crates/sandbox` | `tars-sandbox` | Platform-independent sandbox policy, capability probes, process trees, and Seatbelt backend |
+| `crates/sandbox` | `tars-sandbox` | Platform-independent sandbox policy, capability probes, process trees, macOS Seatbelt, and Linux Bubblewrap + `seccomp-BPF` backends |
 | `crates/cli` | `tars-cli` | `tars` unified binary (CLI subcommands + interactive TUI entry) |
 | `crates/tui` | `tars-tui` | Native terminal interface library consumed by `tars-cli` |
 
@@ -101,7 +101,7 @@ Dependencies flow strictly one way (`tars-cli` → `tars-tui` → `tars-core` �
 
 - [Current implementation](docs/README.md) — code layout, module boundaries, and local verification checks
 - [Shared configuration](docs/configuration.md) — TOML schema, presets, compaction, prelude/skills, external tools, and MCP
-- [Workspace tools](docs/workspace-tools.md) — file safety, permission modes, command rules, Seatbelt sandbox, `run_code`, and record migration
+- [Workspace tools](docs/workspace-tools.md) — file safety, permission modes, command rules, platform sandboxes (Seatbelt/Bubblewrap), `run_code`, and record migration
 - [Session lifecycle](docs/session-lifecycle.md) — session assembly, execution, saving, closing, and usage statistics
 - [Session continuation](docs/session-continuation.md) — repairing interrupted tool batches
 - [TUI guide](docs/tui.md) — terminal layout, keybindings, startup checks, and history display

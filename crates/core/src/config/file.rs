@@ -73,7 +73,7 @@ struct FileAgents {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileExternalTools {
-    /// `managed`, `system`, or an absolute executable path.
+    /// `auto` (default), `managed`, `system`, or an absolute executable path.
     rg: Option<String>,
 }
 
@@ -272,7 +272,7 @@ impl Config {
             Some(value) => {
                 ToolSource::parse(&value).map_err(|_| ConfigError::InvalidExternalTool)?
             }
-            None => ToolSource::Managed,
+            None => ToolSource::Auto,
         };
         let mut prelude_defaults = ResolvedPreludeDefaults {
             config_dir: Some(canonical_base),
@@ -471,7 +471,8 @@ impl Config {
         &self.mcp_servers
     }
 
-    /// Configured source of the `rg` executable; defaults to the managed copy.
+    /// Configured source of the `rg` executable; defaults to `auto`
+    /// (`ToolSource::Auto`: verified managed copy, else `rg >= 14` on `PATH`).
     pub fn ripgrep_source(&self) -> &ToolSource {
         &self.ripgrep
     }
@@ -587,7 +588,7 @@ pub enum ConfigError {
     #[error("profile name must not be blank")]
     EmptyProfile,
     /// The `[external_tools] rg` value is not a usable source.
-    #[error("[external_tools] rg must be \"managed\", \"system\", or an absolute path")]
+    #[error("[external_tools] rg must be \"auto\", \"managed\", \"system\", or an absolute path")]
     InvalidExternalTool,
     /// The selected preset does not exist.
     #[error("unknown configuration profile {0:?}")]

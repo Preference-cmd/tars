@@ -381,7 +381,7 @@ async fn unenforceable_policy_dimensions_reject_every_call_without_launching() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn a_platform_without_a_backend_names_the_build_platform() {
     let directory = tempfile::tempdir().unwrap();

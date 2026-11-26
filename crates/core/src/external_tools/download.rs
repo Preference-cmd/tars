@@ -164,24 +164,44 @@ pub async fn install_managed_rg(config: &Config) -> Result<ToolStatus, InstallEr
 
 /// Install against an explicit environment; see [`install_managed_rg`].
 ///
-/// The configured source must be `managed`; otherwise nothing is downloaded
-/// and [`InstallError::NotManaged`] is returned.
+/// The configured source must be `auto` or `managed`; otherwise nothing is
+/// downloaded and [`InstallError::NotManaged`] is returned.
 pub async fn install_managed_rg_with(
     config: &Config,
     environment: &ToolEnvironment,
 ) -> Result<ToolStatus, InstallError> {
-    if !matches!(config.ripgrep_source(), ToolSource::Managed) {
+    if !matches!(
+        config.ripgrep_source(),
+        ToolSource::Auto | ToolSource::Managed
+    ) {
         return Err(InstallError::NotManaged(
             config.ripgrep_source().to_string(),
         ));
     }
     let asset = super::manifest::ripgrep_asset().ok_or(InstallError::UnsupportedPlatform)?;
-    let destination =
-        super::status::managed_rg_path(environment).ok_or(InstallError::NoDataDirectory)?;
     let source = DownloadSource::from_asset(asset, environment);
-    let version = install(&source, &destination).await?;
+    install_managed_rg_with_source(config, environment, asset, &source).await
+}
+
+async fn install_managed_rg_with_source(
+    config: &Config,
+    environment: &ToolEnvironment,
+    asset: &RipgrepAsset,
+    source: &DownloadSource,
+) -> Result<ToolStatus, InstallError> {
+    if !matches!(
+        config.ripgrep_source(),
+        ToolSource::Auto | ToolSource::Managed
+    ) {
+        return Err(InstallError::NotManaged(
+            config.ripgrep_source().to_string(),
+        ));
+    }
+    let destination = super::status::managed_path(environment, asset.target)
+        .ok_or(InstallError::NoDataDirectory)?;
+    let version = install(source, &destination).await?;
     Ok(ToolStatus::ready(
-        ToolSource::Managed,
+        config.ripgrep_source().clone(),
         Some(destination),
         Some(version),
     ))

@@ -282,7 +282,7 @@ decision = \"allow\"
     host.close(&s4.target(), ClosePolicy::Save).await.unwrap();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod macos_execution {
     use super::*;
     use crate::application::tests::workspace_http::*;

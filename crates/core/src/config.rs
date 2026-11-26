@@ -19,7 +19,8 @@ pub use model::{
 };
 pub use onboarding::{
     OnboardingError, OnboardingInput, default_config_path, default_store_dir,
-    default_tools_for_current_platform, render_initial_config, write_initial_config,
+    default_tools_for_current_platform, default_tools_for_sandbox, render_initial_config,
+    write_initial_config,
 };
 
 #[cfg(test)]

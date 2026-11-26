@@ -69,6 +69,18 @@ impl ToolEnvironment {
         }
     }
 
+    /// Set `$TARS_HOME` on an explicit environment.
+    pub fn with_tars_home(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tars_home = Some(path.into());
+        self
+    }
+
+    /// Set `$PATH` on an explicit environment.
+    pub fn with_path(mut self, path: impl Into<OsString>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
     /// The user TARS directory: `$TARS_HOME`, else `<home>/.tars`.
     ///
     /// Relative or empty `TARS_HOME` and `home` values are ignored so the
@@ -81,8 +93,11 @@ impl ToolEnvironment {
 /// Where the configured `rg` executable comes from.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ToolSource {
-    /// The copy TARS installs under the user TARS directory, pinned by SHA-256.
+    /// Prefer a valid SHA-256-verified managed copy; otherwise fall back to a
+    /// compatible `rg >= 14` on `PATH`, or offer managed installation.
     #[default]
+    Auto,
+    /// The copy TARS installs under the user TARS directory, pinned by SHA-256.
     Managed,
     /// The first `rg` found on `PATH` when TARS starts.
     System,
@@ -95,6 +110,7 @@ impl ToolSource {
     pub fn parse(value: &str) -> Result<Self, ToolSourceError> {
         let value = value.trim();
         match value {
+            "auto" => Ok(Self::Auto),
             "managed" => Ok(Self::Managed),
             "system" => Ok(Self::System),
             path if !path.is_empty() && Path::new(path).is_absolute() => {
@@ -107,6 +123,7 @@ impl ToolSource {
     /// Stable source name used by status output and `--json`.
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Managed => "managed",
             Self::System => "system",
             Self::Path(_) => "path",
@@ -117,6 +134,7 @@ impl ToolSource {
 impl std::fmt::Display for ToolSource {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Auto => formatter.write_str("auto"),
             Self::Managed => formatter.write_str("managed"),
             Self::System => formatter.write_str("system"),
             Self::Path(path) => write!(formatter, "{}", path.display()),
@@ -126,7 +144,7 @@ impl std::fmt::Display for ToolSource {
 
 /// Why an `[external_tools] rg` value is not a usable source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("must be \"managed\", \"system\", or an absolute path")]
+#[error("must be \"auto\", \"managed\", \"system\", or an absolute path")]
 pub struct ToolSourceError;
 
 /// Readiness of one checked tool.
@@ -229,7 +247,7 @@ pub fn managed_rg_path(environment: &ToolEnvironment) -> Option<PathBuf> {
     managed_path(environment, asset.target)
 }
 
-fn managed_path(environment: &ToolEnvironment, target: &str) -> Option<PathBuf> {
+pub(super) fn managed_path(environment: &ToolEnvironment, target: &str) -> Option<PathBuf> {
     let root = environment.tars_dir()?;
     Some(
         root.join("tools")
@@ -295,30 +313,14 @@ impl ExpectedAsset {
 
 fn resolve_source(source: &ToolSource, environment: &ToolEnvironment) -> ToolStatus {
     match source {
+        ToolSource::Auto => resolve_auto(environment, ExpectedAsset::embedded().as_ref()),
         ToolSource::Managed => resolve_managed(environment, ExpectedAsset::embedded().as_ref()),
         ToolSource::System => resolve_system(environment),
         ToolSource::Path(path) => resolve_configured(path),
     }
 }
 
-fn resolve_managed(environment: &ToolEnvironment, expected: Option<&ExpectedAsset>) -> ToolStatus {
-    let source = ToolSource::Managed;
-    let Some(expected) = expected else {
-        return ToolStatus::unavailable(
-            source,
-            None,
-            None,
-            format!("no managed ripgrep {RIPGREP_VERSION} exists for this platform"),
-        );
-    };
-    let Some(path) = managed_path(environment, &expected.target) else {
-        return ToolStatus::unavailable(
-            source,
-            None,
-            None,
-            "cannot locate the user TARS directory; set TARS_HOME or HOME",
-        );
-    };
+fn verify_managed_binary(source: ToolSource, path: PathBuf, expected_sha256: &str) -> ToolStatus {
     match std::fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() => {
             if metadata.len() > MAX_MANAGED_BINARY_BYTES {
@@ -330,7 +332,7 @@ fn resolve_managed(environment: &ToolEnvironment, expected: Option<&ExpectedAsse
                 );
             }
             match super::download::sha256_file(&path) {
-                Ok(actual) if actual == expected.binary_sha256 => match probe_version(&path) {
+                Ok(actual) if actual == expected_sha256 => match probe_version(&path) {
                     Ok(version) => ToolStatus::ready(source, Some(path), Some(version)),
                     Err(reason) => ToolStatus::unavailable(source, Some(path), None, reason),
                 },
@@ -352,8 +354,85 @@ fn resolve_managed(environment: &ToolEnvironment, expected: Option<&ExpectedAsse
             source,
             Some(path),
             None,
-            "managed rg is not installed; run `tars tools install rg`",
+            "managed rg could not be read for verification; run `tars tools install rg`",
         ),
+    }
+}
+
+fn resolve_auto(environment: &ToolEnvironment, expected: Option<&ExpectedAsset>) -> ToolStatus {
+    let source = ToolSource::Auto;
+    let managed_path_if_any = expected.and_then(|exp| managed_path(environment, &exp.target));
+    if let (Some(exp), Some(path)) = (expected, &managed_path_if_any)
+        && std::fs::symlink_metadata(path).is_ok()
+    {
+        // A managed file (or dangling link) present on disk must pass SHA-256
+        // and version verification; never silently fall back to PATH if it
+        // looks tampered or corrupted.
+        return verify_managed_binary(source, path.clone(), &exp.binary_sha256);
+    }
+
+    if let Some(path_variable) = environment.path.as_deref()
+        && let Some(path) = find_on_path(path_variable)
+    {
+        return match probe_version(&path) {
+            Ok(version) if major_version(&version) >= MIN_SYSTEM_MAJOR => {
+                ToolStatus::ready(source, Some(path), Some(version))
+            }
+            Ok(version) => {
+                let hint = if expected.is_some() {
+                    "; run `tars tools install rg`"
+                } else {
+                    ""
+                };
+                ToolStatus::unavailable(
+                    source,
+                    Some(path),
+                    Some(version.clone()),
+                    format!("system rg {version} is older than {MIN_SYSTEM_MAJOR}{hint}"),
+                )
+            }
+            Err(reason) => ToolStatus::unavailable(source, Some(path), None, reason),
+        };
+    }
+
+    let reason = if expected.is_some() {
+        "rg was not found on PATH and managed rg is not installed; run `tars tools install rg`"
+            .to_owned()
+    } else {
+        format!(
+            "rg was not found on PATH and no managed ripgrep {RIPGREP_VERSION} exists for this platform"
+        )
+    };
+    ToolStatus::unavailable(source, managed_path_if_any, None, reason)
+}
+
+fn resolve_managed(environment: &ToolEnvironment, expected: Option<&ExpectedAsset>) -> ToolStatus {
+    let source = ToolSource::Managed;
+    let Some(expected) = expected else {
+        return ToolStatus::unavailable(
+            source,
+            None,
+            None,
+            format!("no managed ripgrep {RIPGREP_VERSION} exists for this platform"),
+        );
+    };
+    let Some(path) = managed_path(environment, &expected.target) else {
+        return ToolStatus::unavailable(
+            source,
+            None,
+            None,
+            "cannot locate the user TARS directory; set TARS_HOME or HOME",
+        );
+    };
+    if std::fs::symlink_metadata(&path).is_ok() {
+        verify_managed_binary(source, path, &expected.binary_sha256)
+    } else {
+        ToolStatus::unavailable(
+            source,
+            Some(path),
+            None,
+            "managed rg is not installed; run `tars tools install rg`",
+        )
     }
 }
 

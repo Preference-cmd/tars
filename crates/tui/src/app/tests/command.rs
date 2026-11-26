@@ -1,12 +1,12 @@
 use super::support::app;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::support::{ctrl, key, until};
 use crate::{input::Form, render};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crossterm::event::KeyCode;
 use ratatui::{Terminal, backend::TestBackend};
 use ratatui_textarea::TextArea;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use serde_json::json;
 use std::sync::Arc;
 use tars_core::config::Config;
@@ -14,9 +14,9 @@ use tars_core::definition::{
     CommandNetwork, CommandSettings, CredentialRef, Provider, SessionDefinition, WorkspaceTool,
 };
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::support::advance_past_approval_window;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::wire;
 
 fn screen(app: &crate::app::App) -> String {
@@ -108,7 +108,7 @@ fn command_summary_follows_the_tools_field_not_the_preset() {
     assert!(form.command_summary().is_none());
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 async fn create_command_session(
     app: &mut crate::app::App,
     endpoint: &str,
@@ -141,7 +141,7 @@ async fn create_command_session(
     until(app, |a| a.entries[a.selected].session.is_some()).await;
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_panel_names_the_backend_and_every_capability() {
     let dir = tempfile::tempdir().unwrap();
@@ -158,17 +158,27 @@ async fn status_panel_names_the_backend_and_every_capability() {
     }
     app.event(key(KeyCode::Enter));
     let view = screen(&app);
+    let backend = if cfg!(target_os = "macos") {
+        "seatbelt"
+    } else {
+        "bwrap"
+    };
+    let lifecycle = if cfg!(target_os = "macos") {
+        "lifecycle partial"
+    } else {
+        "lifecycle full"
+    };
     assert!(
-        view.contains(
-            "Commands: seatbelt: file read full; file write full; network full; \
+        view.contains(&format!(
+            "Commands: {backend}: file read full; file write full; network full; \
              signal isolation full"
-        ),
+        )),
         "{view}"
     );
-    assert!(view.contains("lifecycle partial"), "{view}");
+    assert!(view.contains(lifecycle), "{view}");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_panel_shows_the_command_workdir_timeout_and_network_then_denies() {
     let dir = tempfile::tempdir().unwrap();
@@ -218,7 +228,7 @@ async fn command_panel_shows_the_command_workdir_timeout_and_network_then_denies
     assert!(!workspace.join("sub").join("denied.txt").exists());
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_panel_shows_outside_sandbox_warning_and_justification() {
     let dir = tempfile::tempdir().unwrap();
@@ -269,7 +279,7 @@ async fn command_panel_shows_outside_sandbox_warning_and_justification() {
     assert!(!workspace.join("outside.txt").exists());
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_panel_scrolls_a_multiline_outside_justification() {
     let dir = tempfile::tempdir().unwrap();
@@ -316,7 +326,7 @@ async fn command_panel_scrolls_a_multiline_outside_justification() {
     assert!(!workspace.join("outside.txt").exists());
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn command_panel_allows_the_exact_command_with_y() {
     let dir = tempfile::tempdir().unwrap();
@@ -372,7 +382,7 @@ fn the_startup_clause_is_shown_only_when_the_sandbox_is_unavailable() {
     );
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn the_status_line_renders_the_core_sandbox_status_verbatim() {
     use crate::app::commands::command_status_line;
@@ -392,8 +402,8 @@ fn the_status_line_renders_the_core_sandbox_status_verbatim() {
 /// unavailable status. Ignored by default because CI has `HOME` set; run it
 /// with `env -u HOME CARGO_HOME="$HOME/.cargo" cargo test -p tars-tui -- --ignored
 /// unavailable_command_sandbox`.
-#[cfg(target_os = "macos")]
-#[ignore = "run with HOME unset so the Seatbelt probe fails and the session reports an unavailable sandbox"]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[ignore = "run with HOME unset so the sandbox probe fails and the session reports an unavailable sandbox"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unavailable_command_sandbox_is_reported_at_open_and_in_status() {
     assert!(
@@ -434,8 +444,15 @@ async fn unavailable_command_sandbox_is_reported_at_open_and_in_status() {
     }
     app.event(key(KeyCode::Enter));
     let view = screen(&app);
+    let backend = if cfg!(target_os = "macos") {
+        "seatbelt"
+    } else {
+        "bwrap"
+    };
     assert!(
-        view.contains("Commands: seatbelt sandbox is unavailable: HOME is not set"),
+        view.contains(&format!(
+            "Commands: {backend} sandbox is unavailable: HOME is not set"
+        )),
         "{view}"
     );
 }

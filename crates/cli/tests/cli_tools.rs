@@ -54,6 +54,7 @@ fn status_json_reports_source_path_state_and_the_sandbox_probe_without_downloadi
     let home = tempfile::tempdir().unwrap();
     let output = cli(home.path())
         .args(["tools", "status", "--json"])
+        .env("PATH", empty_bin(home.path()))
         .output()
         .unwrap();
     assert!(output.status.success(), "{:?}", text(&output.stderr));
@@ -61,7 +62,7 @@ fn status_json_reports_source_path_state_and_the_sandbox_probe_without_downloadi
     let tools = value["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0]["name"], "rg");
-    assert_eq!(tools[0]["source"], "managed");
+    assert_eq!(tools[0]["source"], "auto");
     assert_eq!(tools[0]["status"], "unavailable");
     assert_eq!(tools[0]["version"], Value::Null);
     let reason = tools[0]["reason"].as_str().unwrap();
@@ -69,7 +70,7 @@ fn status_json_reports_source_path_state_and_the_sandbox_probe_without_downloadi
     assert!(value["sandbox"]["available"].is_boolean());
     assert!(!value["sandbox"]["detail"].as_str().unwrap().is_empty());
     if let Some(path) = tools[0]["path"].as_str() {
-        // macOS builds know where the managed copy belongs even when missing.
+        // Supported platforms know where the managed copy belongs even when missing.
         let expected_tools = data_directory(home.path()).join("tools");
         assert!(path.starts_with(expected_tools.to_str().unwrap()), "{path}");
         assert!(!path.contains("/tars/tools/"), "{path}");
@@ -87,10 +88,14 @@ fn status_json_reports_source_path_state_and_the_sandbox_probe_without_downloadi
 #[test]
 fn status_text_names_the_source_state_and_the_install_remedy() {
     let home = tempfile::tempdir().unwrap();
-    let output = cli(home.path()).args(["tools", "status"]).output().unwrap();
+    let output = cli(home.path())
+        .args(["tools", "status"])
+        .env("PATH", empty_bin(home.path()))
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{:?}", text(&output.stderr));
     let stdout = text(&output.stdout);
-    assert!(stdout.contains("rg: unavailable (managed)"), "{stdout}");
+    assert!(stdout.contains("rg: unavailable (auto)"), "{stdout}");
     assert!(stdout.contains("  path: "), "{stdout}");
     assert!(stdout.contains("  version: -"), "{stdout}");
     assert!(stdout.contains("  reason: "), "{stdout}");
@@ -127,6 +132,7 @@ fn install_without_a_terminal_or_yes_refuses_and_downloads_nothing() {
     let home = tempfile::tempdir().unwrap();
     let output = cli(home.path())
         .args(["tools", "install", "rg"])
+        .env("PATH", empty_bin(home.path()))
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
@@ -135,9 +141,11 @@ fn install_without_a_terminal_or_yes_refuses_and_downloads_nothing() {
     assert!(stderr.contains("--yes"), "{stderr}");
     assert!(!data_directory(home.path()).exists());
 
-    // Same refusal when stdout is piped but stdin is still not a terminal.
+    // Same refusal when explicit managed is selected without --yes.
+    let config = config_with_source(home.path(), "managed");
     let output = cli(home.path())
-        .args(["tools", "install", "rg"])
+        .args(["tools", "install", "rg", "--config"])
+        .arg(&config)
         .env("PATH", empty_bin(home.path()))
         .output()
         .unwrap();

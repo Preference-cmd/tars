@@ -1,5 +1,5 @@
 //! The command sandbox status captured while a session is assembled.
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use causa::kernel::Context;
 use tars_core::application::{ClosePolicy, PreparedCreate, SessionHost};
@@ -65,14 +65,19 @@ async fn command_status_is_none_without_the_tool_and_reports_the_probe_with_it()
         .command_status()
         .expect("a command tool has a probed sandbox");
     assert!(status.is_available());
+    let expected_prefix = if cfg!(target_os = "macos") {
+        "seatbelt: "
+    } else {
+        "bwrap: "
+    };
     assert!(
-        status
-            .to_string()
-            .starts_with("seatbelt: file read full; file write full; network full; "),
+        status.to_string().starts_with(&format!(
+            "{expected_prefix}file read full; file write full; network full;"
+        )),
         "{status}"
     );
     assert!(
-        status.brief().starts_with("seatbelt: "),
+        status.brief().starts_with(expected_prefix),
         "{}",
         status.brief()
     );

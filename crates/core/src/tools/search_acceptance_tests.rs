@@ -1,4 +1,4 @@
-//! Real macOS Seatbelt acceptance for the bound `search_text` tool (RS01-RS03).
+//! Real platform sandbox acceptance for the bound `search_text` tool (RS01-RS03).
 //!
 //! These drive the tool, not the sandbox package, so the parameter decoding, the
 //! read-only permission-free path, the assembled `rg` invocation and the result
@@ -213,10 +213,15 @@ fn unique_marker() -> String {
 
 /// No process whose argument list contains `marker` is alive.
 fn assert_no_process(marker: &str) {
-    let output = Command::new("/usr/bin/pgrep")
+    let pgrep = if Path::new("/usr/bin/pgrep").exists() {
+        "/usr/bin/pgrep"
+    } else {
+        "pgrep"
+    };
+    let output = Command::new(pgrep)
         .args(["-f", marker])
         .output()
-        .expect("pgrep must exist on macOS");
+        .expect("pgrep must exist on macOS and Linux");
     let found = String::from_utf8_lossy(&output.stdout);
     assert!(
         found.trim().is_empty(),

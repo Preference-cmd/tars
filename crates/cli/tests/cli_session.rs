@@ -60,7 +60,7 @@ fn global_profile_changes_do_not_replace_a_reopened_definition() {
     assert_eq!(report(&output)["text"], "saved definition result");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn session_create_reports_the_full_command_sandbox_line_on_stderr() {
     let dir = tempfile::tempdir().unwrap();
@@ -84,21 +84,22 @@ fn session_create_reports_the_full_command_sandbox_line_on_stderr() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(
-            "TARS: command sandbox: seatbelt: file read full; file write full; network full; \
-             signal isolation full; descendant lifecycle partial ("
-        ),
-        "{stderr}"
-    );
+    let expected = if cfg!(target_os = "macos") {
+        "TARS: command sandbox: seatbelt: file read full; file write full; network full; \
+         signal isolation full; descendant lifecycle partial ("
+    } else {
+        "TARS: command sandbox: bwrap: file read full; file write full; network full; \
+         signal isolation full; descendant lifecycle full"
+    };
+    assert!(stderr.contains(expected), "{stderr}");
     assert_eq!(report(&output)["status"], "created");
 }
 
 /// A failed probe at session creation must still open the session fail-closed
 /// and report the unavailable sandbox through the same `session create` path.
-/// Removing `HOME` makes the Seatbelt probe fail (credential denials need a
-/// home directory) without a production injection seam.
-#[cfg(target_os = "macos")]
+/// Removing `HOME` makes the probe fail (credential denials need a home
+/// directory) without a production injection seam.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn session_create_reports_an_unavailable_command_sandbox_on_stderr() {
     let dir = tempfile::tempdir().unwrap();
@@ -123,13 +124,16 @@ fn session_create_reports_an_unavailable_command_sandbox_on_stderr() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains(
-            "TARS: command sandbox: seatbelt sandbox is unavailable: HOME is not set; \
-             credential denials require a home directory"
-        ),
-        "{stderr}"
+    let backend = if cfg!(target_os = "macos") {
+        "seatbelt"
+    } else {
+        "bwrap"
+    };
+    let expected = format!(
+        "TARS: command sandbox: {backend} sandbox is unavailable: HOME is not set; \
+         credential denials require a home directory"
     );
+    assert!(stderr.contains(&expected), "{stderr}");
     assert_eq!(report(&output)["status"], "created");
 }
 

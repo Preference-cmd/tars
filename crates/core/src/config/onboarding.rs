@@ -22,16 +22,23 @@ pub fn default_store_dir() -> Option<PathBuf> {
 }
 
 /// Return the default workspace tools enabled for new interactive sessions on
-/// the current platform.
+/// Unix when sandbox availability is already known.
 ///
-/// - On macOS: all seven [`WorkspaceTool`] capabilities (Seatbelt sandbox available).
-/// - On other Unix platforms: directory listing, file reading, file finding,
-///   writing, and editing (excluding sandbox-gated `search_text` and `run_command`).
-/// - On non-Unix platforms: empty, until a platform workspace sandbox backend exists.
-pub fn default_tools_for_current_platform() -> Vec<WorkspaceTool> {
-    if cfg!(target_os = "macos") {
+/// - On Unix with `sandbox_available == true`: all seven [`WorkspaceTool`]
+///   capabilities (`list_directory`, `read_file`, `find_files`, `search_text`,
+///   `write_file`, `edit_file`, `run_command`).
+/// - On Unix with `sandbox_available == false`: the five non-sandboxed
+///   filesystem tools (`list_directory`, `read_file`, `find_files`,
+///   `write_file`, `edit_file`), excluding sandbox-gated `search_text` and
+///   `run_command`.
+/// - On non-Unix platforms: empty, until a platform workspace sandbox backend
+///   exists.
+pub fn default_tools_for_sandbox(sandbox_available: bool) -> Vec<WorkspaceTool> {
+    if !cfg!(unix) {
+        Vec::new()
+    } else if sandbox_available {
         WorkspaceTool::ALL.to_vec()
-    } else if cfg!(unix) {
+    } else {
         vec![
             WorkspaceTool::ListDirectory,
             WorkspaceTool::ReadFile,
@@ -39,8 +46,29 @@ pub fn default_tools_for_current_platform() -> Vec<WorkspaceTool> {
             WorkspaceTool::WriteFile,
             WorkspaceTool::EditFile,
         ]
+    }
+}
+
+/// Return the default workspace tools enabled for new interactive sessions on
+/// the current platform.
+///
+/// - On macOS: all seven [`WorkspaceTool`] capabilities (Seatbelt sandbox
+///   available).
+/// - On Linux: adapts dynamically to [`crate::sandbox::Sandbox::open`]
+///   availability (all seven tools when `bwrap` + user namespaces succeed; the
+///   five non-sandboxed tools when unavailable).
+/// - On other Unix platforms: directory listing, file reading, file finding,
+///   writing, and editing (excluding sandbox-gated `search_text` and
+///   `run_command`).
+/// - On non-Unix platforms: empty, until a platform workspace sandbox backend
+///   exists.
+pub fn default_tools_for_current_platform() -> Vec<WorkspaceTool> {
+    if cfg!(target_os = "macos") {
+        default_tools_for_sandbox(true)
+    } else if cfg!(target_os = "linux") {
+        default_tools_for_sandbox(crate::sandbox::Sandbox::open().is_ok())
     } else {
-        Vec::new()
+        default_tools_for_sandbox(false)
     }
 }
 
@@ -430,10 +458,35 @@ mod tests {
     }
 
     #[test]
+    fn default_tools_for_sandbox_adapts_to_availability() {
+        let with_sandbox = default_tools_for_sandbox(true);
+        let without_sandbox = default_tools_for_sandbox(false);
+        if cfg!(unix) {
+            assert_eq!(with_sandbox, WorkspaceTool::ALL);
+            assert_eq!(
+                without_sandbox,
+                vec![
+                    WorkspaceTool::ListDirectory,
+                    WorkspaceTool::ReadFile,
+                    WorkspaceTool::FindFiles,
+                    WorkspaceTool::WriteFile,
+                    WorkspaceTool::EditFile,
+                ]
+            );
+        } else {
+            assert!(with_sandbox.is_empty());
+            assert!(without_sandbox.is_empty());
+        }
+    }
+
+    #[test]
     fn platform_default_tools_match_target_capabilities() {
         let tools = default_tools_for_current_platform();
         if cfg!(target_os = "macos") {
             assert_eq!(tools, WorkspaceTool::ALL);
+        } else if cfg!(target_os = "linux") {
+            let expected = default_tools_for_sandbox(crate::sandbox::Sandbox::open().is_ok());
+            assert_eq!(tools, expected);
         } else if cfg!(unix) {
             assert_eq!(
                 tools,

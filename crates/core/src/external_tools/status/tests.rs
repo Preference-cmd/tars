@@ -27,7 +27,9 @@ fn tool_environment(tars_home: &Path, path: &Path) -> ToolEnvironment {
 }
 
 #[test]
-fn tool_source_parses_the_three_configured_forms() {
+fn tool_source_parses_all_configured_forms() {
+    assert_eq!(ToolSource::parse("auto"), Ok(ToolSource::Auto));
+    assert_eq!(ToolSource::parse(" auto "), Ok(ToolSource::Auto));
     assert_eq!(ToolSource::parse("managed"), Ok(ToolSource::Managed));
     assert_eq!(ToolSource::parse(" system "), Ok(ToolSource::System));
     // A platform-absolute path; a Unix literal such as `/opt/tools/rg` is not
@@ -39,13 +41,15 @@ fn tool_source_parses_the_three_configured_forms() {
         ToolSource::parse(&absolute_text),
         Ok(ToolSource::Path(absolute_path.clone()))
     );
-    for invalid in ["", "Managed", "rg", "./rg", "~/bin/rg"] {
+    for invalid in ["", "Auto", "Managed", "rg", "./rg", "~/bin/rg"] {
         assert_eq!(
             ToolSource::parse(invalid),
             Err(ToolSourceError),
             "{invalid}"
         );
     }
+    assert_eq!(ToolSource::Auto.kind(), "auto");
+    assert_eq!(ToolSource::Auto.to_string(), "auto");
     assert_eq!(ToolSource::Managed.kind(), "managed");
     assert_eq!(ToolSource::System.kind(), "system");
     assert_eq!(ToolSource::Path(absolute_path.clone()).kind(), "path");
@@ -364,6 +368,176 @@ mod unix {
         assert!(status.is_ready(), "{:?}", status.state);
         assert!(marker.exists());
     }
+
+    #[test]
+    fn auto_prefers_valid_managed_copy_over_system_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let tars_home = directory.path().join("data");
+        let bin = directory.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let path_marker = directory.path().join("path-ran");
+        script(&bin, "rg", "14.1.0", Some(&path_marker));
+
+        let environment = tool_environment(&tars_home, &bin);
+        let managed = managed_path(&environment, "test-target").unwrap();
+        std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        let src_dir = directory.path().join("src");
+        std::fs::create_dir(&src_dir).unwrap();
+        let managed_marker = directory.path().join("managed-ran");
+        let fixture = script(&src_dir, "rg", "15.2.0", Some(&managed_marker));
+        std::fs::copy(&fixture, &managed).unwrap();
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let expected = ExpectedAsset {
+            target: "test-target".into(),
+            binary_sha256: hash(&managed),
+        };
+
+        let status = resolve_auto(&environment, Some(&expected));
+        assert!(status.is_ready(), "{:?}", status.state);
+        assert_eq!(status.source, ToolSource::Auto);
+        assert_eq!(status.ready_path(), Some(managed.as_path()));
+        assert_eq!(status.version.as_deref(), Some("15.2.0"));
+        assert!(managed_marker.exists());
+        assert!(!path_marker.exists(), "valid managed must win over PATH");
+    }
+
+    #[test]
+    fn auto_fails_closed_when_managed_copy_is_corrupted_even_with_valid_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let tars_home = directory.path().join("data");
+        let bin = directory.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let path_marker = directory.path().join("path-ran");
+        script(&bin, "rg", "15.2.0", Some(&path_marker));
+
+        let environment = tool_environment(&tars_home, &bin);
+        let managed = managed_path(&environment, "test-target").unwrap();
+        std::fs::create_dir_all(managed.parent().unwrap()).unwrap();
+        let src_dir = directory.path().join("src");
+        std::fs::create_dir(&src_dir).unwrap();
+        let managed_marker = directory.path().join("managed-ran");
+        let fixture = script(&src_dir, "rg", "15.2.0", Some(&managed_marker));
+        std::fs::copy(&fixture, &managed).unwrap();
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let wrong = ExpectedAsset {
+            target: "test-target".into(),
+            binary_sha256: "0".repeat(64),
+        };
+
+        let status = resolve_auto(&environment, Some(&wrong));
+        assert!(!status.is_ready());
+        assert_eq!(status.source, ToolSource::Auto);
+        assert_eq!(status.path.as_deref(), Some(managed.as_path()));
+        assert!(status.ready_path().is_none());
+        assert!(
+            status.unavailable_reason().unwrap().contains("SHA-256"),
+            "{:?}",
+            status.state
+        );
+        assert!(!managed_marker.exists());
+        assert!(
+            !path_marker.exists(),
+            "corrupted managed copy must fail closed without falling back to PATH"
+        );
+
+        // A broken symlink at the managed path also exists via symlink_metadata
+        // and must fail closed instead of falling back to PATH.
+        std::fs::remove_file(&managed).unwrap();
+        std::os::unix::fs::symlink(directory.path().join("missing-target"), &managed).unwrap();
+        let symlink_status = resolve_auto(&environment, Some(&wrong));
+        assert!(!symlink_status.is_ready());
+        assert_eq!(symlink_status.source, ToolSource::Auto);
+        assert_eq!(symlink_status.path.as_deref(), Some(managed.as_path()));
+        assert!(!path_marker.exists());
+    }
+
+    #[test]
+    fn auto_falls_back_to_system_path_when_managed_is_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let tars_home = directory.path().join("data");
+        let bin = directory.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        script(&bin, "rg", "14.1.0", None);
+        let environment = tool_environment(&tars_home, &bin);
+        let expected = ExpectedAsset {
+            target: "test-target".into(),
+            binary_sha256: "0".repeat(64),
+        };
+
+        let status = resolve_auto(&environment, Some(&expected));
+        assert!(status.is_ready(), "{:?}", status.state);
+        assert_eq!(status.source, ToolSource::Auto);
+        assert_eq!(status.ready_path(), Some(bin.join("rg").as_path()));
+        assert_eq!(status.version.as_deref(), Some("14.1.0"));
+
+        // Works even when no managed release exists for the platform (`expected == None`).
+        let status_no_asset = resolve_auto(&environment, None);
+        assert!(status_no_asset.is_ready(), "{:?}", status_no_asset.state);
+        assert_eq!(status_no_asset.source, ToolSource::Auto);
+        assert_eq!(status_no_asset.ready_path(), Some(bin.join("rg").as_path()));
+    }
+
+    #[test]
+    fn auto_rejects_old_system_rg_and_reports_unavailable_when_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let tars_home = directory.path().join("data");
+        let old = directory.path().join("old");
+        std::fs::create_dir(&old).unwrap();
+        script(&old, "rg", "13.0.0", None);
+        let expected = ExpectedAsset {
+            target: "test-target".into(),
+            binary_sha256: "0".repeat(64),
+        };
+
+        let status = resolve_auto(&tool_environment(&tars_home, &old), Some(&expected));
+        assert!(!status.is_ready());
+        assert_eq!(status.source, ToolSource::Auto);
+        assert_eq!(status.version.as_deref(), Some("13.0.0"));
+        assert!(status.ready_path().is_none());
+        let reason = status.unavailable_reason().unwrap();
+        assert!(reason.contains("older than 14"), "{reason}");
+        assert!(reason.contains("tars tools install rg"), "{reason}");
+
+        let status_no_asset = resolve_auto(&tool_environment(&tars_home, &old), None);
+        assert!(!status_no_asset.is_ready());
+        let reason_no_asset = status_no_asset.unavailable_reason().unwrap();
+        assert!(
+            reason_no_asset.contains("older than 14"),
+            "{reason_no_asset}"
+        );
+        assert!(
+            !reason_no_asset.contains("tars tools install rg"),
+            "{reason_no_asset}"
+        );
+
+        let empty = directory.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        let env_empty = tool_environment(&tars_home, &empty);
+        let expected_managed = managed_path(&env_empty, "test-target").unwrap();
+        let status_missing = resolve_auto(&env_empty, Some(&expected));
+        assert!(!status_missing.is_ready());
+        assert_eq!(status_missing.source, ToolSource::Auto);
+        assert_eq!(
+            status_missing.path.as_deref(),
+            Some(expected_managed.as_path())
+        );
+        assert!(
+            status_missing
+                .unavailable_reason()
+                .unwrap()
+                .contains("tars tools install rg")
+        );
+
+        let status_missing_no_asset = resolve_auto(&env_empty, None);
+        assert!(!status_missing_no_asset.is_ready());
+        assert!(status_missing_no_asset.path.is_none());
+        assert!(
+            status_missing_no_asset
+                .unavailable_reason()
+                .unwrap()
+                .contains("no managed ripgrep")
+        );
+    }
 }
 
 #[test]
@@ -372,14 +546,9 @@ fn configured_sources_resolve_through_the_shared_configuration() {
     // panics; this holds on every platform.
     let config = config_with(None);
     let tools = ExternalTools::resolve_with(&config, &ToolEnvironment::default());
-    assert_eq!(tools.rg().source, ToolSource::Managed);
+    assert_eq!(tools.rg().source, ToolSource::Auto);
     assert_eq!(tools.rg().name, "rg");
-    if cfg!(not(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "macos", target_arch = "x86_64")
-    ))) {
-        assert!(!tools.rg().is_ready());
-    }
+    assert!(!tools.rg().is_ready());
 
     // A configured path must be absolute; build it from the real temporary
     // directory so the value is valid on Windows too.
@@ -405,7 +574,7 @@ fn process_cache_returns_the_same_resolution() {
     let first = resolve_process(&Config::load(ConfigSource::Disabled).unwrap());
     let second = resolve_process(&Config::load(ConfigSource::Disabled).unwrap());
     assert!(std::ptr::eq(first, second));
-    assert_eq!(first.rg().source, ToolSource::Managed);
+    assert_eq!(first.rg().source, ToolSource::Auto);
 }
 
 #[test]

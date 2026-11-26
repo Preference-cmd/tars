@@ -540,13 +540,18 @@ async fn ux06_doctor_menu_tab_complete_async_report_and_early_close() {
         lines.iter().any(|l| l.contains(&expected_status_str)),
         "expected doctor output to contain injected sandbox status '{expected_status_str}': {lines:#?}"
     );
-    #[cfg(target_os = "macos")]
-    assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("injected-doctor-reuse-check")),
-        "macOS doctor must reuse injected SandboxStatus without re-probing: {lines:#?}"
-    );
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if matches!(
+        app.sandbox_status,
+        Some(tars_core::sandbox::SandboxStatus::Available(_))
+    ) {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("injected-doctor-reuse-check")),
+            "doctor must reuse injected SandboxStatus without re-probing: {lines:#?}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -728,4 +733,57 @@ async fn ux07_init_guardrails_and_writable_vs_readonly_submission() {
         readonly_req.contains("File write/edit tools are disabled"),
         "{readonly_req}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn onboarding_reuses_startup_sandbox_status_for_default_tools() {
+    use tars_core::config::default_tools_for_sandbox;
+    use tars_core::sandbox::{Capability, Sandbox, SandboxPolicy, SandboxStatus};
+
+    let root = tempfile::tempdir().unwrap();
+    let policy = SandboxPolicy::new([root.path().to_path_buf()], []).unwrap();
+    let cases: Vec<(&str, SandboxStatus, bool)> = match Sandbox::open() {
+        Ok(sb) => {
+            let mut bad_report = sb.report().clone();
+            bad_report.network = Capability::Unsupported("injected-unavailable".into());
+            let err = bad_report.check(&policy).unwrap_err();
+            vec![
+                (
+                    "available",
+                    SandboxStatus::Available(sb.report().clone()),
+                    true,
+                ),
+                ("unavailable", SandboxStatus::Unavailable(err), false),
+            ]
+        }
+        Err(err) => vec![("unavailable", SandboxStatus::Unavailable(err), false)],
+    };
+
+    for (tag, sandbox_status, expected_available) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join(format!("tars_home_{tag}/config.toml"));
+        let ws = dir.path().join(format!("workspace_{tag}"));
+        std::fs::create_dir_all(&ws).unwrap();
+
+        let mut app = onboard_app(dir.path(), cfg_path.clone());
+        app.sandbox_status = Some(sandbox_status);
+        app.list();
+        until(&mut app, |a| a.onboarding.is_some()).await;
+
+        type_text(&mut app, "fixture-model");
+        app.onboarding.as_mut().unwrap().fields[2] = TextArea::from(["PATH"]);
+        app.onboarding.as_mut().unwrap().fields[5] = TextArea::from([ws.to_str().unwrap()]);
+        app.event(key(KeyCode::Enter));
+        until(&mut app, |a| {
+            a.onboarding.is_none() && a.entries.len() == 1 && a.entries[0].session.is_some()
+        })
+        .await;
+
+        let def = app.entries[0].session.as_ref().unwrap().definition();
+        assert_eq!(
+            def.tools,
+            default_tools_for_sandbox(expected_available),
+            "case={tag}"
+        );
+    }
 }

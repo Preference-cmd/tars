@@ -21,7 +21,7 @@ recovery_dir = "."
 default_profile = "work"
 
 # [external_tools]
-# rg = "managed"               # managed | system | an absolute path
+# rg = "auto"                  # auto | managed | system | an absolute path
 
 [profiles.work]
 provider = "openai-chat"
@@ -233,13 +233,14 @@ The built-in `search_text` runs the external `rg` executable. `[external_tools] 
 
 | Value | Meaning | Check |
 | --- | --- | --- |
-| `managed` (default) | The pinned ripgrep 15.2.0 installed by TARS under `~/.tars/tools/ripgrep-15.2.0-<target>/rg` (or `$TARS_HOME/tools/...`, `%USERPROFILE%\.tars\tools\...` on Windows) | SHA-256 of the installed executable compiled into TARS; a mismatch means unavailable |
+| `auto` (default) | Prefers a valid SHA-256-verified managed copy under `~/.tars/tools/ripgrep-15.2.0-<target>/rg` (or `$TARS_HOME/tools/...`); if absent, falls back to the first `rg` on `PATH` (version `>= 14`); if neither is usable, prompts or reports `tars tools install rg` | If a managed file (or link) exists on disk it must pass SHA-256 and `rg --version` checks (failing closed if tampered/corrupted, never silently falling back to `PATH`); otherwise checks `PATH` `rg >= 14` |
+| `managed` | The pinned ripgrep 15.2.0 installed by TARS under `~/.tars/tools/ripgrep-15.2.0-<target>/rg` (or `$TARS_HOME/tools/...`, `%USERPROFILE%\.tars\tools\...` on Windows) for macOS (`aarch64`, `x86_64`) and Linux (`x86_64`, `aarch64`) | SHA-256 of the installed executable compiled into TARS; a mismatch means unavailable |
 | `system` | The first `rg` found in an absolute `PATH` entry when TARS starts; empty and relative entries are skipped so a repository's own `./rg` never runs | Version recorded (a packaging suffix such as `-1` is ignored); a major version below 14 is unavailable |
 | an absolute path | That executable | Must exist; its version is recorded |
 
-Resolution happens once per process and is cached; session binding uses the resolved absolute path and never re-resolves behind the caller's back. A managed file that fails its check, a missing file, an old `system` version or an unreadable path all make search unavailable with a short reason; no source falls back to the others. A configured absolute path is trusted as given, so it is not version-checked the way `system` is.
+Resolution happens once per process and is cached; session binding uses the resolved absolute path and never re-resolves behind the caller's back. Under `managed`, `system`, or an explicit path, no source falls back to the others; under `auto`, a corrupted managed copy on disk fails closed without falling back to `PATH`. A configured absolute path is trusted as given, so it is not version-checked the way `system` is.
 
-Only `tars tools install rg` (or the TUI startup consent) downloads anything, and only for the managed source: HTTPS only, restricted to `github.com` and GitHub release asset hosts including redirects, at most 10 MiB and 120 seconds, proxies from the environment, hash verified before extraction, only the single `rg` entry extracted from the `.tar.gz` with link and path escapes rejected, mode 0755, atomic rename, and one `rg --version` after installation. Any failure leaves nothing at the final path. `[external_tools] rg = "system"` or an absolute path disables the managed installation and `tars tools install rg` refuses with a notice; switch the source back to `managed` to install.
+Only `tars tools install rg` (or the TUI startup consent) downloads anything, and only when configured as `auto` or `managed`: HTTPS only, restricted to `github.com` and GitHub release asset hosts including redirects, at most 10 MiB and 120 seconds, proxies from the environment, hash verified before extraction, only the single `rg` entry extracted from the `.tar.gz` with link and path escapes rejected, mode 0755, atomic rename, and one `rg --version` after installation. Any failure leaves nothing at the final path. `[external_tools] rg = "system"` or an absolute path disables the managed installation and `tars tools install rg` refuses with a notice; switch the source back to `auto` or `managed` to install.
 
 ## MCP servers
 

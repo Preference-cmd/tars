@@ -10,7 +10,11 @@
 //!
 //! `[external_tools] rg` selects where the executable comes from:
 //!
-//! - `managed` (the default) is the copy TARS installs under
+//! - `auto` (the default) uses a SHA-256-verified managed copy if present on
+//!   disk (failing closed if tampered/corrupted), otherwise falls back to a
+//!   compatible `rg >= 14` on `PATH`, or offers consent-gated managed
+//!   installation when neither is available.
+//! - `managed` is the copy TARS installs under
 //!   `$TARS_HOME/tools/ripgrep-15.2.0-<target>/rg`, falling back to
 //!   `~/.tars/tools/...` (`%USERPROFILE%\.tars\tools\...` on Windows). Its
 //!   SHA-256 is checked before it is ever executed.
