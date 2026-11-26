@@ -139,6 +139,8 @@ cargo test -p tars-sandbox
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --locked --no-deps
 cargo build -p tars-core --locked
 cargo build --workspace --locked --release
+cargo build --locked --profile dist --bin tars
+sh -n install.sh
 ./target/release/tars -h
 ./target/release/tars --version
 ./target/release/tars session --help
@@ -146,6 +148,6 @@ cargo build --workspace --locked --release
 cargo deny check   # security advisories, licenses, sources; policy in deny.toml
 ```
 
-Tests use local HTTP, scripted models/tools, real files, processes and deterministic barriers, with no live model credentials. The external-tool download tests use a local HTTPS fixture and never reach GitHub; only the local evidence run downloads the real pinned release. Tests are split by platform: common cases run on every platform; workspace-tool, SIGINT, and real sandbox acceptance cases (Seatbelt on macOS and Bubblewrap `bwrap` on Linux) compile on Linux/macOS (while recording-backend contract tests run everywhere), and non-Unix/unsupported-platform rejection cases are `cfg`-gated to platforms without a backend. CI runs Ubuntu Linux (installing `bubblewrap` and loading an AppArmor `userns` profile for `/usr/bin/bwrap`) and macOS; Windows is left out of CI for now, so nothing checks that the code still builds or passes its tests there.
+Tests use local HTTP, scripted models/tools, real files, processes and deterministic barriers, with no live model credentials. The external-tool download tests use a local HTTPS fixture and never reach GitHub; only the local evidence run downloads the real pinned release. `install.sh` is also tested deterministically against local loopback HTTP fixtures in `crates/cli/tests/installer_script.rs` (`cargo test --workspace --locked`). Tests are split by platform: common cases run on every platform; workspace-tool, SIGINT, and real sandbox acceptance cases (Seatbelt on macOS and Bubblewrap `bwrap` on Linux) compile on Linux/macOS (while recording-backend contract tests run everywhere), and non-Unix/unsupported-platform rejection cases are `cfg`-gated to platforms without a backend. CI runs Ubuntu Linux (installing `bubblewrap` and loading an AppArmor `userns` profile for `/usr/bin/bwrap`) and macOS; Windows is left out of CI for now, so nothing checks that the code still builds or passes its tests there.
 
 Development helper materials and local scripts stay on the local machine and are not added to the repository or the application distribution.

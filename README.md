@@ -16,7 +16,7 @@ TARS is an open-source, local-first AI agent written in Rust and built on [`caus
 
 **Prerequisites:** Rust `1.96.0` (pinned by `rust-toolchain.toml`).
 
-Build the unified `tars` binary from source:
+Until the first tagged release (`v0.1.0`) is published, build the unified `tars` binary from source via Cargo (`.github/workflows/release.yml`, `[profile.dist]`, and `install.sh` are in place for upcoming tagged releases):
 
 ```sh
 cargo build --workspace --locked --release
@@ -79,7 +79,7 @@ printf 'Continue analyzing the material' | ./target/release/tars run \
 
 Current gaps and roadmap items not yet implemented:
 
-- Prebuilt binaries and package-manager installers (currently source build via Cargo only)
+- Published prebuilt release archives (the release workflow and `install.sh` are in place for upcoming `v0.1.0` tags; current installation before the first tagged release remains source build via Cargo) and package-manager installers (Homebrew tap, Cargo-binstall) / Apple notarization
 - Windows workspace tools and sandbox backend for `run_command` and `search_text` (and restoring Windows CI)
 - Desktop GUI
 - Live verification against third-party model and MCP endpoints (current tests cover local HTTP and MCP fixtures)
@@ -99,6 +99,7 @@ Dependencies flow strictly one way (`tars-cli` → `tars-tui` → `tars-core` �
 
 ## Documentation
 
+- [Changelog](CHANGELOG.md) — unreleased changes and known limitations
 - [Current implementation](docs/README.md) — code layout, module boundaries, and local verification checks
 - [Shared configuration](docs/configuration.md) — TOML schema, presets, compaction, prelude/skills, external tools, and MCP
 - [Workspace tools](docs/workspace-tools.md) — file safety, permission modes, command rules, platform sandboxes (Seatbelt/Bubblewrap), `run_code`, and record migration

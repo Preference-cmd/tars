@@ -1,0 +1,377 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      is_prerelease: ${{ steps.meta.outputs.is_prerelease }}
+      publish_release: ${{ steps.meta.outputs.publish_release }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt
+      - run: cargo fmt --all --check
+      - run: sh -n install.sh
+      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Verify version metadata and changelog
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+          import tomllib
+
+          cargo_toml = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8"))
+          cargo_toml_ver = cargo_toml["workspace"]["package"]["version"]
+
+          cargo_lock = tomllib.loads(pathlib.Path("Cargo.lock").read_text(encoding="utf-8"))
+          cli_pkgs = [p for p in cargo_lock.get("package", []) if p.get("name") == "tars-cli"]
+          if len(cli_pkgs) != 1:
+              sys.exit(f"expected exactly 1 tars-cli package in Cargo.lock, found {len(cli_pkgs)}")
+          cargo_lock_ver = cli_pkgs[0]["version"]
+
+          if cargo_toml_ver != cargo_lock_ver:
+              sys.exit(
+                  f"version mismatch: Cargo.toml ({cargo_toml_ver}) != Cargo.lock ({cargo_lock_ver})"
+              )
+
+          changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          event_name = os.environ["EVENT_NAME"]
+          ref_type = os.environ["REF_TYPE"]
+          ref_name = os.environ["REF_NAME"]
+
+          if event_name == "push" and ref_type == "tag":
+              if not re.match(r"^v.+", ref_name):
+                  sys.exit(f"release tag must start with 'v': {ref_name!r}")
+              tag_ver = ref_name[1:]
+              if tag_ver != cargo_toml_ver:
+                  sys.exit(
+                      f"tag version ({tag_ver}) != Cargo.toml/Cargo.lock version ({cargo_toml_ver})"
+                  )
+              is_prerelease = "true" if "-" in tag_ver else "false"
+              ver_heading = re.compile(rf"^## \[{re.escape(tag_ver)}\](?:\s|$)", re.MULTILINE)
+              unreleased_heading = re.compile(r"^## \[Unreleased\](?:\s|$)", re.MULTILINE)
+              if is_prerelease == "false":
+                  if not ver_heading.search(changelog):
+                      sys.exit(f"CHANGELOG.md must contain heading '## [{tag_ver}]' for final release")
+              else:
+                  if not (ver_heading.search(changelog) or unreleased_heading.search(changelog)):
+                      sys.exit(
+                          f"CHANGELOG.md must contain '## [{tag_ver}]' or '## [Unreleased]' for prerelease"
+                      )
+              tag = ref_name
+              version = tag_ver
+              publish_release = "true"
+          else:
+              tag = f"v{cargo_toml_ver}"
+              version = cargo_toml_ver
+              is_prerelease = "true"
+              publish_release = "false"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write(f"tag={tag}\n")
+              fh.write(f"version={version}\n")
+              fh.write(f"is_prerelease={is_prerelease}\n")
+              fh.write(f"publish_release={publish_release}\n")
+          PY
+
+  build-macos:
+    needs: verify
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Build release binary
+        run: cargo build --locked --profile dist --bin tars
+      - name: Package, verify whitelist, smoke test, and checksum
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          stem="tars-${TAG}-${TARGET}"
+          archive="${stem}.tar.gz"
+          stage_root="${RUNNER_TEMP}/stage"
+          rm -rf "$stage_root" dist
+          mkdir -p "${stage_root}/${stem}" dist
+
+          install -m 0755 target/dist/tars "${stage_root}/${stem}/tars"
+          install -m 0644 LICENSE "${stage_root}/${stem}/LICENSE"
+          install -m 0644 README.md "${stage_root}/${stem}/README.md"
+          install -m 0644 config.example.toml "${stage_root}/${stem}/config.example.toml"
+          install -m 0644 mcp.example.json "${stage_root}/${stem}/mcp.example.json"
+
+          COPYFILE_DISABLE=1 tar -C "$stage_root" -czf "dist/${archive}" \
+            "${stem}/LICENSE" \
+            "${stem}/README.md" \
+            "${stem}/config.example.toml" \
+            "${stem}/mcp.example.json" \
+            "${stem}/tars"
+
+          expected_list="${RUNNER_TEMP}/expected-tar-list.txt"
+          actual_list="${RUNNER_TEMP}/actual-tar-list.txt"
+          cat > "$expected_list" <<EOF
+          ${stem}/LICENSE
+          ${stem}/README.md
+          ${stem}/config.example.toml
+          ${stem}/mcp.example.json
+          ${stem}/tars
+          EOF
+          tar -tzf "dist/${archive}" | LC_ALL=C sort > "$actual_list"
+          diff -u "$expected_list" "$actual_list"
+
+          smoke_dir="${RUNNER_TEMP}/smoke"
+          smoke_store="${RUNNER_TEMP}/smoke-store"
+          rm -rf "$smoke_dir" "$smoke_store"
+          mkdir -p "$smoke_dir"
+          tar -xzf "dist/${archive}" -C "$smoke_dir"
+
+          bin="${smoke_dir}/${stem}/tars"
+          actual_ver=$("$bin" --version)
+          if [ "$actual_ver" != "tars ${VERSION}" ]; then
+            echo "unexpected --version output: ${actual_ver} (expected: tars ${VERSION})" >&2
+            exit 1
+          fi
+          "$bin" -h >/dev/null
+          "$bin" session list --no-config --store "$smoke_store"
+          "$bin" tools status --no-config
+
+          ls -lh "$bin" "dist/${archive}"
+          otool -L "$bin"
+
+          (cd dist && shasum -a 256 "$archive" > "${archive}.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  build-linux:
+    needs: verify
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    container:
+      image: ubuntu:22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install container build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl build-essential cmake binutils tar gzip
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.96.0
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build release binary
+        run: cargo build --locked --profile dist --bin tars
+      - name: Package, verify whitelist, smoke test, and checksum
+        shell: bash
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          stem="tars-${TAG}-${TARGET}"
+          archive="${stem}.tar.gz"
+          stage_root="${RUNNER_TEMP}/stage"
+          rm -rf "$stage_root" dist
+          mkdir -p "${stage_root}/${stem}" dist
+
+          install -m 0755 target/dist/tars "${stage_root}/${stem}/tars"
+          install -m 0644 LICENSE "${stage_root}/${stem}/LICENSE"
+          install -m 0644 README.md "${stage_root}/${stem}/README.md"
+          install -m 0644 config.example.toml "${stage_root}/${stem}/config.example.toml"
+          install -m 0644 mcp.example.json "${stage_root}/${stem}/mcp.example.json"
+
+          tar -C "$stage_root" -czf "dist/${archive}" \
+            "${stem}/LICENSE" \
+            "${stem}/README.md" \
+            "${stem}/config.example.toml" \
+            "${stem}/mcp.example.json" \
+            "${stem}/tars"
+
+          expected_list="${RUNNER_TEMP}/expected-tar-list.txt"
+          actual_list="${RUNNER_TEMP}/actual-tar-list.txt"
+          cat > "$expected_list" <<EOF
+          ${stem}/LICENSE
+          ${stem}/README.md
+          ${stem}/config.example.toml
+          ${stem}/mcp.example.json
+          ${stem}/tars
+          EOF
+          tar -tzf "dist/${archive}" | LC_ALL=C sort > "$actual_list"
+          diff -u "$expected_list" "$actual_list"
+
+          smoke_dir="${RUNNER_TEMP}/smoke"
+          smoke_store="${RUNNER_TEMP}/smoke-store"
+          rm -rf "$smoke_dir" "$smoke_store"
+          mkdir -p "$smoke_dir"
+          tar -xzf "dist/${archive}" -C "$smoke_dir"
+
+          bin="${smoke_dir}/${stem}/tars"
+          actual_ver=$("$bin" --version)
+          if [ "$actual_ver" != "tars ${VERSION}" ]; then
+            echo "unexpected --version output: ${actual_ver} (expected: tars ${VERSION})" >&2
+            exit 1
+          fi
+          "$bin" -h >/dev/null
+          "$bin" session list --no-config --store "$smoke_store"
+          "$bin" tools status --no-config
+
+          ls -lh "$bin" "dist/${archive}"
+          ldd --version | head -n 1
+          ldd "$bin"
+          echo "GLIBC symbols referenced:"
+          readelf --version-info "$bin" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sort -uV || true
+
+          (cd dist && sha256sum "$archive" > "${archive}.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [verify, build-macos, build-linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Verify artifacts and build SHA256SUMS.txt
+        env:
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd dist
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu
+          do
+            archive="tars-${TAG}-${target}.tar.gz"
+            if [ ! -f "$archive" ] || [ ! -f "${archive}.sha256" ]; then
+              echo "missing artifact or sha256 for ${target}" >&2
+              exit 1
+            fi
+            sha256sum -c "${archive}.sha256"
+          done
+
+          LC_ALL=C ls -1 tars-*.tar.gz | xargs sha256sum > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          rm -f ./*.tar.gz.sha256
+          ls -la
+      - name: Upload dry-run release bundle
+        if: needs.verify.outputs.publish_release != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundle-dry-run
+          path: dist/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Attest build provenance
+        if: needs.verify.outputs.publish_release == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
+      - name: Extract release notes from CHANGELOG.md
+        if: needs.verify.outputs.publish_release == 'true'
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          version = os.environ["VERSION"]
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+
+          def extract_section(heading_name: str):
+              pattern = re.compile(rf"^## \[{re.escape(heading_name)}\][^\n]*\n", re.MULTILINE)
+              match = pattern.search(text)
+              if not match:
+                  return None
+              start = match.end()
+              next_heading = re.search(r"^## \[", text[start:], re.MULTILINE)
+              end = start + next_heading.start() if next_heading else len(text)
+              return text[start:end].strip()
+
+          notes = extract_section(version)
+          if notes is None and "-" in version:
+              notes = extract_section("Unreleased")
+          if not notes:
+              sys.exit(f"failed to extract release notes for {version} from CHANGELOG.md")
+
+          pathlib.Path("release-notes.md").write_text(notes + "\n", encoding="utf-8")
+          PY
+      - name: Create GitHub Release
+        if: needs.verify.outputs.publish_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          IS_PRERELEASE: ${{ needs.verify.outputs.is_prerelease }}
+        run: |
+          args=(
+            release create "$TAG"
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
+            --title "TARS $TAG"
+            --notes-file release-notes.md
+          )
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh "${args[@]}"

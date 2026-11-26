@@ -2446,8 +2446,11 @@ name = "tars-cli"
 version = "0.0.0"
 dependencies = [
  "causa",
+ "flate2",
  "rusqlite",
  "serde_json",
+ "sha2 0.10.9",
+ "tar",
  "tars-core",
  "tars-tui",
  "tempfile",
