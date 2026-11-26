@@ -45,6 +45,8 @@ rquickjs = { version = "0.14.0", default-features = false, features = ["futures"
 # Local-first embedded SQLite v3 store for sessions, multi-agent state,
 # event mailbox, compaction history, spilled artifacts, and workspace trust.
 rusqlite = { version = "0.43", default-features = false, features = ["bundled"] }
+# CommonMark + GFM pull parser for `tars-tui`, default features disabled to avoid `getopts` and HTML escaping.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [profile.dist]
 inherits = "release"
