@@ -601,3 +601,69 @@ fn version_probe_accepts_release_and_rejects_non_ripgrep_output() {
     assert_eq!(major_version("14"), 14);
     assert_eq!(major_version("not"), 0);
 }
+
+#[test]
+fn etxtbsy_retry_recovers_from_transient_executable_file_busy() {
+    let mut attempts = 0;
+    let result = run_with_etxtbsy_retry(|| {
+        attempts += 1;
+        if attempts <= 2 {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ExecutableFileBusy,
+                "transient busy",
+            ))
+        } else {
+            Ok("ok")
+        }
+    });
+    assert_eq!(result.unwrap(), "ok");
+    assert_eq!(attempts, 3);
+
+    // Succeeding on the final (5th) retry also recovers.
+    let mut max_retry_attempts = 0;
+    let max_retry_result = run_with_etxtbsy_retry(|| {
+        max_retry_attempts += 1;
+        if max_retry_attempts <= ETXTBSY_RETRY_DELAYS.len() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ExecutableFileBusy,
+                "transient busy",
+            ))
+        } else {
+            Ok("recovered-on-last-retry")
+        }
+    });
+    assert_eq!(max_retry_result.unwrap(), "recovered-on-last-retry");
+    assert_eq!(max_retry_attempts, 1 + ETXTBSY_RETRY_DELAYS.len());
+}
+
+#[test]
+fn etxtbsy_retry_stops_after_bounded_limit_on_persistent_busy() {
+    let mut attempts = 0;
+    let error = run_with_etxtbsy_retry::<(), _>(|| {
+        attempts += 1;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::ExecutableFileBusy,
+            "still busy",
+        ))
+    })
+    .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::ExecutableFileBusy);
+    assert_eq!(attempts, 1 + ETXTBSY_RETRY_DELAYS.len());
+}
+
+#[test]
+fn etxtbsy_retry_does_not_retry_other_io_errors() {
+    for kind in [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::PermissionDenied,
+    ] {
+        let mut attempts = 0;
+        let error = run_with_etxtbsy_retry::<(), _>(|| {
+            attempts += 1;
+            Err(std::io::Error::new(kind, "non-transient"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), kind);
+        assert_eq!(attempts, 1);
+    }
+}

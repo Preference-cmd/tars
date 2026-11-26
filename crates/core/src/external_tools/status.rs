@@ -490,6 +490,36 @@ fn resolve_configured(path: &Path) -> ToolStatus {
     }
 }
 
+/// Backoff schedule for transient `ETXTBSY` (`ExecutableFileBusy`) retries.
+const ETXTBSY_RETRY_DELAYS: [std::time::Duration; 5] = [
+    std::time::Duration::from_millis(5),
+    std::time::Duration::from_millis(10),
+    std::time::Duration::from_millis(20),
+    std::time::Duration::from_millis(40),
+    std::time::Duration::from_millis(80),
+];
+
+/// Retry transient `ETXTBSY` (`ExecutableFileBusy`) errors when executing a
+/// freshly written binary in a multi-threaded process.
+///
+/// On Linux, another thread concurrently `fork()`ing can briefly hold a
+/// writable descriptor open until `execve()` closes `O_CLOEXEC` descriptors,
+/// causing `execve()` to fail transiently with `ETXTBSY`.
+fn run_with_etxtbsy_retry<T, F>(mut op: F) -> std::io::Result<T>
+where
+    F: FnMut() -> std::io::Result<T>,
+{
+    for delay in ETXTBSY_RETRY_DELAYS {
+        match op() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                std::thread::sleep(delay);
+            }
+            result => return result,
+        }
+    }
+    op()
+}
+
 /// Run `rg --version` once and return the reported version.
 ///
 /// The environment is cleared and nothing from the tool's output is echoed in
@@ -497,11 +527,13 @@ fn resolve_configured(path: &Path) -> ToolStatus {
 /// secrets nor inject text into status output. A managed binary is only run
 /// after its SHA-256 matched; this function does not verify hashes itself.
 pub(super) fn probe_version(path: &Path) -> Result<String, String> {
-    let output = std::process::Command::new(path)
-        .arg("--version")
-        .env_clear()
-        .output()
-        .map_err(|error| format!("rg could not be executed: {}", error.kind()))?;
+    let output = run_with_etxtbsy_retry(|| {
+        std::process::Command::new(path)
+            .arg("--version")
+            .env_clear()
+            .output()
+    })
+    .map_err(|error| format!("rg could not be executed: {}", error.kind()))?;
     if !output.status.success() {
         return Err(match output.status.code() {
             Some(code) => format!("rg --version exited with status {code}"),
