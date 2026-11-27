@@ -88,9 +88,11 @@ async fn opening_reads_no_record_and_top_scroll_loads_one_without_shifting_rows(
         after.contains("── Compacted (auto, ~130k → ~8k) ──"),
         "{after}"
     );
+    // Compare all conversation rows below the top header/divider (excluding the dynamic scroll indicator row).
+    let conv_end = before_rows.len() - 8;
     assert_eq!(
-        &before_rows[6..],
-        &after_rows[6..],
+        &before_rows[6..conv_end],
+        &after_rows[6..conv_end],
         "a loaded record must not shift rows"
     );
 

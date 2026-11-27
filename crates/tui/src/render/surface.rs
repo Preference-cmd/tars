@@ -1,5 +1,5 @@
-use super::theme::{ACCENT, MUTED};
-use crate::app::{App, Confirmation};
+use super::theme::{ACCENT, MUTED, SPINNER_FRAMES, THINKING_GLYPH};
+use crate::app::{App, Confirmation, Entry};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -7,12 +7,54 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
+use std::path::{Path, PathBuf};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn transcript_width(width: u16) -> u16 {
     width.saturating_sub(4).max(1)
 }
+
+pub(crate) fn header_height(height: u16) -> u16 {
+    if height <= 14 { 1 } else { 2 }
+}
+
+pub(crate) const fn footer_base_height() -> u16 {
+    4
+}
+
+fn is_obscured(app: &App) -> bool {
+    app.panel.is_some()
+        || app.form.is_some()
+        || app.onboarding.is_some()
+        || app.confirmation.is_some()
+        || app.entries.get(app.selected).is_some_and(|e| {
+            e.workspace_rules_trust.is_some()
+                || e.workspace_agents_trust.is_some()
+                || !e.approval_queue.is_empty()
+        })
+}
+
+pub(crate) fn activity_bar_height(app: &App) -> u16 {
+    u16::from(
+        !is_obscured(app)
+            && app
+                .entries
+                .get(app.selected)
+                .is_some_and(Entry::is_animating),
+    )
+}
+
+pub(crate) fn scroll_bar_height(app: &App) -> u16 {
+    u16::from(
+        !is_obscured(app)
+            && app
+                .entries
+                .get(app.selected)
+                .is_some_and(|e| e.scroll.is_some()),
+    )
+}
+
 fn attachment_bar_height(app: &App) -> u16 {
     u16::from(
         app.entries
@@ -21,7 +63,38 @@ fn attachment_bar_height(app: &App) -> u16 {
     )
 }
 
-fn input_height(app: &App, width: u16, height: u16) -> u16 {
+fn queue_bar_height(app: &App) -> u16 {
+    u16::from(
+        app.entries
+            .get(app.selected)
+            .is_some_and(|e| !e.queued_prompts.is_empty()),
+    )
+}
+
+struct LayoutHeights {
+    header: u16,
+    scroll_bar: u16,
+    activity_bar: u16,
+    attachment_bar: u16,
+    input: u16,
+    queue_bar: u16,
+    footer_base: u16,
+}
+
+fn layout_heights(app: &App, width: u16, height: u16) -> LayoutHeights {
+    let header = header_height(height);
+    let footer_base = footer_base_height();
+    // Reserve at least 1 row for conversation and 3 rows for the input box.
+    let slack = height.saturating_sub(header + footer_base + 1 + 3);
+    let attachment_bar = attachment_bar_height(app).min(slack);
+    let rem = slack - attachment_bar;
+    let queue_bar = queue_bar_height(app).min(rem);
+    let rem = rem - queue_bar;
+    let activity_bar = activity_bar_height(app).min(rem);
+    let rem = rem - activity_bar;
+    let scroll_bar = scroll_bar_height(app).min(rem);
+    let extra_bars = attachment_bar + queue_bar + activity_bar + scroll_bar;
+
     let cells = usize::from(width.saturating_sub(6).max(1));
     let rows = app.entries.get(app.selected).map_or(1, |entry| {
         entry
@@ -32,15 +105,19 @@ fn input_height(app: &App, width: u16, height: u16) -> u16 {
             .sum::<usize>()
             .clamp(1, 6) as u16
     });
-    let extra_bars = queue_bar_height(app) + attachment_bar_height(app);
-    (rows + 2).min(height.saturating_sub(9 + extra_bars).max(3))
-}
-fn queue_bar_height(app: &App) -> u16 {
-    u16::from(
-        app.entries
-            .get(app.selected)
-            .is_some_and(|e| !e.queued_prompts.is_empty()),
-    )
+    let max_input = height
+        .saturating_sub(header + footer_base + 1 + extra_bars)
+        .max(3);
+    let input = (rows + 2).min(max_input);
+    LayoutHeights {
+        header,
+        scroll_bar,
+        activity_bar,
+        attachment_bar,
+        input,
+        queue_bar,
+        footer_base,
+    }
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -75,6 +152,154 @@ fn truncate_display_width(text: &str, max_width: usize) -> String {
         end = offset + grapheme.len();
     }
     format!("{}…", &text[..end])
+}
+
+pub(crate) fn truncate_spans_display_width(
+    spans: Vec<Span<'static>>,
+    max_width: usize,
+) -> Vec<Span<'static>> {
+    let total: usize = spans.iter().map(|s| s.content.width()).sum();
+    if total <= max_width {
+        return spans;
+    }
+    if max_width == 0 {
+        return Vec::new();
+    }
+    if max_width == 1 {
+        let style = spans
+            .last()
+            .map_or_else(|| Style::default().fg(MUTED), |s| s.style);
+        return vec![Span::styled("…", style)];
+    }
+    let limit = max_width - 1;
+    let mut cols = 0usize;
+    let mut out = Vec::new();
+    let mut last_style = Style::default().fg(MUTED);
+    for span in spans {
+        last_style = span.style;
+        let w = span.content.width();
+        if cols + w <= limit {
+            cols += w;
+            out.push(span);
+        } else {
+            let remaining = limit.saturating_sub(cols);
+            let mut end = 0usize;
+            for (offset, grapheme) in span.content.grapheme_indices(true) {
+                let gw = grapheme.width();
+                if cols + gw > limit {
+                    break;
+                }
+                cols += gw;
+                end = offset + grapheme.len();
+            }
+            if end > 0 && remaining > 0 {
+                out.push(Span::styled(span.content[..end].to_owned(), span.style));
+            }
+            out.push(Span::styled("…", span.style));
+            return out;
+        }
+    }
+    out.push(Span::styled("…", last_style));
+    out
+}
+
+/// Format a workspace path with `$HOME` -> `~` substitution and tail-preserving ellipsis.
+pub(crate) fn format_workspace_label(path: &Path, max_width: usize) -> String {
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from);
+    format_workspace_label_with_home(path, home.as_deref(), max_width)
+}
+
+/// Format a workspace path using an explicit home directory (for deterministic tests).
+pub(crate) fn format_workspace_label_with_home(
+    path: &Path,
+    home: Option<&Path>,
+    max_width: usize,
+) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let home_replaced = match home {
+        Some(home) if !home.as_os_str().is_empty() => {
+            if path == home {
+                "~".to_owned()
+            } else if let Ok(rel) = path.strip_prefix(home) {
+                let rel_str = rel.to_string_lossy();
+                if rel_str.is_empty() {
+                    "~".to_owned()
+                } else {
+                    format!("~/{rel_str}")
+                }
+            } else {
+                path.display().to_string()
+            }
+        }
+        _ => path.display().to_string(),
+    };
+    let escaped = crate::transcript::display_single_line(&home_replaced);
+    if escaped.width() <= max_width {
+        return escaped;
+    }
+
+    let parts: Vec<&str> = escaped
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty())
+        .collect();
+    let has_tilde = escaped == "~" || escaped.starts_with("~/") || escaped.starts_with("~\\");
+
+    if has_tilde && parts.len() > 2 {
+        let mut tail_parts: Vec<&str> = Vec::new();
+        for &part in parts[1..].iter().rev() {
+            let tail_width: usize = tail_parts.iter().map(|p| 1 + p.width()).sum();
+            let candidate_len = "~/…".width() + tail_width + 1 + part.width();
+            if candidate_len <= max_width {
+                tail_parts.push(part);
+            } else {
+                break;
+            }
+        }
+        if !tail_parts.is_empty() {
+            tail_parts.reverse();
+            return format!("~/…/{}", tail_parts.join("/"));
+        }
+    }
+
+    if parts.len() >= 2 {
+        let mut tail_parts: Vec<&str> = Vec::new();
+        for &part in parts.iter().rev() {
+            if has_tilde && part == "~" {
+                break;
+            }
+            let tail_width: usize = tail_parts.iter().map(|p| 1 + p.width()).sum();
+            let candidate_len = "…".width() + tail_width + 1 + part.width();
+            if candidate_len <= max_width {
+                tail_parts.push(part);
+            } else {
+                break;
+            }
+        }
+        if !tail_parts.is_empty() {
+            tail_parts.reverse();
+            return format!("…/{}", tail_parts.join("/"));
+        }
+    }
+
+    if max_width == 1 {
+        return "…".to_owned();
+    }
+    let limit = max_width - 1;
+    let mut cols = 0usize;
+    let mut start = escaped.len();
+    for (offset, grapheme) in escaped.grapheme_indices(true).rev() {
+        let w = grapheme.width();
+        if cols + w > limit {
+            break;
+        }
+        cols += w;
+        start = offset;
+    }
+    format!("…{}", &escaped[start..])
 }
 
 pub(crate) fn format_attachment_bar(
@@ -135,14 +360,17 @@ pub(crate) fn format_queued_prompt_preview(
 }
 
 pub(crate) fn conversation_height(height: u16, width: u16, app: &App) -> usize {
-    let queue_rows = queue_bar_height(app);
-    let attachment_rows = attachment_bar_height(app);
-    usize::from(
-        height
-            .saturating_sub(3 + attachment_rows + queue_rows + input_height(app, width, height) + 5)
-            .max(1),
-    )
+    let h = layout_heights(app, width, height);
+    let non_conv = h.header
+        + h.scroll_bar
+        + h.activity_bar
+        + h.attachment_bar
+        + h.input
+        + h.queue_bar
+        + h.footer_base;
+    usize::from(height.saturating_sub(non_conv).max(1))
 }
+
 pub(super) fn inset(area: Rect) -> Rect {
     Rect::new(
         area.x.saturating_add(2),
@@ -151,6 +379,237 @@ pub(super) fn inset(area: Rect) -> Rect {
         area.height,
     )
 }
+
+fn build_header_lines(
+    app: &App,
+    entry: Option<&Entry>,
+    max_width: usize,
+    rows: u16,
+) -> Vec<Line<'static>> {
+    let raw_model = entry
+        .map(|e| e.model.as_str())
+        .or(app.options.preset.as_ref().map(|p| p.model.as_str()))
+        .unwrap_or("No model selected");
+    let version = format!(" v{}", env!("CARGO_PKG_VERSION"));
+    let mut spans = vec![
+        Span::styled(
+            "TARS",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(version.clone(), Style::default().fg(MUTED)),
+    ];
+    let mut used = "TARS".width() + version.width();
+
+    let model = crate::transcript::display_single_line(raw_model);
+    if used + 3 < max_width {
+        let model_cap = model.width().min(max_width - used - 3);
+        let model_fit = truncate_display_width(&model, model_cap);
+        spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
+        spans.push(Span::styled(model_fit.clone(), Style::default().fg(MUTED)));
+        used += 3 + model_fit.width();
+    }
+
+    if let Some(e) = entry {
+        let agent_part = e.viewed_agent_id.as_ref().map(|agent_id| {
+            let label = e.viewed_agent_label.as_deref().unwrap_or(agent_id.as_str());
+            format!(
+                "agent: {} (read-only)",
+                crate::transcript::display_single_line(label)
+            )
+        });
+        let short = e.id().get(..8).unwrap_or(e.id());
+        let session_base = format!("Session {short}");
+        let session_title = e
+            .title()
+            .map(|t| crate::transcript::display_single_line(&t));
+        let workspace_path = e.workspace_root.clone().or_else(|| {
+            e.session
+                .as_ref()
+                .and_then(|s| s.definition().workspace_root)
+        });
+
+        let agent_reserve = agent_part.as_ref().map_or(0, |a| 3 + a.width());
+        let session_reserve = 3 + session_base.width();
+
+        if let Some(ws) = workspace_path {
+            let remaining = max_width.saturating_sub(used);
+            if remaining > 6 {
+                // Leave room for Session <short> and agent: when wide enough; otherwise give workspace what fits.
+                let reserve_others = if remaining >= session_reserve + agent_reserve + 12 {
+                    session_reserve + agent_reserve
+                } else {
+                    0
+                };
+                let ws_budget = remaining
+                    .saturating_sub(3 + reserve_others)
+                    .max(8)
+                    .min(remaining.saturating_sub(3));
+                let ws_label = format_workspace_label(&ws, ws_budget);
+                if !ws_label.is_empty() && used + 3 + ws_label.width() <= max_width {
+                    spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
+                    spans.push(Span::styled(ws_label.clone(), Style::default().fg(MUTED)));
+                    used += 3 + ws_label.width();
+                }
+            }
+        }
+
+        if used + 3 < max_width {
+            let after_ws = max_width.saturating_sub(used);
+            let session_label = if let Some(title) = session_title {
+                let avail_for_title =
+                    after_ws.saturating_sub(3 + session_base.width() + agent_reserve + 3);
+                if avail_for_title >= 4 {
+                    let short_title = truncate_display_width(&title, avail_for_title);
+                    format!("{session_base} ({short_title})")
+                } else {
+                    session_base
+                }
+            } else {
+                session_base
+            };
+            if used + 3 + session_label.width() <= max_width {
+                spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
+                spans.push(Span::styled(
+                    session_label.clone(),
+                    Style::default().fg(MUTED),
+                ));
+                used += 3 + session_label.width();
+            }
+        }
+
+        if let Some(agent_str) = agent_part
+            && used + 3 < max_width
+        {
+            spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
+            spans.push(Span::styled(
+                agent_str,
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ));
+        }
+    } else if used + 3 < max_width {
+        spans.push(Span::styled(
+            " · Local sessions · /new to begin",
+            Style::default().fg(MUTED),
+        ));
+    }
+
+    let line1 = Line::from(truncate_spans_display_width(spans, max_width));
+    if rows > 1 {
+        vec![line1, Line::default()]
+    } else {
+        vec![line1]
+    }
+}
+
+fn elapsed_suffix(started_at: Option<std::time::Instant>, now: std::time::Instant) -> String {
+    started_at
+        .map(|t0| format!(" · {:.1}s", now.saturating_duration_since(t0).as_secs_f64()))
+        .unwrap_or_default()
+}
+
+fn build_activity_line(app: &App, entry: &Entry, max_width: usize) -> Line<'static> {
+    let now = app.clock.now();
+    let spinner = SPINNER_FRAMES[(app.spinner_tick as usize) % SPINNER_FRAMES.len()];
+    let active_tools: Vec<_> = entry.tools.active_calls().collect();
+
+    let spans = if let Some(label) = entry.busy {
+        let primary = format!(
+            "{spinner} {}…",
+            crate::transcript::display_single_line(label)
+        );
+        let elapsed = elapsed_suffix(entry.busy_started_at, now);
+        let mut s = vec![Span::styled(primary, Style::default().fg(ACCENT))];
+        if !elapsed.is_empty() {
+            s.push(Span::styled(elapsed, Style::default().fg(MUTED)));
+        }
+        s
+    } else if !active_tools.is_empty() {
+        let running_tools: Vec<_> = active_tools
+            .iter()
+            .copied()
+            .filter(|call| call.phase == tars_core::session::ToolPhase::Running)
+            .collect();
+        let (verb, shown_tools) = if running_tools.is_empty() {
+            ("Waiting", active_tools.as_slice())
+        } else {
+            ("Running", running_tools.as_slice())
+        };
+        let tool_desc = if shown_tools.len() == 1 {
+            let call = shown_tools[0];
+            let parsed_args =
+                serde_json::from_str::<serde_json::Value>(&call.arguments_summary).ok();
+            let (title, target) = crate::transcript::friendly_tool_title_and_target(
+                &call.tool_name,
+                parsed_args.as_ref(),
+                Some(&call.arguments_summary),
+                None,
+            );
+            match target {
+                Some(target) if !target.is_empty() => format!("{verb} {title} ({target})"),
+                _ => format!("{verb} {title}"),
+            }
+        } else if verb == "Waiting" {
+            format!("Waiting on {} tools", shown_tools.len())
+        } else {
+            format!("Running {} tools", shown_tools.len())
+        };
+        let elapsed = elapsed_suffix(entry.turn_started_at, now);
+        vec![
+            Span::styled(
+                format!("{spinner} {tool_desc}"),
+                Style::default().fg(ACCENT),
+            ),
+            Span::styled(
+                format!("{elapsed}  ·  Esc to interrupt"),
+                Style::default().fg(MUTED),
+            ),
+        ]
+    } else if entry.preview.is_active()
+        && !entry.preview.reasoning.is_empty()
+        && entry.preview.text.is_empty()
+        && !entry.preview.ready
+    {
+        let elapsed = elapsed_suffix(entry.turn_started_at, now);
+        vec![
+            Span::styled(
+                format!("{THINKING_GLYPH} Thinking"),
+                Style::default().fg(ACCENT),
+            ),
+            Span::styled(
+                format!("{elapsed}  ·  Esc to interrupt"),
+                Style::default().fg(MUTED),
+            ),
+        ]
+    } else if entry.is_turn_running()
+        || entry.preview.is_active()
+        || entry.execution == "Running (background wakeup)"
+    {
+        let elapsed = elapsed_suffix(entry.turn_started_at, now);
+        vec![
+            Span::styled(format!("{spinner} Generating"), Style::default().fg(ACCENT)),
+            Span::styled(
+                format!("{elapsed}  ·  Esc to interrupt"),
+                Style::default().fg(MUTED),
+            ),
+        ]
+    } else {
+        let noun = if entry.active_bg_count == 1 {
+            "task"
+        } else {
+            "tasks"
+        };
+        vec![Span::styled(
+            format!(
+                "{spinner} {} background {noun} running",
+                entry.active_bg_count
+            ),
+            Style::default().fg(ACCENT),
+        )]
+    };
+
+    Line::from(truncate_spans_display_width(spans, max_width))
+}
+
 pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     if let Some(startup) = &app.startup {
         super::splash::draw(frame, startup);
@@ -178,73 +637,35 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         return;
     }
     let body = inset(area);
-    let queue_rows = queue_bar_height(app);
-    let attachment_rows = attachment_bar_height(app);
+    let heights = layout_heights(app, area.width, area.height);
     let regions = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(heights.header),
         Constraint::Min(1),
-        Constraint::Length(attachment_rows),
-        Constraint::Length(input_height(app, area.width, area.height)),
-        Constraint::Length(5 + queue_rows),
+        Constraint::Length(heights.scroll_bar),
+        Constraint::Length(heights.activity_bar),
+        Constraint::Length(heights.attachment_bar),
+        Constraint::Length(heights.input),
+        Constraint::Length(heights.footer_base + heights.queue_bar),
     ])
     .split(body);
     let entry = app.entries.get(app.selected);
-    let model = entry
-        .map(|e| e.model.as_str())
-        .or(app.options.preset.as_ref().map(|p| p.model.as_str()))
-        .unwrap_or("No model selected");
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    "TARS",
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  {}  ·  {model}", env!("CARGO_PKG_VERSION")),
-                    Style::default().fg(MUTED),
-                ),
-            ]),
-            Line::styled(
-                entry.map_or_else(
-                    || "Local sessions  ·  /new to begin".into(),
-                    |e| {
-                        let short = e.id().get(..8).unwrap_or(e.id());
-                        let session_label = match e.title() {
-                            Some(title) => format!(
-                                "Session {short} ({})",
-                                tars_core::permission::escape_untrusted_text(&title)
-                            ),
-                            None => format!("Session {short}"),
-                        };
-                        if let Some(agent_id) = &e.viewed_agent_id {
-                            let label = e
-                                .viewed_agent_label
-                                .as_deref()
-                                .unwrap_or(agent_id.as_str());
-                            format!(
-                                "{session_label}  ·  agent: {} (read-only)  ·  /agents main · /sessions to switch",
-                                tars_core::permission::escape_untrusted_text(label),
-                            )
-                        } else if e.session.is_some() {
-                            format!("{session_label}  ·  /sessions to switch  ·  /agents")
-                        } else {
-                            format!("{session_label}  ·  /sessions to switch")
-                        }
-                    },
-                ),
-                Style::default().fg(MUTED),
-            ),
-        ]),
+        Paragraph::new(build_header_lines(
+            app,
+            entry,
+            usize::from(regions[0].width),
+            heights.header,
+        )),
         regions[0],
     );
+    let overlay_height = area.height.saturating_sub(header_height(area.height) + 1);
     if let Some(confirmation) = &app.confirmation {
         super::panels::confirm(
             frame,
             confirmation,
             Rect {
                 y: regions[1].y,
-                height: area.height.saturating_sub(4),
+                height: overlay_height,
                 ..body
             },
         );
@@ -256,7 +677,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             app,
             Rect {
                 y: regions[1].y,
-                height: area.height.saturating_sub(4),
+                height: overlay_height,
                 ..body
             },
         );
@@ -268,12 +689,13 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             app,
             Rect {
                 y: regions[1].y,
-                height: area.height.saturating_sub(4),
+                height: overlay_height,
                 ..body
             },
         );
         return;
     }
+    let between_header_and_footer = regions[6].y.saturating_sub(regions[1].y);
     if app.panel.is_none() && entry.is_some_and(|e| e.workspace_rules_trust.is_some()) {
         super::panels::workspace_rules_trust(
             frame,
@@ -281,11 +703,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             entry.unwrap(),
             Rect {
                 y: regions[1].y,
-                height: regions[1].height + regions[2].height + regions[3].height,
+                height: between_header_and_footer,
                 ..body
             },
         );
-        footer(frame, app, regions[4]);
+        footer(frame, app, regions[6], heights.queue_bar > 0);
         return;
     }
     if app.panel.is_none() && entry.is_some_and(|e| e.workspace_agents_trust.is_some()) {
@@ -295,11 +717,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             entry.unwrap(),
             Rect {
                 y: regions[1].y,
-                height: regions[1].height + regions[2].height + regions[3].height,
+                height: between_header_and_footer,
                 ..body
             },
         );
-        footer(frame, app, regions[4]);
+        footer(frame, app, regions[6], heights.queue_bar > 0);
         return;
     }
     if app.panel.is_none() && entry.is_some_and(|e| !e.approval_queue.is_empty()) {
@@ -309,13 +731,14 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             entry.unwrap(),
             Rect {
                 y: regions[1].y,
-                height: regions[1].height + regions[2].height + regions[3].height,
+                height: between_header_and_footer,
                 ..body
             },
         );
-        footer(frame, app, regions[4]);
+        footer(frame, app, regions[6], heights.queue_bar > 0);
         return;
     }
+    let mut active_viewport_stats: Option<(usize, usize)> = None;
     if let Some(entry) = entry {
         let history = entry
             .history_rows
@@ -325,6 +748,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         let committed = history + current;
         let height = usize::from(regions[1].height);
         let viewport = entry.viewport(height);
+        active_viewport_stats = Some((viewport.start, viewport.end));
         let start = viewport.start;
         let sticky = viewport.sticky;
         let mut lines = Vec::with_capacity(height);
@@ -376,7 +800,9 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             }
         }
         let show_live_root = entry.viewed_agent_id.is_none();
-        let tool_lines = entry.tools.styled_lines(app.clock.now(), 0);
+        let tool_lines = entry
+            .tools
+            .styled_lines(app.clock.now(), app.spinner_tick as usize);
         for index in start..entry.conversation_len() {
             if lines.len() >= height {
                 break;
@@ -451,25 +877,57 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     } else {
         welcome(frame, regions[1], false);
     }
-    if attachment_rows > 0
+    if heights.scroll_bar > 0
+        && let Some(entry) = entry
+        && let Some((start, end)) = active_viewport_stats
+    {
+        let bar_width = usize::from(regions[2].width);
+        let line = if entry.has_unread_output {
+            Line::styled(
+                truncate_display_width("↓ New output · End/PgDn", bar_width),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            let pct = (start * 100 / end.max(1)).min(100);
+            let label = format!("↑ Scrolled ({pct}%) · End to follow");
+            Line::styled(
+                truncate_display_width(&label, bar_width),
+                Style::default().fg(MUTED),
+            )
+        };
+        frame.render_widget(Paragraph::new(line), regions[2]);
+    }
+    if heights.activity_bar > 0
+        && let Some(entry) = entry
+    {
+        frame.render_widget(
+            Paragraph::new(build_activity_line(
+                app,
+                entry,
+                usize::from(regions[3].width),
+            )),
+            regions[3],
+        );
+    }
+    if heights.attachment_bar > 0
         && let Some(entry) = entry
     {
         const PREFIX: &str = "Images: ";
-        let avail = usize::from(regions[2].width).saturating_sub(PREFIX.len());
+        let avail = usize::from(regions[4].width).saturating_sub(PREFIX.len());
         let bar = format_attachment_bar(&entry.pending_images, avail);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(PREFIX, Style::default().fg(ACCENT)),
                 Span::styled(bar, Style::default().fg(MUTED)),
             ])),
-            regions[2],
+            regions[4],
         );
     }
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(MUTED));
-    let inner = block.inner(regions[3]);
-    frame.render_widget(block, regions[3]);
+    let inner = block.inner(regions[5]);
+    frame.render_widget(block, regions[5]);
     frame.render_widget(
         Paragraph::new("❯").style(Style::default().fg(ACCENT)),
         inner,
@@ -504,7 +962,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             editor_area,
         );
     }
-    footer(frame, app, regions[4]);
+    footer(frame, app, regions[6], heights.queue_bar > 0);
     if let Some(panel) = &app.panel {
         super::panels::draw(
             frame,
@@ -512,7 +970,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             panel,
             Rect {
                 y: regions[1].y,
-                height: regions[1].height + regions[2].height + regions[3].height,
+                height: between_header_and_footer,
                 ..body
             },
         );
@@ -597,7 +1055,103 @@ fn welcome(frame: &mut Frame<'_>, area: Rect, open: bool) {
         area,
     );
 }
-fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn build_status_spans(e: &Entry, max_width: usize) -> Vec<Span<'static>> {
+    let build = |compact: bool| -> Vec<Span<'static>> {
+        let exec_text = if compact && e.execution == "No work in this instance" {
+            "Idle".to_owned()
+        } else {
+            e.execution.clone()
+        };
+        let exec_style = if e.execution.starts_with("Running") {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(MUTED)
+        };
+
+        let status_text = if compact {
+            e.status.replace("unsaved / running", "unsaved")
+        } else {
+            e.status.clone()
+        };
+        let status_style = Style::default().fg(if e.status.contains("BLOCKED") {
+            Color::Yellow
+        } else {
+            MUTED
+        });
+
+        let mut spans = vec![
+            Span::styled(exec_text, exec_style),
+            Span::styled(" · ", Style::default().fg(MUTED)),
+            Span::styled(status_text, status_style),
+        ];
+        if let Some(b) = e.busy {
+            spans.push(Span::styled(format!(" · {b}"), Style::default().fg(MUTED)));
+        }
+        if let Some((mode, _)) = e.session.as_ref().and_then(|s| s.permission_mode()) {
+            spans.push(Span::styled(" · mode ", Style::default().fg(MUTED)));
+            let mode_style = match mode {
+                tars_core::permission::PermissionMode::FullAccess => Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+                tars_core::permission::PermissionMode::AcceptEdits => Style::default().fg(ACCENT),
+                _ => Style::default().fg(MUTED),
+            };
+            spans.push(Span::styled(mode.to_string(), mode_style));
+        }
+        let usage = e.session.as_ref().and_then(|s| s.context_usage());
+        if let Some(mut label) = context_label(usage) {
+            if compact && let Some((head, _)) = label.split_once(" / ") {
+                let auto_off = label.contains(" · auto off");
+                label = if auto_off {
+                    format!("{head} · auto off")
+                } else {
+                    head.to_owned()
+                };
+            }
+            let over = usage.is_some_and(|usage| {
+                usage
+                    .context_window
+                    .is_some_and(|window| usage.estimate_tokens >= window)
+            });
+            spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
+            spans.push(Span::styled(
+                label,
+                Style::default().fg(if over { Color::Yellow } else { MUTED }),
+            ));
+        }
+        if e.active_bg_count > 0 {
+            spans.push(Span::styled(
+                format!(" · bg {} running", e.active_bg_count),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ));
+        }
+        if let Some(agent_id) = &e.viewed_agent_id {
+            let name = e.viewed_agent_label.as_deref().unwrap_or(agent_id.as_str());
+            let escaped_name = tars_core::permission::escape_untrusted_text(name);
+            let display_name = if compact {
+                truncate_display_width(&escaped_name, 16)
+            } else {
+                escaped_name
+            };
+            spans.push(Span::styled(
+                format!(" · viewing agent: {display_name} (read-only)"),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans
+    };
+
+    let full = build(false);
+    let full_width: usize = full.iter().map(|s| s.content.width()).sum();
+    let chosen = if full_width > max_width && max_width >= 40 {
+        build(true)
+    } else {
+        full
+    };
+    truncate_spans_display_width(chosen, max_width)
+}
+
+fn footer(frame: &mut Frame<'_>, app: &App, area: Rect, show_queue: bool) {
     let entry = app.entries.get(app.selected);
     let message = if let Some(confirmation) = &app.confirmation {
         match confirmation {
@@ -629,13 +1183,13 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         "Enter send · Ctrl-J newline · / commands · Esc interrupt"
     };
-    let has_queue = entry.is_some_and(|e| !e.queued_prompts.is_empty());
+    let has_queue = show_queue && entry.is_some_and(|e| !e.queued_prompts.is_empty());
     let (hint_area, status_area, notice_area) = if has_queue {
         let sections = Layout::vertical([
             Constraint::Length(1),
-            Constraint::Length(2),
             Constraint::Length(1),
-            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Min(2),
         ])
         .split(area);
         if let Some(e) = entry {
@@ -669,9 +1223,9 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         (sections[1], sections[2], sections[3])
     } else {
         let sections = Layout::vertical([
-            Constraint::Length(2),
             Constraint::Length(1),
-            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Min(2),
         ])
         .split(area);
         (sections[0], sections[1], sections[2])
@@ -687,69 +1241,15 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         hint_area,
     );
     if let Some(e) = entry {
-        let mut spans = vec![
-            Span::styled(e.execution.clone(), Style::default().fg(MUTED)),
-            Span::styled(" · ", Style::default().fg(MUTED)),
-            Span::styled(
-                e.status.clone(),
-                Style::default().fg(if e.status.contains("BLOCKED") {
-                    Color::Yellow
-                } else {
-                    MUTED
-                }),
-            ),
-        ];
-        if let Some(b) = e.busy {
-            spans.push(Span::styled(format!(" · {b}"), Style::default().fg(MUTED)));
-        }
-        if let Some((mode, _)) = e.session.as_ref().and_then(|s| s.permission_mode()) {
-            spans.push(Span::styled(" · mode ", Style::default().fg(MUTED)));
-            let mode_style = if mode == tars_core::permission::PermissionMode::FullAccess {
-                Style::default()
-                    .fg(Color::LightRed)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(MUTED)
-            };
-            spans.push(Span::styled(mode.to_string(), mode_style));
-        }
-        let usage = e.session.as_ref().and_then(|s| s.context_usage());
-        if let Some(label) = context_label(usage) {
-            let over = usage.is_some_and(|usage| {
-                usage
-                    .context_window
-                    .is_some_and(|window| usage.estimate_tokens >= window)
-            });
-            spans.push(Span::styled(" · ", Style::default().fg(MUTED)));
-            spans.push(Span::styled(
-                label,
-                Style::default().fg(if over { Color::Yellow } else { MUTED }),
-            ));
-        }
-        if e.active_bg_count > 0 {
-            spans.push(Span::styled(
-                format!(" · bg {} running", e.active_bg_count),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        if let Some(agent_id) = &e.viewed_agent_id {
-            let name = e.viewed_agent_label.as_deref().unwrap_or(agent_id.as_str());
-            let escaped_name = tars_core::permission::escape_untrusted_text(name);
-            spans.push(Span::styled(
-                format!(" · viewing agent: {escaped_name} (read-only)"),
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-            ));
-        }
+        let spans = build_status_spans(e, usize::from(status_area.width));
         frame.render_widget(Paragraph::new(Line::from(spans)), status_area);
     } else {
+        let summary = truncate_display_width(
+            &format!("{} saved sessions · F1 commands", app.entries.len()),
+            usize::from(status_area.width),
+        );
         frame.render_widget(
-            Paragraph::new(format!(
-                "{} saved sessions · F1 commands",
-                app.entries.len()
-            ))
-            .style(Style::default().fg(MUTED)),
+            Paragraph::new(summary).style(Style::default().fg(MUTED)),
             status_area,
         );
     }

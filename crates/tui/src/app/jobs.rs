@@ -75,7 +75,7 @@ pub(super) enum Message {
         bool,
         Result<SaveStatus, String>,
     ),
-    Listed(Result<Vec<SessionListing>, ApplicationError>),
+    Listed(u64, Result<Vec<SessionListing>, ApplicationError>),
     Opened(Key, Result<ManagedSession, ApplicationError>),
     WorkspaceRulesTrusted(Key, Result<usize, ApplicationError>),
     WorkspaceAgentsTrusted(Key, Result<usize, ApplicationError>),
@@ -293,13 +293,21 @@ impl App {
             Message::RepairApplied(key, request, applied, result) => {
                 self.repair_applied(key, request, applied, result)
             }
-            Message::Listed(result) => {
+            Message::Listed(generation, result) => {
                 self.listing = false;
                 let pending_resume = self.pending_resume_selector.take();
                 let is_startup = std::mem::replace(&mut self.startup_action_pending, false);
                 match result {
                     Err(error) => self.notice = error.to_string(),
-                    Ok(listed) => {
+                    Ok(mut listed) => {
+                        listed.retain(|item| {
+                            !self
+                                .recently_deleted
+                                .contains(item.conversation_id.as_str())
+                        });
+                        if generation == self.list_generation {
+                            self.recently_deleted.clear();
+                        }
                         for item in &listed {
                             let id = item.conversation_id.as_str().to_owned();
                             if let Some(existing) = self.entries.iter_mut().find(|e| e.id() == id) {
@@ -476,11 +484,14 @@ impl App {
                 }
             }
             Message::Opened(key, result) => {
+                let now = self.clock.now();
                 if let Some(entry) = self.entry_mut(&key) {
-                    entry.busy = None;
+                    entry.clear_busy();
                     match result {
                         Ok(session) => {
                             entry.turn_in_flight = false;
+                            entry.turn_started_at =
+                                session.status().active_work.as_ref().map(|_| now);
                             entry.approvals_rx = Some(session.connect_approvals());
                             entry.session_events_rx = Some(session.subscribe_events());
                             entry.active_bg_count = session.active_finite_background_tasks();
@@ -529,7 +540,7 @@ impl App {
             Message::WorkspaceRulesTrusted(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     if entry.busy == Some("trusting workspace rules") {
-                        entry.busy = None;
+                        entry.clear_busy();
                     }
                     entry.notice = match result {
                         Ok(count) => {
@@ -542,7 +553,7 @@ impl App {
             Message::WorkspaceAgentsTrusted(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     if entry.busy == Some("trusting workspace agents") {
-                        entry.busy = None;
+                        entry.clear_busy();
                     }
                     entry.notice = match result {
                         Ok(count) => {
@@ -559,6 +570,7 @@ impl App {
                     && entry.work.as_ref() == Some(&work)
                 {
                     entry.turn_in_flight = false;
+                    entry.turn_started_at = None;
                     if let Ok((_, tools)) = &result {
                         entry.tools.reconcile(tools, now);
                     }
@@ -566,7 +578,9 @@ impl App {
                     entry.approval_queue.clear();
                     entry.approval_reason = None;
                     entry.approval_scroll = 0;
-                    entry.scroll = None;
+                    if entry.scroll.is_some() {
+                        entry.has_unread_output = true;
+                    }
                     let outcome = result.as_ref().map(|(result, _)| WorkOutcome::of(result));
                     let completed = matches!(&outcome, Ok(o) if o.kind == "completed");
                     let outcome_kind = outcome.as_ref().ok().map(|o| o.kind);
@@ -667,6 +681,12 @@ impl App {
                                 entry.capture_scroll_anchor();
                                 entry.history_anchor = None;
                             }
+                            let has_new_output = entry.material_version.is_some()
+                                && (entry.material_version.as_ref() != Some(&view.version)
+                                    || view.transcript.text.len() > entry.transcript.text.len());
+                            if entry.scroll.is_some() && has_new_output {
+                                entry.has_unread_output = true;
+                            }
                             entry.material_version = Some(view.version);
                             entry.material_retry_after = None;
                             entry.transcript = view.transcript;
@@ -700,6 +720,11 @@ impl App {
                     }
                     match result {
                         Ok(transcript) => {
+                            if entry.scroll.is_some()
+                                && transcript.text.len() > entry.transcript.text.len()
+                            {
+                                entry.has_unread_output = true;
+                            }
                             entry.transcript = transcript;
                             entry.rows = None;
                             if entry.notice.starts_with("Agent materials unavailable")
@@ -773,7 +798,7 @@ impl App {
             }
             Message::Compacted(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
-                    entry.busy = None;
+                    entry.clear_busy();
                     match result {
                         Ok(reload) => {
                             let outcome = reload.outcome;
@@ -848,7 +873,7 @@ impl App {
             }
             Message::Retried(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
-                    entry.busy = None;
+                    entry.clear_busy();
                     entry.notice = match result {
                         Ok(status) => save_label(&status),
                         Err(error) => error.to_string(),
@@ -857,7 +882,7 @@ impl App {
             }
             Message::Exported(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
-                    entry.busy = None;
+                    entry.clear_busy();
                     entry.notice = match result {
                         Ok((path, importable)) => format!(
                             "Exported actual materials: {path}{}",
@@ -870,7 +895,7 @@ impl App {
             Message::MarkdownExported { key, result } => {
                 if let Some(entry) = self.entry_mut(&key) {
                     if entry.busy == Some("exporting markdown") {
-                        entry.busy = None;
+                        entry.clear_busy();
                     }
                     entry.notice = match result {
                         Ok((path, 0)) => format!(
@@ -949,7 +974,7 @@ impl App {
             Message::Forked(key, result, listing) => {
                 let fallback = self.entry_mut(&key).map(|entry| {
                     if entry.busy == Some("forking") {
-                        entry.busy = None;
+                        entry.clear_busy();
                     }
                     (
                         entry.model.clone(),
@@ -1017,11 +1042,13 @@ impl App {
                 if let Some(entry) = self.entries.iter_mut().find(|e| e.id() == id)
                     && entry.busy == Some("deleting")
                 {
-                    entry.busy = None;
+                    entry.clear_busy();
                 }
                 let short = id.get(..8).unwrap_or(&id).to_owned();
                 match result {
                     Ok(()) => {
+                        self.list_generation = self.list_generation.saturating_add(1);
+                        self.recently_deleted.insert(id.clone());
                         if let Some(pos) = self.entries.iter().position(|e| e.id() == id) {
                             self.entries.remove(pos);
                             if self.entries.is_empty() {
@@ -1038,13 +1065,14 @@ impl App {
                         self.notice = format!("Deleted session {short}");
                     }
                     Err(error) => {
+                        self.recently_deleted.remove(&id);
                         self.notice = format!("Delete failed: {error}");
                     }
                 }
             }
             Message::Closed(key, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
-                    entry.busy = None;
+                    entry.clear_busy();
                     entry.approvals_rx = None;
                     entry.approval_queue.clear();
                     entry.approval_reason = None;
@@ -1061,12 +1089,14 @@ impl App {
                                 entry.transcript = Arc::new(Transcript::default());
                                 entry.rows = None;
                                 entry.scroll = None;
+                                entry.has_unread_output = false;
                             }
                             entry.workspace_rules_trust = None;
                             entry.workspace_agents_trust = None;
                             entry.prepared = None;
                             entry.work = None;
                             entry.turn_in_flight = false;
+                            entry.turn_started_at = None;
                             entry.queued_prompts.clear();
                             entry.queue_paused = false;
                             entry.pending_images.clear();
@@ -1138,12 +1168,15 @@ impl App {
                     self.notice = message;
                     return;
                 };
+                if kind == JobKind::Delete {
+                    self.recently_deleted.remove(&key.id);
+                }
                 let mut panicked_repair = None;
                 let mut panicked_close = false;
                 if let Some(entry) = self.entry_mut(&key) {
                     let clear_busy = |entry: &mut Entry, label: &str| {
                         if entry.busy == Some(label) {
-                            entry.busy = None;
+                            entry.clear_busy();
                         }
                     };
                     match kind {
@@ -1227,6 +1260,9 @@ impl App {
                             // The core work may still run; only the local
                             // observation adapter is gone.
                             entry.turn_in_flight = false;
+                            if !entry.is_turn_running() {
+                                entry.turn_started_at = None;
+                            }
                             if !entry.queued_prompts.is_empty() {
                                 entry.queue_paused = true;
                             }

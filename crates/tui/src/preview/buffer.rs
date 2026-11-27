@@ -149,12 +149,16 @@ impl Preview {
             self.reasoning_header.clear();
             return;
         }
+        let glyph = crate::render::theme::THINKING_GLYPH;
         self.reasoning_header = if !self.is_reasoning_collapsed() {
-            "💭 Thinking…".into()
+            format!("{glyph} Thinking…")
         } else if self.ready {
-            format!("💭 Thought ({} chars)", self.reasoning.chars().count())
+            format!("{glyph} Thought ({} chars)", self.reasoning.chars().count())
         } else {
-            format!("💭 Thinking ({} chars)", self.reasoning.chars().count())
+            format!(
+                "{glyph} Thinking ({} chars)",
+                self.reasoning.chars().count()
+            )
         };
     }
 

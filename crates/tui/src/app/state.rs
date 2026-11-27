@@ -6,7 +6,7 @@ use crate::{
     transcript::{Rows, Transcript},
 };
 use ratatui_textarea::TextArea;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -361,8 +361,10 @@ pub(crate) struct Entry {
     pub session: Option<ManagedSession>,
     pub(super) prepared: Option<PreparedCreate>,
     pub busy: Option<&'static str>,
+    pub(crate) busy_started_at: Option<Instant>,
     pub work: Option<WorkRef>,
     pub(crate) turn_in_flight: bool,
+    pub(crate) turn_started_at: Option<Instant>,
     pub(crate) queued_prompts: VecDeque<QueuedPrompt>,
     pub(crate) queue_paused: bool,
     pub(crate) pending_images: Vec<tars_core::media::PreparedImage>,
@@ -390,6 +392,7 @@ pub(crate) struct Entry {
     pub(super) progress: Option<super::progress::ProgressFeed>,
     pub rows: Option<Rows>,
     pub scroll: Option<usize>,
+    pub(crate) has_unread_output: bool,
     pub(super) material_version: Option<MaterialVersion>,
     pub(super) requested_material_version: Option<MaterialVersion>,
     pub(super) superseded_material_version: Option<MaterialVersion>,
@@ -426,8 +429,10 @@ impl Entry {
             session: None,
             prepared: None,
             busy: None,
+            busy_started_at: None,
             work: None,
             turn_in_flight: false,
+            turn_started_at: None,
             queued_prompts: VecDeque::new(),
             queue_paused: false,
             pending_images: Vec::new(),
@@ -452,6 +457,7 @@ impl Entry {
             progress: None,
             rows: None,
             scroll: None,
+            has_unread_output: false,
             material_version: None,
             requested_material_version: None,
             superseded_material_version: None,
@@ -511,6 +517,26 @@ impl Entry {
         self.has_text_draft() || !self.pending_images.is_empty()
     }
 
+    pub(crate) fn set_busy(&mut self, label: &'static str, now: Instant) {
+        if self.busy != Some(label) || self.busy_started_at.is_none() {
+            self.busy_started_at = Some(now);
+        }
+        self.busy = Some(label);
+    }
+
+    pub(crate) fn clear_busy(&mut self) {
+        self.busy = None;
+        self.busy_started_at = None;
+    }
+
+    pub(crate) fn sync_busy_started_at(&mut self, now: Instant) {
+        if self.busy.is_some() {
+            self.busy_started_at.get_or_insert(now);
+        } else {
+            self.busy_started_at = None;
+        }
+    }
+
     pub(crate) fn is_turn_running(&self) -> bool {
         self.busy.is_none()
             && (self.turn_in_flight
@@ -518,6 +544,15 @@ impl Entry {
                     .session
                     .as_ref()
                     .is_some_and(|s| s.status().active_work.is_some()))
+    }
+
+    pub(crate) fn is_animating(&self) -> bool {
+        self.is_turn_running()
+            || self.preview.is_active()
+            || self.busy.is_some()
+            || self.active_bg_count > 0
+            || self.tools.has_active_calls()
+            || self.execution == "Running (background wakeup)"
     }
 
     pub(crate) fn reset_history_cursor(&mut self) {
@@ -636,6 +671,14 @@ pub(crate) struct App {
     pub(crate) startup_action_pending: bool,
     /// Deferred `/resume <selector>` target resolved once `list()` completes.
     pub(crate) pending_resume_selector: Option<String>,
+    /// Spinner animation frame counter incremented every 100 ms while active.
+    pub(crate) spinner_tick: u64,
+    /// Sub-tick toggle (50 ms interval) so `spinner_tick` advances every 2nd tick.
+    pub(crate) tick_phase: u8,
+    /// Monotonic generation bumped on session deletes to guard stale `list()` results.
+    pub(crate) list_generation: u64,
+    /// Deleted session IDs kept until a `list()` spawned after the delete settles.
+    pub(crate) recently_deleted: HashSet<String>,
 }
 impl App {
     pub fn new(options: Options) -> Self {
@@ -696,6 +739,10 @@ impl App {
             pending_external_edit: None,
             startup_action_pending: true,
             pending_resume_selector: None,
+            spinner_tick: 0,
+            tick_phase: 0,
+            list_generation: 0,
+            recently_deleted: HashSet::new(),
         }
     }
     pub(super) fn entry_mut(&mut self, key: &Key) -> Option<&mut Entry> {

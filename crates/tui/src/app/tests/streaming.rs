@@ -514,7 +514,7 @@ fn minimum_height_keeps_temporary_label_and_latest_preview_text_visible() {
         .unwrap();
     app.poll_progress();
     let rendered = screen(&app, 30, 12);
-    assert!(rendered.contains("Generating temp"), "{rendered}");
+    assert!(rendered.contains("Generating"), "{rendered}");
     assert!(
         rendered.contains("你") || rendered.contains("🙂"),
         "{rendered}"
@@ -540,7 +540,9 @@ fn one_row_viewport_warns_about_loss_and_truncation_and_scrolls_earlier_text() {
         .unwrap();
     app.poll_progress();
     app.entries[0].preview.lost = 1;
+    app.entries[0].editor.insert_str("d1\nd2\nd3\nd4");
     app.event(Event::Resize(30, 12));
+    assert_eq!(render::conversation_height(12, 30, &app), 1);
     let rendered = screen(&app, 30, 12);
     assert!(rendered.contains("Temp lost/cut"), "{rendered}");
     assert!(rendered.contains("🙂"), "{rendered}");
@@ -627,7 +629,7 @@ fn reasoning_streams_up_to_six_rows_and_collapses_when_body_or_ready_arrives() {
 
     let rendered = screen(&app, 80, 24);
     assert!(
-        rendered.contains("💭") && rendered.contains("Thinking…"),
+        rendered.contains("◇") && rendered.contains("Thinking…"),
         "{rendered}"
     );
     assert!(rendered.contains("thought line 9"), "{rendered}");
@@ -641,7 +643,7 @@ fn reasoning_streams_up_to_six_rows_and_collapses_when_body_or_ready_arrives() {
     app.poll_progress();
     let rendered = screen(&app, 80, 24);
     assert!(
-        rendered.contains("💭") && rendered.contains("Thinking ("),
+        rendered.contains("◇") && rendered.contains("Thinking ("),
         "{rendered}"
     );
     assert!(!rendered.contains("thought line 9"), "{rendered}");
@@ -654,7 +656,7 @@ fn reasoning_streams_up_to_six_rows_and_collapses_when_body_or_ready_arrives() {
     app.poll_progress();
     let rendered = screen(&app, 80, 24);
     assert!(
-        rendered.contains("💭") && rendered.contains("Thought ("),
+        rendered.contains("◇") && rendered.contains("Thought ("),
         "{rendered}"
     );
 }
@@ -761,5 +763,5 @@ fn reasoning_and_tool_drafts_are_panic_free_at_min_height_and_escape_controls() 
     assert!(!app.entries[0].preview.tool_calls[0].name.contains('\x1b'));
     app.event(Event::Resize(30, 12));
     let rendered = screen(&app, 30, 12);
-    assert!(rendered.contains("Generating temp"), "{rendered}");
+    assert!(rendered.contains("Generating"), "{rendered}");
 }

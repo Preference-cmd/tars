@@ -43,6 +43,9 @@ impl Entry {
         if let ProgressUpdate::Tool(call) = &event.update {
             if call.invocation_id == event.invocation_id {
                 self.tools.apply(call, now);
+                if self.scroll.is_some() {
+                    self.has_unread_output = true;
+                }
             }
             return;
         }
@@ -61,21 +64,36 @@ impl Entry {
         }
         match &event.update {
             ProgressUpdate::ModelStarted => self.preview.start(event.invocation_id.clone()),
-            ProgressUpdate::Text { delta, truncated } => self.preview.append(delta, *truncated),
+            ProgressUpdate::Text { delta, truncated } => {
+                self.preview.append(delta, *truncated);
+                if !delta.is_empty() && self.scroll.is_some() {
+                    self.has_unread_output = true;
+                }
+            }
             ProgressUpdate::Reasoning { delta, truncated } => {
-                self.preview.append_reasoning(delta, *truncated)
+                self.preview.append_reasoning(delta, *truncated);
+                if !delta.is_empty() && self.scroll.is_some() {
+                    self.has_unread_output = true;
+                }
             }
             ProgressUpdate::ToolCallDelta {
                 call_index,
                 name_delta,
                 arguments_delta,
                 truncated,
-            } => self.preview.append_tool_call_delta(
-                *call_index,
-                name_delta.as_deref(),
-                arguments_delta.as_deref(),
-                *truncated,
-            ),
+            } => {
+                let has_delta = name_delta.as_deref().is_some_and(|s| !s.is_empty())
+                    || arguments_delta.as_deref().is_some_and(|s| !s.is_empty());
+                self.preview.append_tool_call_delta(
+                    *call_index,
+                    name_delta.as_deref(),
+                    arguments_delta.as_deref(),
+                    *truncated,
+                );
+                if has_delta && self.scroll.is_some() {
+                    self.has_unread_output = true;
+                }
+            }
             ProgressUpdate::ModelOutputReady => self.preview.mark_ready(),
             ProgressUpdate::Tool(_) => unreachable!("handled independently of model preview"),
             ProgressUpdate::Compaction(_) => {

@@ -493,20 +493,73 @@ impl App {
                 KeyCode::Esc if key.kind == KeyEventKind::Press => self.cancel(),
                 KeyCode::PageUp | KeyCode::PageDown => {
                     if let Some(entry) = self.entries.get_mut(self.selected) {
-                        let viewport = entry.viewport(self.viewport_height);
-                        let at_top = viewport.start == 0;
-                        let end = viewport.end;
-                        let offset = viewport.start;
-                        let page = viewport.page;
-                        entry.scroll = if key.code == KeyCode::PageUp {
-                            Some(offset.saturating_sub(page))
+                        let page = entry.viewport(self.viewport_height).page;
+                        if key.code == KeyCode::PageUp {
+                            scroll_up_lines(entry, self.viewport_height, page, false);
                         } else {
-                            let next = (offset + page).min(end);
-                            (next < end).then_some(next)
-                        };
-                        entry.scroll_anchor = None;
-                        if key.code == KeyCode::PageUp && at_top {
-                            entry.request_earlier_history();
+                            scroll_down_lines(entry, self.viewport_height, page);
+                        }
+                    }
+                }
+                KeyCode::Up
+                    if key.modifiers == KeyModifiers::ALT
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    if let Some(entry) = self.entries.get_mut(self.selected) {
+                        scroll_up_lines(entry, self.viewport_height, 3, true);
+                    }
+                }
+                KeyCode::Down
+                    if key.modifiers == KeyModifiers::ALT
+                        || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    if let Some(entry) = self.entries.get_mut(self.selected) {
+                        scroll_down_lines(entry, self.viewport_height, 3);
+                    }
+                }
+                KeyCode::Char('u' | 'U')
+                    if key.modifiers.contains(KeyModifiers::ALT)
+                        && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if let Some(entry) = self.entries.get_mut(self.selected) {
+                        let half = (entry.viewport(self.viewport_height).page / 2).max(1);
+                        scroll_up_lines(entry, self.viewport_height, half, true);
+                    }
+                }
+                KeyCode::Char('d' | 'D')
+                    if key.modifiers.contains(KeyModifiers::ALT)
+                        && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                {
+                    if let Some(entry) = self.entries.get_mut(self.selected) {
+                        let half = (entry.viewport(self.viewport_height).page / 2).max(1);
+                        scroll_down_lines(entry, self.viewport_height, half);
+                    }
+                }
+                KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(entry) = self.entries.get_mut(self.selected) {
+                        scroll_to_top(entry);
+                    }
+                }
+                KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if let Some(entry) = self.entries.get_mut(self.selected) {
+                        scroll_to_bottom(entry);
+                    }
+                }
+                KeyCode::Home if key.modifiers.is_empty() => {
+                    if let Some(entry) = self.entries.get_mut(self.selected) {
+                        if entry.has_text_draft() {
+                            input::edit(&mut entry.editor, key);
+                        } else {
+                            scroll_to_top(entry);
+                        }
+                    }
+                }
+                KeyCode::End if key.modifiers.is_empty() => {
+                    if let Some(entry) = self.entries.get_mut(self.selected) {
+                        if entry.has_text_draft() {
+                            input::edit(&mut entry.editor, key);
+                        } else {
+                            scroll_to_bottom(entry);
                         }
                     }
                 }
@@ -724,6 +777,44 @@ impl App {
         input::paste(&mut entry.editor, text, true);
         entry.reset_history_cursor();
     }
+}
+
+fn scroll_up_lines(
+    entry: &mut super::Entry,
+    viewport_height: usize,
+    lines: usize,
+    load_on_hit_top: bool,
+) {
+    let viewport = entry.viewport(viewport_height);
+    let at_top = viewport.start == 0;
+    let next = viewport.start.saturating_sub(lines);
+    entry.scroll = Some(next);
+    entry.scroll_anchor = None;
+    if if load_on_hit_top { next == 0 } else { at_top } {
+        entry.request_earlier_history();
+    }
+}
+
+fn scroll_down_lines(entry: &mut super::Entry, viewport_height: usize, lines: usize) {
+    let viewport = entry.viewport(viewport_height);
+    let next = (viewport.start + lines).min(viewport.end);
+    entry.scroll = (next < viewport.end).then_some(next);
+    if entry.scroll.is_none() {
+        entry.has_unread_output = false;
+    }
+    entry.scroll_anchor = None;
+}
+
+fn scroll_to_top(entry: &mut super::Entry) {
+    entry.scroll = Some(0);
+    entry.scroll_anchor = None;
+    entry.request_earlier_history();
+}
+
+fn scroll_to_bottom(entry: &mut super::Entry) {
+    entry.scroll = None;
+    entry.scroll_anchor = None;
+    entry.has_unread_output = false;
 }
 
 fn approval_max_scroll(entry: &super::Entry) -> usize {

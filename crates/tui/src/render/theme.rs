@@ -14,7 +14,6 @@ pub(crate) const ERR: Color = Color::Red;
 pub(crate) const WARN: Color = Color::Yellow;
 
 /// Geometric glyph for thinking / reasoning state (used in activity bar and preview).
-#[allow(dead_code)] // Consumed by Phase 3 activity bar and preview buffer.
 pub(crate) const THINKING_GLYPH: &str = "◇";
 /// Geometric glyph for succeeded tool cards in the committed transcript.
 pub(crate) const TOOL_OK_GLYPH: &str = "▸";

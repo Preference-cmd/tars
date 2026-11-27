@@ -363,6 +363,7 @@ impl App {
         if panel.busy {
             return;
         }
+        let now = self.clock.now();
         let Some(entry) = self.entries.iter_mut().find(|entry| entry.key == panel.key) else {
             return;
         };
@@ -377,7 +378,7 @@ impl App {
         panel.lines =
             vec!["Applying the preview and waiting for saving. Your draft is retained.".into()];
         panel.scroll = 0;
-        entry.busy = Some("repairing materials");
+        entry.set_busy("repairing materials", now);
         entry.repair_job = Some(panel.request);
         let key = panel.key.clone();
         let request = panel.request;
@@ -428,7 +429,7 @@ impl App {
         };
         if let Some(entry) = self.entry_mut(&key) {
             if entry.busy == Some("repairing materials") {
-                entry.busy = None;
+                entry.clear_busy();
             }
             entry.notice = message.clone();
         }

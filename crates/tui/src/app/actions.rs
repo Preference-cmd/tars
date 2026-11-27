@@ -341,9 +341,10 @@ impl App {
             return;
         }
         self.listing = true;
+        let generation = self.list_generation;
         let host = self.host.clone();
         self.spawn_job(None, super::jobs::JobKind::List, async move {
-            Message::Listed(host.list().await)
+            Message::Listed(generation, host.list().await)
         });
     }
     pub(super) fn create(&mut self) {
@@ -372,6 +373,7 @@ impl App {
         if !self.capacity() {
             return;
         }
+        let now = self.clock.now();
         let Some(entry) = self.entries.get_mut(self.selected) else {
             return;
         };
@@ -402,10 +404,13 @@ impl App {
         entry.refreshing = false;
         entry.wrapping = false;
         entry.turn_in_flight = false;
+        entry.turn_started_at = None;
+        entry.scroll = None;
+        entry.has_unread_output = false;
         entry.queued_prompts.clear();
         entry.queue_paused = false;
         entry.execution = "No work in this instance".into();
-        entry.busy = Some("opening");
+        entry.set_busy("opening", now);
         let key = entry.key.clone();
         let prepared = entry.prepared.clone();
         let host = self.host.clone();
@@ -624,11 +629,13 @@ impl App {
                     entry.rows = None;
                 }
                 entry.turn_in_flight = true;
+                entry.turn_started_at = Some(self.clock.now());
                 entry.work = Some(receipt.work.clone());
                 entry.bind_progress(progress);
                 entry.execution = "Running".into();
                 entry.notice = "Input accepted; Ctrl-C cancels this work".into();
                 entry.scroll = None;
+                entry.has_unread_output = false;
                 let key = entry.key.clone();
                 self.spawn_job(Some(key.clone()), super::jobs::JobKind::Work, async move {
                     let result = loop {
@@ -855,6 +862,7 @@ impl App {
         if !self.capacity() {
             return;
         }
+        let now = self.clock.now();
         let Some(entry) = self.entries.get_mut(self.selected) else {
             return;
         };
@@ -866,7 +874,7 @@ impl App {
             return;
         };
         entry.workspace_rules_trust = None;
-        entry.busy = Some("trusting workspace rules");
+        entry.set_busy("trusting workspace rules", now);
         let key = entry.key.clone();
         self.spawn_job(
             Some(key.clone()),
@@ -882,6 +890,7 @@ impl App {
         if !self.capacity() {
             return;
         }
+        let now = self.clock.now();
         let Some(entry) = self.entries.get_mut(self.selected) else {
             return;
         };
@@ -893,7 +902,7 @@ impl App {
             return;
         };
         entry.workspace_agents_trust = None;
-        entry.busy = Some("trusting workspace agents");
+        entry.set_busy("trusting workspace agents", now);
         let key = entry.key.clone();
         self.spawn_job(
             Some(key.clone()),
@@ -989,6 +998,7 @@ impl App {
         if !self.capacity() {
             return;
         }
+        let now = self.clock.now();
         let Some(entry) = self.entries.get_mut(index) else {
             return;
         };
@@ -998,7 +1008,7 @@ impl App {
         let Some(status) = self.host.lookup(&entry.id().into()) else {
             return;
         };
-        entry.busy = Some("closing");
+        entry.set_busy("closing", now);
         entry.approval_queue.clear();
         entry.approval_reason = None;
         entry.approval_scroll = 0;
@@ -1014,6 +1024,7 @@ impl App {
         if !self.capacity() {
             return;
         }
+        let now = self.clock.now();
         let Some(entry) = self.entries.get_mut(self.selected) else {
             return;
         };
@@ -1030,7 +1041,7 @@ impl App {
                 self.close(self.selected, ClosePolicy::Save);
                 return;
             }
-            entry.busy = Some("retrying save");
+            entry.set_busy("retrying save", now);
             let key = entry.key.clone();
             self.spawn_job(Some(key.clone()), super::jobs::JobKind::Retry, async move {
                 Message::Retried(key, session.retry_save().await)
@@ -1043,6 +1054,7 @@ impl App {
         if !self.capacity() {
             return;
         }
+        let now = self.clock.now();
         let Some(entry) = self.entries.get_mut(self.selected) else {
             return;
         };
@@ -1053,7 +1065,7 @@ impl App {
             entry.notice = "No opened material view; initial creation contains no input".into();
             return;
         };
-        entry.busy = Some("exporting");
+        entry.set_busy("exporting", now);
         let key = entry.key.clone();
         let directory = self.options.recovery_dir.clone();
         self.spawn_job(
@@ -1072,6 +1084,7 @@ impl App {
         if !self.capacity() {
             return;
         }
+        let clock_now = self.clock.now();
         let Some(entry) = self.entries.get_mut(self.selected) else {
             self.notice = "Open a session first to export Markdown".into();
             return;
@@ -1143,7 +1156,7 @@ impl App {
         let fallback_model = entry.model().to_owned();
         let host = self.host.clone();
         let key = entry.key.clone();
-        entry.busy = Some("exporting markdown");
+        entry.set_busy("exporting markdown", clock_now);
         entry.notice = "Exporting Markdown...".into();
         self.spawn_job(
             Some(key.clone()),
@@ -1224,6 +1237,7 @@ impl App {
             entry.transcript = Arc::new(crate::transcript::Transcript::default());
             entry.rows = None;
             entry.scroll = None;
+            entry.has_unread_output = false;
             entry.scroll_anchor = None;
             entry.clear_history();
             entry.notice = "Switched to main (entry) agent".into();
@@ -1244,6 +1258,7 @@ impl App {
         entry.transcript = Arc::new(crate::transcript::Transcript::default());
         entry.rows = None;
         entry.scroll = None;
+        entry.has_unread_output = false;
         entry.scroll_anchor = None;
         entry.clear_history();
         entry.notice = format!(
@@ -1298,7 +1313,9 @@ impl App {
     pub(super) fn poll(&mut self) {
         self.poll_startup();
         self.poll_progress();
+        let now = self.clock.now();
         for entry in &mut self.entries {
+            entry.sync_busy_started_at(now);
             if let Some(rx) = &mut entry.approvals_rx {
                 let was_empty = entry.approval_queue.is_empty();
                 while let Ok(request) = rx.try_recv() {
@@ -1312,7 +1329,7 @@ impl App {
                     entry.approval_scroll = 0;
                 }
             }
-            if drain_session_events(entry) {
+            if drain_session_events(entry, now) {
                 self.dirty = true;
             }
             if let Some(status) = self.host.lookup(&entry.id().into()) {
@@ -1460,6 +1477,20 @@ impl App {
         self.update_workspace_trust_guard();
         self.update_repair_guard();
         self.try_dequeue_ready();
+        let animating = self.startup.is_none()
+            && self
+                .entries
+                .get(self.selected)
+                .is_some_and(Entry::is_animating);
+        if animating {
+            self.tick_phase = (self.tick_phase + 1) % 2;
+            if self.tick_phase == 0 {
+                self.spinner_tick = self.spinner_tick.wrapping_add(1);
+                self.dirty = true;
+            }
+        } else {
+            self.tick_phase = 0;
+        }
         if self.quitting {
             for index in 0..self.entries.len() {
                 self.close(index, ClosePolicy::Save);
@@ -1546,6 +1577,7 @@ impl App {
         if !self.capacity() {
             return;
         }
+        let now = self.clock.now();
         let Some(entry) = self.entries.get_mut(self.selected) else {
             self.notice = "Open a session first to compact its context".into();
             return;
@@ -1567,7 +1599,7 @@ impl App {
                 "Cannot compact the context while a work is running; cancel it first".into();
             return;
         }
-        entry.busy = Some("compacting");
+        entry.set_busy("compacting", now);
         entry.notice = "Compacting the context; the replaced conversation stays on screen".into();
         let key = entry.key.clone();
         self.spawn_job(
@@ -1861,6 +1893,7 @@ impl App {
         if !self.capacity() {
             return;
         }
+        let now = self.clock.now();
         let Some(entry) = self.entries.get_mut(self.selected) else {
             self.notice = "Open a saved idle session first to fork it".into();
             return;
@@ -1902,7 +1935,7 @@ impl App {
                 return;
             }
         };
-        entry.busy = Some("forking");
+        entry.set_busy("forking", now);
         entry.notice = "Forking session...".into();
         let key = entry.key.clone();
         let source_id: tars_core::session::ConversationId = entry.id().into();
@@ -1934,8 +1967,11 @@ impl App {
             self.notice = "Close this session before deleting (/close)".into();
             return;
         }
+        let now = self.clock.now();
+        self.list_generation = self.list_generation.saturating_add(1);
+        self.recently_deleted.insert(id.clone());
         let key = if let Some(entry) = self.entries.iter_mut().find(|e| e.id() == id) {
-            entry.busy = Some("deleting");
+            entry.set_busy("deleting", now);
             Some(entry.key.clone())
         } else {
             None
@@ -2025,7 +2061,7 @@ impl App {
     }
 }
 
-fn drain_session_events(entry: &mut Entry) -> bool {
+fn drain_session_events(entry: &mut Entry, now: std::time::Instant) -> bool {
     const MAX_SESSION_EVENTS_PER_TICK: usize = 64;
     let Some(mut rx) = entry.session_events_rx.take() else {
         return false;
@@ -2062,6 +2098,7 @@ fn drain_session_events(entry: &mut Entry) -> bool {
                         {
                             if *status == OperationStatus::Running {
                                 entry.execution = "Running (background wakeup)".into();
+                                entry.turn_started_at.get_or_insert(now);
                             } else if status.is_terminal() {
                                 entry.execution = match status {
                                     OperationStatus::Completed => {
@@ -2069,6 +2106,7 @@ fn drain_session_events(entry: &mut Entry) -> bool {
                                     }
                                     other => format!("Background wakeup: {other}"),
                                 };
+                                entry.turn_started_at = None;
                                 entry.requested_material_version = None;
                             }
                         }
@@ -2106,6 +2144,7 @@ fn drain_session_events(entry: &mut Entry) -> bool {
                             .is_none_or(|snap| snap.active_operation_id.is_none())
                     {
                         entry.execution = "Completed (background wakeup)".into();
+                        entry.turn_started_at = None;
                         entry.requested_material_version = None;
                     }
                     if let Some(agent_id) = entry.viewed_agent_id.as_deref() {

@@ -86,6 +86,18 @@ impl ToolView {
         self.corrected = true;
     }
 
+    pub fn has_active_calls(&self) -> bool {
+        self.calls
+            .iter()
+            .any(|call| matches!(call.phase, ToolPhase::Waiting | ToolPhase::Running))
+    }
+
+    pub fn active_calls(&self) -> impl Iterator<Item = &ToolProgress> {
+        self.calls
+            .iter()
+            .filter(|call| matches!(call.phase, ToolPhase::Waiting | ToolPhase::Running))
+    }
+
     pub fn line_count(&self) -> usize {
         usize::from(self.lost > 0 || self.truncated) + self.calls.len()
     }

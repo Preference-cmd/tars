@@ -947,10 +947,17 @@ async fn automatic_compaction_during_work_preserves_scroll_position_on_live_rebu
 
     assert_eq!(viewed_text_after, viewed_text_before);
 
-    // Let work finish and assert the view returns to the bottom.
+    // Let work finish and assert scroll position is preserved (CC07) with unread flag until Ctrl+End.
     server.release.add_permits(1);
     until(&mut app, |app| app.entries[0].execution == "Completed").await;
+    assert_eq!(app.entries[0].scroll, Some(new_scroll));
+    assert!(app.entries[0].has_unread_output);
+    app.event(Event::Key(crossterm::event::KeyEvent::new(
+        KeyCode::End,
+        crossterm::event::KeyModifiers::CONTROL,
+    )));
     assert_eq!(app.entries[0].scroll, None);
+    assert!(!app.entries[0].has_unread_output);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
