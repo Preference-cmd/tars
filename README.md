@@ -1,6 +1,6 @@
 # TARS
 
-TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI commands (`-p`/`--print`, `run`, `session`, `tools`, `doctor`, `completions`). TARS is in early-stage development (`v0.1.0` prebuilt macOS/Linux binaries available via GitHub Releases, or build from source via Cargo).
+TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI commands (`-p`/`--print`, `run`, `session`, `trust`, `tools`, `doctor`, `completions`). TARS is in early-stage development (`v0.1.0` prebuilt macOS/Linux binaries available via GitHub Releases, or build from source via Cargo).
 
 ## Key features
 
@@ -62,10 +62,10 @@ The examples below assume `tars` is on your `PATH` (use `./target/release/tars` 
 
 ### Interactive TUI
 
-Launch `tars` directly in an interactive terminal: when a default profile is configured (and `--no-config` is not passed), `tars` automatically creates and opens a ready session bound to the workspace (`--workspace DIR` or the current working directory) and sandbox-appropriate tools; when unconfigured with an empty store, it opens the guided first-run setup panel (`Esc` skips). Supports `-c`/`--continue` (most recently updated session), `-r`/`--resume [SELECTOR]` (session picker or ID/prefix match), slash commands (`/clear`, `/resume`, `/model`, `/copy`, `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/queue`, `/image`, `/rename`, `/fork`, `/edit`, `/mode`, `/compact`, `/export-md`, `/help`), `Ctrl-O` to expand full tool results/diffs, and paste/drag-and-drop local image attachments:
+Launch `tars` directly in an interactive terminal: before creating or opening a default session on an untrusted workspace (`--workspace DIR` or the current working directory), `tars` displays a folder-trust prompt (`Do you trust the files in this folder?`; `n` / `Esc` / `Ctrl-C` exits without writing configuration or trust records). Once the folder is trusted, `tars` automatically creates and opens a ready workspace-bound session with sandbox-appropriate tools when a default profile is configured (and `--no-config` is not passed), or enters the minimalist welcome screen non-blockingly (`✓ Trusted` badge and `/new (F2)` / `~/.tars/config.toml` guidance) without auto-writing `~/.tars/config.toml`. Supports `-c`/`--continue` (most recently updated session), `-r`/`--resume [SELECTOR]` (session picker or ID/prefix match), slash commands (`/clear`, `/resume`, `/model`, `/copy`, `/trust`, `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/queue`, `/image`, `/rename`, `/fork`, `/edit`, `/mode`, `/compact`, `/export-md`, `/help`), tiered `Ctrl-C` (cancelling active work/approvals or declining `.tars/` trust prompts first, and cleanly saving and exiting when idle), `Ctrl-O` to expand full tool results/diffs, and paste/drag-and-drop local image attachments:
 
 ```sh
-# Launch directly (auto-starts a workspace-bound session when configured, or onboarding when unconfigured):
+# Launch directly (prompts to trust an untrusted folder, then auto-starts a session when configured or opens the welcome screen):
 tars
 tars --workspace /path/to/repo
 # Continue the most recent session, open the session picker, or resume by ID/prefix:
@@ -117,8 +117,10 @@ tars session export-materials "$SHORT_PREFIX" --store ./tars-data --output expor
 tars session export-markdown "$SHORT_PREFIX" --store ./tars-data --output transcript.md --json
 tars session delete "$SHORT_PREFIX" --store ./tars-data --json
 
-# Read-only diagnostics and static shell completions
+# Read-only diagnostics, folder trust management, and static shell completions
 tars doctor --json
+tars trust list --json
+tars trust revoke
 tars completions zsh
 ```
 
@@ -164,10 +166,10 @@ Dependencies flow strictly one way (`tars-cli` → `tars-tui` → `tars-core` �
 - [Changelog](CHANGELOG.md) — release history and known limitations
 - [Current implementation](docs/README.md) — code layout, module boundaries, and local verification checks
 - [Shared configuration](docs/configuration.md) — TOML schema, presets, compaction, prelude/skills, external tools, and MCP
-- [Workspace tools](docs/workspace-tools.md) — file safety, permission modes, command rules, platform sandboxes (Seatbelt/Bubblewrap), `run_code`, and record migration
+- [Workspace tools](docs/workspace-tools.md) — file safety, permission modes, command rules, workspace trust boundaries, platform sandboxes (Seatbelt/Bubblewrap), `run_code`, and record migration
 - [Session lifecycle](docs/session-lifecycle.md) — session assembly, execution, saving, closing, and usage statistics
 - [Session continuation](docs/session-continuation.md) — repairing interrupted tool batches
-- [TUI guide](docs/tui.md) — terminal layout, keybindings, startup checks, and history display
+- [TUI guide](docs/tui.md) — folder trust wizard, terminal layout, keybindings, tiered `Ctrl+C` exit, `/trust`, startup checks, and history display
 - [config.example.toml](config.example.toml) & [mcp.example.json](mcp.example.json) — starter configuration examples
 
 ## Contributing
