@@ -5,7 +5,7 @@ use std::process::ExitCode;
 const HELP: &str = "TARS — agent application
 
 Usage: tars [interactive options]
-       tars run --provider <protocol> --model <id> (--input <text> | --stdin) [options]
+       tars run --provider <protocol> --model <id> (--input <text> | --stdin | --image <path>) [options]
        tars session <create | run | list | show | compact | history | repair | rename | delete | fork | export-materials | import-legacy> [options]
        tars tools <status | install> [options]
 
@@ -38,6 +38,8 @@ Run options:
   --model        Model identifier (or configured profile)
   --input        User text; mutually exclusive with --stdin
   --stdin        Read UTF-8 user text until EOF
+  --image        Attach a local PNG/JPEG/GIF/WebP image file (repeatable, max 8;
+                 text may be omitted when at least one --image is provided)
   --api-key-env  Credential variable (default OPENAI_API_KEY / ANTHROPIC_API_KEY)
   --endpoint     Full HTTP endpoint override, including the path
   --timeout-secs Work deadline, 1–86400 seconds (default 120)

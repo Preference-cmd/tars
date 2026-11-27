@@ -1,4 +1,4 @@
-use super::options::SessionCommand;
+use super::options::{ExportMaterialsTarget, SessionCommand};
 use crate::cli::command::{failure, output};
 use crate::cli::execute::{
     application_error_message, early_failure, present_outcome, report_detail,
@@ -19,13 +19,14 @@ use tars_core::definition::SessionDefinition;
 
 pub(crate) fn run(command: SessionCommand) -> ExitCode {
     if let SessionCommand::ExportMaterials {
-        record,
+        target: ExportMaterialsTarget::Record(record),
         output: path,
+        json: json_output,
     } = command
     {
         let context = match tars_core::material::load_session_materials(&record) {
             Ok(context) => context,
-            Err(error) => return failure(error),
+            Err(error) => return early_failure(json_output, &error.to_string()),
         };
         return match tars_core::material::save_new(&path, &context) {
             Ok(saved) => {
@@ -37,9 +38,22 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                         managed_execution::recovery_limit_warning(false)
                     );
                 }
-                output(&format!("{}\n", path.display()))
+                if json_output {
+                    output(&format!(
+                        "{}\n",
+                        json!({
+                            "status": "exported",
+                            "path": path,
+                            "media_dir": null,
+                            "media_count": 0,
+                            "importable": saved.importable,
+                        })
+                    ))
+                } else {
+                    output(&format!("{}\n", path.display()))
+                }
             }
-            Err(error) => failure(error),
+            Err(error) => early_failure(json_output, &error.to_string()),
         };
     }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -87,6 +101,8 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 trust_workspace_rules,
                 trust_workspace_agents,
                 input,
+                stdin,
+                images,
                 permission_mode,
                 recovery_dir,
                 json,
@@ -100,6 +116,8 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                     trust_workspace_rules,
                     trust_workspace_agents,
                     input,
+                    stdin,
+                    images,
                     permission_mode,
                     recovery_dir,
                     json,
@@ -161,7 +179,15 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 store,
                 json,
             } => (import_legacy(record, store, json).await, false),
-            SessionCommand::ExportMaterials { .. } => {
+            SessionCommand::ExportMaterials {
+                target: ExportMaterialsTarget::Session { store, id },
+                output: path,
+                json,
+            } => (export_session_materials(store, id, path, json).await, false),
+            SessionCommand::ExportMaterials {
+                target: ExportMaterialsTarget::Record(_),
+                ..
+            } => {
                 unreachable!("offline export handled before runtime")
             }
         }
@@ -171,6 +197,44 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
         runtime.shutdown_background();
     }
     code
+}
+
+async fn export_session_materials(
+    store: PathBuf,
+    id: String,
+    output_path: PathBuf,
+    json_output: bool,
+) -> ExitCode {
+    let host = managed_execution::definition_host(store);
+    match host
+        .export_session_materials(&id.clone().into(), &output_path)
+        .await
+    {
+        Ok(exported) => {
+            if json_output {
+                output(&format!(
+                    "{}\n",
+                    json!({
+                        "status": "exported",
+                        "conversation_id": id,
+                        "path": exported.path,
+                        "media_dir": exported.media_dir,
+                        "media_count": exported.media_count,
+                    })
+                ))
+            } else if let Some(media_dir) = &exported.media_dir {
+                output(&format!(
+                    "{}\nExported {} media file(s) to {}\n",
+                    exported.path.display(),
+                    exported.media_count,
+                    media_dir.display()
+                ))
+            } else {
+                output(&format!("{}\n", exported.path.display()))
+            }
+        }
+        Err(error) => early_failure(json_output, &application_error_message(&error)),
+    }
 }
 
 async fn import_legacy(record: PathBuf, store: PathBuf, json_output: bool) -> ExitCode {
@@ -424,15 +488,22 @@ async fn run_saved(
     trust_workspace_rules: bool,
     trust_workspace_agents: bool,
     input: Option<String>,
+    stdin: bool,
+    images: Vec<PathBuf>,
     permission_mode: Option<tars_core::permission::PermissionMode>,
     recovery_dir: PathBuf,
     json_output: bool,
 ) -> (ExitCode, bool) {
-    let used_stdin_input = input.is_none();
-    let input = match managed_execution::input_text(input) {
-        Ok(input) => input,
-        Err(error) => return (early_failure(json_output, error), false),
+    let prepared_images = match managed_execution::prepare_images(&images) {
+        Ok(images) => images,
+        Err(error) => return (early_failure(json_output, &error), false),
     };
+    let used_stdin_input = stdin;
+    let input =
+        match managed_execution::prepare_prompt_input(input, stdin, !prepared_images.is_empty()) {
+            Ok(input) => input,
+            Err(error) => return (early_failure(json_output, error), false),
+        };
     let host = SessionHost::new(Some(store))
         .with_external_tools(external_tools)
         .with_user_rules_path(user_rules_path)
@@ -492,13 +563,14 @@ async fn run_saved(
         managed_execution::report_open_notices(&session);
     }
     let connect_approvals = crate::cli::approval::should_connect_stdio(used_stdin_input);
-    let report = match managed_execution::work(&session, input, connect_approvals).await {
-        Ok(report) => report,
-        Err(error) => {
-            let _ = host.close(&session.target(), ClosePolicy::Save).await;
-            return (early_failure(json_output, &error), false);
-        }
-    };
+    let report =
+        match managed_execution::work(&session, input, &prepared_images, connect_approvals).await {
+            Ok(report) => report,
+            Err(error) => {
+                let _ = host.close(&session.target(), ClosePolicy::Save).await;
+                return (early_failure(json_output, &error), false);
+            }
+        };
     managed_execution::report_prelude_diagnostics(&session.prelude_diagnostics());
     let presented = present_outcome(&report.result);
     let status = presented.status;

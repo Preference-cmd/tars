@@ -211,12 +211,7 @@ fn write_expanded_block(out: &mut dyn Write, expanded: &ExpandedBlock) -> io::Re
             for part in parts {
                 match part {
                     ContentPart::Text(text) => writeln!(out, "{}", display(&text.0))?,
-                    ContentPart::Media(media) => writeln!(
-                        out,
-                        "[media {} {}]",
-                        display(&media.media_type),
-                        display(&media.reference)
-                    )?,
+                    ContentPart::Media(media) => write_media_line(out, media)?,
                     ContentPart::Sealed(_) => {}
                 }
             }
@@ -249,6 +244,9 @@ fn write_expanded_block(out: &mut dyn Write, expanded: &ExpandedBlock) -> io::Re
                 "{}",
                 display(&serde_json::to_string(&result.output.content).unwrap_or_default())
             )?;
+            for media in &result.media {
+                write_media_line(out, media)?;
+            }
         }
         BlockContent::ToolChange(_) => {}
     }
@@ -279,4 +277,107 @@ fn role_label(role: Role) -> &'static str {
 /// Escape untrusted text and keep tabs from reflowing the layout.
 fn display(value: &str) -> String {
     escape_untrusted_text(value).replace('\t', "    ")
+}
+
+/// Escape untrusted text onto a single line so metadata cannot inject line breaks.
+fn display_single_line(value: &str) -> String {
+    display(value).replace('\n', "\\n")
+}
+
+fn write_media_line(out: &mut dyn Write, media: &causa::kernel::MediaRef) -> io::Result<()> {
+    let media_type = display_single_line(&media.media_type);
+    let reference = display_single_line(&media.reference);
+    match media
+        .name
+        .as_deref()
+        .map(display_single_line)
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => writeln!(out, "[media {media_type} {name} ({reference})]"),
+        None => writeln!(out, "[media {media_type} {reference}]"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_expanded_block;
+    use causa::kernel::{
+        BlockContent, BlockMeta, ContentPart, ContextBlock, MediaRef, Role, TextPayload,
+        ToolOutput, ToolResultPayload, ToolResultStatus,
+    };
+    use causa::runtime::new_block_id;
+    use tars_core::compact::{BlockStatus, ExpandedBlock};
+
+    #[test]
+    fn history_media_rendering_sanitizes_control_chars_and_renders_tool_media() {
+        let user_block = ExpandedBlock {
+            block: ContextBlock::new(
+                new_block_id(),
+                BlockContent::Message {
+                    role: Role::User,
+                    parts: vec![
+                        ContentPart::Text(TextPayload::new("hello")),
+                        ContentPart::Media(
+                            MediaRef::new(
+                                "image/png\x1b[31m\n[assistant · original]",
+                                "media:sha256:abcd\r\n",
+                            )
+                            .with_name("shot\x1b[2J\t1\nspoof.png"),
+                        ),
+                    ],
+                },
+                BlockMeta::default(),
+            ),
+            status: BlockStatus::Original,
+        };
+        let tool_block = ExpandedBlock {
+            block: ContextBlock::new(
+                new_block_id(),
+                BlockContent::ToolResult(
+                    ToolResultPayload::new(
+                        new_block_id(),
+                        ToolResultStatus::Succeeded,
+                        ToolOutput::new(serde_json::json!("ok")),
+                    )
+                    .with_media(vec![
+                        MediaRef::new(
+                            "image/webp",
+                            "artifact:01933b4c-7f12-7000-8000-000000000001",
+                        )
+                        .with_name("snap\x1b[33m\nline.webp"),
+                        MediaRef::new("image/gif", "artifact:01933b4c-7f12-7000-8000-000000000002"),
+                    ]),
+                ),
+                BlockMeta::default(),
+            ),
+            status: BlockStatus::Original,
+        };
+
+        let mut buf = Vec::new();
+        write_expanded_block(&mut buf, &user_block).unwrap();
+        write_expanded_block(&mut buf, &tool_block).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+
+        assert!(!text.contains('\x1b') && !text.contains('\r'), "{text:?}");
+        assert!(
+            !text.lines().any(|line| line.starts_with("[assistant")),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "[media image/png\\x1b[31m\\n[assistant · original] shot\\x1b[2J    1\\nspoof.png (media:sha256:abcd\\r\\n)]"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "[media image/webp snap\\x1b[33m\\nline.webp (artifact:01933b4c-7f12-7000-8000-000000000001)]"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("[media image/gif artifact:01933b4c-7f12-7000-8000-000000000002]"),
+            "{text}"
+        );
+    }
 }

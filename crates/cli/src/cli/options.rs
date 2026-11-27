@@ -12,6 +12,8 @@ pub(super) struct RunOptions {
     pub model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
     pub user_rules_path: Option<PathBuf>,
     pub input: Option<String>,
+    pub stdin: bool,
+    pub images: Vec<PathBuf>,
     pub load: Option<PathBuf>,
     pub save: Option<PathBuf>,
     pub json: bool,
@@ -21,6 +23,7 @@ impl RunOptions {
     pub fn parse(args: &[OsString]) -> Result<Self, CliError> {
         let mut values = HashMap::new();
         let mut skill_dirs = Vec::new();
+        let mut images = Vec::new();
         let mut no_skills = false;
         let mut code_execution = false;
         let mut no_code_execution = false;
@@ -43,6 +46,13 @@ impl RunOptions {
                         return Err("empty --skill-dir option".into());
                     }
                     skill_dirs.push(PathBuf::from(value));
+                }
+                "--image" => {
+                    let value = args.next().ok_or("option needs a value")?;
+                    if value.is_empty() {
+                        return Err("empty --image option".into());
+                    }
+                    images.push(PathBuf::from(value));
                 }
                 "--provider"
                 | "--model"
@@ -113,18 +123,19 @@ impl RunOptions {
         // observations until convergence completes.
         definition.retained_work_capacity = 17;
         let input = string("--input")?;
-        if stdin == input.is_some() {
-            return Err("choose exactly one of --input or --stdin".into());
-        }
-        if input.as_ref().is_some_and(|s| s.trim().is_empty()) {
-            return Err("input must not be blank".into());
-        }
+        super::managed_execution::validate_prompt_options(
+            input.as_deref(),
+            stdin,
+            !images.is_empty(),
+        )?;
         Ok(Self {
             definition,
             external_tools,
             model_profiles,
             user_rules_path,
             input,
+            stdin,
+            images,
             load: values.get("--load").map(PathBuf::from),
             save: values.get("--save").map(PathBuf::from),
             json,

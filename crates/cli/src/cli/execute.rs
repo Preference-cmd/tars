@@ -27,6 +27,19 @@ pub(super) fn run(options: RunOptions) -> ExitCode {
 }
 
 async fn execute(options: RunOptions) -> (ExitCode, bool) {
+    let images = match managed_execution::prepare_images(&options.images) {
+        Ok(images) => images,
+        Err(error) => return (early_failure(options.json, &error), false),
+    };
+    let used_stdin_input = options.stdin;
+    let input = match managed_execution::prepare_prompt_input(
+        options.input,
+        options.stdin,
+        !images.is_empty(),
+    ) {
+        Ok(input) => input,
+        Err(error) => return (early_failure(options.json, error), false),
+    };
     let imported_context = match &options.load {
         Some(path) => match tars_core::material::load(path) {
             Ok(context) => Some(context),
@@ -38,11 +51,6 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
             }
         },
         None => None,
-    };
-    let used_stdin_input = options.input.is_none();
-    let input = match managed_execution::input_text(options.input) {
-        Ok(input) => input,
-        Err(error) => return (early_failure(options.json, error), false),
     };
     let prepared = match PreparedCreate::prepare_transient(options.definition, imported_context) {
         Ok(prepared) => prepared,
@@ -68,7 +76,7 @@ async fn execute(options: RunOptions) -> (ExitCode, bool) {
     managed_execution::report_mcp_status(&session);
     managed_execution::report_command_brief(&session);
     let connect_approvals = super::approval::should_connect_stdio(used_stdin_input);
-    let report = match managed_execution::work(&session, input, connect_approvals).await {
+    let report = match managed_execution::work(&session, input, &images, connect_approvals).await {
         Ok(report) => report,
         Err(error) => {
             let _ = host

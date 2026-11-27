@@ -7,6 +7,10 @@ use tars_core::McpServerStatus;
 use tars_core::application::{
     ApplicationError, HostOptions, ManagedSession, SaveStatus, SessionHost, text_input,
 };
+use tars_core::media::{
+    MAX_IMAGES_PER_MESSAGE, MediaError, PreparedImage, prepare_image_from_path,
+};
+use tars_core::permission::escape_untrusted_text;
 use tars_core::session::{SubmitRequest, WorkRef, WorkResult, WorkState};
 
 pub(super) struct WorkReport {
@@ -165,26 +169,86 @@ pub(super) fn report_command_brief(session: &ManagedSession) {
     }
 }
 
-pub(super) fn input_text(input: Option<String>) -> Result<String, &'static str> {
-    let text = match input {
-        Some(text) => text,
-        None => {
+pub(super) fn validate_prompt_options(
+    input: Option<&str>,
+    stdin: bool,
+    has_images: bool,
+) -> Result<(), &'static str> {
+    if stdin && input.is_some() {
+        return Err("choose exactly one of --input or --stdin");
+    }
+    if !has_images {
+        if !stdin && input.is_none() {
+            return Err("choose exactly one of --input or --stdin");
+        }
+        if input.is_some_and(|value| value.trim().is_empty()) {
+            return Err("input must not be blank");
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn prepare_images(paths: &[PathBuf]) -> Result<Vec<PreparedImage>, String> {
+    if paths.len() > MAX_IMAGES_PER_MESSAGE {
+        return Err(MediaError::TooManyImages {
+            count: paths.len(),
+            max_images: MAX_IMAGES_PER_MESSAGE,
+        }
+        .to_string());
+    }
+    let mut images = Vec::with_capacity(paths.len());
+    for path in paths {
+        let image = prepare_image_from_path(path).map_err(|error| {
+            format!(
+                "invalid image '{}': {error}",
+                escape_untrusted_text(&path.display().to_string())
+            )
+        })?;
+        images.push(image);
+    }
+    Ok(images)
+}
+
+pub(super) fn prepare_prompt_input(
+    input: Option<String>,
+    stdin: bool,
+    has_images: bool,
+) -> Result<Option<String>, &'static str> {
+    let text = match (input, stdin) {
+        (Some(text), false) => Some(text),
+        (None, true) => {
             let mut text = String::new();
             io::stdin()
                 .read_to_string(&mut text)
                 .map_err(|_| "cannot read UTF-8 stdin")?;
-            text
+            Some(text)
         }
+        (None, false) => None,
+        (Some(_), true) => return Err("choose exactly one of --input or --stdin"),
     };
-    if text.trim().is_empty() {
-        return Err("input must not be blank");
+    match text {
+        Some(text) if text.trim().is_empty() => {
+            if has_images {
+                Ok(None)
+            } else {
+                Err("input must not be blank")
+            }
+        }
+        Some(text) => Ok(Some(text)),
+        None => {
+            if has_images {
+                Ok(None)
+            } else {
+                Err("choose exactly one of --input or --stdin")
+            }
+        }
     }
-    Ok(text)
 }
 
 pub(super) async fn work(
     session: &ManagedSession,
-    input: String,
+    input: Option<String>,
+    images: &[PreparedImage],
     connect_approvals: bool,
 ) -> Result<WorkReport, String> {
     let approver = if connect_approvals {
@@ -194,12 +258,20 @@ pub(super) async fn work(
     };
     let mut progress = session.subscribe_progress();
     let mut events = session.subscribe_events();
-    let receipt = session
-        .submit(SubmitRequest {
-            request_key: new_block_id().0.to_string(),
-            blocks: vec![text_input(input)],
-        })
-        .map_err(|error| error.to_string())?;
+    let request_key = new_block_id().0.to_string();
+    let receipt = if images.is_empty() {
+        let text = input.ok_or_else(|| "input must not be blank".to_owned())?;
+        session
+            .submit(SubmitRequest {
+                request_key,
+                blocks: vec![text_input(text)],
+            })
+            .map_err(|error| error.to_string())?
+    } else {
+        session
+            .submit_with_images(request_key, input.as_deref(), images)
+            .map_err(|error| error.to_string())?
+    };
     let mut signal_failed = false;
     let mut stopping = false;
     let mut progress_open = true;

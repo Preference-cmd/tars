@@ -5,10 +5,16 @@ use std::path::PathBuf;
 use tars_core::definition::SessionDefinition;
 use tars_core::external_tools::ExternalTools;
 
+pub(crate) enum ExportMaterialsTarget {
+    Record(PathBuf),
+    Session { store: PathBuf, id: String },
+}
+
 pub(crate) enum SessionCommand {
     ExportMaterials {
-        record: PathBuf,
+        target: ExportMaterialsTarget,
         output: PathBuf,
+        json: bool,
     },
     ImportLegacy {
         record: PathBuf,
@@ -39,6 +45,8 @@ pub(crate) enum SessionCommand {
         trust_workspace_rules: bool,
         trust_workspace_agents: bool,
         input: Option<String>,
+        stdin: bool,
+        images: Vec<PathBuf>,
         permission_mode: Option<tars_core::permission::PermissionMode>,
         recovery_dir: PathBuf,
         json: bool,
@@ -98,25 +106,7 @@ impl SessionCommand {
         let (command, mut args) = args.split_first().ok_or("session command is required")?;
         let command = command.to_str().ok_or("session command must be UTF-8")?;
         if command == "export-materials" {
-            let mut values = HashMap::new();
-            let mut options = args.iter();
-            while let Some(flag) = options.next() {
-                let flag = flag.to_str().ok_or("option must be UTF-8")?;
-                if !matches!(flag, "--record" | "--output") {
-                    return Err("export-materials accepts only --record and --output".into());
-                }
-                insert(&mut values, flag, &mut options)?;
-            }
-            return Ok(Self::ExportMaterials {
-                record: values
-                    .get("--record")
-                    .map(PathBuf::from)
-                    .ok_or("--record is required")?,
-                output: values
-                    .get("--output")
-                    .map(PathBuf::from)
-                    .ok_or("--output is required")?,
-            });
+            return parse_export_materials(args);
         }
         let id = if matches!(
             command,
@@ -150,6 +140,7 @@ impl SessionCommand {
         }
         let mut values = HashMap::new();
         let mut skill_dirs = Vec::new();
+        let mut images = Vec::new();
         let mut no_skills = false;
         let mut code_execution = false;
         let mut no_code_execution = false;
@@ -232,6 +223,15 @@ impl SessionCommand {
                 }
                 "--input" if command == "run" => {
                     insert(&mut values, flag, &mut args)?;
+                }
+                "--image" if command == "run" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::argument("option needs a value"))?;
+                    if value.is_empty() {
+                        return Err(CliError::argument("empty --image option"));
+                    }
+                    images.push(PathBuf::from(value));
                 }
                 "--last" if command == "history" => {
                     insert(&mut values, flag, &mut args)?;
@@ -340,12 +340,11 @@ impl SessionCommand {
             }
             "run" => {
                 let input = string("--input")?;
-                if stdin == input.is_some() {
-                    return Err("choose exactly one of --input or --stdin".into());
-                }
-                if input.as_ref().is_some_and(|value| value.trim().is_empty()) {
-                    return Err("input must not be blank".into());
-                }
+                crate::cli::managed_execution::validate_prompt_options(
+                    input.as_deref(),
+                    stdin,
+                    !images.is_empty(),
+                )?;
                 let permission_mode = string("--permission-mode")?
                     .map(|value| {
                         value
@@ -362,6 +361,8 @@ impl SessionCommand {
                     trust_workspace_rules,
                     trust_workspace_agents,
                     input,
+                    stdin,
+                    images,
                     permission_mode,
                     recovery_dir: values
                         .get("--recovery-dir")
@@ -459,4 +460,85 @@ fn insert<'a>(
         return Err(CliError::argument("empty or duplicate option"));
     }
     Ok(())
+}
+
+fn parse_export_materials(args: &[OsString]) -> Result<SessionCommand, CliError> {
+    let is_session_mode = args
+        .first()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| !value.starts_with('-'));
+    if !is_session_mode {
+        let mut values = HashMap::new();
+        let mut json = false;
+        let mut options = args.iter();
+        while let Some(flag) = options.next() {
+            let flag = flag.to_str().ok_or("option must be UTF-8")?;
+            match flag {
+                "--json" if !json => json = true,
+                "--record" | "--output" => insert(&mut values, flag, &mut options)?,
+                _ => {
+                    return Err(
+                        "export-materials accepts only --record, --output, and --json".into(),
+                    );
+                }
+            }
+        }
+        return Ok(SessionCommand::ExportMaterials {
+            target: ExportMaterialsTarget::Record(
+                values
+                    .get("--record")
+                    .map(PathBuf::from)
+                    .ok_or("--record is required")?,
+            ),
+            output: values
+                .get("--output")
+                .map(PathBuf::from)
+                .ok_or("--output is required")?,
+            json,
+        });
+    }
+
+    let (id, rest) = args.split_first().expect("checked first arg");
+    let id = id
+        .to_str()
+        .filter(|value| !value.is_empty())
+        .ok_or("conversation ID must be non-empty UTF-8")?
+        .to_owned();
+    let mut values = HashMap::new();
+    let mut json = false;
+    let mut no_config = false;
+    let mut positional_output: Option<PathBuf> = None;
+    let mut options = rest.iter();
+    while let Some(arg) = options.next() {
+        let token = arg.to_str().ok_or("option must be UTF-8")?;
+        match token {
+            "--json" if !json => json = true,
+            "--no-config" if !no_config => no_config = true,
+            "--store" | "--config" | "--output" => insert(&mut values, token, &mut options)?,
+            "--record" => return Err("--record cannot be combined with a conversation ID".into()),
+            other if !other.starts_with('-') && positional_output.is_none() => {
+                if other.is_empty() {
+                    return Err("empty output path".into());
+                }
+                positional_output = Some(PathBuf::from(arg));
+            }
+            _ => return Err("unknown, duplicate, or inapplicable session option".into()),
+        }
+    }
+    let output = match (values.get("--output").map(PathBuf::from), positional_output) {
+        (Some(_), Some(_)) => return Err("choose either positional output or --output".into()),
+        (Some(path), None) | (None, Some(path)) => path,
+        (None, None) => return Err("--output or output path is required".into()),
+    };
+    let config = configuration::load(&values, no_config)?;
+    let store = values
+        .get("--store")
+        .map(PathBuf::from)
+        .or_else(|| config.store_dir().map(PathBuf::from))
+        .ok_or("--store or a configured store directory is required")?;
+    Ok(SessionCommand::ExportMaterials {
+        target: ExportMaterialsTarget::Session { store, id },
+        output,
+        json,
+    })
 }

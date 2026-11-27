@@ -12,7 +12,7 @@ pub(super) use options::SessionCommand;
 pub(super) const HELP: &str = "Persistent TARS sessions
 
 Usage: tars session create --store <directory> --provider <protocol> --model <id> [options]
-       tars session run <conversation-id> --store <directory> (--input <text> | --stdin) [options]
+       tars session run <conversation-id> --store <directory> (--input <text> | --stdin | --image <path>) [options]
        tars session list --store <directory> [--json]
        tars session show <conversation-id> --store <directory> [--agent <id-or-name>] [--json]
        tars session compact <conversation-id> --store <directory> [--json]
@@ -21,7 +21,8 @@ Usage: tars session create --store <directory> --provider <protocol> --model <id
        tars session rename <conversation-id> --store <directory> (--title <text> | --clear) [--json]
        tars session delete <conversation-id> --store <directory> [--json]
        tars session fork <conversation-id> --store <directory> [--title <text>] [--json]
-       tars session export-materials --record <file> --output <new-file>
+       tars session export-materials <conversation-id> --store <directory> (--output <new-file> | <new-file>) [--json]
+       tars session export-materials --record <file> --output <new-file> [--json]
        tars session import-legacy --record <file> --store <directory> [--json]
 
 Create options:
@@ -72,6 +73,8 @@ Create options:
 Run options:
   --input             User text; mutually exclusive with --stdin
   --stdin             Read UTF-8 user text until EOF
+  --image             Attach a local PNG/JPEG/GIF/WebP image file (repeatable, max 8;
+                      text may be omitted when at least one --image is provided)
   --permission-mode   read-only | ask | accept-edits | full-access
                       Change and save the current permission mode for this session.
                       Reopening reverts full-access to ask unless created as full-access.
@@ -135,8 +138,9 @@ Fork creates a physically isolated copy of a session's entry materials, history,
 Material export and --load import contain only the current Context, never the
 history records.
 
-export-materials extracts validated Context from a v1/v2 session record offline.
-It neither loads configuration nor opens a session; an existing output is refused.
+export-materials exports validated Context (and sidecar .media/ blobs when present)
+from a SQLite session, or extracts Context offline from a legacy v1/v2/v2.4 record.
+An existing output file is always refused.
 import-legacy imports a validated tars-session-v2.4 JSON record (and any
 referenced .history/.artifacts files) into SQLite without modifying the source.
 Create saves the fixed definition and materials without calling a model.
