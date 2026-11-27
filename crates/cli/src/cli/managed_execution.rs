@@ -106,8 +106,18 @@ pub(super) fn report_workspace_agents_notice(session: &ManagedSession) {
 /// A host for commands that save or repair a session and run no work: it
 /// opens sessions without starting their MCP servers.
 pub(super) fn definition_host(store: PathBuf) -> SessionHost {
+    definition_host_with_credentials(store, None)
+}
+
+/// A host for commands that open a session without starting MCP servers,
+/// optionally wired with `credentials.toml` for `CredentialRef::Store` resolution.
+pub(super) fn definition_host_with_credentials(
+    store: PathBuf,
+    credentials_path: Option<PathBuf>,
+) -> SessionHost {
     let options = HostOptions {
         connect_mcp_servers: false,
+        credentials_path,
         ..HostOptions::default()
     };
     SessionHost::with_options(Some(store), options).expect("default bounds are positive")

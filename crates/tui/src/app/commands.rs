@@ -37,6 +37,7 @@ pub(crate) enum Panel {
     Agents {
         selected: usize,
     },
+    Provider(Box<super::provider::ProviderWizardState>),
 }
 
 /// The `/status` line for the probed command sandbox, with its own vocabulary
@@ -59,6 +60,10 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "Resume a saved session by ID/prefix or open session picker",
     ),
     ("model", "Switch model profile in a new session"),
+    (
+        "provider",
+        "Add or update a model provider preset and API key",
+    ),
     ("sessions", "Find and open a saved or active session"),
     ("agents", "List session agents and switch transcript view"),
     ("queue", "Inspect, pop, or clear queued prompts"),
@@ -221,31 +226,26 @@ impl App {
     }
     pub(super) fn command(&mut self, index: usize, query: &str) {
         match COMMANDS[index].0 {
-            "new" => {
-                self.form = Some(
-                    input::Form::new(
-                        self.options.config.clone(),
-                        self.options.profile.clone(),
-                        self.options.preset.as_ref(),
-                    )
-                    .with_code_execution(self.options.code_execution_enabled),
-                )
-            }
+            "new" => self.open_new_session_form(),
             "clear" => self.clear_command(),
             "resume" => {
                 let clean = query.trim_start_matches('/').trim();
                 let arg = clean.strip_prefix("resume").unwrap_or("").trim();
                 self.resume_command(arg);
             }
+            "provider" => self.open_provider_wizard(),
             "model" => {
                 let clean = query.trim_start_matches('/').trim();
                 let arg = clean.strip_prefix("model").unwrap_or("").trim();
                 if arg.is_empty() {
                     let profiles = self.matching_model_profiles("");
                     if profiles.is_empty() {
-                        self.notice =
-                            "No model profiles configured; use /new or add [profiles.<name>] to config.toml"
-                                .into();
+                        if self.options.no_config {
+                            self.notice =
+                                "No model profiles configured (--no-config); use /new".into();
+                        } else {
+                            self.open_provider_wizard();
+                        }
                     } else {
                         let selected = self
                             .options
@@ -395,6 +395,7 @@ impl App {
                     "/clear   Start a fresh session with current model preset and workspace",
                     "/resume [selector]   Open session picker or jump to a saved session",
                     "/model [profile]   Switch model profile in a new session",
+                    "/provider   Add or update a model provider preset and API key",
                     "/agents [name|id|main]   List session agents (x cancels running, Enter switches)",
                     "/mode [name]   Show or change the permission mode",
                     "/rules [list | remove <N> | clear]   Show active rules or manage session rules",
@@ -1201,6 +1202,10 @@ impl App {
             self.repair_key(key);
             return;
         }
+        if matches!(self.panel, Some(Panel::Provider(_))) {
+            self.provider_key(key);
+            return;
+        }
         let Some(mut panel) = self.panel.take() else {
             return;
         };
@@ -1208,7 +1213,9 @@ impl App {
             return;
         }
         let (query, selected, commands) = match &mut panel {
-            Panel::Repair(_) => unreachable!("repair keys handled separately"),
+            Panel::Repair(_) | Panel::Provider(_) => {
+                unreachable!("repair and provider keys handled separately")
+            }
             Panel::ModeSelect { selected } => {
                 const MODES: [tars_core::permission::PermissionMode; 4] = [
                     tars_core::permission::PermissionMode::ReadOnly,
@@ -1302,7 +1309,7 @@ impl App {
             Panel::Sessions { query, selected } => (query, selected, false),
             Panel::Models { query, selected } => {
                 let profiles = self.matching_model_profiles(query);
-                let total = profiles.len() + 1;
+                let total = profiles.len() + 2;
                 *selected = (*selected).min(total.saturating_sub(1));
                 match key.code {
                     KeyCode::Up => *selected = selected.saturating_sub(1),
@@ -1315,14 +1322,11 @@ impl App {
                             return;
                         }
                         self.panel = None;
-                        self.form = Some(
-                            input::Form::new(
-                                self.options.config.clone(),
-                                self.options.profile.clone(),
-                                self.options.preset.as_ref(),
-                            )
-                            .with_code_execution(self.options.code_execution_enabled),
-                        );
+                        if *selected == profiles.len() {
+                            self.open_new_session_form();
+                        } else {
+                            self.open_provider_wizard();
+                        }
                         return;
                     }
                     KeyCode::Backspace => {

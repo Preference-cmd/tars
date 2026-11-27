@@ -29,7 +29,7 @@ fn create_form(endpoint: &str, workspace: &std::path::Path, tools: &str) -> Form
             "openai-chat",
             "fixture-model",
             endpoint,
-            "PATH",
+            "env:PATH",
             "120",
             &workspace.display().to_string(),
             tools,

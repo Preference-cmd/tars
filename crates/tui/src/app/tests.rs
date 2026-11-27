@@ -31,6 +31,7 @@ mod media;
 mod multi_agent;
 mod onboarding_doctor_init;
 mod prompt_cache;
+mod provider;
 mod sessions;
 mod workflow;
 mod workspace_rules;

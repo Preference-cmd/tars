@@ -680,12 +680,20 @@ async fn cc03_model_panel_direct_switch_tab_completion_and_definition_immutabili
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
 
-    // Empty profiles -> helpful notice.
+    // Empty profiles -> opens Panel::Provider directly (or notice under --no-config).
     let mut no_profiles = app(dir.path());
     run_command(&mut no_profiles, "model");
+    assert!(matches!(no_profiles.panel, Some(Panel::Provider(_))));
+    no_profiles.event(key(KeyCode::Esc));
+    assert!(no_profiles.panel.is_none());
+
+    let mut no_config_profiles = app(dir.path());
+    no_config_profiles.options.no_config = true;
+    run_command(&mut no_config_profiles, "model");
+    assert!(no_config_profiles.panel.is_none());
     assert_eq!(
-        no_profiles.notice,
-        "No model profiles configured; use /new or add [profiles.<name>] to config.toml"
+        no_config_profiles.notice,
+        "No model profiles configured (--no-config); use /new"
     );
 
     let cfg_path = write_profiles_config(dir.path(), &ws, false);

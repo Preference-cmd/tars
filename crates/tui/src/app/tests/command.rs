@@ -120,7 +120,7 @@ async fn create_command_session(
             "openai-chat",
             "fixture-model",
             endpoint,
-            "PATH",
+            "env:PATH",
             "120",
             &workspace.display().to_string(),
             "run_command",

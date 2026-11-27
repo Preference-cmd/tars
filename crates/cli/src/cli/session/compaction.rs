@@ -16,12 +16,13 @@ use tars_core::permission::escape_untrusted_text;
 pub(super) async fn compact(
     store: PathBuf,
     id: String,
+    credentials_path: Option<PathBuf>,
     recovery_dir: PathBuf,
     json_output: bool,
 ) -> ExitCode {
     // Opening reads the saved definition; compaction calls the session's own
-    // model, so the configured credential environment must still resolve.
-    let host = managed_execution::definition_host(store);
+    // model, so the configured credential store or environment must resolve.
+    let host = managed_execution::definition_host_with_credentials(store, credentials_path);
     let resolved_id = match super::execute::resolve_selector(&host, &id, json_output).await {
         Ok(id) => id,
         Err(code) => return code,

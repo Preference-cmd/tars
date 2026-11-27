@@ -73,12 +73,15 @@ pub(crate) struct Form {
     /// Frozen command settings read from the preset. Display-only: the form
     /// never edits them, and creation resolves them through the preset.
     pub command: Option<CommandSettings>,
+    /// Whether `generation.0` (`max_tokens`) was auto-populated when cycling
+    /// Field 0 (`Provider`) to `anthropic` so cycling away can restore `None`.
+    pub auto_max_tokens: bool,
 }
 pub(crate) const FIELD_NAMES: [&str; 11] = [
     "Provider",
     "Model",
     "Endpoint (optional, full URL)",
-    "Credential environment variable",
+    "Credential (store name, or env:VAR)",
     "Timeout seconds (1..86400)",
     "Workspace root (optional; does not enable tools)",
     "Tools (comma-separated list_directory,read_file,search_text,find_files,write_file,edit_file,run_command)",
@@ -95,7 +98,7 @@ impl Default for Form {
                 "openai-chat",
                 "",
                 "",
-                "OPENAI_API_KEY",
+                "openai-chat",
                 "120",
                 "",
                 "",
@@ -118,6 +121,7 @@ impl Default for Form {
             config: Arc::new(Config::default()),
             profile: None,
             command: None,
+            auto_max_tokens: false,
         }
     }
 }
@@ -162,15 +166,16 @@ impl Form {
             Provider::OpenAiResponses => "openai-responses",
             Provider::Anthropic => "anthropic",
         };
-        let credential_name = match &preset.credential {
-            CredentialRef::Environment(name) | CredentialRef::Store(name) => name,
+        let credential_value = match &preset.credential {
+            CredentialRef::Environment(name) => format!("env:{name}"),
+            CredentialRef::Store(name) => name.clone(),
         };
         let mode_str = preset.permission_mode.map_or("ask", |m| m.as_str());
         let values = [
             provider.to_owned(),
             preset.model.clone(),
             preset.endpoint.clone().unwrap_or_default(),
-            credential_name.clone(),
+            credential_value,
             preset.work_timeout_secs.unwrap_or(120).to_string(),
             preset
                 .workspace_root
@@ -226,6 +231,70 @@ impl Form {
         self
     }
 
+    pub(crate) fn with_workspace_defaults(
+        mut self,
+        workspace_root: Option<std::path::PathBuf>,
+        default_tools: &[WorkspaceTool],
+    ) -> Self {
+        let has_workspace = !self.fields[5].lines().join("").trim().is_empty();
+        if !has_workspace && let Some(ws) = workspace_root {
+            self.fields[5] = TextArea::from([ws.display().to_string()]);
+        }
+        let effective_workspace = !self.fields[5].lines().join("").trim().is_empty();
+        let has_tools = !self.fields[6].lines().join("").trim().is_empty();
+        if effective_workspace && !has_tools && !default_tools.is_empty() {
+            let joined = default_tools
+                .iter()
+                .map(|tool| tool.name())
+                .collect::<Vec<_>>()
+                .join(",");
+            self.fields[6] = TextArea::from([joined]);
+        }
+        self
+    }
+
+    pub(crate) const fn is_selector_field(index: usize) -> bool {
+        matches!(index, 0 | 7 | 9 | 10)
+    }
+
+    fn cycle_selector(&mut self, index: usize, forward: bool) {
+        const PROVIDERS: [&str; 3] = ["openai-chat", "openai-responses", "anthropic"];
+        const MODES: [&str; 4] = ["read-only", "ask", "accept-edits", "full-access"];
+        const ON_OFF: [&str; 2] = ["on", "off"];
+        const OFF_ON: [&str; 2] = ["off", "on"];
+        let options: &[&str] = match index {
+            0 => &PROVIDERS,
+            7 => &MODES,
+            9 => &ON_OFF,
+            10 => &OFF_ON,
+            _ => return,
+        };
+        let current = self.fields[index].lines().join("");
+        let trimmed = current.trim();
+        let pos = options.iter().position(|&opt| opt == trimmed).unwrap_or(0);
+        let next_pos = if forward {
+            (pos + 1) % options.len()
+        } else {
+            (pos + options.len() - 1) % options.len()
+        };
+        let next = options[next_pos];
+        self.fields[index] = TextArea::from([next]);
+        if index == 0 {
+            if next == "anthropic" {
+                if self.generation.0.is_none() {
+                    self.generation.0 = Some(8192);
+                    self.auto_max_tokens = true;
+                }
+            } else if self.auto_max_tokens {
+                self.generation.0 = None;
+                self.auto_max_tokens = false;
+            }
+            if self.fields[3].lines().join("").trim() == trimmed {
+                self.fields[3] = TextArea::from([next]);
+            }
+        }
+    }
+
     pub fn definition(&self) -> Result<SessionDefinition, String> {
         let values: Vec<_> = self.fields.iter().map(|f| f.lines().join("")).collect();
         let provider = match values[0].as_str() {
@@ -253,6 +322,12 @@ impl Form {
             "off" => false,
             _ => return Err("Code execution: on | off".into()),
         };
+        let raw_credential = values[3].trim();
+        let (credential, api_key_env) = if let Some(env_var) = raw_credential.strip_prefix("env:") {
+            (None, Some(env_var.trim().to_owned()))
+        } else {
+            (Some(raw_credential.to_owned()), None)
+        };
         // Resolve explicit form values through the same core path as CLI input.
         // Profile limits were frozen when the selected startup preset was loaded.
         let mut definition = self
@@ -263,8 +338,8 @@ impl Form {
                     provider: Some(provider),
                     model: Some(values[1].clone()),
                     endpoint: (!values[2].is_empty()).then(|| values[2].clone()),
-                    credential: None,
-                    api_key_env: Some(values[3].clone()),
+                    credential,
+                    api_key_env,
                     timeout_secs: Some(timeout),
                     capacity: Some(self.limits.0),
                     max_model_rounds: Some(self.limits.1),
@@ -315,6 +390,20 @@ impl Form {
                 self.selected = (self.selected + self.fields.len() - 1) % self.fields.len()
             }
             KeyCode::Enter => {}
+            _ if Self::is_selector_field(self.selected) => {
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
+                    match key.code {
+                        KeyCode::Left => self.cycle_selector(self.selected, false),
+                        KeyCode::Right | KeyCode::Char(' ') => {
+                            self.cycle_selector(self.selected, true)
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ if !key.modifiers.contains(KeyModifiers::CONTROL)
                 || !matches!(key.code, KeyCode::Char('m' | 'j')) =>
             {

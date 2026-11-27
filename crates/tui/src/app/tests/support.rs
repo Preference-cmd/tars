@@ -92,7 +92,7 @@ pub(super) async fn create_provider(app: &mut App, provider: &str, endpoint: &st
             provider,
             "fixture-model",
             endpoint,
-            "PATH",
+            "env:PATH",
             "120",
             "",
             "",

@@ -135,10 +135,11 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
             SessionCommand::Compact {
                 store,
                 id,
+                credentials_path,
                 recovery_dir,
                 json,
             } => (
-                super::compaction::compact(store, id, recovery_dir, json).await,
+                super::compaction::compact(store, id, credentials_path, recovery_dir, json).await,
                 false,
             ),
             SessionCommand::History {
@@ -160,12 +161,22 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
             SessionCommand::Repair {
                 store,
                 id,
+                credentials_path,
                 apply,
                 expected_revision,
                 recovery_dir,
                 json,
             } => (
-                super::repair::run(store, id, apply, expected_revision, recovery_dir, json).await,
+                super::repair::run(
+                    store,
+                    id,
+                    credentials_path,
+                    apply,
+                    expected_revision,
+                    recovery_dir,
+                    json,
+                )
+                .await,
                 false,
             ),
             SessionCommand::Rename {

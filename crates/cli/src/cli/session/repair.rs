@@ -11,13 +11,15 @@ use tars_core::application::{ClosePolicy, RepairError, RepairMode, RepairSummary
 pub(super) async fn run(
     store: PathBuf,
     id: String,
+    credentials_path: Option<PathBuf>,
     apply: bool,
     expected_revision: Option<u64>,
     recovery_dir: PathBuf,
     json_output: bool,
 ) -> ExitCode {
-    // Repair edits saved materials only; it never needs a server.
-    let host = managed_execution::definition_host(store);
+    // Repair edits saved materials only; it never needs a server, though opening
+    // validates the configured credential reference.
+    let host = managed_execution::definition_host_with_credentials(store, credentials_path);
     let resolved_id = match super::execute::resolve_selector(&host, &id, json_output).await {
         Ok(id) => id,
         Err(code) => return code,

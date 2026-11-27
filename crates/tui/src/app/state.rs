@@ -677,6 +677,10 @@ pub(crate) struct App {
     pub(crate) user_rules_path: Option<std::path::PathBuf>,
     /// Isolated credentials file path (`~/.tars/credentials.toml`), or `None` when `--no-config`.
     pub(crate) credentials_path: Option<std::path::PathBuf>,
+    /// Cached read-only credential entry names for `/new` status badge and `/provider`.
+    pub(crate) credential_store_cache: super::provider::CredentialStoreCache,
+    /// Whether startup workspace validation failed (blocks auto-opening sessions after `/provider`).
+    pub(crate) invalid_startup_workspace: bool,
     /// Deferred external `$EDITOR` request executed by `App::run` outside `EventStream`.
     pub(super) pending_external_edit: Option<PendingExternalEdit>,
     /// Whether the startup action (`Default`, `-c`, `-r`) still awaits initial `list()`.
@@ -760,7 +764,13 @@ impl App {
             external_tools: None,
             search_reason: None,
             user_rules_path,
-            credentials_path,
+            credentials_path: credentials_path.clone(),
+            credential_store_cache: if credentials_path.is_none() {
+                super::provider::CredentialStoreCache::Unavailable
+            } else {
+                super::provider::CredentialStoreCache::Unknown
+            },
+            invalid_startup_workspace: false,
             pending_external_edit: None,
             startup_action_pending: true,
             pending_resume_selector: None,

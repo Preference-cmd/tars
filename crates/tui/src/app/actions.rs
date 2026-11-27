@@ -76,7 +76,28 @@ impl App {
         Ok((id, model))
     }
 
-    fn resolve_preset_definition(
+    pub(super) fn open_new_session_form(&mut self) {
+        let workspace_root = self
+            .options
+            .preset
+            .as_ref()
+            .and_then(|p| p.workspace_root.clone())
+            .or_else(|| self.active_or_cli_workspace())
+            .or_else(|| std::env::current_dir().ok());
+        let default_tools = self.default_workspace_tools();
+        self.form = Some(
+            input::Form::new(
+                self.options.config.clone(),
+                self.options.profile.clone(),
+                self.options.preset.as_ref(),
+            )
+            .with_code_execution(self.options.code_execution_enabled)
+            .with_workspace_defaults(workspace_root, &default_tools),
+        );
+        self.refresh_cached_credential_names();
+    }
+
+    pub(super) fn resolve_preset_definition(
         &self,
         profile: Option<&str>,
         preset: &tars_core::definition::SessionDefinition,
@@ -711,13 +732,15 @@ impl App {
         if !self.options.no_config && self.options.preset.is_some() {
             self.create_default_startup_session();
         } else if let Some(reason) = invalid_workspace {
+            self.invalid_startup_workspace = true;
             self.notice = format!(
                 "Invalid workspace: {} · run /new (F2) or pass --workspace",
                 crate::transcript::display_single_line(&reason)
             );
         } else {
             self.notice =
-                "No model configured · run /new (F2) or configure ~/.tars/config.toml".into();
+                "No model configured · run /provider, /new (F2), or configure ~/.tars/config.toml"
+                    .into();
         }
     }
 

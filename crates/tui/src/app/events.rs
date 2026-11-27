@@ -139,17 +139,24 @@ impl App {
             }
             self.ctrl_c_exit_armed = false;
             if let Some(panel) = &mut self.panel {
-                if let super::commands::Panel::Commands { query, selected }
-                | super::commands::Panel::Sessions { query, selected }
-                | super::commands::Panel::Models { query, selected } = panel
-                {
-                    query.extend(text.chars().filter(|c| !c.is_control()));
-                    *selected = 0;
+                match panel {
+                    super::commands::Panel::Commands { query, selected }
+                    | super::commands::Panel::Sessions { query, selected }
+                    | super::commands::Panel::Models { query, selected } => {
+                        query.extend(text.chars().filter(|c| !c.is_control()));
+                        *selected = 0;
+                    }
+                    super::commands::Panel::Provider(wizard) => {
+                        wizard.paste_single_line(text);
+                    }
+                    _ => {}
                 }
                 return;
             }
             if let Some(form) = &mut self.form {
-                input::paste(&mut form.fields[form.selected], text, false);
+                if !input::Form::is_selector_field(form.selected) {
+                    input::paste(&mut form.fields[form.selected], text, false);
+                }
             } else if self.folder_trust.is_some() {
                 return;
             } else if let Some(entry) = self.entries.get_mut(self.selected) {
@@ -473,14 +480,7 @@ impl App {
         } else {
             match key.code {
                 KeyCode::F(2) if key.kind == KeyEventKind::Press => {
-                    self.form = Some(
-                        input::Form::new(
-                            self.options.config.clone(),
-                            self.options.profile.clone(),
-                            self.options.preset.as_ref(),
-                        )
-                        .with_code_execution(self.options.code_execution_enabled),
-                    )
+                    self.open_new_session_form();
                 }
                 KeyCode::F(3) if key.kind == KeyEventKind::Press => self.open(),
                 KeyCode::F(4) if key.kind == KeyEventKind::Press => {
@@ -662,6 +662,9 @@ impl App {
             self.ctrl_c_exit_armed = true;
             self.set_active_notice("Press Ctrl-C again to exit");
             return;
+        }
+        if let Some(super::commands::Panel::Provider(wizard)) = self.panel.as_mut() {
+            wizard.clear_secret();
         }
         self.panel = None;
         self.last_ctrl_c_cancel_at = None;

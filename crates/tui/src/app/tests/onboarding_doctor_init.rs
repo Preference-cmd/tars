@@ -200,7 +200,7 @@ async fn ft03_folder_trust_wizard_replaces_model_form_and_never_writes_config_to
     assert!(app.host.is_workspace_folder_trusted(&ws).await.unwrap());
     assert_eq!(
         app.notice,
-        "No model configured · run /new (F2) or configure ~/.tars/config.toml"
+        "No model configured · run /provider, /new (F2), or configure ~/.tars/config.toml"
     );
     assert!(!dir.path().join("config.toml").exists());
 
@@ -208,10 +208,10 @@ async fn ft03_folder_trust_wizard_replaces_model_form_and_never_writes_config_to
     assert!(main.contains("Welcome to TARS"), "{main}");
     assert!(main.contains("✓ Trusted"), "{main}");
     assert!(
-        main.contains("/new (F2) to start, or configure ~/.tars/config.toml"),
+        main.contains("/provider to add a model, or /new (F2)"),
         "{main}"
     );
-    assert!(!main.contains("/provider"), "{main}");
+    assert!(main.contains("/provider"), "{main}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -520,7 +520,7 @@ async fn ft10_welcome_card_trust_badge_f4_switching_and_slash_trust() {
     )
     .unwrap();
 
-    // 1. Unconfigured empty welcome card shows ~/.tars/config.toml guidance and Ctrl-C exit, never /provider.
+    // 1. Unconfigured empty welcome card shows /provider and /new (F2) guidance and Ctrl-C exit.
     let mut unconfigured = app_with_folder_trust(dir.path(), Some(ws_trusted.clone()));
     unconfigured.list();
     until(&mut unconfigured, |a| {
@@ -539,11 +539,11 @@ async fn ft10_welcome_card_trust_badge_f4_switching_and_slash_trust() {
     assert!(view.contains("Welcome to TARS"), "{view}");
     assert!(view.contains("✓ Trusted"), "{view}");
     assert!(
-        view.contains("/new (F2) to start, or configure ~/.tars/config.toml"),
+        view.contains("/provider to add a model, or /new (F2)"),
         "{view}"
     );
     assert!(view.contains("Ctrl-C exit"), "{view}");
-    assert!(!view.contains("/provider"), "{view}");
+    assert!(view.contains("/provider"), "{view}");
     let trusted_cell = buf
         .content()
         .iter()
@@ -582,7 +582,7 @@ async fn ft10_welcome_card_trust_badge_f4_switching_and_slash_trust() {
                 "openai-chat",
                 "fixture-model",
                 server.endpoint.as_str(),
-                "PATH",
+                "env:PATH",
                 "120",
                 ws_arg,
                 "",
@@ -736,7 +736,7 @@ async fn ux06_doctor_menu_tab_complete_async_report_and_early_close() {
             "openai-chat",
             "fixture-model",
             "http://127.0.0.1:9/chat/completions",
-            "PATH",
+            "env:PATH",
             "120",
             ws.to_str().unwrap(),
             "read_file,find_files",
@@ -912,7 +912,7 @@ async fn ux07_init_guardrails_and_writable_vs_readonly_submission() {
             "openai-chat",
             "fixture-model",
             server.endpoint.as_str(),
-            "PATH",
+            "env:PATH",
             "120",
             ws.to_str().unwrap(),
             "list_directory,read_file,write_file,edit_file",
@@ -967,7 +967,7 @@ async fn ux07_init_guardrails_and_writable_vs_readonly_submission() {
             "openai-chat",
             "fixture-model",
             server.endpoint.as_str(),
-            "PATH",
+            "env:PATH",
             "120",
             ws.to_str().unwrap(),
             "list_directory,read_file",

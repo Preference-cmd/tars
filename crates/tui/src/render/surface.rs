@@ -1000,7 +1000,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                     "/open this session, or /new · Ctrl-C exit"
                 }
             } else {
-                "/new to start · /sessions to resume · Ctrl-C exit"
+                "/new to start · /provider · /sessions · Ctrl-C exit"
             };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
@@ -1158,9 +1158,7 @@ fn welcome(frame: &mut Frame<'_>, app: &App, area: Rect, entry: Option<&Entry>) 
             Style::default().fg(MUTED),
         ));
     } else {
-        lines.push(Line::from(
-            "/new (F2) to start, or configure ~/.tars/config.toml",
-        ));
+        lines.push(Line::from("/provider to add a model, or /new (F2)"));
         lines.push(Line::styled(
             "/sessions  Find and reopen your saved sessions",
             Style::default().fg(MUTED),
@@ -1294,6 +1292,8 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect, show_queue: bool) {
         "↑↓ / PageUp/PageDown scroll · Esc back to draft"
     } else if matches!(app.panel, Some(crate::app::Panel::Info { .. })) {
         "↑↓ / PageUp PageDown scroll · Esc back"
+    } else if matches!(app.panel, Some(crate::app::Panel::Provider(_))) {
+        "↑↓ / Tab navigate · Enter confirm · Esc back"
     } else if app.panel.is_some() {
         "Type to filter · ↑↓ select · Enter choose · Esc back"
     } else if app.has_active_text_draft() {

@@ -53,6 +53,7 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
                      When configuration is enabled, store defaults to ~/.tars/data (or $TARS_HOME/data)\n\
                      unless overridden via --store or TOML. With --no-config, --store DIR is required.\n\n\
                      Slash commands:\n  \
+                     /provider  Add or update a model provider preset and API key\n  \
                      /doctor    Check configuration, credentials, storage, sandbox and tools\n  \
                      /trust     Show folder trust and workspace .tars trust status\n  \
                      /init      Analyze the workspace and create or update AGENTS.md\n  \

@@ -64,7 +64,7 @@ async fn create_with_workspace(app: &mut crate::app::App, endpoint: &str, worksp
             "openai-chat",
             "fixture-model",
             endpoint,
-            "PATH",
+            "env:PATH",
             "120",
             &ws,
             "",

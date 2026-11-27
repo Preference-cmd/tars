@@ -140,6 +140,10 @@ pub(super) enum Message {
     FolderTrustSaved(std::path::PathBuf, Result<std::path::PathBuf, String>),
     /// `/trust` status lines finished loading.
     TrustStatusLoaded(Vec<String>),
+    /// Read-only `credentials.toml` entry names refreshed for `/new` and `/provider`.
+    CredentialNamesLoaded(super::provider::CredentialStoreCache),
+    /// Persisting provider preset & API key from `/provider` finished.
+    ProviderSaved(Result<super::provider::ProviderSavedState, String>),
     JobPanicked(Option<Key>, JobKind, String),
 }
 
@@ -178,6 +182,10 @@ pub(super) enum JobKind {
     TrustWorkspaceFolder,
     /// Read-only `/trust` status lookup.
     LoadTrustStatus,
+    /// Read-only `credentials.toml` name list refresh.
+    LoadCredentialNames,
+    /// Writing `credentials.toml` and `config.toml` from `/provider`.
+    SaveProvider,
 }
 
 pub(super) fn save_label(save: &SaveStatus) -> String {
@@ -1026,6 +1034,12 @@ impl App {
                     *scroll = 0;
                 }
             }
+            Message::CredentialNamesLoaded(cache) => {
+                self.credential_store_cache = cache;
+            }
+            Message::ProviderSaved(result) => {
+                self.provider_saved(result);
+            }
             Message::AgentOperationCancelled(key, agent_name, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     let escaped = tars_core::permission::escape_untrusted_text(&agent_name);
@@ -1279,6 +1293,19 @@ impl App {
                     }
                     return;
                 }
+                if kind == JobKind::LoadCredentialNames {
+                    self.credential_store_cache = super::provider::CredentialStoreCache::Error;
+                    return;
+                }
+                if kind == JobKind::SaveProvider {
+                    if let Some(super::commands::Panel::Provider(wizard)) = self.panel.as_mut() {
+                        wizard.saving = false;
+                        wizard.error = message.clone();
+                    } else {
+                        self.notice = message;
+                    }
+                    return;
+                }
                 let Some(key) = key else {
                     self.notice = message;
                     return;
@@ -1301,7 +1328,9 @@ impl App {
                         | JobKind::Doctor
                         | JobKind::CheckFolderTrust
                         | JobKind::TrustWorkspaceFolder
-                        | JobKind::LoadTrustStatus => {
+                        | JobKind::LoadTrustStatus
+                        | JobKind::LoadCredentialNames
+                        | JobKind::SaveProvider => {
                             unreachable!("handled before the entry lookup")
                         }
                         JobKind::Materials | JobKind::AgentMaterials => {

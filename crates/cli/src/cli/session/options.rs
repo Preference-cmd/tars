@@ -70,6 +70,7 @@ pub(crate) enum SessionCommand {
     Compact {
         store: PathBuf,
         id: String,
+        credentials_path: Option<PathBuf>,
         recovery_dir: PathBuf,
         json: bool,
     },
@@ -89,6 +90,7 @@ pub(crate) enum SessionCommand {
     Repair {
         store: PathBuf,
         id: String,
+        credentials_path: Option<PathBuf>,
         apply: bool,
         expected_revision: Option<u64>,
         recovery_dir: PathBuf,
@@ -452,6 +454,7 @@ impl SessionCommand {
                 Ok(Self::Repair {
                     store,
                     id: id.expect("repair ID parsed"),
+                    credentials_path,
                     apply,
                     expected_revision,
                     recovery_dir: values
@@ -530,6 +533,7 @@ impl SessionCommand {
             "compact" => Ok(Self::Compact {
                 store,
                 id: id.expect("compact ID parsed"),
+                credentials_path,
                 recovery_dir: values
                     .get("--recovery-dir")
                     .map(PathBuf::from)

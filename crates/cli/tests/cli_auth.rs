@@ -875,3 +875,179 @@ fn credential_conflicts_invalid_names_completions_and_help_contract() {
         }
     }
 }
+
+#[test]
+fn session_compact_and_repair_resolve_store_backed_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let tars_home = dir.path().join("tars-home");
+    let config_dir = dir.path().join("cfg");
+    let config_path = config_dir.join("config.toml");
+    let creds_path = config_dir.join("credentials.toml");
+    let store_dir = dir.path().join("store");
+    let secret = "sk-compact-repair-store-secret-999";
+
+    fs::create_dir_all(&config_dir).unwrap();
+    CredentialsStore::set(&creds_path, "work", secret).unwrap();
+
+    // Multi-round server: streaming for `session run`, JSON for `session compact`.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}/fixture", listener.local_addr().unwrap());
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for _ in 0..2 {
+            let Ok(mut socket) = sse::accept_post(&listener) else {
+                return;
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = vec![];
+            let split = loop {
+                let mut chunk = [0; 4096];
+                let count = socket.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&chunk[..count]);
+                if let Some(index) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8(bytes[..split].to_vec()).unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_lowercase()
+                        .strip_prefix("content-length: ")
+                        .map(str::to_owned)
+                })
+                .unwrap()
+                .parse()
+                .unwrap();
+            while bytes.len() < split + length {
+                let mut chunk = [0; 4096];
+                let count = socket.read(&mut chunk).unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&chunk[..count]);
+            }
+            let raw = String::from_utf8(bytes).unwrap();
+            let body: Value = serde_json::from_str(&raw[split..]).unwrap();
+            let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+            tx.send(raw).unwrap();
+            let (content_type, payload) = if streaming {
+                sse::reply(200, chat_body("turn-ok"))
+            } else {
+                (
+                    "application/json",
+                    json!({
+                        "choices": [{
+                            "message": { "role": "assistant", "content": "compacted summary" },
+                            "finish_reason": "stop"
+                        }]
+                    })
+                    .to_string(),
+                )
+            };
+            let _ = write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+        }
+    });
+
+    fs::write(
+        &config_path,
+        format!(
+            "version = 1\nstore = '{}'\ndefault_profile = 'work'\n[profiles.work]\nprovider = 'openai-chat'\nmodel = 'fixture-model'\nendpoint = '{endpoint}'\n",
+            store_dir.display()
+        ),
+    )
+    .unwrap();
+
+    let create_out = tars_cmd(&tars_home)
+        .args([
+            "session",
+            "create",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(create_out.status.success(), "{create_out:?}");
+    let conv_id = serde_json::from_slice::<Value>(&create_out.stdout).unwrap()["conversation_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let run_out = tars_cmd(&tars_home)
+        .args([
+            "session",
+            "run",
+            &conv_id,
+            "--config",
+            config_path.to_str().unwrap(),
+            "--input",
+            "hello",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(run_out.status.success(), "{run_out:?}");
+    assert_no_secret(&run_out, secret);
+
+    let repair_out = tars_cmd(&tars_home)
+        .args([
+            "session",
+            "repair",
+            &conv_id,
+            "--config",
+            config_path.to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(repair_out.status.success(), "{repair_out:?}");
+    assert_no_secret(&repair_out, secret);
+    let repair_json: Value = serde_json::from_slice(&repair_out.stdout).unwrap();
+    assert_eq!(repair_json["status"], "not_needed");
+
+    let compact_out = tars_cmd(&tars_home)
+        .args([
+            "session",
+            "compact",
+            &conv_id,
+            "--config",
+            config_path.to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(compact_out.status.success(), "{compact_out:?}");
+    assert_no_secret(&compact_out, secret);
+    let compact_json: Value = serde_json::from_slice(&compact_out.stdout).unwrap();
+    assert_eq!(compact_json["status"], "compacted");
+
+    let req1 = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let req2 = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(req1.contains(&format!("authorization: Bearer {secret}")));
+    assert!(req2.contains(&format!("authorization: Bearer {secret}")));
+
+    // Counterexample: `--no-config` with `--store` leaves `credentials_path = None` and fails closed.
+    let no_cfg_repair = tars_cmd(&tars_home)
+        .env("OPENAI_API_KEY", "collide-env-key")
+        .args([
+            "session",
+            "repair",
+            &conv_id,
+            "--no-config",
+            "--store",
+            store_dir.to_str().unwrap(),
+            "--dry-run",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(!no_cfg_repair.status.success());
+    assert_no_secret(&no_cfg_repair, secret);
+}

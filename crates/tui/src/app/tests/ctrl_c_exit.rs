@@ -510,7 +510,7 @@ async fn ft07_pending_approval_and_workspace_trust_ctrl_c_priorities() {
             "openai-chat",
             "fixture-model",
             &server.endpoint,
-            "PATH",
+            "env:PATH",
             "120",
             &canonical_ws.display().to_string(),
             "",
@@ -755,4 +755,47 @@ async fn ft06_ctrl_repeat_never_inserts_char_or_double_confirms_and_esc_never_ex
     assert!(matches!(app.confirmation, Some(Confirmation::Quit { .. })));
     app.event(ctrl('c'));
     assert!(app.quitting);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cr10_ctrl_c_on_provider_wizard_respects_active_work_and_clears_secret_buffer() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::new().await;
+    let mut app = super::support::app(dir.path());
+    app.options.config_path = Some(dir.path().join("config.toml"));
+    app.options.credentials_path = Some(dir.path().join("credentials.toml"));
+
+    // 1. Active work running while Panel::Provider Step 2 has a secret: Ctrl+C cancels work first!
+    super::support::create(&mut app, &server.endpoint).await;
+    app.event(Event::Paste("active turn".into()));
+    app.event(key(KeyCode::Enter));
+    until(&mut app, |_| server.requests.lock().unwrap().len() == 1).await;
+    assert!(app.entry_has_active_work());
+
+    app.open_provider_wizard();
+    app.event(key(KeyCode::Enter)); // openai Step 2
+    app.event(Event::Paste("sk-secret-during-work".into()));
+    app.event(ctrl('c'));
+    assert!(!app.quitting);
+    assert!(matches!(app.panel, Some(Panel::Provider(_))));
+    assert_eq!(
+        app.entries[0].notice,
+        "Cancellation requested; press Ctrl-C again once idle to exit"
+    );
+    until(&mut app, |a| {
+        a.entries[0].execution == "Cancelled" && !a.entry_has_active_work()
+    })
+    .await;
+
+    // 2. When idle (after grace expires), Ctrl+C on Panel::Provider clears secret buffer, closes panel, and quits.
+    app.advance_clock(CTRL_C_EXIT_GRACE_WINDOW);
+    if let Some(Panel::Provider(wizard)) = &app.panel {
+        assert_eq!(wizard.api_key, "sk-secret-during-work");
+    } else {
+        panic!("expected Panel::Provider still open");
+    }
+    app.event(ctrl('c'));
+    assert!(app.panel.is_none());
+    assert!(app.quitting);
+    until(&mut app, |a| a.done).await;
 }

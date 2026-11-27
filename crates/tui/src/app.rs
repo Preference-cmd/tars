@@ -6,6 +6,7 @@ mod events;
 pub(crate) mod history;
 mod jobs;
 mod progress;
+pub(crate) mod provider;
 mod repair;
 mod startup;
 mod state;

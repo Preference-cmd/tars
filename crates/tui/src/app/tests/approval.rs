@@ -75,7 +75,7 @@ async fn create_test_session(
             "openai-chat",
             "fixture-model",
             endpoint,
-            "PATH",
+            "env:PATH",
             "120",
             &workspace.display().to_string(),
             "list_directory,read_file,search_text,write_file,edit_file",
