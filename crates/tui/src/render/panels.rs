@@ -1,7 +1,7 @@
 use super::theme::{ACCENT, MUTED};
 use crate::{
     app::{App, COMMANDS, Panel, matching_commands},
-    input::{FIELD_NAMES, ONBOARDING_FIELD_NAMES},
+    input::FIELD_NAMES,
 };
 use ratatui::{
     Frame,
@@ -530,84 +530,101 @@ pub(super) fn form(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-pub(super) fn onboarding(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let onboarding = app.onboarding.as_ref().unwrap();
-    let compact = area.height < 2 + 3 * onboarding.fields.len() as u16 + 4;
-    let shown: Vec<_> = if compact {
-        vec![onboarding.selected]
+pub(super) fn folder_trust(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let wizard = app.folder_trust.as_ref().unwrap();
+    let compact = area.height < 16 || area.width < 46;
+    let short_path = super::surface::format_workspace_label(&wizard.workspace_root, usize::MAX);
+    let full_path =
+        tars_core::permission::escape_untrusted_text(&wizard.workspace_root.display().to_string());
+
+    let mut lines = Vec::new();
+    lines.push(Line::styled(
+        "Do you trust the files in this folder?",
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+    ));
+
+    if compact {
+        lines.push(Line::from(short_path));
     } else {
-        (0..onboarding.fields.len()).collect()
-    };
-    let mut sizes = vec![Constraint::Length(2)];
-    sizes.extend(std::iter::repeat_n(Constraint::Length(3), shown.len()));
-    sizes.push(Constraint::Min(1));
-    sizes.push(Constraint::Length(if compact { 2 } else { 3 }));
-    let rows = Layout::vertical(sizes).split(area);
-    let title = if compact {
-        format!(
-            "Welcome to TARS · First-run setup  ·  {} / {}",
-            onboarding.selected + 1,
-            onboarding.fields.len()
-        )
-    } else {
-        "Welcome to TARS · First-run setup".to_owned()
-    };
-    frame.render_widget(
-        Paragraph::new(title)
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-        rows[0],
-    );
-    for (row, &index) in shown.iter().enumerate() {
-        let field = &onboarding.fields[index];
-        let title = if index == 2 {
-            let env_name = field.lines().join("");
-            let trimmed = env_name.trim();
-            let is_set = !trimmed.is_empty()
-                && std::env::var_os(trimmed).is_some_and(|value| !value.is_empty());
-            let badge = if is_set {
-                Span::styled(" [set]", Style::default().fg(Color::Green))
-            } else {
-                Span::styled(" [not set]", Style::default().fg(Color::Yellow))
-            };
-            Line::from(vec![Span::raw(ONBOARDING_FIELD_NAMES[index]), badge])
-        } else {
-            Line::from(ONBOARDING_FIELD_NAMES[index])
-        };
-        let block = Block::default()
-            .borders(Borders::BOTTOM)
-            .title(title)
-            .border_style(Style::default().fg(if index == onboarding.selected {
-                ACCENT
-            } else {
-                MUTED
-            }));
-        let inner = block.inner(rows[row + 1]);
-        frame.render_widget(block, rows[row + 1]);
-        if index == 0 {
-            frame.render_widget(
-                Paragraph::new(format!("◀ {} ▶", field.lines().join(""))),
-                inner,
-            );
-        } else if index == onboarding.selected {
-            frame.render_widget(field, inner);
-        } else {
-            frame.render_widget(Paragraph::new(field.lines().join("")), inner);
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled("Folder: ", Style::default().fg(MUTED)),
+            Span::raw(short_path.clone()),
+        ]));
+        if short_path != full_path {
+            lines.push(Line::from(vec![
+                Span::styled("Path:   ", Style::default().fg(MUTED)),
+                Span::raw(full_path),
+            ]));
         }
+        lines.push(Line::default());
+        lines.push(Line::from("Trusting this folder allows TARS to:"));
+        lines.push(Line::from(
+            "  • Read and edit files in this workspace (subject to permission mode)",
+        ));
+        lines.push(Line::from(
+            "  • Run commands in this workspace (subject to permission mode)",
+        ));
+        lines.push(Line::from(
+            "  • Read workspace instructions and skills (AGENTS.md / skills)",
+        ));
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            "Note: .tars/permissions.toml and .tars/agents/*.md remain independently verified by content hash and confirmation panels.",
+            Style::default().fg(MUTED),
+        ));
+        lines.push(Line::default());
     }
-    let error_row = shown.len() + 1;
-    frame.render_widget(
-        Paragraph::new(onboarding.error.as_str())
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(Color::Yellow)),
-        rows[error_row],
-    );
-    frame.render_widget(
-        Paragraph::new("Tab/↑↓ field · ←→ provider · Enter/Ctrl-S save & start · Esc skip")
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(MUTED)),
-        rows[error_row + 1],
-    );
+
+    let yes_label = if wizard.saving {
+        "1. Yes, trust this folder (saving…)"
+    } else {
+        "1. Yes, trust this folder"
+    };
+    let options = [(0usize, yes_label), (1usize, "2. No, exit")];
+    for (idx, label) in options {
+        let active = wizard.selected == idx;
+        let prefix = if active { "❯ " } else { "  " };
+        let style = if active {
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::styled(format!("{prefix}{label}"), style));
+    }
+
+    if !wizard.error.is_empty() {
+        if !compact {
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled(
+            tars_core::permission::escape_untrusted_text(&wizard.error),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
+    let hint = if compact {
+        "↑↓/jk · Enter · y/n/Ctrl-C"
+    } else {
+        "↑↓ / j k select · Enter confirm · y trust · n / Esc / Ctrl-C exit"
+    };
+    let hint_style = if app.is_folder_trust_guarded() {
+        Style::default().fg(MUTED).add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(MUTED).remove_modifier(Modifier::DIM)
+    };
+    let hint_widget = Paragraph::new(hint)
+        .wrap(Wrap { trim: false })
+        .style(hint_style);
+    use unicode_width::UnicodeWidthStr;
+    let hint_lines = hint.width().div_ceil(usize::from(area.width.max(1)));
+    let hint_height = u16::try_from(hint_lines)
+        .unwrap_or(1)
+        .clamp(1, area.height.saturating_sub(1).max(1));
+
+    let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(hint_height)]).split(area);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[0]);
+    frame.render_widget(hint_widget, rows[1]);
 }
 
 pub(super) fn confirm(frame: &mut Frame<'_>, confirmation: &crate::app::Confirmation, area: Rect) {

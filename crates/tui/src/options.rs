@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 use tars_core::{
-    config::{Config, ConfigSource, default_config_path, default_store_dir},
+    config::{Config, ConfigSource, default_store_dir},
     definition::SessionDefinition,
 };
 
@@ -24,8 +24,7 @@ pub(crate) struct Options {
     pub workspace: Option<PathBuf>,
     pub code_execution_enabled: Option<bool>,
     pub no_config: bool,
-    pub auto_onboard: bool,
-    pub onboarding_config_path: Option<PathBuf>,
+    pub check_folder_trust: bool,
     pub startup_action: StartupAction,
 }
 
@@ -54,6 +53,7 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
                      unless overridden via --store or TOML. With --no-config, --store DIR is required.\n\n\
                      Slash commands:\n  \
                      /doctor    Check configuration, credentials, storage, sandbox and tools\n  \
+                     /trust     Show folder trust and workspace .tars trust status\n  \
                      /init      Analyze the workspace and create or update AGENTS.md\n  \
                      /new       Create a session with model settings (F2)\n  \
                      /clear     Start a fresh session with the current model preset and workspace\n  \
@@ -184,8 +184,6 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         (preset, _) => preset,
     };
     let config_path = config.source().map(PathBuf::from);
-    let auto_onboard = !no_config && config_path.is_none() && preset.is_none();
-    let onboarding_config_path = default_config_path();
     let store = store
         .or_else(|| config.store_dir().map(PathBuf::from))
         .or_else(|| (!no_config).then(default_store_dir).flatten())
@@ -202,8 +200,7 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         workspace,
         code_execution_enabled,
         no_config,
-        auto_onboard,
-        onboarding_config_path,
+        check_folder_trust: true,
         startup_action,
     }))
 }

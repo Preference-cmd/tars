@@ -28,7 +28,7 @@ fn is_obscured(app: &App) -> bool {
         .as_ref()
         .is_some_and(|p| !matches!(p, crate::app::Panel::Commands { .. }))
         || app.form.is_some()
-        || app.onboarding.is_some()
+        || app.folder_trust.is_some()
         || app.confirmation.is_some()
         || app.entries.get(app.selected).is_some_and(|e| {
             e.workspace_rules_trust.is_some()
@@ -641,14 +641,14 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     let approval_visible = pending
         && app.panel.is_none()
         && app.form.is_none()
-        && app.onboarding.is_none()
+        && app.folder_trust.is_none()
         && app.confirmation.is_none();
     let minimum_height = if approval_visible { 19 } else { 12 };
     if app.too_small || area.width < 30 || area.height < minimum_height {
         let message = if approval_visible {
             "Resize to at least 30 x 19 to answer the pending confirmation. Esc cancels this turn. Ctrl-Q quits."
         } else {
-            "Resize to 30 x 12. Ctrl-Q quits."
+            "Resize to 30 x 12. Ctrl-C / Ctrl-Q quits."
         };
         frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: false }), area);
         return;
@@ -700,8 +700,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         );
         return;
     }
-    if app.onboarding.is_some() {
-        super::panels::onboarding(
+    if app.folder_trust.is_some() {
+        super::panels::folder_trust(
             frame,
             app,
             Rect {
@@ -857,7 +857,6 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                 lines.push(Line::styled(text, style));
             }
         }
-        frame.render_widget(Paragraph::new(lines), regions[1]);
         if entry.viewed_agent_id.is_some() && entry.transcript.text.is_empty() {
             let label = entry
                 .viewed_agent_label
@@ -884,15 +883,18 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                 .wrap(Wrap { trim: false }),
                 regions[1],
             );
-        } else if entry.transcript.text.is_empty()
+        } else if entry.viewed_agent_id.is_none()
+            && entry.transcript.is_conversation_empty()
             && entry.history.is_empty()
             && !entry.preview.is_active()
             && entry.tools.calls.is_empty()
         {
-            welcome(frame, regions[1], entry.session.is_some());
+            welcome(frame, app, regions[1], Some(entry));
+        } else {
+            frame.render_widget(Paragraph::new(lines), regions[1]);
         }
     } else {
-        welcome(frame, regions[1], false);
+        welcome(frame, app, regions[1], None);
     }
     if heights.scroll_bar > 0
         && let Some(entry) = entry
@@ -990,15 +992,15 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                     "Read-only child agent view · /agents to return to main"
                 } else if entry.session.is_some() {
                     if entry.pending_images.is_empty() {
-                        "Ask something…"
+                        "Ask something… · Ctrl-C exit"
                     } else {
                         "Add a message or press Enter to send image(s)…"
                     }
                 } else {
-                    "/open this session, or /new"
+                    "/open this session, or /new · Ctrl-C exit"
                 }
             } else {
-                "/new to start · /sessions to resume"
+                "/new to start · /sessions to resume · Ctrl-C exit"
             };
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
@@ -1090,37 +1092,86 @@ pub(super) fn context_label(usage: Option<tars_core::application::ContextUsage>)
     Some(label)
 }
 
-fn welcome(frame: &mut Frame<'_>, area: Rect, open: bool) {
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::default(),
-            Line::styled(
-                if open {
-                    "Start a conversation"
-                } else {
-                    "Welcome to TARS"
-                },
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Line::default(),
-            Line::from(if open {
-                "Type below, then press Enter to send."
-            } else {
-                "/new       Choose a model and create a session"
-            }),
-            Line::from(if open {
-                "Ctrl-J adds a new line. Paste stays in your draft."
-            } else {
-                "/sessions  Find and reopen your saved sessions"
-            }),
-            Line::styled(
-                "/help      Shortcuts and recovery options",
-                Style::default().fg(MUTED),
-            ),
-        ])
-        .wrap(Wrap { trim: false }),
-        area,
-    );
+fn welcome(frame: &mut Frame<'_>, app: &App, area: Rect, entry: Option<&Entry>) {
+    let open = entry.is_some_and(|e| e.session.is_some());
+    let displayed_workspace = if let Some(entry) = entry {
+        entry
+            .session
+            .as_ref()
+            .and_then(|s| s.definition().workspace_root)
+            .or_else(|| entry.workspace_root.clone())
+    } else {
+        app.startup_workspace_root()
+    };
+    let has_configured_model =
+        app.options.preset.is_some() || !app.options.config.model_profiles().is_empty();
+
+    let mut lines = Vec::new();
+    if area.height > 4 {
+        lines.push(Line::default());
+    }
+    lines.push(Line::styled(
+        if open {
+            "Start a conversation"
+        } else {
+            "Welcome to TARS"
+        },
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+    if area.height > 5 {
+        lines.push(Line::default());
+    }
+
+    if let Some(ws) = displayed_workspace {
+        let is_trusted = app.is_displayed_workspace_trusted(&ws);
+        let reserve = if is_trusted { 21 } else { 11 };
+        let max_ws_width = usize::from(area.width).saturating_sub(reserve).max(8);
+        let ws_label = format_workspace_label(&ws, max_ws_width);
+        let mut ws_spans = vec![
+            Span::styled("Workspace: ", Style::default().fg(MUTED)),
+            Span::raw(ws_label),
+        ];
+        if is_trusted {
+            ws_spans.push(Span::styled(
+                " ✓ Trusted",
+                Style::default().fg(super::theme::OK),
+            ));
+        }
+        lines.push(Line::from(ws_spans));
+    } else {
+        lines.push(Line::styled("Workspace: none", Style::default().fg(MUTED)));
+    }
+
+    if open {
+        lines.push(Line::from("Type below, then press Enter to send."));
+        lines.push(Line::from(
+            "Ctrl-J adds a new line. Paste stays in your draft.",
+        ));
+        lines.push(Line::styled(
+            "/help      Shortcuts, /trust and recovery options",
+            Style::default().fg(MUTED),
+        ));
+    } else if has_configured_model {
+        lines.push(Line::from("/new · /sessions · /commands"));
+        lines.push(Line::styled(
+            "/help      Shortcuts, /trust and recovery options",
+            Style::default().fg(MUTED),
+        ));
+    } else {
+        lines.push(Line::from(
+            "/new (F2) to start, or configure ~/.tars/config.toml",
+        ));
+        lines.push(Line::styled(
+            "/sessions  Find and reopen your saved sessions",
+            Style::default().fg(MUTED),
+        ));
+        lines.push(Line::styled(
+            "/help      Shortcuts, /trust and recovery options",
+            Style::default().fg(MUTED),
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 fn build_status_spans(e: &Entry, max_width: usize) -> Vec<Span<'static>> {
     let build = |compact: bool| -> Vec<Span<'static>> {
@@ -1246,9 +1297,9 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect, show_queue: bool) {
     } else if app.panel.is_some() {
         "Type to filter · ↑↓ select · Enter choose · Esc back"
     } else if app.has_active_text_draft() {
-        "Enter send · Ctrl-J newline · F1 commands · Esc interrupt"
+        "Enter send · Ctrl-J newline · F1 commands · Esc interrupt · Ctrl-C exit"
     } else {
-        "Enter send · Ctrl-J newline · / commands · Esc interrupt"
+        "Enter send · Ctrl-J newline · / commands · Esc interrupt · Ctrl-C exit"
     };
     let has_queue = show_queue && entry.is_some_and(|e| !e.queued_prompts.is_empty());
     let (hint_area, status_area, notice_area) = if has_queue {
@@ -1335,7 +1386,7 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect, show_queue: bool) {
 
     let self_waiting = if (app.panel.is_some()
         || app.form.is_some()
-        || app.onboarding.is_some()
+        || app.folder_trust.is_some()
         || app.confirmation.is_some())
         && entry.is_some_and(|e| !e.approval_queue.is_empty())
     {

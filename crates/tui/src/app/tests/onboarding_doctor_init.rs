@@ -1,56 +1,41 @@
-use super::support::{Server, app, create, ctrl, key, until};
+use super::support::{Server, app, app_with_folder_trust, create, ctrl, key, until};
 use crate::{
-    app::{App, COMMANDS, Clock, Panel, matching_commands},
-    input::{Form, OnboardingForm},
+    app::{
+        App, COMMANDS, CONFIRM_GUARD_WINDOW, Clock, Panel, TRUST_PANEL_TITLE, jobs::Message,
+        matching_commands,
+    },
+    input::{FolderTrustWizard, Form},
     options::{self, Options, StartupAction},
     render,
 };
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{Terminal, backend::TestBackend};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Color};
 use ratatui_textarea::TextArea;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
 use tars_core::{
-    application::{ClosePolicy, PreparedCreate},
-    config::{Config, ConfigSource, default_store_dir, default_tools_for_current_platform},
-    definition::Provider,
+    application::{ClosePolicy, PreparedCreate, SessionHost},
+    config::{Config, ConfigSource, default_store_dir, default_tools_for_sandbox},
 };
 
-fn screen_sized(app: &App, width: u16, height: u16) -> String {
+fn render_buf(app: &App, width: u16, height: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| render::draw(frame, app)).unwrap();
-    terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect()
+    terminal.backend().buffer().clone()
+}
+
+fn buf_text(buf: &Buffer) -> String {
+    buf.content().iter().map(|cell| cell.symbol()).collect()
+}
+
+fn screen_sized(app: &App, width: u16, height: u16) -> String {
+    buf_text(&render_buf(app, width, height))
 }
 
 fn screen(app: &App) -> String {
     screen_sized(app, 100, 40)
-}
-
-fn onboard_app(dir: &Path, config_path: PathBuf) -> App {
-    let mut app = App::new(Options {
-        store: dir.join("store"),
-        recovery_dir: dir.to_path_buf(),
-        config: Arc::new(Config::default()),
-        profile: None,
-        preset: None,
-        config_path: None,
-        workspace: None,
-        code_execution_enabled: None,
-        no_config: false,
-        auto_onboard: true,
-        onboarding_config_path: Some(config_path),
-        startup_action: StartupAction::Default,
-    });
-    app.clock = Clock::manual(std::time::Instant::now());
-    app
 }
 
 fn run_slash_command(app: &mut App, name: &str) {
@@ -61,8 +46,47 @@ fn run_slash_command(app: &mut App, name: &str) {
     app.event(key(KeyCode::Enter));
 }
 
-fn type_text(app: &mut App, text: &str) {
-    app.event(Event::Paste(text.into()));
+fn write_preset_config(dir: &Path, store: &Path, ws: Option<&Path>) -> PathBuf {
+    let cfg_path = dir.join("config.toml");
+    let ws_line = ws
+        .map(|p| format!("workspace_root = '{}'\n", p.display()))
+        .unwrap_or_default();
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "version = 1\n\
+             store = '{}'\n\
+             default_profile = 'default'\n\
+             [profiles.default]\n\
+             provider = 'openai-chat'\n\
+             model = 'fixture-model'\n\
+             api_key_env = 'PATH'\n\
+             {ws_line}",
+            store.display(),
+        ),
+    )
+    .unwrap();
+    cfg_path
+}
+
+fn configured_trust_app(dir: &Path, cfg_path: &Path, workspace: Option<PathBuf>) -> App {
+    let config = Arc::new(Config::load(ConfigSource::File(cfg_path.to_path_buf())).unwrap());
+    let preset = config.preset(None).unwrap();
+    let mut app = App::new(Options {
+        store: dir.join("store"),
+        recovery_dir: dir.to_path_buf(),
+        config,
+        profile: None,
+        preset,
+        config_path: Some(cfg_path.to_path_buf()),
+        workspace,
+        code_execution_enabled: None,
+        no_config: false,
+        check_folder_trust: true,
+        startup_action: StartupAction::Default,
+    });
+    app.clock = Clock::manual(std::time::Instant::now());
+    app
 }
 
 #[test]
@@ -76,7 +100,7 @@ fn ux04_zero_config_store_resolution_and_no_config_isolation() {
         "{err}"
     );
 
-    // --no-config with --store works and disables auto_onboard.
+    // --no-config with --store works and enables check_folder_trust in CLI launches.
     let dir = tempfile::tempdir().unwrap();
     let explicit_store = dir.path().join("isolated");
     let opts = options::parse(
@@ -93,7 +117,7 @@ fn ux04_zero_config_store_resolution_and_no_config_isolation() {
     .unwrap()
     .unwrap();
     assert!(opts.no_config);
-    assert!(!opts.auto_onboard);
+    assert!(opts.check_folder_trust);
     assert_eq!(opts.store, explicit_store);
 
     // When config is enabled and has no explicit `store`, falls back to default_store_dir().
@@ -108,7 +132,7 @@ fn ux04_zero_config_store_resolution_and_no_config_isolation() {
         .unwrap()
         .unwrap();
         assert!(!opts.no_config);
-        assert!(!opts.auto_onboard);
+        assert!(opts.check_folder_trust);
         assert_eq!(opts.store, expected_default);
     }
 
@@ -128,269 +152,552 @@ fn ux04_zero_config_store_resolution_and_no_config_isolation() {
             .unwrap()
             .is_none()
     );
+    assert!(COMMANDS.iter().any(|(name, _)| *name == "trust"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ux05_auto_onboard_opens_on_empty_store_and_esc_skips_without_writing() {
+async fn ft03_folder_trust_wizard_replaces_model_form_and_never_writes_config_toml() {
     let dir = tempfile::tempdir().unwrap();
-    let cfg_path = dir.path().join("nested/config.toml");
-    let mut app = onboard_app(dir.path(), cfg_path.clone());
+    let ws = dir.path().join("project");
+    std::fs::create_dir(&ws).unwrap();
+    let mut app = app_with_folder_trust(dir.path(), Some(ws.clone()));
 
     app.list();
-    until(&mut app, |a| !a.listing).await;
-    assert!(app.onboarding.is_some());
+    until(&mut app, |a| !a.listing && a.folder_trust.is_some()).await;
 
-    // Normal and compact screen rendering both show onboarding cleanly.
-    let wide = screen_sized(&app, 100, 40);
-    assert!(wide.contains("Welcome to TARS · First-run setup"), "{wide}");
-    assert!(wide.contains("Provider"), "{wide}");
-    assert!(wide.contains("Model"), "{wide}");
-    assert!(wide.contains("API key env var"), "{wide}");
-    assert!(wide.contains("Workspace"), "{wide}");
+    let view = screen(&app);
     assert!(
-        wide.contains("Tab/↑↓ field · ←→ provider · Enter/Ctrl-S save & start · Esc skip"),
-        "{wide}"
+        view.contains("Do you trust the files in this folder?"),
+        "{view}"
+    );
+    assert!(view.contains("1. Yes, trust this folder"), "{view}");
+    assert!(view.contains("2. No, exit"), "{view}");
+    assert!(view.contains(".tars/permissions.toml"), "{view}");
+    assert!(view.contains(".tars/agents/*.md"), "{view}");
+    assert!(view.contains(&ws.display().to_string()), "{view}");
+    for forbidden in [
+        "First-run setup",
+        "Provider",
+        "API key env var",
+        "Max tokens",
+        "/provider",
+    ] {
+        assert!(
+            !view.contains(forbidden),
+            "unexpected '{forbidden}': {view}"
+        );
+    }
+
+    // Confirming Yes without any config.toml trusts the folder and enters main screen non-blockingly.
+    app.advance_clock(CONFIRM_GUARD_WINDOW);
+    app.event(key(KeyCode::Char('y')));
+    until(&mut app, |a| a.folder_trust.is_none() && a.jobs.is_empty()).await;
+
+    assert!(!app.quitting);
+    assert!(app.entries.is_empty());
+    assert!(app.host.is_workspace_folder_trusted(&ws).await.unwrap());
+    assert_eq!(
+        app.notice,
+        "No model configured · run /new (F2) or configure ~/.tars/config.toml"
+    );
+    assert!(!dir.path().join("config.toml").exists());
+
+    let main = screen(&app);
+    assert!(main.contains("Welcome to TARS"), "{main}");
+    assert!(main.contains("✓ Trusted"), "{main}");
+    assert!(
+        main.contains("/new (F2) to start, or configure ~/.tars/config.toml"),
+        "{main}"
+    );
+    assert!(!main.contains("/provider"), "{main}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ft04_pre_session_gating_guard_window_compact_and_startup_isolation() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    let other_ws = dir.path().join("other-ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&other_ws).unwrap();
+    let cfg_path = write_preset_config(dir.path(), &dir.path().join("store"), None);
+
+    // Seed an unrelated session in the store so we prove existing sessions do NOT skip folder trust.
+    let seeded_host = SessionHost::new(Some(dir.path().join("store")));
+    let mut seed_def = super::support::history_definition(None);
+    seed_def.workspace_root = Some(other_ws.clone());
+    let prepared = PreparedCreate::prepare_persistent(seed_def, None).unwrap();
+    let seeded_id = prepared.conversation_id().as_str().to_owned();
+    let seeded = seeded_host.create(prepared).await.unwrap();
+    seeded_host
+        .close(&seeded.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // 1. Untrusted workspace with preset & existing store session still gates on FolderTrustWizard.
+    let mut app = configured_trust_app(dir.path(), &cfg_path, Some(ws.clone()));
+    app.list();
+    until(&mut app, |a| !a.listing && a.folder_trust.is_some()).await;
+    assert_eq!(app.entries.len(), 1);
+    assert!(
+        app.entries.iter().all(|e| e.session.is_none()),
+        "must not create/open any session before folder trust is confirmed"
     );
 
-    let compact = screen_sized(&app, 40, 14);
+    // During 500ms guard window: navigation works, Yes keys are blocked, No/Esc/Ctrl-C exits.
+    app.event(key(KeyCode::Char('y')));
+    app.event(key(KeyCode::Char('1')));
+    app.event(key(KeyCode::Enter));
+    assert!(app.folder_trust.is_some());
+    assert!(!app.host.is_workspace_folder_trusted(&ws).await.unwrap());
+
+    app.event(key(KeyCode::Char('j')));
+    assert_eq!(app.folder_trust.as_ref().unwrap().selected, 1);
+    app.event(key(KeyCode::Char('k')));
+    assert_eq!(app.folder_trust.as_ref().unwrap().selected, 0);
+    app.event(key(KeyCode::Tab));
+    assert_eq!(app.folder_trust.as_ref().unwrap().selected, 1);
+    app.event(key(KeyCode::BackTab));
+    assert_eq!(app.folder_trust.as_ref().unwrap().selected, 0);
+
+    // Compact 30 x 12 renders wizard cleanly; < 30 x 12 renders resize prompt and allows Ctrl-C / Ctrl-Q.
+    let compact = screen_sized(&app, 30, 12);
+    let compact_norm = compact.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        compact.contains("Welcome to TARS · First-run setup"),
+        compact_norm.contains("Do you trust the files in this folder?"),
         "{compact}"
     );
-    assert!(compact.contains("2 / 6"), "{compact}");
-
-    // Esc skips without writing config.toml and marks onboarding dismissed.
-    app.event(key(KeyCode::Esc));
-    assert!(app.onboarding.is_none());
-    assert!(app.onboarding_dismissed);
     assert!(
-        app.notice
-            .contains("Setup skipped · press F2 or /new to create a session"),
-        "{}",
-        app.notice
+        compact_norm.contains("1. Yes, trust this folder"),
+        "{compact}"
     );
-    assert!(!cfg_path.exists());
+    assert!(compact_norm.contains("2. No, exit"), "{compact}");
 
-    // Subsequent list() must not reopen onboarding once dismissed.
-    app.list();
-    until(&mut app, |a| !a.listing).await;
-    assert!(app.onboarding.is_none());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ux05_auto_onboard_skipped_when_store_already_has_session() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg_path = dir.path().join("config.toml");
-    let mut app = onboard_app(dir.path(), cfg_path);
-    let prepared =
-        PreparedCreate::prepare_persistent(super::support::history_definition(None), None).unwrap();
-    let session = app.host.create(prepared).await.unwrap();
-    let target = session.target();
-    app.host.close(&target, ClosePolicy::Save).await.unwrap();
-
-    app.list();
-    until(&mut app, |a| !a.listing).await;
-    assert!(!app.entries.is_empty());
-    assert!(app.onboarding.is_none());
-}
-
-#[test]
-fn ux05_provider_cycling_and_live_env_badge_never_leaks_secret_values() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut form = OnboardingForm::new(Some(dir.path().to_path_buf()));
-    assert_eq!(form.selected, 1);
-    assert_eq!(form.provider(), Provider::OpenAiResponses);
-    assert_eq!(form.fields[2].lines().join(""), "OPENAI_API_KEY");
-    assert_eq!(form.fields[4].lines().join(""), "");
-    assert_eq!(
-        form.fields[5].lines().join(""),
-        dir.path().display().to_string()
-    );
-
-    // Move Up to field 0 (Provider) and cycle Left to Anthropic.
-    form.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-    assert_eq!(form.selected, 0);
-    form.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-    assert_eq!(form.provider(), Provider::Anthropic);
-    assert_eq!(form.fields[2].lines().join(""), "ANTHROPIC_API_KEY");
-    assert_eq!(form.fields[4].lines().join(""), "8192");
-
-    // Cycle Right back to OpenAiResponses clears untouched max_tokens.
-    form.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    assert_eq!(form.provider(), Provider::OpenAiResponses);
-    assert_eq!(form.fields[2].lines().join(""), "OPENAI_API_KEY");
-    assert_eq!(form.fields[4].lines().join(""), "");
-
-    // Cycle Right to OpenAiChat, then Anthropic, then customize max_tokens.
-    form.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    assert_eq!(form.provider(), Provider::OpenAiChat);
-    assert_eq!(form.fields[2].lines().join(""), "OPENAI_API_KEY");
-    form.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    assert_eq!(form.provider(), Provider::Anthropic);
-    assert_eq!(form.fields[4].lines().join(""), "8192");
-
-    // Edit Max tokens (field 4) so cycling no longer overwrites it.
-    for _ in 0..4 {
-        form.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    }
-    assert_eq!(form.selected, 4);
-    form.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-    form.key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
-    assert!(form.max_tokens_touched);
-    // Shift+Tab (both BackTab and Tab+SHIFT) moves focus backward.
-    form.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
-    assert_eq!(form.selected, 3);
-    form.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
-    assert_eq!(form.selected, 2);
-    form.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
-    assert_eq!(form.selected, 1);
-    form.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
-    assert_eq!(form.selected, 0);
-    form.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-    assert_eq!(form.provider(), Provider::OpenAiResponses);
-    assert_eq!(form.fields[4].lines().join(""), "8190");
-
-    // Custom env var name is preserved across cycling, and badge reflects [set]/[not set] without echoing values.
-    let mut app = onboard_app(dir.path(), dir.path().join("config.toml"));
-    form.fields[2] = TextArea::from(["PATH"]);
-    app.onboarding = Some(form);
-    let view_set = screen(&app);
-    assert!(view_set.contains("API key env var [set]"), "{view_set}");
-    if let Ok(path_val) = std::env::var("PATH")
-        && path_val.len() > 8
-    {
-        assert!(!view_set.contains(&path_val), "must never echo env values");
-    }
-
-    let form = app.onboarding.as_mut().unwrap();
-    form.selected = 0;
-    form.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-    assert_eq!(form.fields[2].lines().join(""), "PATH");
-    form.fields[2] = TextArea::from(["TARS_DEFINITELY_UNSET_ENV_VAR_TEST"]);
-    let view_unset = screen(&app);
+    app.event(Event::Resize(29, 11));
+    assert!(app.too_small);
+    let tiny = screen_sized(&app, 29, 11);
+    let tiny_norm = tiny.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        view_unset.contains("API key env var [not set]"),
-        "{view_unset}"
+        tiny_norm.contains("Resize to 30 x 12. Ctrl-C / Ctrl-Q quits."),
+        "{tiny}"
     );
-}
+    app.event(ctrl('c'));
+    assert!(app.quitting);
+    assert!(!app.host.is_workspace_folder_trusted(&ws).await.unwrap());
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ux05_validation_before_write_and_create_new_atomicity() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg_path = dir.path().join("config.toml");
-    let ws = dir.path().join("ws");
-    std::fs::create_dir(&ws).unwrap();
-
-    let mut app = onboard_app(dir.path(), cfg_path.clone());
-    app.list();
-    until(&mut app, |a| a.onboarding.is_some()).await;
-
-    // 1. Secret-like api_key_env is rejected without echoing the value and without writing config.toml.
-    type_text(&mut app, "gpt-5");
-    app.event(key(KeyCode::Tab));
-    let secret = "sk-live-secret-do-not-echo";
-    app.onboarding.as_mut().unwrap().fields[2] = TextArea::from([secret]);
-    app.event(key(KeyCode::Enter));
-    let onboarding = app.onboarding.as_ref().unwrap();
-    assert!(!onboarding.error.is_empty());
-    assert!(!onboarding.error.contains(secret), "{}", onboarding.error);
-    assert!(!cfg_path.exists());
-
-    // 2. Invalid workspace path fails BEFORE writing config.toml.
-    let onboarding = app.onboarding.as_mut().unwrap();
-    onboarding.fields[2] = TextArea::from(["PATH"]);
-    onboarding.fields[5] = TextArea::from([dir.path().join("missing-dir").to_str().unwrap()]);
-    app.event(key(KeyCode::Enter));
-    let onboarding = app.onboarding.as_ref().unwrap();
+    // Decline with 'n' during guard window on a fresh wizard -> zero DB writes, zero new sessions, quits.
+    let mut decline_app = configured_trust_app(dir.path(), &cfg_path, Some(ws.clone()));
+    decline_app.list();
+    until(&mut decline_app, |a| !a.listing && a.folder_trust.is_some()).await;
+    decline_app.event(key(KeyCode::Char('n')));
+    assert!(decline_app.quitting);
     assert!(
-        onboarding.error.contains("Workspace path"),
-        "{}",
-        onboarding.error
+        !decline_app
+            .host
+            .is_workspace_folder_trusted(&ws)
+            .await
+            .unwrap()
     );
-    assert!(
-        !cfg_path.exists(),
-        "invalid workspace must not leave a written config.toml"
-    );
+    assert_eq!(decline_app.entries.len(), 1);
 
-    // 3. Existing config.toml is never overwritten (AlreadyExists).
-    std::fs::write(&cfg_path, "# existing user config\n").unwrap();
-    app.onboarding.as_mut().unwrap().fields[5] = TextArea::from([ws.to_str().unwrap()]);
-    app.event(ctrl('s'));
-    let onboarding = app.onboarding.as_ref().unwrap();
-    assert!(
-        onboarding.error.contains("already exists"),
-        "{}",
-        onboarding.error
-    );
-    assert_eq!(
-        std::fs::read_to_string(&cfg_path).unwrap(),
-        "# existing user config\n"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ux05_submit_writes_config_updates_host_and_opens_session_with_workspace() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg_path = dir.path().join("tars_home/config.toml");
-    let ws = dir.path().join("workspace");
-    std::fs::create_dir(&ws).unwrap();
-    let server = Server::with_streaming_rounds(vec![vec![
-        r#"data: {"id":"1","choices":[{"index":0,"delta":{"content":"Ready!"},"finish_reason":null}]}"#.to_owned() + "\n\n",
-        "data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n".to_owned(),
-    ]])
-    .await;
-
-    let mut app = onboard_app(dir.path(), cfg_path.clone());
-    app.list();
-    until(&mut app, |a| a.onboarding.is_some()).await;
-
-    // Cycle to openai-chat so it matches the local Chat Completions fixture server.
-    app.event(key(KeyCode::Up));
-    app.event(key(KeyCode::Right));
-    assert_eq!(
-        app.onboarding.as_ref().unwrap().provider(),
-        Provider::OpenAiChat
-    );
-    app.event(key(KeyCode::Tab));
-    type_text(&mut app, "fixture-model");
-    app.onboarding.as_mut().unwrap().fields[2] = TextArea::from(["PATH"]);
-    app.onboarding.as_mut().unwrap().fields[3] = TextArea::from([server.endpoint.as_str()]);
-    app.onboarding.as_mut().unwrap().fields[5] = TextArea::from([ws.to_str().unwrap()]);
-
+    // 2. Confirming after guard trusts folder and auto-creates default session.
+    app.quitting = false;
+    app.event(Event::Resize(100, 40));
+    app.advance_clock(CONFIRM_GUARD_WINDOW);
     app.event(key(KeyCode::Enter));
     until(&mut app, |a| {
-        a.onboarding.is_none() && a.entries.len() == 1 && a.entries[0].session.is_some()
+        a.folder_trust.is_none() && a.entries.iter().any(|e| e.session.is_some())
+    })
+    .await;
+    assert!(app.host.is_workspace_folder_trusted(&ws).await.unwrap());
+    let opened_ws = app
+        .entries
+        .iter()
+        .find_map(|e| e.session.as_ref())
+        .unwrap()
+        .definition()
+        .workspace_root
+        .unwrap();
+    assert_eq!(opened_ws, ws.canonicalize().unwrap());
+
+    // F5 refresh never re-triggers wizard.
+    app.event(key(KeyCode::F(5)));
+    until(&mut app, |a| !a.listing).await;
+    assert!(app.folder_trust.is_none());
+
+    // 3. Reopening on the already-trusted directory skips wizard immediately.
+    let mut trusted_reopen = configured_trust_app(dir.path(), &cfg_path, Some(ws.clone()));
+    trusted_reopen.list();
+    until(&mut trusted_reopen, |a| {
+        !a.listing && a.entries.iter().any(|e| e.session.is_some())
+    })
+    .await;
+    assert!(trusted_reopen.folder_trust.is_none());
+
+    // 4. -c, -r, and -r <id> NEVER trigger FolderTrustWizard even on untrusted cwd/workspace.
+    let untrusted_ws = dir.path().join("never-trusted");
+    std::fs::create_dir_all(&untrusted_ws).unwrap();
+    for action in [
+        StartupAction::ContinueLatest,
+        StartupAction::OpenSessionPicker,
+        StartupAction::Resume(seeded_id),
+    ] {
+        let mut flag_app = configured_trust_app(dir.path(), &cfg_path, Some(untrusted_ws.clone()));
+        flag_app.options.startup_action = action;
+        flag_app.list();
+        until(&mut flag_app, |a| !a.listing && a.jobs.is_empty()).await;
+        assert!(flag_app.folder_trust.is_none());
+    }
+
+    // 5. InvalidWorkspace skips wizard and degrades cleanly (both with and without preset).
+    let missing_ws = dir.path().join("does-not-exist");
+    let mut invalid_with_preset =
+        configured_trust_app(dir.path(), &cfg_path, Some(missing_ws.clone()));
+    invalid_with_preset.list();
+    until(&mut invalid_with_preset, |a| {
+        !a.listing && a.jobs.is_empty()
+    })
+    .await;
+    assert!(invalid_with_preset.folder_trust.is_none());
+    assert!(
+        invalid_with_preset
+            .notice
+            .contains("Could not start default session:")
+            && invalid_with_preset.notice.contains("Run /doctor or /new"),
+        "{}",
+        invalid_with_preset.notice
+    );
+
+    let mut invalid_no_preset = app_with_folder_trust(dir.path(), Some(missing_ws));
+    invalid_no_preset.list();
+    until(&mut invalid_no_preset, |a| !a.listing && a.jobs.is_empty()).await;
+    assert!(invalid_no_preset.folder_trust.is_none());
+    assert!(
+        invalid_no_preset.notice.starts_with("Invalid workspace:"),
+        "{}",
+        invalid_no_preset.notice
+    );
+
+    // 6. Store failure keeps wizard open with error and creates zero sessions.
+    let mut no_store_app = app_with_folder_trust(dir.path(), Some(untrusted_ws.clone()));
+    no_store_app.host = SessionHost::new(None);
+    no_store_app.folder_trust = Some(FolderTrustWizard::new(
+        untrusted_ws,
+        no_store_app.clock.now(),
+    ));
+    no_store_app.advance_clock(CONFIRM_GUARD_WINDOW);
+    no_store_app.event(key(KeyCode::Char('y')));
+    until(&mut no_store_app, |a| {
+        a.folder_trust.as_ref().is_some_and(|w| !w.saving) && a.jobs.is_empty()
+    })
+    .await;
+    let wizard = no_store_app.folder_trust.as_ref().unwrap();
+    assert!(!wizard.error.is_empty());
+    assert!(no_store_app.entries.is_empty());
+
+    // 7. Key Repeat never accidentally confirms or toggles wizard, and untrusted text is escaped.
+    let mut escape_app = app_with_folder_trust(dir.path(), None);
+    let mut w =
+        FolderTrustWizard::new(PathBuf::from("/tmp/evil\x1b[31mws"), escape_app.clock.now());
+    w.error = "bad\x1b[31merror".into();
+    escape_app.folder_trust = Some(w);
+    escape_app.advance_clock(CONFIRM_GUARD_WINDOW);
+    escape_app.event(Event::Key(KeyEvent {
+        kind: KeyEventKind::Repeat,
+        ..KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)
+    }));
+    assert!(escape_app.folder_trust.is_some());
+    let rendered = screen(&escape_app);
+    assert!(!rendered.contains('\x1b'), "must escape ANSI escapes");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ft05_folder_trust_never_bypasses_tars_rules_or_agents_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("workspace");
+    std::fs::create_dir_all(ws.join(".tars/agents")).unwrap();
+    std::fs::write(
+        ws.join(".tars/permissions.toml"),
+        "version = 1\n[[command]]\nprefix = [\"git\", \"status\"]\ndecision = \"allow\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join(".tars/agents/reviewer.md"),
+        "---\nname: reviewer\ndescription: Code reviewer\n---\nReview carefully.\n",
+    )
+    .unwrap();
+    let cfg_path = write_preset_config(dir.path(), &dir.path().join("store"), Some(&ws));
+
+    let mut app = configured_trust_app(dir.path(), &cfg_path, Some(ws.clone()));
+    app.list();
+    until(&mut app, |a| !a.listing && a.folder_trust.is_some()).await;
+
+    // Confirm folder trust via wizard.
+    app.advance_clock(CONFIRM_GUARD_WINDOW);
+    app.event(key(KeyCode::Char('y')));
+    until(&mut app, |a| {
+        a.folder_trust.is_none() && a.entries.len() == 1 && a.entries[0].session.is_some()
     })
     .await;
 
-    assert!(cfg_path.is_file());
-    let loaded = Config::load(ConfigSource::File(cfg_path.clone())).unwrap();
-    let preset = loaded.preset(None).unwrap().unwrap();
-    assert_eq!(preset.provider, Provider::OpenAiChat);
-    assert_eq!(preset.model, "fixture-model");
+    assert!(app.host.is_workspace_folder_trusted(&ws).await.unwrap());
+    let entry = &app.entries[0];
+    assert!(
+        entry.workspace_rules_trust.is_some(),
+        "folder trust must NOT bypass .tars/permissions.toml trust prompt"
+    );
+    assert!(
+        entry.workspace_agents_trust.is_some(),
+        "folder trust must NOT bypass .tars/agents/*.md trust prompt"
+    );
+    assert!(!entry.session.as_ref().unwrap().workspace_rules_trusted());
+    assert!(!entry.session.as_ref().unwrap().workspace_agents_trusted());
 
-    assert_eq!(app.options.config_path.as_ref(), Some(&cfg_path));
-    assert!(app.options.preset.is_some());
-    assert_eq!(
-        app.user_rules_path,
-        Some(
-            dir.path()
-                .canonicalize()
-                .unwrap()
-                .join("tars_home/permissions.toml")
-        )
+    // Trust rules and agents, close, mutate files, reopen -> content-hash mismatch re-prompts!
+    app.advance_clock(CONFIRM_GUARD_WINDOW);
+    app.event(key(KeyCode::Char('y')));
+    until(&mut app, |a| {
+        a.entries[0].workspace_rules_trust.is_none() && a.jobs.is_empty()
+    })
+    .await;
+    app.advance_clock(CONFIRM_GUARD_WINDOW);
+    app.event(key(KeyCode::Char('y')));
+    until(&mut app, |a| {
+        a.entries[0].workspace_agents_trust.is_none() && a.jobs.is_empty()
+    })
+    .await;
+    assert!(
+        app.entries[0]
+            .session
+            .as_ref()
+            .unwrap()
+            .workspace_rules_trusted()
+    );
+    assert!(
+        app.entries[0]
+            .session
+            .as_ref()
+            .unwrap()
+            .workspace_agents_trusted()
     );
 
-    let session = app.entries[0].session.as_ref().unwrap();
-    let def = session.definition();
-    assert_eq!(def.workspace_root, Some(ws.canonicalize().unwrap()));
-    assert_eq!(def.tools, default_tools_for_current_platform());
+    app.event(ctrl('w'));
+    until(&mut app, |a| a.entries[0].session.is_none()).await;
 
-    // Immediately usable for conversation turns.
-    type_text(&mut app, "hello");
-    app.event(key(KeyCode::Enter));
-    until(&mut app, |a| a.entries[0].execution == "Completed").await;
-    assert_eq!(server.requests.lock().unwrap().len(), 1);
+    std::fs::write(
+        ws.join(".tars/permissions.toml"),
+        "version = 1\n[[command]]\nprefix = [\"git\", \"status\"]\ndecision = \"allow\"\n\n[[command]]\nprefix = [\"cargo\", \"test\"]\ndecision = \"allow\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join(".tars/agents/reviewer.md"),
+        "---\nname: reviewer\ndescription: Modified reviewer\n---\nReview even more carefully.\n",
+    )
+    .unwrap();
+
+    app.event(key(KeyCode::F(3)));
+    until(&mut app, |a| a.entries[0].session.is_some()).await;
+    assert!(app.entries[0].workspace_rules_trust.is_some());
+    assert!(app.entries[0].workspace_agents_trust.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ft10_welcome_card_trust_badge_f4_switching_and_slash_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws_trusted = dir.path().join("ws-trusted");
+    let ws_other = dir.path().join("ws-other");
+    std::fs::create_dir_all(ws_trusted.join(".tars/agents")).unwrap();
+    std::fs::create_dir_all(&ws_other).unwrap();
+    std::fs::write(
+        ws_trusted.join(".tars/permissions.toml"),
+        "version = 1\n[[command]]\nprefix = [\"git\", \"status\"]\ndecision = \"allow\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws_trusted.join(".tars/agents/helper.md"),
+        "---\nname: helper\ndescription: Helper\n---\nHelp.\n",
+    )
+    .unwrap();
+
+    // 1. Unconfigured empty welcome card shows ~/.tars/config.toml guidance and Ctrl-C exit, never /provider.
+    let mut unconfigured = app_with_folder_trust(dir.path(), Some(ws_trusted.clone()));
+    unconfigured.list();
+    until(&mut unconfigured, |a| {
+        !a.listing && a.folder_trust.is_some()
+    })
+    .await;
+    unconfigured.advance_clock(CONFIRM_GUARD_WINDOW);
+    unconfigured.event(key(KeyCode::Char('y')));
+    until(&mut unconfigured, |a| {
+        a.folder_trust.is_none() && a.jobs.is_empty()
+    })
+    .await;
+
+    let buf = render_buf(&unconfigured, 100, 40);
+    let view = buf_text(&buf);
+    assert!(view.contains("Welcome to TARS"), "{view}");
+    assert!(view.contains("✓ Trusted"), "{view}");
+    assert!(
+        view.contains("/new (F2) to start, or configure ~/.tars/config.toml"),
+        "{view}"
+    );
+    assert!(view.contains("Ctrl-C exit"), "{view}");
+    assert!(!view.contains("/provider"), "{view}");
+    let trusted_cell = buf
+        .content()
+        .iter()
+        .find(|cell| cell.symbol() == "✓")
+        .expect("green checkmark cell");
+    assert_eq!(trusted_cell.fg, Color::Green);
+
+    // 2. Configured welcome card (before opening) shows `/new · /sessions · /commands`.
+    let cfg_path = write_preset_config(dir.path(), &dir.path().join("store"), Some(&ws_other));
+    let configured_only = configured_trust_app(dir.path(), &cfg_path, Some(ws_other.clone()));
+    let cfg_view = screen(&configured_only);
+    assert!(cfg_view.contains("Welcome to TARS"), "{cfg_view}");
+    assert!(
+        cfg_view.contains("/new · /sessions · /commands"),
+        "{cfg_view}"
+    );
+    assert!(!cfg_view.contains("✓ Trusted"), "{cfg_view}");
+
+    // 3. F4 switching between trusted ws, different ws, and unbound session never shows stale badge.
+    let server = Server::new().await;
+    let multi_dir = tempfile::tempdir().unwrap();
+    let mut multi = app_with_folder_trust(multi_dir.path(), Some(ws_trusted.clone()));
+    multi.list();
+    until(&mut multi, |a| !a.listing && a.folder_trust.is_some()).await;
+    multi.advance_clock(CONFIRM_GUARD_WINDOW);
+    multi.event(key(KeyCode::Char('y')));
+    until(&mut multi, |a| {
+        a.folder_trust.is_none() && a.jobs.is_empty()
+    })
+    .await;
+
+    // Create entry 0 (ws_trusted), entry 1 (ws_other), entry 2 (unbound).
+    for ws_arg in [ws_trusted.to_str().unwrap(), ws_other.to_str().unwrap(), ""] {
+        multi.form = Some(Form {
+            fields: [
+                "openai-chat",
+                "fixture-model",
+                server.endpoint.as_str(),
+                "PATH",
+                "120",
+                ws_arg,
+                "",
+                "ask",
+                "",
+                "on",
+                "off",
+            ]
+            .into_iter()
+            .map(|v| TextArea::from([v]))
+            .collect(),
+            ..Form::default()
+        });
+        let expected_len = multi.entries.len() + 1;
+        multi.event(ctrl('s'));
+        assert!(
+            multi.form.is_none(),
+            "form error: {:?}",
+            multi.form.as_ref().map(|f| &f.error)
+        );
+        until(&mut multi, |a| {
+            a.entries.len() == expected_len && a.entries[expected_len - 1].session.is_some()
+        })
+        .await;
+    }
+    // Dismiss trust prompts on entry 0 so welcome card renders cleanly.
+    multi.event(key(KeyCode::F(4)));
+    assert_eq!(multi.selected, 0);
+    multi.advance_clock(CONFIRM_GUARD_WINDOW);
+    multi.event(key(KeyCode::Char('n')));
+    multi.advance_clock(CONFIRM_GUARD_WINDOW);
+    multi.event(key(KeyCode::Char('n')));
+    let trusted_screen = screen(&multi);
+    assert!(trusted_screen.contains("✓ Trusted"), "{trusted_screen}");
+    assert!(
+        trusted_screen.contains("Type below, then press Enter to send."),
+        "{trusted_screen}"
+    );
+
+    // F4 -> entry 1 (ws_other): must NOT show ✓ Trusted!
+    multi.event(key(KeyCode::F(4)));
+    assert_eq!(multi.selected, 1);
+    let other_screen = screen(&multi);
+    assert!(!other_screen.contains("✓ Trusted"), "{other_screen}");
+
+    // F4 -> entry 2 (unbound): must NOT show ✓ Trusted, and /trust reports unbound!
+    multi.event(key(KeyCode::F(4)));
+    assert_eq!(multi.selected, 2);
+    let unbound_screen = screen(&multi);
+    assert!(!unbound_screen.contains("✓ Trusted"));
+    assert!(unbound_screen.contains("Workspace: none"));
+
+    run_slash_command(&mut multi, "trust");
+    match &multi.panel {
+        Some(Panel::Info { title, lines, .. }) => {
+            assert_eq!(title, TRUST_PANEL_TITLE);
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l == "Workspace: none (not bound to a folder)"),
+                "{lines:#?}"
+            );
+        }
+        _ => panic!("expected Workspace trust panel for unbound session"),
+    }
+    multi.event(key(KeyCode::Esc));
+
+    // Switch back to entry 0 (ws_trusted) and run /trust -> shows folder trust + .tars/ status!
+    multi.event(key(KeyCode::F(4)));
+    assert_eq!(multi.selected, 0);
+    assert_eq!(COMMANDS[matching_commands("tru")[0]].0, "trust");
+    run_slash_command(&mut multi, "trust");
+    match &multi.panel {
+        Some(Panel::Info { title, lines, .. }) => {
+            assert_eq!(title, TRUST_PANEL_TITLE);
+            assert_eq!(lines, &["Loading workspace trust status..."]);
+        }
+        _ => panic!("expected loading Workspace trust panel"),
+    }
+    until(&mut multi, |a| {
+        matches!(
+            &a.panel,
+            Some(Panel::Info { title, lines, .. })
+                if title == TRUST_PANEL_TITLE && lines.iter().any(|l| l.contains("tars trust revoke"))
+        )
+    })
+    .await;
+    let trust_view = screen(&multi);
+    assert!(trust_view.contains(TRUST_PANEL_TITLE), "{trust_view}");
+    assert!(
+        trust_view.contains("Folder trust (trusted_workspaces): Trusted"),
+        "{trust_view}"
+    );
+    assert!(
+        trust_view.contains(".tars/permissions.toml") && trust_view.contains("Not trusted"),
+        "{trust_view}"
+    );
+    assert!(
+        trust_view.contains(".tars/agents/*.md") && trust_view.contains("helper"),
+        "{trust_view}"
+    );
+    assert!(
+        trust_view.contains("Run 'tars trust revoke' to revoke folder trust"),
+        "{trust_view}"
+    );
+    multi.event(key(KeyCode::Esc));
+
+    // Stale TrustStatusLoaded must NOT clobber /help or reopen a closed panel.
+    run_slash_command(&mut multi, "help");
+    multi.complete(Message::TrustStatusLoaded(vec!["stale".into()]));
+    match &multi.panel {
+        Some(Panel::Info { title, lines, .. }) => {
+            assert_eq!(title, "Keyboard shortcuts");
+            assert!(lines.iter().any(|l| l.contains("/trust")));
+        }
+        _ => panic!("expected /help panel to remain intact"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -401,13 +708,7 @@ async fn ux06_doctor_menu_tab_complete_async_report_and_early_close() {
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path().join("ws");
     std::fs::create_dir(&ws).unwrap();
-    let cfg_path = dir.path().join("config.toml");
-    std::fs::write(
-        &cfg_path,
-        "version = 1\nstore = 'store'\ndefault_profile = 'default'\n\
-         [profiles.default]\nprovider = 'openai-chat'\nmodel = 'fixture-model'\napi_key_env = 'PATH'\n",
-    )
-    .unwrap();
+    let cfg_path = write_preset_config(dir.path(), &dir.path().join("store"), None);
     let config = Arc::new(Config::load(ConfigSource::File(cfg_path.clone())).unwrap());
     let preset = config.preset(None).unwrap();
     let mut app = App::new(Options {
@@ -420,8 +721,7 @@ async fn ux06_doctor_menu_tab_complete_async_report_and_early_close() {
         workspace: None,
         code_execution_enabled: None,
         no_config: false,
-        auto_onboard: false,
-        onboarding_config_path: None,
+        check_folder_trust: false,
         startup_action: StartupAction::Default,
     });
     app.clock = Clock::manual(std::time::Instant::now());
@@ -556,48 +856,6 @@ async fn ux06_doctor_menu_tab_complete_async_report_and_early_close() {
             "doctor must reuse injected SandboxStatus without re-probing: {lines:#?}"
         );
     }
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ux05_empty_workspace_succeeds_with_empty_tools_and_too_small_guards_keys() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg_path = dir.path().join("tars_home/config.toml");
-    let mut app = onboard_app(dir.path(), cfg_path.clone());
-    app.list();
-    until(&mut app, |a| a.onboarding.is_some()).await;
-
-    // When terminal is too small, non-Ctrl-Q keys and paste are ignored, while Ctrl-Q quits.
-    app.event(Event::Resize(20, 8));
-    assert!(app.too_small);
-    app.event(Event::Paste("ignored".into()));
-    app.event(key(KeyCode::Esc));
-    app.event(key(KeyCode::Enter));
-    assert!(app.onboarding.is_some());
-    assert_eq!(
-        app.onboarding.as_ref().unwrap().fields[1].lines().join(""),
-        ""
-    );
-    app.event(ctrl('q'));
-    assert!(app.quitting);
-
-    // Restore normal size and submit onboarding with cleared empty Workspace.
-    app.quitting = false;
-    app.event(Event::Resize(100, 40));
-    assert!(!app.too_small);
-    type_text(&mut app, "fixture-model");
-    app.onboarding.as_mut().unwrap().fields[2] = TextArea::from(["PATH"]);
-    app.onboarding.as_mut().unwrap().fields[5] = TextArea::from([""]);
-
-    app.event(key(KeyCode::Enter));
-    until(&mut app, |a| {
-        a.onboarding.is_none() && a.entries.len() == 1 && a.entries[0].session.is_some()
-    })
-    .await;
-
-    assert!(cfg_path.is_file());
-    let def = app.entries[0].session.as_ref().unwrap().definition();
-    assert_eq!(def.workspace_root, None);
-    assert!(def.tools.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -740,8 +998,7 @@ async fn ux07_init_guardrails_and_writable_vs_readonly_submission() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn onboarding_reuses_startup_sandbox_status_for_default_tools() {
-    use tars_core::config::default_tools_for_sandbox;
+async fn folder_trust_reuses_startup_sandbox_status_for_default_tools() {
     use tars_core::sandbox::{Capability, Sandbox, SandboxPolicy, SandboxStatus};
 
     let root = tempfile::tempdir().unwrap();
@@ -765,21 +1022,19 @@ async fn onboarding_reuses_startup_sandbox_status_for_default_tools() {
 
     for (tag, sandbox_status, expected_available) in cases {
         let dir = tempfile::tempdir().unwrap();
-        let cfg_path = dir.path().join(format!("tars_home_{tag}/config.toml"));
         let ws = dir.path().join(format!("workspace_{tag}"));
         std::fs::create_dir_all(&ws).unwrap();
+        let cfg_path = write_preset_config(dir.path(), &dir.path().join("store"), Some(&ws));
 
-        let mut app = onboard_app(dir.path(), cfg_path.clone());
+        let mut app = configured_trust_app(dir.path(), &cfg_path, Some(ws.clone()));
         app.sandbox_status = Some(sandbox_status);
         app.list();
-        until(&mut app, |a| a.onboarding.is_some()).await;
+        until(&mut app, |a| !a.listing && a.folder_trust.is_some()).await;
 
-        type_text(&mut app, "fixture-model");
-        app.onboarding.as_mut().unwrap().fields[2] = TextArea::from(["PATH"]);
-        app.onboarding.as_mut().unwrap().fields[5] = TextArea::from([ws.to_str().unwrap()]);
-        app.event(key(KeyCode::Enter));
+        app.advance_clock(CONFIRM_GUARD_WINDOW);
+        app.event(key(KeyCode::Char('y')));
         until(&mut app, |a| {
-            a.onboarding.is_none() && a.entries.len() == 1 && a.entries[0].session.is_some()
+            a.folder_trust.is_none() && a.entries.len() == 1 && a.entries[0].session.is_some()
         })
         .await;
 

@@ -46,6 +46,7 @@ pub(super) fn command_status_line(status: &tars_core::sandbox::SandboxStatus) ->
 }
 
 pub(super) const DOCTOR_PANEL_TITLE: &str = "Doctor · environment & configuration check";
+pub(crate) const TRUST_PANEL_TITLE: &str = "Workspace trust";
 
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("new", "Create a session with model settings"),
@@ -82,6 +83,10 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     (
         "doctor",
         "Check configuration, credentials, storage, sandbox and tools",
+    ),
+    (
+        "trust",
+        "Show folder trust and workspace .tars trust status",
     ),
     (
         "init",
@@ -368,6 +373,7 @@ impl App {
             "compact" => self.compact(),
             "summary" => self.show_summary(),
             "doctor" => self.run_doctor(),
+            "trust" => self.show_trust_status(),
             "init" => self.run_init(),
             "help" => self.panel = Some(Panel::Info {
                 title: "Keyboard shortcuts".into(),
@@ -384,6 +390,7 @@ impl App {
                     "/fork [title]   Fork current idle session into a new independent session",
                     "Ctrl-D / Delete (in /sessions)   Delete a closed session with confirmation",
                     "/doctor   Check configuration, credentials, storage, sandbox and tools",
+                    "/trust   Show folder trust and workspace .tars trust status",
                     "/init   Analyze the workspace and create or update AGENTS.md",
                     "/clear   Start a fresh session with current model preset and workspace",
                     "/resume [selector]   Open session picker or jump to a saved session",

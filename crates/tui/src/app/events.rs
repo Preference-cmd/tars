@@ -96,6 +96,7 @@ impl App {
         self.update_approval_guard();
         self.update_workspace_trust_guard();
         self.update_repair_guard();
+        self.update_folder_trust_guard();
         let is_guarded = self.is_approval_guarded();
         let is_workspace_trust_guarded = self.is_workspace_trust_guarded();
         if let Event::Resize(width, height) = event {
@@ -147,10 +148,8 @@ impl App {
             }
             if let Some(form) = &mut self.form {
                 input::paste(&mut form.fields[form.selected], text, false);
-            } else if let Some(onboarding) = &mut self.onboarding {
-                if !self.too_small {
-                    onboarding.paste(text);
-                }
+            } else if self.folder_trust.is_some() {
+                return;
             } else if let Some(entry) = self.entries.get_mut(self.selected) {
                 if entry.workspace_rules_trust.is_some() || entry.workspace_agents_trust.is_some() {
                     return;
@@ -217,25 +216,8 @@ impl App {
             self.update_workspace_trust_guard();
             return;
         }
-        if self.onboarding.is_some() {
-            if self.too_small {
-                return;
-            }
-            if input::control(key, 's')
-                || (key.code == KeyCode::Enter
-                    && key.kind == KeyEventKind::Press
-                    && !key.modifiers.intersects(
-                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT,
-                    ))
-            {
-                self.submit_onboarding();
-            } else if key.code == KeyCode::Esc {
-                self.onboarding = None;
-                self.onboarding_dismissed = true;
-                self.notice = "Setup skipped · press F2 or /new to create a session".into();
-            } else if let Some(onboarding) = &mut self.onboarding {
-                onboarding.key(key);
-            }
+        if self.folder_trust.is_some() {
+            self.folder_trust_key(key);
             self.update_approval_guard();
             self.update_workspace_trust_guard();
             return;
@@ -614,6 +596,52 @@ enum TrustPromptKind {
 }
 
 impl App {
+    fn folder_trust_key(&mut self, key: crossterm::event::KeyEvent) {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        if input::control(key, 'c') || input::control(key, 'q') {
+            self.quitting = true;
+            return;
+        }
+        if self.too_small {
+            return;
+        }
+        let no_ctrl_alt = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if !no_ctrl_alt {
+            return;
+        }
+        let is_guarded = self.is_folder_trust_guarded();
+        match key.code {
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::Char('j' | 'k') => {
+                if let Some(wizard) = self.folder_trust.as_mut() {
+                    wizard.toggle();
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('2' | 'n' | 'N') => {
+                self.quitting = true;
+            }
+            KeyCode::Enter => {
+                let selected = self.folder_trust.as_ref().map(|wizard| wizard.selected);
+                match selected {
+                    Some(1) => self.quitting = true,
+                    Some(0) if !is_guarded => self.confirm_folder_trust(),
+                    _ => {}
+                }
+            }
+            KeyCode::Char('1' | 'y' | 'Y') if !is_guarded => {
+                self.confirm_folder_trust();
+            }
+            _ => {}
+        }
+    }
+
     fn workspace_trust_key(
         &mut self,
         key: crossterm::event::KeyEvent,

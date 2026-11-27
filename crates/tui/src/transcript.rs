@@ -255,6 +255,22 @@ impl Transcript {
         Self::build(blocks, false, false)
     }
 
+    /// True when no conversation turn has been recorded yet (the transcript is
+    /// empty or contains only folded session-prelude notices).
+    pub(crate) fn is_conversation_empty(&self) -> bool {
+        if self.text.is_empty() {
+            return true;
+        }
+        !self.segments.is_empty()
+            && self.segments.iter().all(|segment| {
+                matches!(
+                    segment,
+                    TranscriptSegment::MutedNotice(notice)
+                        if notice.starts_with("● Session prelude")
+                )
+            })
+    }
+
     /// Append an accepted user submission to the live transcript while the turn runs.
     ///
     /// Replaced by the authoritative `Transcript::from_materials` snapshot once the

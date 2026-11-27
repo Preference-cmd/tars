@@ -21,7 +21,7 @@ pub(crate) use complete::{
     strip_model_command_prefix,
 };
 pub(crate) use graphemes::edit;
-pub(crate) use onboarding::{ONBOARDING_FIELD_NAMES, OnboardingForm};
+pub(crate) use onboarding::FolderTrustWizard;
 
 pub(crate) fn editor() -> TextArea<'static> {
     let mut editor = TextArea::default();

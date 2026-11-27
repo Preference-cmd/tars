@@ -12,10 +12,13 @@ mod state;
 
 #[allow(unused_imports)]
 pub(crate) use clock::Clock;
+#[allow(unused_imports)]
+pub(crate) use commands::TRUST_PANEL_TITLE;
 pub(crate) use commands::{COMMANDS, InfoKind, Panel, matching_commands};
 pub(crate) use startup::Startup;
 pub(crate) use state::{
-    App, Confirmation, Entry, QueuedPrompt, WorkspaceTrustLine, WorkspaceTrustLineKind,
+    App, CONFIRM_GUARD_WINDOW, Confirmation, Entry, GuardWindow, QueuedPrompt, WorkspaceTrustLine,
+    WorkspaceTrustLineKind,
 };
 
 #[cfg(test)]

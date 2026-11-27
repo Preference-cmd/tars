@@ -28,11 +28,20 @@ pub(super) fn app(dir: &std::path::Path) -> App {
         workspace: None,
         code_execution_enabled: None,
         no_config: false,
-        auto_onboard: false,
-        onboarding_config_path: None,
+        check_folder_trust: false,
         startup_action: StartupAction::Default,
     });
     app.clock = Clock::manual(std::time::Instant::now());
+    app
+}
+
+pub(super) fn app_with_folder_trust(
+    dir: &std::path::Path,
+    workspace: Option<std::path::PathBuf>,
+) -> App {
+    let mut app = app(dir);
+    app.options.check_folder_trust = true;
+    app.options.workspace = workspace;
     app
 }
 pub(super) fn advance_past_approval_window(app: &mut App) {

@@ -1,12 +1,13 @@
 use super::Clock;
 use super::jobs::Message;
 use crate::{
-    input::{self, Form, OnboardingForm},
+    input::{self, FolderTrustWizard, Form},
     options::Options,
     transcript::{Rows, Transcript},
 };
 use ratatui_textarea::TextArea;
 use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -630,8 +631,10 @@ pub(crate) struct App {
     pub entries: Vec<Entry>,
     pub selected: usize,
     pub form: Option<Form>,
-    pub onboarding: Option<OnboardingForm>,
-    pub onboarding_dismissed: bool,
+    pub folder_trust: Option<FolderTrustWizard>,
+    pub(crate) trusted_workspace: Option<PathBuf>,
+    pub(crate) trusted_workspace_raw: Option<PathBuf>,
+    pub(crate) initial_cwd: Option<PathBuf>,
     pub confirmation: Option<Confirmation>,
     pub panel: Option<super::commands::Panel>,
     pub viewport_height: usize,
@@ -713,8 +716,10 @@ impl App {
             entries: Vec::new(),
             selected: 0,
             form: None,
-            onboarding: None,
-            onboarding_dismissed: false,
+            folder_trust: None,
+            trusted_workspace: None,
+            trusted_workspace_raw: None,
+            initial_cwd: std::env::current_dir().ok(),
             confirmation: None,
             panel: None,
             viewport_height: 12,
@@ -810,7 +815,7 @@ impl App {
         let approval_visible = pending
             && self.panel.is_none()
             && self.form.is_none()
-            && self.onboarding.is_none()
+            && self.folder_trust.is_none()
             && self.confirmation.is_none();
         let minimum_height = if approval_visible { 19 } else { 12 };
         self.too_small = width < 30 || self.view_height < minimum_height;
@@ -836,7 +841,7 @@ impl App {
     pub(crate) fn current_visible_approval(&self) -> Option<VisibleApproval> {
         if self.panel.is_some()
             || self.form.is_some()
-            || self.onboarding.is_some()
+            || self.folder_trust.is_some()
             || self.confirmation.is_some()
             || self.quitting
         {
@@ -886,7 +891,7 @@ impl App {
     pub(super) fn current_visible_workspace_trust(&self) -> Option<VisibleWorkspaceTrust> {
         if self.panel.is_some()
             || self.form.is_some()
-            || self.onboarding.is_some()
+            || self.folder_trust.is_some()
             || self.confirmation.is_some()
             || self.quitting
         {
@@ -952,12 +957,45 @@ impl App {
             _ => false,
         }
     }
+    /// Mark the UI dirty when the folder-trust guard expires so the hint is redrawn.
+    pub(crate) fn update_folder_trust_guard(&mut self) {
+        if let Some(wizard) = self.folder_trust.as_mut()
+            && wizard.guard.check_expired(self.clock.now())
+        {
+            self.dirty = true;
+        }
+    }
+    /// Return whether the folder-trust confirmation guard is currently active.
+    pub(crate) fn is_folder_trust_guarded(&self) -> bool {
+        self.folder_trust
+            .as_ref()
+            .is_some_and(|wizard| wizard.is_guarded(self.clock.now()))
+    }
+    /// Resolve the startup target workspace following CLI -> preset -> cwd precedence.
+    pub(crate) fn startup_workspace_root(&self) -> Option<PathBuf> {
+        self.options
+            .workspace
+            .clone()
+            .or_else(|| {
+                self.options
+                    .preset
+                    .as_ref()
+                    .and_then(|p| p.workspace_root.clone())
+            })
+            .or_else(|| self.initial_cwd.clone())
+    }
+    /// Return whether a displayed workspace path matches the session-checked trusted workspace.
+    pub(crate) fn is_displayed_workspace_trusted(&self, ws: &Path) -> bool {
+        self.trusted_workspace.as_ref().is_some_and(|t| t == ws)
+            || self.trusted_workspace_raw.as_ref().is_some_and(|t| t == ws)
+    }
     #[cfg(test)]
     pub(crate) fn advance_clock(&mut self, duration: Duration) {
         self.clock.advance(duration);
         self.update_approval_guard();
         self.update_workspace_trust_guard();
         self.update_repair_guard();
+        self.update_folder_trust_guard();
         self.update_startup_guard();
     }
 }

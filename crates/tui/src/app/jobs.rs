@@ -58,6 +58,12 @@ pub(super) enum AgentMaterialsError {
     Failed(String),
 }
 
+pub(super) enum FolderTrustCheck {
+    Trusted(std::path::PathBuf),
+    Untrusted(Option<String>),
+    InvalidWorkspace(String),
+}
+
 pub(super) enum Message {
     RepairInspected(
         Key,
@@ -128,6 +134,12 @@ pub(super) enum Message {
     StartupInstalled(Result<(), String>),
     /// `/doctor` diagnostic lines finished loading.
     DoctorLoaded(Vec<String>),
+    /// Pre-session folder-trust check finished.
+    FolderTrustChecked(std::path::PathBuf, FolderTrustCheck),
+    /// Persisting folder-level trust from [`FolderTrustWizard`] finished.
+    FolderTrustSaved(std::path::PathBuf, Result<std::path::PathBuf, String>),
+    /// `/trust` status lines finished loading.
+    TrustStatusLoaded(Vec<String>),
     JobPanicked(Option<Key>, JobKind, String),
 }
 
@@ -160,6 +172,12 @@ pub(super) enum JobKind {
     StartupInstall,
     /// Read-only `/doctor` diagnostics.
     Doctor,
+    /// Pre-session folder-trust lookup.
+    CheckFolderTrust,
+    /// Persisting folder-level trust from the startup wizard.
+    TrustWorkspaceFolder,
+    /// Read-only `/trust` status lookup.
+    LoadTrustStatus,
 }
 
 pub(super) fn save_label(save: &SaveStatus) -> String {
@@ -363,7 +381,7 @@ impl App {
                         let can_route_list = !self.quitting
                             && self.confirmation.is_none()
                             && self.form.is_none()
-                            && self.onboarding.is_none();
+                            && self.folder_trust.is_none();
 
                         if !can_route_list {
                             // Never open sessions or install panels behind an active modal or shutdown.
@@ -456,26 +474,23 @@ impl App {
                                     });
                                 }
                                 crate::options::StartupAction::Default => {
-                                    if self.entries.is_empty()
-                                        && self.options.auto_onboard
-                                        && !self.onboarding_dismissed
-                                        && self.onboarding.is_none()
-                                        && self.form.is_none()
-                                        && self.panel.is_none()
-                                        && self.confirmation.is_none()
-                                        && !self.quitting
+                                    if !self
+                                        .entries
+                                        .iter()
+                                        .any(|e| e.session.is_some() || e.busy.is_some())
                                     {
-                                        self.onboarding =
-                                            Some(crate::input::OnboardingForm::new(
-                                                self.options
-                                                    .workspace
-                                                    .clone()
-                                                    .or_else(|| std::env::current_dir().ok()),
-                                            ));
-                                    } else if !self.options.no_config
-                                        && self.options.preset.is_some()
-                                    {
-                                        self.create_default_startup_session();
+                                        if self.options.check_folder_trust
+                                            && self.panel.is_none()
+                                            && self.folder_trust.is_none()
+                                            && self.form.is_none()
+                                            && self.confirmation.is_none()
+                                            && !self.quitting
+                                            && let Some(workspace) = self.startup_workspace_root()
+                                        {
+                                            self.check_folder_trust(workspace);
+                                        } else {
+                                            self.finish_startup_after_trust(None);
+                                        }
                                     }
                                 }
                             }
@@ -939,6 +954,78 @@ impl App {
                     *scroll = 0;
                 }
             }
+            Message::FolderTrustChecked(workspace, check) => {
+                if self.quitting
+                    || self.confirmation.is_some()
+                    || self.form.is_some()
+                    || self.panel.is_some()
+                    || self.folder_trust.is_some()
+                {
+                    return;
+                }
+                match check {
+                    FolderTrustCheck::Trusted(canonical) => {
+                        self.trusted_workspace = Some(canonical);
+                        self.trusted_workspace_raw = Some(workspace);
+                        self.finish_startup_after_trust(None);
+                    }
+                    FolderTrustCheck::Untrusted(read_error) => {
+                        let mut wizard =
+                            crate::input::FolderTrustWizard::new(workspace, self.clock.now());
+                        if let Some(err) = read_error {
+                            wizard.error = tars_core::permission::escape_untrusted_text(&err);
+                        }
+                        self.folder_trust = Some(wizard);
+                        self.refresh_size_flags();
+                        self.update_approval_guard();
+                        self.update_workspace_trust_guard();
+                    }
+                    FolderTrustCheck::InvalidWorkspace(reason) => {
+                        self.finish_startup_after_trust(Some(reason));
+                    }
+                }
+            }
+            Message::FolderTrustSaved(workspace, result) => match result {
+                Ok(canonical) => {
+                    self.folder_trust = None;
+                    self.trusted_workspace = Some(canonical);
+                    self.trusted_workspace_raw = Some(workspace);
+                    self.refresh_size_flags();
+                    self.update_approval_guard();
+                    self.update_workspace_trust_guard();
+                    if !self.quitting
+                        && self.confirmation.is_none()
+                        && self.form.is_none()
+                        && self.panel.is_none()
+                    {
+                        self.finish_startup_after_trust(None);
+                    }
+                }
+                Err(error) => {
+                    if let Some(wizard) = self.folder_trust.as_mut() {
+                        wizard.saving = false;
+                        wizard.error = tars_core::permission::escape_untrusted_text(&error);
+                    } else {
+                        self.notice = format!(
+                            "Failed to trust workspace folder: {}",
+                            tars_core::permission::escape_untrusted_text(&error)
+                        );
+                    }
+                }
+            },
+            Message::TrustStatusLoaded(lines) => {
+                if let Some(super::commands::Panel::Info {
+                    title,
+                    lines: panel_lines,
+                    scroll,
+                    ..
+                }) = &mut self.panel
+                    && title == super::commands::TRUST_PANEL_TITLE
+                {
+                    *panel_lines = lines;
+                    *scroll = 0;
+                }
+            }
             Message::AgentOperationCancelled(key, agent_name, result) => {
                 if let Some(entry) = self.entry_mut(&key) {
                     let escaped = tars_core::permission::escape_untrusted_text(&agent_name);
@@ -1164,6 +1251,34 @@ impl App {
                     self.notice = message;
                     return;
                 }
+                if kind == JobKind::LoadTrustStatus {
+                    if let Some(super::commands::Panel::Info {
+                        title,
+                        lines: panel_lines,
+                        scroll,
+                        ..
+                    }) = &mut self.panel
+                        && title == super::commands::TRUST_PANEL_TITLE
+                    {
+                        *panel_lines = vec![message.clone()];
+                        *scroll = 0;
+                    }
+                    self.notice = message;
+                    return;
+                }
+                if kind == JobKind::CheckFolderTrust {
+                    self.notice = message;
+                    return;
+                }
+                if kind == JobKind::TrustWorkspaceFolder {
+                    if let Some(wizard) = self.folder_trust.as_mut() {
+                        wizard.saving = false;
+                        wizard.error = message.clone();
+                    } else {
+                        self.notice = message;
+                    }
+                    return;
+                }
                 let Some(key) = key else {
                     self.notice = message;
                     return;
@@ -1181,7 +1296,12 @@ impl App {
                     };
                     match kind {
                         JobKind::List => unreachable!("handled before the entry lookup"),
-                        JobKind::Startup | JobKind::StartupInstall | JobKind::Doctor => {
+                        JobKind::Startup
+                        | JobKind::StartupInstall
+                        | JobKind::Doctor
+                        | JobKind::CheckFolderTrust
+                        | JobKind::TrustWorkspaceFolder
+                        | JobKind::LoadTrustStatus => {
                             unreachable!("handled before the entry lookup")
                         }
                         JobKind::Materials | JobKind::AgentMaterials => {

@@ -64,9 +64,12 @@ fn write_profiles_config(dir: &Path, ws: &Path, unset_cred: bool) -> PathBuf {
 }
 
 fn app_from_args(args: &[&str]) -> App {
-    let opts = options::parse(args.iter().map(|s| (*s).to_owned()))
+    let mut opts = options::parse(args.iter().map(|s| (*s).to_owned()))
         .unwrap()
         .unwrap();
+    // Existing CLI-flag alignment tests exercise post-trust startup/session flows;
+    // folder-trust gating is tested explicitly with `check_folder_trust = true`.
+    opts.check_folder_trust = false;
     let mut app = App::new(opts);
     app.clock = Clock::manual(std::time::Instant::now());
     app

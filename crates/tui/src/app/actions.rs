@@ -109,7 +109,7 @@ impl App {
     pub(super) fn create_default_startup_session(&mut self) {
         if self.quitting
             || self.confirmation.is_some()
-            || self.onboarding.is_some()
+            || self.folder_trust.is_some()
             || self.form.is_some()
             || self.panel.is_some()
             || !self.capacity()
@@ -163,7 +163,7 @@ impl App {
     pub(super) fn clear_command(&mut self) {
         if self.quitting
             || self.confirmation.is_some()
-            || self.onboarding.is_some()
+            || self.folder_trust.is_some()
             || self.form.is_some()
             || !self.capacity()
         {
@@ -237,7 +237,7 @@ impl App {
     pub(super) fn switch_model_profile(&mut self, profile_name: &str) {
         if self.quitting
             || self.confirmation.is_some()
-            || self.onboarding.is_some()
+            || self.folder_trust.is_some()
             || self.form.is_some()
             || !self.capacity()
         {
@@ -678,121 +678,184 @@ impl App {
         }
     }
 
-    pub(super) fn submit_onboarding(&mut self) {
+    pub(super) fn check_folder_trust(&mut self, workspace: PathBuf) {
         if !self.capacity() {
             return;
         }
-        let Some(onboarding) = self.onboarding.as_mut() else {
-            return;
-        };
-        let (input, workspace_root) = match onboarding.validate_and_build() {
-            Ok(pair) => pair,
-            Err(error) => {
-                onboarding.error = error;
-                return;
-            }
-        };
-        let Some(target_path) = self.options.onboarding_config_path.clone() else {
-            onboarding.error =
-                "Unable to determine configuration path; pass --config or set TARS_HOME/HOME"
-                    .into();
-            return;
-        };
-        let new_config = match tars_core::config::write_initial_config(&target_path, &input) {
-            Ok(config) => Arc::new(config),
-            Err(error) => {
-                onboarding.error = error.to_string();
-                return;
-            }
-        };
-        let preset = match (
-            new_config
-                .preset(self.options.profile.as_deref())
-                .ok()
-                .flatten(),
-            self.options.code_execution_enabled,
-        ) {
-            (Some(_), Some(_)) => new_config
-                .definition(
-                    self.options.profile.as_deref(),
-                    tars_core::config::DefinitionOverrides {
-                        code_execution_enabled: self.options.code_execution_enabled,
-                        ..Default::default()
-                    },
-                )
-                .ok(),
-            (preset, _) => preset,
-        };
-        let user_rules_path = new_config
-            .config_dir()
-            .map(|dir| dir.join("permissions.toml"));
-        let mut host = tars_core::application::SessionHost::new(Some(self.options.store.clone()))
-            .with_user_rules_path(user_rules_path.clone())
-            .with_model_profiles(new_config.model_profiles());
-        if let Some(external_tools) = &self.external_tools {
-            host = host.with_external_tools(external_tools.clone());
-        }
-        self.options.config = new_config;
-        self.options.config_path = Some(target_path.clone());
-        self.options.preset = preset;
-        self.user_rules_path = user_rules_path;
-        self.host = host;
-
-        let tools = workspace_root.as_ref().map(|_| {
-            self.sandbox_status
-                .as_ref()
-                .map(|status| tars_core::config::default_tools_for_sandbox(status.is_available()))
-                .unwrap_or_else(tars_core::config::default_tools_for_current_platform)
+        let host = self.host.clone();
+        let ws = workspace.clone();
+        self.spawn_job(None, super::jobs::JobKind::CheckFolderTrust, async move {
+            let meta_check = super::jobs::blocking({
+                let ws = ws.clone();
+                move || match std::fs::metadata(&ws) {
+                    Ok(meta) if meta.is_dir() => Ok(std::fs::canonicalize(&ws).unwrap_or(ws)),
+                    Ok(_) => Err(format!("not a directory: {}", ws.display())),
+                    Err(err) => Err(format!("{}: {err}", ws.display())),
+                }
+            })
+            .await;
+            let check = match meta_check {
+                Ok(Ok(canonical)) => match host.is_workspace_folder_trusted(&canonical).await {
+                    Ok(true) => super::jobs::FolderTrustCheck::Trusted(canonical),
+                    Ok(false) => super::jobs::FolderTrustCheck::Untrusted(None),
+                    Err(err) => super::jobs::FolderTrustCheck::Untrusted(Some(err.to_string())),
+                },
+                Ok(Err(reason)) => super::jobs::FolderTrustCheck::InvalidWorkspace(reason),
+                Err(err) => super::jobs::FolderTrustCheck::InvalidWorkspace(err.to_string()),
+            };
+            Message::FolderTrustChecked(workspace, check)
         });
-        let definition = match self.options.config.definition(
-            self.options.profile.as_deref(),
-            tars_core::config::DefinitionOverrides {
-                workspace_root,
-                tools,
-                code_execution_enabled: self.options.code_execution_enabled,
-                ..Default::default()
+    }
+
+    pub(super) fn finish_startup_after_trust(&mut self, invalid_workspace: Option<String>) {
+        if !self.options.no_config && self.options.preset.is_some() {
+            self.create_default_startup_session();
+        } else if let Some(reason) = invalid_workspace {
+            self.notice = format!(
+                "Invalid workspace: {} · run /new (F2) or pass --workspace",
+                crate::transcript::display_single_line(&reason)
+            );
+        } else {
+            self.notice =
+                "No model configured · run /new (F2) or configure ~/.tars/config.toml".into();
+        }
+    }
+
+    pub(super) fn confirm_folder_trust(&mut self) {
+        if !self.capacity() {
+            return;
+        }
+        let Some(wizard) = self.folder_trust.as_mut() else {
+            return;
+        };
+        if wizard.saving || wizard.is_guarded(self.clock.now()) {
+            return;
+        }
+        wizard.saving = true;
+        wizard.error.clear();
+        let workspace = wizard.workspace_root.clone();
+        let host = self.host.clone();
+        self.spawn_job(
+            None,
+            super::jobs::JobKind::TrustWorkspaceFolder,
+            async move {
+                let result = match host.trust_workspace_folder(&workspace).await {
+                    Ok(()) => {
+                        let ws_for_canon = workspace.clone();
+                        let canonical =
+                            super::jobs::blocking(move || std::fs::canonicalize(&ws_for_canon))
+                                .await
+                                .ok()
+                                .and_then(Result::ok)
+                                .unwrap_or_else(|| workspace.clone());
+                        Ok(canonical)
+                    }
+                    Err(err) => Err(err.to_string()),
+                };
+                Message::FolderTrustSaved(workspace, result)
             },
-        ) {
-            Ok(definition) => definition,
-            Err(error) => {
-                self.onboarding = None;
-                self.onboarding_dismissed = true;
-                self.notice = format!(
-                    "Config saved to {}, but session creation failed: {error}",
-                    target_path.display()
-                );
-                return;
-            }
+        );
+    }
+
+    pub(super) fn show_trust_status(&mut self) {
+        let active_session = self
+            .entries
+            .get(self.selected)
+            .and_then(|entry| entry.session.as_ref());
+        let (workspace_root, rules_line, agents_line) = if let Some(session) = active_session {
+            let def = session.definition();
+            let report = session.open_report();
+            let rules_line = report.workspace_rules.file_path.as_ref().map(|path| {
+                let escaped =
+                    tars_core::permission::escape_untrusted_text(&path.display().to_string());
+                let status = if session.workspace_rules_trusted() {
+                    "Trusted (or not present)".to_owned()
+                } else {
+                    format!(
+                        "Not trusted ({} allow rule(s) pending)",
+                        report.workspace_rules.allow_rules.len()
+                    )
+                };
+                format!(".tars/permissions.toml ({escaped}): {status}")
+            });
+            let agents_line = report.workspace_agents.agents_dir.as_ref().map(|dir| {
+                let escaped_dir =
+                    tars_core::permission::escape_untrusted_text(&dir.display().to_string());
+                let status = if report.workspace_agents.trusted {
+                    "Trusted (or not present)".to_owned()
+                } else {
+                    let names: Vec<String> = report
+                        .workspace_agents
+                        .untrusted_agents
+                        .iter()
+                        .map(|n| tars_core::permission::escape_untrusted_text(n))
+                        .collect();
+                    format!(
+                        "Not trusted ({} pending: {})",
+                        names.len(),
+                        names.join(", ")
+                    )
+                };
+                format!(".tars/agents/*.md ({escaped_dir}): {status}")
+            });
+            (def.workspace_root, rules_line, agents_line)
+        } else {
+            let ws = self
+                .active_or_cli_workspace()
+                .or_else(|| self.startup_workspace_root())
+                .or_else(|| std::env::current_dir().ok());
+            (ws, None, None)
         };
 
-        let model = definition.model.clone();
-        let prompt_cache = definition.prompt_cache;
-        let code_execution = definition.code_execution;
-        let workspace_root = definition.workspace_root.clone();
-        let prepared = match PreparedCreate::prepare_persistent(definition, None) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                self.onboarding = None;
-                self.onboarding_dismissed = true;
-                self.notice = format!(
-                    "Config saved to {}, but session creation failed: {error}",
-                    target_path.display()
-                );
-                return;
-            }
+        let Some(workspace) = workspace_root else {
+            self.panel = Some(super::commands::Panel::Info {
+                title: super::commands::TRUST_PANEL_TITLE.into(),
+                kind: super::commands::InfoKind::Plain,
+                lines: vec![
+                    "Workspace: none (not bound to a folder)".into(),
+                    String::new(),
+                    "Run 'tars trust revoke' to revoke folder trust".into(),
+                ],
+                scroll: 0,
+            });
+            return;
         };
-        let mut entry = Entry::new(prepared.conversation_id().as_str().to_owned(), model);
-        entry.prompt_cache = prompt_cache;
-        entry.code_execution = code_execution;
-        entry.workspace_root = workspace_root;
-        entry.prepared = Some(prepared);
-        self.entries.push(entry);
-        self.scratch_editor = input::editor();
-        self.selected = self.entries.len() - 1;
-        self.onboarding = None;
-        self.onboarding_dismissed = true;
-        self.notice = format!("Config: {} · F2 new / F3 open", target_path.display());
-        self.open();
+
+        if !self.capacity() {
+            return;
+        }
+        self.panel = Some(super::commands::Panel::Info {
+            title: super::commands::TRUST_PANEL_TITLE.into(),
+            kind: super::commands::InfoKind::Plain,
+            lines: vec!["Loading workspace trust status...".into()],
+            scroll: 0,
+        });
+        let host = self.host.clone();
+        self.spawn_job(None, super::jobs::JobKind::LoadTrustStatus, async move {
+            let folder_status = match host.is_workspace_folder_trusted(&workspace).await {
+                Ok(true) => "Trusted".to_owned(),
+                Ok(false) => "Not trusted".to_owned(),
+                Err(err) => format!(
+                    "Error checking folder trust: {}",
+                    tars_core::permission::escape_untrusted_text(&err.to_string())
+                ),
+            };
+            let escaped_ws =
+                tars_core::permission::escape_untrusted_text(&workspace.display().to_string());
+            let mut lines = vec![
+                format!("Workspace: {escaped_ws}"),
+                format!("Folder trust (trusted_workspaces): {folder_status}"),
+            ];
+            if let Some(rules) = rules_line {
+                lines.push(rules);
+            }
+            if let Some(agents) = agents_line {
+                lines.push(agents);
+            }
+            lines.push(String::new());
+            lines.push("Run 'tars trust revoke' to revoke folder trust".into());
+            Message::TrustStatusLoaded(lines)
+        });
     }
 
     pub(super) fn run_doctor(&mut self) {
@@ -1643,6 +1706,7 @@ impl App {
         self.update_approval_guard();
         self.update_workspace_trust_guard();
         self.update_repair_guard();
+        self.update_folder_trust_guard();
         self.try_dequeue_ready();
         let animating = self.startup.is_none()
             && self
@@ -1893,7 +1957,7 @@ impl App {
             || self.confirmation.is_some()
             || self.panel.is_some()
             || self.form.is_some()
-            || self.onboarding.is_some()
+            || self.folder_trust.is_some()
             || self.jobs.len() >= super::state::MAX_JOBS
         {
             return;
@@ -2157,7 +2221,7 @@ impl App {
             || self.confirmation.is_some()
             || self.panel.is_some()
             || self.form.is_some()
-            || self.onboarding.is_some()
+            || self.folder_trust.is_some()
         {
             return;
         }
