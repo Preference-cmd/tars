@@ -21,6 +21,7 @@ pub(crate) struct Options {
     pub profile: Option<String>,
     pub preset: Option<SessionDefinition>,
     pub config_path: Option<PathBuf>,
+    pub credentials_path: Option<PathBuf>,
     pub workspace: Option<PathBuf>,
     pub code_execution_enabled: Option<bool>,
     pub no_config: bool,
@@ -184,6 +185,14 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         (preset, _) => preset,
     };
     let config_path = config.source().map(PathBuf::from);
+    let credentials_path = config
+        .config_dir()
+        .map(|dir| dir.join("credentials.toml"))
+        .or_else(|| {
+            (!no_config)
+                .then(tars_core::config::default_credentials_path)
+                .flatten()
+        });
     let store = store
         .or_else(|| config.store_dir().map(PathBuf::from))
         .or_else(|| (!no_config).then(default_store_dir).flatten())
@@ -197,6 +206,7 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
         profile,
         preset,
         config_path,
+        credentials_path,
         workspace,
         code_execution_enabled,
         no_config,

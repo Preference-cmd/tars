@@ -84,6 +84,7 @@ api_key_env = "TARS_DOCTOR_UNSET_KEY_999999"
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
 
     let cred_item = ok_report
@@ -115,6 +116,7 @@ api_key_env = "TARS_DOCTOR_UNSET_KEY_999999"
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
 
     let unset_item = fail_report
@@ -156,6 +158,7 @@ fn config_missing_valid_and_anthropic_without_max_tokens() {
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
     let cfg_item = missing_report
         .items
@@ -194,6 +197,7 @@ api_key_env = "PATH"
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
 
     let loaded_item = report
@@ -234,6 +238,7 @@ fn storage_check_is_read_only_verifies_sqlite_and_detects_legacy_sessions() {
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
     assert!(!absent_store.exists(), "doctor must not create store_dir");
     assert!(
@@ -271,6 +276,7 @@ fn storage_check_is_read_only_verifies_sqlite_and_detects_legacy_sessions() {
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
     let sqlite_item = populated_report
         .items
@@ -309,6 +315,7 @@ fn storage_check_is_read_only_verifies_sqlite_and_detects_legacy_sessions() {
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
     let corrupt_item = corrupt_report
         .items
@@ -344,6 +351,7 @@ fn invalid_permissions_toml_fails_without_echoing_rule_values() {
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: Some(&bad_rules),
+        credentials_path: None,
     });
 
     let perm_item = report
@@ -431,6 +439,7 @@ mcp = ["present", "missing"]
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
 
     assert!(
@@ -482,6 +491,7 @@ fn sandbox_tool_warning_and_format_lines_summary() {
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
 
     let ws_warn = report
@@ -548,6 +558,7 @@ fn sqlite_immutable_read_only_creates_no_wal_or_shm_and_handles_special_uri_char
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
 
     let sqlite_item = report
@@ -606,6 +617,7 @@ fn sqlite_check_succeeds_on_read_only_store_dir_and_db() {
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
 
     let sqlite_item = report
@@ -660,6 +672,7 @@ fn storage_check_fails_when_db_metadata_is_unreadable() {
         sandbox: Some(&sandbox),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
 
     let sqlite_item = report
@@ -747,6 +760,7 @@ fn doctor_gives_actionable_linux_bwrap_and_auto_rg_hints() {
         sandbox: Some(&missing_bwrap),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
     let sb_missing = report_missing
         .items
@@ -794,6 +808,7 @@ fn doctor_gives_actionable_linux_bwrap_and_auto_rg_hints() {
         sandbox: Some(&userns_bwrap),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
     let sb_userns = report_userns
         .items
@@ -826,6 +841,7 @@ fn doctor_gives_actionable_linux_bwrap_and_auto_rg_hints() {
         sandbox: Some(&generic_bwrap),
         external_tools: Some(&ext),
         user_rules_path: None,
+        credentials_path: None,
     });
     let sb_generic = report_generic
         .items
@@ -840,4 +856,253 @@ fn doctor_gives_actionable_linux_bwrap_and_auto_rg_hints() {
         "{:?}",
         sb_generic.hint
     );
+}
+
+#[test]
+fn doctor_checks_credentials_store_health_permissions_symlinks_and_no_config() {
+    use crate::config::CredentialsStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.toml");
+    let creds_path = dir.path().join("credentials.toml");
+    let store_dir = dir.path().join("data");
+    let ext = unavailable_external_tools(dir.path());
+    let sandbox = available_sandbox();
+
+    write_file(
+        &cfg_path,
+        r#"
+version = 1
+store = "data"
+recovery_dir = "."
+default_profile = "work"
+
+[profiles.work]
+provider = "openai-responses"
+model = "gpt-5.4"
+
+[profiles.missing_key]
+provider = "openai-chat"
+model = "gpt-4o"
+
+[profiles.env_prof]
+provider = "openai-chat"
+model = "gpt-4o"
+api_key_env = "PATH"
+"#,
+    );
+    let config = Config::load(ConfigSource::File(cfg_path.clone())).unwrap();
+    let secret = "sk-doctor-store-secret-998877";
+    CredentialsStore::set(&creds_path, "work", secret).unwrap();
+
+    // 1. Healthy 0600 store + matching Store("work") -> Ok and zero secret echo.
+    let ok_report = run_diagnostics(&DoctorInput {
+        version: "0.2.0-test",
+        config: &config,
+        config_path: Some(&cfg_path),
+        config_disabled: false,
+        profile: Some("work"),
+        store_dir: &store_dir,
+        recovery_dir: dir.path(),
+        workspace_root: None,
+        active_tools: None,
+        sandbox: Some(&sandbox),
+        external_tools: Some(&ext),
+        user_rules_path: None,
+        credentials_path: Some(&creds_path),
+    });
+    let store_item = ok_report
+        .items
+        .iter()
+        .find(|i| i.category == "credentials" && i.label == "Credentials store")
+        .unwrap();
+    assert_eq!(store_item.status, DoctorStatus::Ok);
+    let key_item = ok_report
+        .items
+        .iter()
+        .find(|i| i.category == "credentials" && i.label == "Store work")
+        .unwrap();
+    assert_eq!(key_item.status, DoctorStatus::Ok);
+    assert!(!ok_report.format_lines().join("\n").contains(secret));
+
+    // 2. Missing key in healthy store -> Fail with `tars auth set missing_key` hint.
+    let missing_key_report = run_diagnostics(&DoctorInput {
+        version: "0.2.0-test",
+        config: &config,
+        config_path: Some(&cfg_path),
+        config_disabled: false,
+        profile: Some("missing_key"),
+        store_dir: &store_dir,
+        recovery_dir: dir.path(),
+        workspace_root: None,
+        active_tools: None,
+        sandbox: Some(&sandbox),
+        external_tools: Some(&ext),
+        user_rules_path: None,
+        credentials_path: Some(&creds_path),
+    });
+    let missing_item = missing_key_report
+        .items
+        .iter()
+        .find(|i| i.category == "credentials" && i.label == "Store missing_key")
+        .unwrap();
+    assert_eq!(missing_item.status, DoctorStatus::Fail);
+    assert!(
+        missing_item
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.contains("tars auth set missing_key"))
+    );
+
+    // 3. --no-config with Store profile -> Fail with `--api-key-env` hint.
+    let disabled_store_report = run_diagnostics(&DoctorInput {
+        version: "0.2.0-test",
+        config: &config,
+        config_path: None,
+        config_disabled: true,
+        profile: Some("work"),
+        store_dir: &store_dir,
+        recovery_dir: dir.path(),
+        workspace_root: None,
+        active_tools: None,
+        sandbox: Some(&sandbox),
+        external_tools: Some(&ext),
+        user_rules_path: None,
+        credentials_path: None,
+    });
+    let disabled_item = disabled_store_report
+        .items
+        .iter()
+        .find(|i| i.category == "credentials" && i.label == "Credentials store")
+        .unwrap();
+    assert_eq!(disabled_item.status, DoctorStatus::Fail);
+    assert!(
+        disabled_item
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.contains("--api-key-env"))
+    );
+
+    // 4. --no-config with no profile -> Ok ("disabled (--no-config)").
+    let empty_cfg = Config::load(ConfigSource::Disabled).unwrap();
+    let disabled_no_profile = run_diagnostics(&DoctorInput {
+        version: "0.2.0-test",
+        config: &empty_cfg,
+        config_path: None,
+        config_disabled: true,
+        profile: None,
+        store_dir: &store_dir,
+        recovery_dir: dir.path(),
+        workspace_root: None,
+        active_tools: None,
+        sandbox: Some(&sandbox),
+        external_tools: Some(&ext),
+        user_rules_path: None,
+        credentials_path: None,
+    });
+    let disabled_ok = disabled_no_profile
+        .items
+        .iter()
+        .find(|i| i.category == "credentials" && i.label == "Credentials store")
+        .unwrap();
+    assert_eq!(disabled_ok.status, DoctorStatus::Ok);
+
+    // 5. Missing credentials.toml for Store profile -> Fail with `tars auth set work`.
+    let absent_creds = dir.path().join("missing-credentials.toml");
+    let absent_report = run_diagnostics(&DoctorInput {
+        version: "0.2.0-test",
+        config: &config,
+        config_path: Some(&cfg_path),
+        config_disabled: false,
+        profile: Some("work"),
+        store_dir: &store_dir,
+        recovery_dir: dir.path(),
+        workspace_root: None,
+        active_tools: None,
+        sandbox: Some(&sandbox),
+        external_tools: Some(&ext),
+        user_rules_path: None,
+        credentials_path: Some(&absent_creds),
+    });
+    let absent_item = absent_report
+        .items
+        .iter()
+        .find(|i| i.category == "credentials" && i.label == "Credentials store")
+        .unwrap();
+    assert_eq!(absent_item.status, DoctorStatus::Fail);
+    assert!(
+        absent_item
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.contains("tars auth set work"))
+    );
+
+    // 6. Unix 0644 permissions & symlink fail closed with chmod 600 hint and zero secret echo,
+    //    even when the active profile uses Environment("PATH").
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let perm_report = run_diagnostics(&DoctorInput {
+            version: "0.2.0-test",
+            config: &config,
+            config_path: Some(&cfg_path),
+            config_disabled: false,
+            profile: Some("env_prof"),
+            store_dir: &store_dir,
+            recovery_dir: dir.path(),
+            workspace_root: None,
+            active_tools: None,
+            sandbox: Some(&sandbox),
+            external_tools: Some(&ext),
+            user_rules_path: None,
+            credentials_path: Some(&creds_path),
+        });
+        let perm_store_item = perm_report
+            .items
+            .iter()
+            .find(|i| i.category == "credentials" && i.label == "Credentials store")
+            .unwrap();
+        assert_eq!(perm_store_item.status, DoctorStatus::Fail);
+        assert!(
+            perm_store_item
+                .hint
+                .as_deref()
+                .is_some_and(|h| h.contains("chmod 600"))
+        );
+        let env_item = perm_report
+            .items
+            .iter()
+            .find(|i| i.category == "credentials" && i.label == "Env PATH")
+            .unwrap();
+        assert_eq!(env_item.status, DoctorStatus::Ok);
+        assert!(!perm_report.format_lines().join("\n").contains(secret));
+
+        fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let link_path = dir.path().join("link-credentials.toml");
+        symlink(&creds_path, &link_path).unwrap();
+        let link_report = run_diagnostics(&DoctorInput {
+            version: "0.2.0-test",
+            config: &config,
+            config_path: Some(&cfg_path),
+            config_disabled: false,
+            profile: Some("work"),
+            store_dir: &store_dir,
+            recovery_dir: dir.path(),
+            workspace_root: None,
+            active_tools: None,
+            sandbox: Some(&sandbox),
+            external_tools: Some(&ext),
+            user_rules_path: None,
+            credentials_path: Some(&link_path),
+        });
+        let link_item = link_report
+            .items
+            .iter()
+            .find(|i| i.category == "credentials" && i.label == "Credentials store")
+            .unwrap();
+        assert_eq!(link_item.status, DoctorStatus::Fail);
+        assert!(!link_report.format_lines().join("\n").contains(secret));
+    }
 }

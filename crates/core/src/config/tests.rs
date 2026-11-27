@@ -1824,3 +1824,157 @@ credential = "work.dotted"
         super::ConfigError::Definition(DefinitionError::InvalidCredentialReference)
     ));
 }
+
+#[test]
+fn omitting_credentials_resolves_to_store_never_global_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        r#"
+version = 1
+default_profile = "work"
+
+[profiles.work]
+provider = "openai-responses"
+model = "gpt-5.4"
+
+[profiles.claude]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+max_tokens = 4096
+"#,
+    )
+    .unwrap();
+    let config = Config::load(ConfigSource::File(cfg_path)).unwrap();
+
+    let work_def = config.preset(None).unwrap().unwrap();
+    assert_eq!(work_def.credential, CredentialRef::Store("work".into()));
+
+    let claude_def = config.preset(Some("claude")).unwrap().unwrap();
+    assert_eq!(claude_def.credential, CredentialRef::Store("claude".into()));
+
+    let profiles = config.model_profiles();
+    assert_eq!(
+        profiles["work"].credential,
+        CredentialRef::Store("work".into())
+    );
+    assert_eq!(
+        profiles["claude"].credential,
+        CredentialRef::Store("claude".into())
+    );
+
+    // Ad-hoc resolution without profile or credential override uses provider.as_str().
+    let disabled = Config::load(ConfigSource::Disabled).unwrap();
+    for provider in [
+        Provider::OpenAiChat,
+        Provider::OpenAiResponses,
+        Provider::Anthropic,
+    ] {
+        let adhoc = disabled
+            .definition(
+                None,
+                DefinitionOverrides {
+                    provider: Some(provider),
+                    model: Some("fixture-model".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            adhoc.credential,
+            CredentialRef::Store(provider.as_str().to_owned())
+        );
+    }
+
+    // Invalid profile name omitting both credential and api_key_env fails at load time.
+    let bad_profile_path = dir.path().join("bad-profile-name.toml");
+    std::fs::write(
+        &bad_profile_path,
+        r#"
+version = 1
+default_profile = "work.dotted"
+
+[profiles."work.dotted"]
+provider = "openai-chat"
+model = "gpt-4o"
+"#,
+    )
+    .unwrap();
+    let err = Config::load(ConfigSource::File(bad_profile_path)).unwrap_err();
+    assert!(matches!(
+        err,
+        super::ConfigError::Definition(DefinitionError::InvalidCredentialReference)
+    ));
+}
+
+#[test]
+fn override_credential_and_api_key_env_priority_and_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        r#"
+version = 1
+default_profile = "store_prof"
+
+[profiles.store_prof]
+provider = "openai-chat"
+model = "gpt-4o"
+credential = "work"
+
+[profiles.env_prof]
+provider = "openai-chat"
+model = "gpt-4o"
+api_key_env = "CI_KEY"
+"#,
+    )
+    .unwrap();
+    let config = Config::load(ConfigSource::File(cfg_path)).unwrap();
+
+    // Conflicting overrides are rejected.
+    let conflict = config
+        .definition(
+            None,
+            DefinitionOverrides {
+                credential: Some("work".into()),
+                api_key_env: Some("CI_KEY".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(
+        conflict,
+        super::ConfigError::ConflictingCredential
+    ));
+
+    // `--api-key-env` overrides profile `credential`.
+    let env_over_store = config
+        .definition(
+            Some("store_prof"),
+            DefinitionOverrides {
+                api_key_env: Some("CI_KEY".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        env_over_store.credential,
+        CredentialRef::Environment("CI_KEY".into())
+    );
+
+    // `--credential` overrides profile `api_key_env`.
+    let store_over_env = config
+        .definition(
+            Some("env_prof"),
+            DefinitionOverrides {
+                credential: Some("personal".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        store_over_env.credential,
+        CredentialRef::Store("personal".into())
+    );
+}

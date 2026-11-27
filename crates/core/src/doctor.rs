@@ -6,7 +6,7 @@
 //! untrusted MCP servers, or echoing credential values.
 
 use crate::agents::{AgentDiscovery, scan_workspace_agents};
-use crate::config::{Config, default_config_path};
+use crate::config::{Config, CredentialsError, CredentialsStore, default_config_path};
 use crate::definition::{
     CredentialRef, McpServerConfig, Provider, SessionDefinition, WorkspaceTool,
     valid_environment_name,
@@ -147,6 +147,8 @@ pub struct DoctorInput<'a> {
     pub external_tools: Option<&'a ExternalTools>,
     /// Optional path to user-level `permissions.toml`.
     pub user_rules_path: Option<&'a Path>,
+    /// Optional path to isolated `credentials.toml`.
+    pub credentials_path: Option<&'a Path>,
 }
 
 /// Run read-only, zero-network diagnostics across runtime, configuration,
@@ -405,6 +407,151 @@ fn check_credentials(
     resolved_profile: Option<&SessionDefinition>,
     items: &mut Vec<DoctorItem>,
 ) {
+    let profile_cred = resolved_profile.map(|def| &def.credential);
+    let mut insecure_store_path: Option<PathBuf> = None;
+    let loaded_store = match input.credentials_path {
+        None => {
+            match profile_cred {
+                Some(CredentialRef::Store(name)) => {
+                    let detail = if input.config_disabled {
+                        "disabled (--no-config); active profile requires credentials store"
+                    } else {
+                        "credentials.toml path could not be resolved"
+                    };
+                    push_item(
+                        items,
+                        "credentials",
+                        "Credentials store",
+                        DoctorStatus::Fail,
+                        detail,
+                        Some(format!(
+                            "omit --no-config and run `tars auth set {name}`, or pass --api-key-env <VAR>"
+                        )),
+                    );
+                }
+                Some(CredentialRef::Environment(_)) => {
+                    let detail = if input.config_disabled {
+                        "disabled (--no-config); active profile uses environment variable"
+                    } else {
+                        "not configured (active profile uses environment variable)"
+                    };
+                    push_item(
+                        items,
+                        "credentials",
+                        "Credentials store",
+                        DoctorStatus::Ok,
+                        detail,
+                        None,
+                    );
+                }
+                None => {
+                    if input.config_disabled {
+                        push_item(
+                            items,
+                            "credentials",
+                            "Credentials store",
+                            DoctorStatus::Ok,
+                            "disabled (--no-config)",
+                            None,
+                        );
+                    } else {
+                        push_item(
+                            items,
+                            "credentials",
+                            "Credentials store",
+                            DoctorStatus::Warn,
+                            "credentials.toml path could not be resolved",
+                            Some("set HOME/TARS_HOME or pass --api-key-env <VAR>".into()),
+                        );
+                    }
+                }
+            }
+            None
+        }
+        Some(path) => match CredentialsStore::load_optional(path) {
+            Ok(Some(store)) => {
+                let count = store.list_names().len();
+                let noun = if count == 1 { "entry" } else { "entries" };
+                push_item(
+                    items,
+                    "credentials",
+                    "Credentials store",
+                    DoctorStatus::Ok,
+                    format!("loaded {} ({count} {noun})", path.display()),
+                    None,
+                );
+                Some(store)
+            }
+            Ok(None) => {
+                match profile_cred {
+                    Some(CredentialRef::Store(name)) => {
+                        push_item(
+                            items,
+                            "credentials",
+                            "Credentials store",
+                            DoctorStatus::Fail,
+                            format!("not found at {}", path.display()),
+                            Some(format!("run `tars auth set {name}`")),
+                        );
+                    }
+                    Some(CredentialRef::Environment(_)) => {
+                        push_item(
+                            items,
+                            "credentials",
+                            "Credentials store",
+                            DoctorStatus::Ok,
+                            format!(
+                                "not created at {} (active profile uses environment variable)",
+                                path.display()
+                            ),
+                            None,
+                        );
+                    }
+                    None => {
+                        push_item(
+                            items,
+                            "credentials",
+                            "Credentials store",
+                            DoctorStatus::Warn,
+                            format!("not found at {}", path.display()),
+                            Some("run `tars auth set <name>` to store an API key".into()),
+                        );
+                    }
+                }
+                None
+            }
+            Err(CredentialsError::InsecurePermissions {
+                path: bad_path,
+                mode,
+            }) => {
+                push_item(
+                    items,
+                    "credentials",
+                    "Credentials store",
+                    DoctorStatus::Fail,
+                    format!("insecure permissions {mode:04o} on {}", bad_path.display()),
+                    Some(format!("run: chmod 600 {}", bad_path.display())),
+                );
+                insecure_store_path = Some(bad_path);
+                None
+            }
+            Err(err) => {
+                push_item(
+                    items,
+                    "credentials",
+                    "Credentials store",
+                    DoctorStatus::Fail,
+                    err.to_string(),
+                    Some(format!(
+                        "fix or recreate {} (e.g. `tars auth set <name>`)",
+                        path.display()
+                    )),
+                );
+                None
+            }
+        },
+    };
+
     if let Some(def) = resolved_profile {
         match &def.credential {
             CredentialRef::Environment(env_name) => {
@@ -428,16 +575,47 @@ fn check_credentials(
                     );
                 }
             }
-            CredentialRef::Store(name) => {
-                push_item(
-                    items,
-                    "credentials",
-                    format!("Store {name}"),
-                    DoctorStatus::Warn,
-                    "store check pending",
-                    Some(format!("tars auth set {name}")),
-                );
-            }
+            CredentialRef::Store(name) => match &loaded_store {
+                Some(store) if store.get(name).is_some() => {
+                    push_item(
+                        items,
+                        "credentials",
+                        format!("Store {name}"),
+                        DoctorStatus::Ok,
+                        "stored",
+                        None,
+                    );
+                }
+                Some(_) => {
+                    push_item(
+                        items,
+                        "credentials",
+                        format!("Store {name}"),
+                        DoctorStatus::Fail,
+                        "not found in credentials store",
+                        Some(format!("run `tars auth set {name}`")),
+                    );
+                }
+                None => {
+                    let hint = if let Some(bad_path) = &insecure_store_path {
+                        format!("run: chmod 600 {}", bad_path.display())
+                    } else if input.credentials_path.is_none() && input.config_disabled {
+                        format!(
+                            "omit --no-config and run `tars auth set {name}`, or pass --api-key-env <VAR>"
+                        )
+                    } else {
+                        format!("run `tars auth set {name}`")
+                    };
+                    push_item(
+                        items,
+                        "credentials",
+                        format!("Store {name}"),
+                        DoctorStatus::Fail,
+                        "unavailable (credentials store not loaded)",
+                        Some(hint),
+                    );
+                }
+            },
         }
     }
 

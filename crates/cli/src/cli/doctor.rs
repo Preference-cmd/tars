@@ -34,6 +34,7 @@ pub(super) struct DoctorOptions {
     recovery_dir: PathBuf,
     workspace: Option<PathBuf>,
     user_rules_path: Option<PathBuf>,
+    credentials_path: Option<PathBuf>,
     json: bool,
 }
 
@@ -107,6 +108,7 @@ impl DoctorOptions {
             .unwrap_or_else(|| PathBuf::from("."));
         let workspace = values.get("--workspace").map(PathBuf::from);
         let user_rules_path = config.config_dir().map(|dir| dir.join("permissions.toml"));
+        let credentials_path = configuration::credentials_path_for(&config, no_config);
 
         Ok(Self {
             config,
@@ -117,6 +119,7 @@ impl DoctorOptions {
             recovery_dir,
             workspace,
             user_rules_path,
+            credentials_path,
             json,
         })
     }
@@ -147,6 +150,7 @@ pub(super) fn run(options: DoctorOptions) -> ExitCode {
         sandbox: None,
         external_tools: None,
         user_rules_path: options.user_rules_path.as_deref(),
+        credentials_path: options.credentials_path.as_deref(),
     };
     let report = run_diagnostics(&input);
     let has_fail = report.fail_count() > 0;

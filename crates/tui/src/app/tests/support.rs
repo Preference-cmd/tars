@@ -25,6 +25,7 @@ pub(super) fn app(dir: &std::path::Path) -> App {
         profile: None,
         preset: None,
         config_path: None,
+        credentials_path: None,
         workspace: None,
         code_execution_enabled: None,
         no_config: false,

@@ -16,7 +16,7 @@ mod saving;
 mod supervisor;
 mod types;
 
-pub use crate::assembly::AssemblyError;
+pub use crate::assembly::{AssemblyError, CredentialUnavailableReason};
 pub use crate::mcp::McpStartError;
 pub use crate::store::{
     CommitStage, LegacyImportSummary, MAX_SESSION_TITLE_CHARS, StoreError, TrustedWorkspaceFolder,

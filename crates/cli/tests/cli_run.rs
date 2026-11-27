@@ -636,3 +636,87 @@ fn assembly_failure_and_context_window_exceeded_report_specific_reasons_and_hint
         String::from_utf8_lossy(&ctx_output.stderr)
     );
 }
+
+#[test]
+fn cli_run_uses_sibling_credentials_store_and_refuses_global_env_or_no_config() {
+    use tars_core::config::CredentialsStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.toml");
+    let creds_path = dir.path().join("credentials.toml");
+    let (endpoint, requests) = server(200, chat(), Duration::ZERO);
+
+    std::fs::write(
+        &cfg_path,
+        format!(
+            "version = 1\ndefault_profile = \"work\"\n[profiles.work]\nprovider = \"openai-chat\"\nmodel = \"fixture-model\"\nendpoint = \"{endpoint}\"\n"
+        ),
+    )
+    .unwrap();
+
+    // 1. Even with OPENAI_API_KEY set in env, missing credentials.toml fails closed (CR04).
+    let missing = Command::new(env!("CARGO_BIN_EXE_tars"))
+        .env_remove("TARS_CONFIG")
+        .env("TARS_HOME", dir.path())
+        .env("OPENAI_API_KEY", "collide-env-key")
+        .args(["run", "--config"])
+        .arg(&cfg_path)
+        .args(["--input", "hello"])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(1), "{missing:?}");
+    let missing_err = String::from_utf8_lossy(&missing.stderr);
+    assert!(missing_err.contains("API key"), "{missing_err}");
+    assert!(missing_err.contains("tars auth set work"), "{missing_err}");
+    assert!(requests.try_recv().is_err());
+
+    // 2. With 0600 sibling credentials.toml, `tars run` uses the stored secret and never echoes it.
+    let store_secret = "sk-cli-store-secret-xyz";
+    CredentialsStore::set(&creds_path, "work", store_secret).unwrap();
+    let ok = Command::new(env!("CARGO_BIN_EXE_tars"))
+        .env_remove("TARS_CONFIG")
+        .env("TARS_HOME", dir.path())
+        .env("OPENAI_API_KEY", "collide-env-key")
+        .args(["run", "--config"])
+        .arg(&cfg_path)
+        .args(["--input", "hello", "--json"])
+        .output()
+        .unwrap();
+    assert!(ok.status.success(), "{ok:?}");
+    assert!(!String::from_utf8_lossy(&ok.stdout).contains(store_secret));
+    assert!(!String::from_utf8_lossy(&ok.stderr).contains(store_secret));
+    let req = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        req.contains(&format!("authorization: Bearer {store_secret}")),
+        "{req}"
+    );
+
+    // 3. Under `--no-config`, even if TARS_HOME/credentials.toml has `openai-chat`,
+    //    `tars run` never reads global credentials.toml (CR06).
+    CredentialsStore::set(&creds_path, "openai-chat", store_secret).unwrap();
+    let no_cfg = Command::new(env!("CARGO_BIN_EXE_tars"))
+        .env_remove("TARS_CONFIG")
+        .env("TARS_HOME", dir.path())
+        .env("OPENAI_API_KEY", "collide-env-key")
+        .args([
+            "run",
+            "--no-config",
+            "--provider",
+            "openai-chat",
+            "--model",
+            "fixture-model",
+            "--endpoint",
+            "http://127.0.0.1:1/unused",
+            "--input",
+            "hello",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(no_cfg.status.code(), Some(1), "{no_cfg:?}");
+    let no_cfg_err = String::from_utf8_lossy(&no_cfg.stderr);
+    assert!(no_cfg_err.contains("API key"), "{no_cfg_err}");
+    assert!(
+        no_cfg_err.contains("tars auth set openai-chat"),
+        "{no_cfg_err}"
+    );
+}

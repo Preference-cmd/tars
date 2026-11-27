@@ -237,7 +237,7 @@ impl Config {
                 return Err(ConfigError::EmptyProfile);
             }
             model::resolve(
-                Some(profile),
+                Some((name.as_str(), profile)),
                 DefinitionOverrides::default(),
                 &self.mcp_servers,
                 &self.prelude_defaults,
@@ -404,11 +404,12 @@ impl Config {
         })
     }
 
-    fn selected(&self, name: Option<&str>) -> Result<Option<&Profile>, ConfigError> {
+    fn selected(&self, name: Option<&str>) -> Result<Option<(&str, &Profile)>, ConfigError> {
         name.or(self.default_profile.as_deref())
             .map(|name| {
                 self.profiles
-                    .get(name)
+                    .get_key_value(name)
+                    .map(|(key, profile)| (key.as_str(), profile))
                     .ok_or_else(|| ConfigError::UnknownProfile(name.to_owned()))
             })
             .transpose()
@@ -417,9 +418,9 @@ impl Config {
     /// Read a selected preset, or None when no default/explicit profile exists.
     pub fn preset(&self, name: Option<&str>) -> Result<Option<SessionDefinition>, ConfigError> {
         self.selected(name)?
-            .map(|profile| {
+            .map(|selected| {
                 model::resolve(
-                    Some(profile),
+                    Some(selected),
                     DefinitionOverrides::default(),
                     &self.mcp_servers,
                     &self.prelude_defaults,

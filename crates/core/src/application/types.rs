@@ -228,6 +228,10 @@ pub struct HostOptions {
     /// Defaults to `None` so hosts without explicit configuration stay isolated
     /// from the process user's `~/.tars/permissions.toml`.
     pub user_rules_path: Option<std::path::PathBuf>,
+    /// Optional path to the isolated credentials store file (`credentials.toml`).
+    /// Defaults to `None` so hosts without explicit configuration stay isolated
+    /// from the process user's `~/.tars/credentials.toml`.
+    pub credentials_path: Option<std::path::PathBuf>,
     /// Multi-agent coordinator limits and event scheduling configuration.
     pub coordinator: super::CoordinatorConfig,
     /// Authorized named model profiles selectable via `spawn_agent` `model.profile`.
@@ -240,6 +244,7 @@ impl Default for HostOptions {
             max_storage_operations: 4,
             connect_mcp_servers: true,
             user_rules_path: None,
+            credentials_path: None,
             coordinator: super::CoordinatorConfig::default(),
             model_profiles: std::collections::BTreeMap::new(),
         }

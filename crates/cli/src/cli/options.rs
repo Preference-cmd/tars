@@ -63,6 +63,7 @@ pub(super) struct RunOptions {
     pub external_tools: ExternalTools,
     pub model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
     pub user_rules_path: Option<PathBuf>,
+    pub credentials_path: Option<PathBuf>,
     pub input: Option<String>,
     pub stdin: bool,
     pub images: Vec<PathBuf>,
@@ -207,6 +208,7 @@ impl RunOptions {
         let external_tools = ExternalTools::resolve(&config);
         let model_profiles = config.model_profiles();
         let user_rules_path = config.config_dir().map(|dir| dir.join("permissions.toml"));
+        let credentials_path = configuration::credentials_path_for(&config, no_config);
         let mut definition = configuration::definition(
             &config,
             &values,
@@ -231,6 +233,7 @@ impl RunOptions {
             external_tools,
             model_profiles,
             user_rules_path,
+            credentials_path,
             input,
             stdin,
             images,

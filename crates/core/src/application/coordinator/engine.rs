@@ -3353,6 +3353,7 @@ impl SessionCoordinator {
             .with_approval_origin(ApprovalOrigin::new(agent_id, &agent_name, operation_id))
             .with_shared_approvals(self.approvals.clone())
             .with_storage(storage)
+            .with_credentials_path(self.host.credentials_path())
             .with_compaction(history, None, None)
             .with_usage(Some(usage))
             .with_command_rules(command_rules)

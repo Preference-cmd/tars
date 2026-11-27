@@ -16,15 +16,77 @@ use causa::providers::{
 use causa::runtime::{RetryPolicy, ToolExecutor, ToolExecutorOptions, TurnRunner};
 use std::sync::Arc;
 
+/// Sanitized reason a configured credential reference could not be resolved.
+///
+/// Never includes secret values or raw TOML snippets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CredentialUnavailableReason {
+    /// Configured environment variable is missing, non-Unicode, or blank.
+    Environment {
+        /// Environment variable name referenced by the definition.
+        variable: String,
+    },
+    /// Credentials store is disabled (for example under `--no-config`).
+    StoreDisabled {
+        /// Credential entry name referenced by the definition.
+        name: String,
+    },
+    /// Credential entry or `credentials.toml` file is missing or blank.
+    StoreMissing {
+        /// Credential entry name referenced by the definition.
+        name: String,
+    },
+    /// Credentials store file has insecure Unix permissions (`mode & 0o077 != 0`).
+    StoreInsecurePermissions {
+        /// Path to the credentials file with overly permissive mode.
+        path: std::path::PathBuf,
+    },
+    /// Credentials store file is a symlink, unreadable, or invalid.
+    StoreInvalid {
+        /// Credential entry name referenced by the definition.
+        name: String,
+        /// Sanitized failure summary without secret values or raw TOML.
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for CredentialUnavailableReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Environment { .. } => {
+                f.write_str("API key environment variable is missing, non-Unicode or blank")
+            }
+            Self::StoreDisabled { name } => write!(
+                f,
+                "API key credential '{name}' is unavailable because credentials store is disabled"
+            ),
+            Self::StoreMissing { name } => write!(
+                f,
+                "API key credential '{name}' was not found in credentials store"
+            ),
+            Self::StoreInsecurePermissions { path } => write!(
+                f,
+                "API key credentials file {:?} has insecure permissions; run: chmod 600 {}",
+                path,
+                path.display()
+            ),
+            Self::StoreInvalid { name, reason } => write!(
+                f,
+                "API key credential '{name}' cannot be loaded from credentials store: {reason}"
+            ),
+        }
+    }
+}
+
 /// Typed session assembly failure before any model call is made.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum AssemblyError {
     /// Session definition failed validation.
     #[error("invalid session definition: {0}")]
     Definition(#[from] DefinitionError),
-    /// Configured credential environment variable is missing, non-Unicode or blank.
-    #[error("credential environment variable is missing, non-Unicode or blank")]
-    CredentialUnavailable,
+    /// Configured credential reference could not be resolved from environment or store.
+    #[error("{0}")]
+    CredentialUnavailable(CredentialUnavailableReason),
     /// Workspace root could not be opened or validated.
     #[error("workspace resource unavailable: {0}")]
     Workspace(#[source] Arc<WorkspaceError>),
@@ -51,6 +113,8 @@ pub(crate) struct SessionResources {
     /// Sessions directory; the command tool must not read it and history lives
     /// beside the records.
     pub(crate) storage: Option<std::path::PathBuf>,
+    /// Isolated `credentials.toml` store path, or `None` when disabled/unconfigured.
+    pub(crate) credentials_path: Option<std::path::PathBuf>,
     /// Restored history index of a reopened session.
     pub(crate) history: Vec<crate::compact::HistoryRecordEntry>,
     /// Running automatic-compaction switch read from the record, if present.
@@ -102,6 +166,7 @@ impl SessionResources {
         Self {
             tools,
             storage: None,
+            credentials_path: None,
             history: Vec::new(),
             auto_compact: None,
             compact_threshold: None,
@@ -213,6 +278,15 @@ impl SessionResources {
         self
     }
 
+    /// Attach the isolated `credentials.toml` path used to resolve `CredentialRef::Store`.
+    pub(crate) fn with_credentials_path(
+        mut self,
+        credentials_path: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.credentials_path = credentials_path;
+        self
+    }
+
     /// Restore the reopened session's history index and running values.
     pub(crate) fn with_compaction(
         mut self,
@@ -281,6 +355,7 @@ pub(crate) fn assemble(
     let SessionResources {
         tools,
         storage,
+        credentials_path,
         history,
         auto_compact,
         compact_threshold,
@@ -414,8 +489,8 @@ pub(crate) fn assemble(
             let resolver: Option<Arc<dyn MediaResolver>> =
                 media_vault.map(|vault| vault as Arc<dyn MediaResolver>);
             (
-                definition_gateway(definition, resolver)?,
-                definition_gateway(definition, None)?,
+                definition_gateway(definition, credentials_path.as_deref(), resolver)?,
+                definition_gateway(definition, credentials_path.as_deref(), None)?,
             )
         }
     };
@@ -424,8 +499,8 @@ pub(crate) fn assemble(
         let resolver: Option<Arc<dyn MediaResolver>> =
             media_vault.map(|vault| vault as Arc<dyn MediaResolver>);
         (
-            definition_gateway(definition, resolver)?,
-            definition_gateway(definition, None)?,
+            definition_gateway(definition, credentials_path.as_deref(), resolver)?,
+            definition_gateway(definition, credentials_path.as_deref(), None)?,
         )
     };
     let usage_hub = Arc::new(match initial_usage {
@@ -816,18 +891,64 @@ fn wrap_retry_and_count(
     }
 }
 
-/// Protocol gateway for the definition, using its resolved credential.
-fn definition_gateway(
-    definition: &SessionDefinition,
-    media_resolver: Option<Arc<dyn MediaResolver>>,
-) -> Result<Arc<dyn ModelGateway>, AssemblyError> {
-    let api_key = match &definition.credential {
+/// Resolve an API key from either an explicit environment variable or the
+/// isolated `0600` `credentials.toml` store without echoing secret values.
+fn read_credential(
+    credential: &CredentialRef,
+    credentials_path: Option<&std::path::Path>,
+) -> Result<String, AssemblyError> {
+    match credential {
         CredentialRef::Environment(name) => std::env::var(name)
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .ok_or(AssemblyError::CredentialUnavailable)?,
-        CredentialRef::Store(_) => return Err(AssemblyError::CredentialUnavailable),
-    };
+            .ok_or_else(|| {
+                AssemblyError::CredentialUnavailable(CredentialUnavailableReason::Environment {
+                    variable: name.clone(),
+                })
+            }),
+        CredentialRef::Store(name) => {
+            let Some(path) = credentials_path else {
+                return Err(AssemblyError::CredentialUnavailable(
+                    CredentialUnavailableReason::StoreDisabled { name: name.clone() },
+                ));
+            };
+            let store = match crate::config::CredentialsStore::load_optional(path) {
+                Ok(Some(store)) => store,
+                Ok(None) => {
+                    return Err(AssemblyError::CredentialUnavailable(
+                        CredentialUnavailableReason::StoreMissing { name: name.clone() },
+                    ));
+                }
+                Err(crate::config::CredentialsError::InsecurePermissions { path, .. }) => {
+                    return Err(AssemblyError::CredentialUnavailable(
+                        CredentialUnavailableReason::StoreInsecurePermissions { path },
+                    ));
+                }
+                Err(err) => {
+                    return Err(AssemblyError::CredentialUnavailable(
+                        CredentialUnavailableReason::StoreInvalid {
+                            name: name.clone(),
+                            reason: err.to_string(),
+                        },
+                    ));
+                }
+            };
+            store.get(name).map(str::to_owned).ok_or_else(|| {
+                AssemblyError::CredentialUnavailable(CredentialUnavailableReason::StoreMissing {
+                    name: name.clone(),
+                })
+            })
+        }
+    }
+}
+
+/// Protocol gateway for the definition, using its resolved credential.
+fn definition_gateway(
+    definition: &SessionDefinition,
+    credentials_path: Option<&std::path::Path>,
+    media_resolver: Option<Arc<dyn MediaResolver>>,
+) -> Result<Arc<dyn ModelGateway>, AssemblyError> {
+    let api_key = read_credential(&definition.credential, credentials_path)?;
     Ok(protocol_gateway(
         definition.protocol_render_options()?,
         api_key,

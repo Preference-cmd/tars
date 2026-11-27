@@ -100,6 +100,17 @@ pub(super) fn string(values: &Values<'_>, key: &str) -> Result<Option<String>, C
         .transpose()
 }
 
+pub(super) fn credentials_path_for(config: &Config, no_config: bool) -> Option<PathBuf> {
+    config
+        .config_dir()
+        .map(|dir| dir.join("credentials.toml"))
+        .or_else(|| {
+            (!no_config)
+                .then(tars_core::config::default_credentials_path)
+                .flatten()
+        })
+}
+
 pub(super) fn load(values: &Values<'_>, disabled: bool) -> Result<Config, CliError> {
     let source = match (values.get("--config"), disabled) {
         (Some(_), true) => {
@@ -246,6 +257,7 @@ pub(super) fn definition(
             .transpose()?,
         model: string(values, "--model")?,
         endpoint: string(values, "--endpoint")?,
+        credential: None,
         api_key_env: string(values, "--api-key-env")?,
         timeout_secs: number("--timeout-secs")?,
         capacity: number("--capacity")?

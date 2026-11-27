@@ -1,4 +1,4 @@
-use crate::assembly::AssemblyError;
+use crate::assembly::{AssemblyError, CredentialUnavailableReason};
 use crate::mcp::McpStartError;
 use crate::session::{ModelFailure, WorkResult, WorkerFault};
 use causa::kernel::ControlError;
@@ -74,16 +74,57 @@ impl WorkOutcome {
                 model_failure: None,
                 detail: Some(definition_error.to_string()),
             },
-            AssemblyError::CredentialUnavailable => Self {
-                kind: "assembly_failed",
-                summary: "Credential environment variable is missing, non-Unicode or blank"
-                    .to_owned(),
-                hint: Some(
-                    "check the configured API key environment variable (e.g. OPENAI_API_KEY or ANTHROPIC_API_KEY)"
+            AssemblyError::CredentialUnavailable(reason) => match reason {
+                CredentialUnavailableReason::Environment { variable } => Self {
+                    kind: "assembly_failed",
+                    summary: "API key environment variable is missing, non-Unicode or blank"
                         .to_owned(),
-                ),
-                model_failure: None,
-                detail: None,
+                    hint: Some(format!(
+                        "set {variable} in the environment (export {variable}=...) or pass --api-key-env"
+                    )),
+                    model_failure: None,
+                    detail: None,
+                },
+                CredentialUnavailableReason::StoreDisabled { name } => Self {
+                    kind: "assembly_failed",
+                    summary: format!(
+                        "API key credential '{name}' is unavailable because credentials store is disabled"
+                    ),
+                    hint: Some(format!(
+                        "omit --no-config and run `tars auth set {name}`, or pass --api-key-env <VAR>"
+                    )),
+                    model_failure: None,
+                    detail: None,
+                },
+                CredentialUnavailableReason::StoreMissing { name } => Self {
+                    kind: "assembly_failed",
+                    summary: format!(
+                        "API key credential '{name}' was not found in credentials store"
+                    ),
+                    hint: Some(format!(
+                        "run `tars auth set {name}` or pass --api-key-env <VAR>"
+                    )),
+                    model_failure: None,
+                    detail: None,
+                },
+                CredentialUnavailableReason::StoreInsecurePermissions { path } => Self {
+                    kind: "assembly_failed",
+                    summary: "API key credentials file has insecure permissions".to_owned(),
+                    hint: Some(format!("run: chmod 600 {}", path.display())),
+                    model_failure: None,
+                    detail: None,
+                },
+                CredentialUnavailableReason::StoreInvalid { name, reason } => Self {
+                    kind: "assembly_failed",
+                    summary: format!(
+                        "API key credential '{name}' cannot be loaded from credentials store"
+                    ),
+                    hint: Some(format!(
+                        "fix or recreate credentials.toml with `tars auth set {name}`, or pass --api-key-env <VAR>"
+                    )),
+                    model_failure: None,
+                    detail: Some(reason.clone()),
+                },
             },
             AssemblyError::Workspace(workspace_error) => Self {
                 kind: "assembly_failed",
@@ -591,7 +632,52 @@ mod tests {
                 "definition",
                 true,
             ),
-            (AssemblyError::CredentialUnavailable, "API key", false),
+            (
+                AssemblyError::CredentialUnavailable(
+                    crate::assembly::CredentialUnavailableReason::Environment {
+                        variable: "MY_API_KEY".into(),
+                    },
+                ),
+                "API key",
+                false,
+            ),
+            (
+                AssemblyError::CredentialUnavailable(
+                    crate::assembly::CredentialUnavailableReason::StoreDisabled {
+                        name: "work".into(),
+                    },
+                ),
+                "tars auth set work",
+                false,
+            ),
+            (
+                AssemblyError::CredentialUnavailable(
+                    crate::assembly::CredentialUnavailableReason::StoreMissing {
+                        name: "work".into(),
+                    },
+                ),
+                "tars auth set work",
+                false,
+            ),
+            (
+                AssemblyError::CredentialUnavailable(
+                    crate::assembly::CredentialUnavailableReason::StoreInsecurePermissions {
+                        path: std::path::PathBuf::from("/tmp/credentials.toml"),
+                    },
+                ),
+                "chmod 600",
+                false,
+            ),
+            (
+                AssemblyError::CredentialUnavailable(
+                    crate::assembly::CredentialUnavailableReason::StoreInvalid {
+                        name: "work".into(),
+                        reason: "credentials file must not be a symlink".into(),
+                    },
+                ),
+                "tars auth set work",
+                true,
+            ),
             (
                 AssemblyError::Workspace(Arc::new(WorkspaceError::InvalidPath)),
                 "workspace",

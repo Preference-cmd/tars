@@ -79,7 +79,7 @@ fn missing_credentials_report_only_a_sanitized_resolution_error() {
         Ok(_) => panic!("missing credential accepted"),
         Err(error) => error,
     };
-    assert!(matches!(error, AssemblyError::CredentialUnavailable));
+    assert!(matches!(error, AssemblyError::CredentialUnavailable(_)));
     assert!(!error.to_string().contains("TARS_MISSING_"));
 }
 
@@ -500,4 +500,195 @@ async fn the_host_hands_resolved_external_tools_to_the_search_runtime() {
     )
     .await
     .unwrap();
+}
+
+#[test]
+fn store_credential_assembly_enforces_isolation_permissions_and_zero_secret_echo() {
+    use super::provider::CredentialUnavailableReason;
+    use crate::application::WorkOutcome;
+    use crate::config::CredentialsStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut def = definition();
+    def.credential = CredentialRef::Store("work".into());
+
+    // 1. Disabled (`credentials_path: None`, e.g. --no-config) fails closed even if env var exists.
+    let err = match assemble(
+        &def,
+        "id".into(),
+        Context::default(),
+        crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16)),
+        crate::permission::PermissionMode::Ask,
+        None,
+        true,
+    ) {
+        Ok(_) => panic!("store credential without path must fail closed"),
+        Err(err) => err,
+    };
+    assert!(matches!(
+        &err,
+        AssemblyError::CredentialUnavailable(CredentialUnavailableReason::StoreDisabled { name })
+            if name == "work"
+    ));
+    let outcome = WorkOutcome::from_assembly_error(&err);
+    assert!(outcome.summary.contains("API key"));
+    assert!(
+        outcome
+            .hint
+            .as_deref()
+            .is_some_and(|h| h.contains("tars auth set work") && h.contains("--api-key-env"))
+    );
+
+    // 2. Missing credentials.toml fails closed with StoreMissing.
+    let creds_path = dir.path().join("credentials.toml");
+    let err = match assemble(
+        &def,
+        "id".into(),
+        Context::default(),
+        crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16))
+            .with_credentials_path(Some(creds_path.clone())),
+        crate::permission::PermissionMode::Ask,
+        None,
+        true,
+    ) {
+        Ok(_) => panic!("missing credentials file must fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(
+        &err,
+        AssemblyError::CredentialUnavailable(CredentialUnavailableReason::StoreMissing { name })
+            if name == "work"
+    ));
+
+    // 3. Valid 0600 credentials.toml with another key -> StoreMissing for "work".
+    let secret = "sk-store-secret-do-not-leak-98765";
+    CredentialsStore::set(&creds_path, "other", secret).unwrap();
+    let err = match assemble(
+        &def,
+        "id".into(),
+        Context::default(),
+        crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16))
+            .with_credentials_path(Some(creds_path.clone())),
+        crate::permission::PermissionMode::Ask,
+        None,
+        true,
+    ) {
+        Ok(_) => panic!("missing key in store must fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(
+        &err,
+        AssemblyError::CredentialUnavailable(CredentialUnavailableReason::StoreMissing { name })
+            if name == "work"
+    ));
+
+    // 4. Valid 0600 credentials.toml with "work" -> succeeds!
+    CredentialsStore::set(&creds_path, "work", secret).unwrap();
+    assert!(
+        assemble(
+            &def,
+            "id".into(),
+            Context::default(),
+            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16))
+                .with_credentials_path(Some(creds_path.clone())),
+            crate::permission::PermissionMode::Ask,
+            None,
+            true,
+        )
+        .is_ok()
+    );
+
+    // 5. Corrupt TOML containing secret -> StoreInvalid, zero secret echo.
+    let corrupt_path = dir.path().join("corrupt.toml");
+    std::fs::write(
+        &corrupt_path,
+        format!("version = 1\n[credentials.work]\napi_key = \"{secret}\"\nbad_toml = ["),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&corrupt_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let err = match assemble(
+        &def,
+        "id".into(),
+        Context::default(),
+        crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16))
+            .with_credentials_path(Some(corrupt_path)),
+        crate::permission::PermissionMode::Ask,
+        None,
+        true,
+    ) {
+        Ok(_) => panic!("corrupt credentials.toml must fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(
+        &err,
+        AssemblyError::CredentialUnavailable(CredentialUnavailableReason::StoreInvalid { .. })
+    ));
+    let outcome = WorkOutcome::from_assembly_error(&err);
+    assert!(!err.to_string().contains(secret));
+    assert!(!format!("{err:?}").contains(secret));
+    assert!(!outcome.summary.contains(secret));
+    assert!(!outcome.detail.as_deref().unwrap_or("").contains(secret));
+
+    // 6. Unix 0644 permissions and symlink fail closed with zero secret echo.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = match assemble(
+            &def,
+            "id".into(),
+            Context::default(),
+            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16))
+                .with_credentials_path(Some(creds_path.clone())),
+            crate::permission::PermissionMode::Ask,
+            None,
+            true,
+        ) {
+            Ok(_) => panic!("0644 credentials.toml must fail closed"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            &err,
+            AssemblyError::CredentialUnavailable(
+                CredentialUnavailableReason::StoreInsecurePermissions { .. }
+            )
+        ));
+        let outcome = WorkOutcome::from_assembly_error(&err);
+        assert!(
+            outcome
+                .hint
+                .as_deref()
+                .is_some_and(|h| h.contains("chmod 600"))
+        );
+        assert!(!err.to_string().contains(secret));
+        assert!(!format!("{err:?}").contains(secret));
+
+        std::fs::set_permissions(&creds_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link_path = dir.path().join("link.toml");
+        symlink(&creds_path, &link_path).unwrap();
+        let err = match assemble(
+            &def,
+            "id".into(),
+            Context::default(),
+            crate::assembly::SessionResources::new(crate::tools::ToolResources::new(16))
+                .with_credentials_path(Some(link_path)),
+            crate::permission::PermissionMode::Ask,
+            None,
+            true,
+        ) {
+            Ok(_) => panic!("symlink credentials.toml must fail closed"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            &err,
+            AssemblyError::CredentialUnavailable(CredentialUnavailableReason::StoreInvalid { .. })
+        ));
+        assert!(!err.to_string().contains(secret));
+        assert!(!format!("{err:?}").contains(secret));
+    }
 }

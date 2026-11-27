@@ -263,6 +263,7 @@ impl Form {
                     provider: Some(provider),
                     model: Some(values[1].clone()),
                     endpoint: (!values[2].is_empty()).then(|| values[2].clone()),
+                    credential: None,
                     api_key_env: Some(values[3].clone()),
                     timeout_secs: Some(timeout),
                     capacity: Some(self.limits.0),

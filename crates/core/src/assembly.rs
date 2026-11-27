@@ -3,10 +3,10 @@
 mod provider;
 mod retry;
 
-pub use provider::AssemblyError;
 #[cfg(test)]
 pub(crate) use provider::protocol_gateway;
 pub(crate) use provider::{AssembledSession, SessionResources, assemble};
+pub use provider::{AssemblyError, CredentialUnavailableReason};
 pub(crate) use retry::StreamRetryHook;
 
 #[cfg(test)]

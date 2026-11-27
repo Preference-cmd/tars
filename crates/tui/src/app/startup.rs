@@ -543,6 +543,7 @@ impl App {
             self.host = tars_core::application::SessionHost::new(Some(self.options.store.clone()))
                 .with_external_tools(tools.clone())
                 .with_user_rules_path(user_rules_path)
+                .with_credentials_path(self.credentials_path.clone())
                 .with_model_profiles(self.options.config.model_profiles());
             self.external_tools = Some(tools);
         }

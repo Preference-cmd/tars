@@ -5,10 +5,18 @@ use super::types::*;
 use crate::session::{ConversationId, WorkRef};
 use crate::store::SessionStore;
 use causa::kernel::ToolBatch;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::Semaphore;
+
+/// Runtime configuration fields updatable in place on an active [`SessionHost`].
+#[derive(Clone, Debug, Default)]
+pub(super) struct HostRuntimeConfig {
+    pub credentials_path: Option<PathBuf>,
+    pub user_rules_path: Option<PathBuf>,
+    pub model_profiles: BTreeMap<String, crate::agents::ModelProfile>,
+}
 
 /// Shared lifecycle owner. Dropping a view or waiter never closes a session.
 pub struct SessionHost {
@@ -19,6 +27,7 @@ pub(super) struct HostInner {
     pub entries: Mutex<HashMap<ConversationId, Arc<Entry>>>,
     pub store: Option<SessionStore>,
     pub options: HostOptions,
+    pub runtime_config: RwLock<HostRuntimeConfig>,
     pub io: Arc<Semaphore>,
     pub tool_resources: Arc<crate::tools::ToolResources>,
     /// Process-wide external-tool check, when the entry point resolved one.
@@ -51,6 +60,32 @@ pub(super) type TestAssembly = dyn Fn(
     + Send
     + Sync;
 
+impl HostInner {
+    pub(super) fn credentials_path(&self) -> Option<PathBuf> {
+        self.runtime_config
+            .read()
+            .expect("runtime config lock")
+            .credentials_path
+            .clone()
+    }
+
+    pub(super) fn user_rules_path(&self) -> Option<PathBuf> {
+        self.runtime_config
+            .read()
+            .expect("runtime config lock")
+            .user_rules_path
+            .clone()
+    }
+
+    pub(super) fn model_profiles(&self) -> BTreeMap<String, crate::agents::ModelProfile> {
+        self.runtime_config
+            .read()
+            .expect("runtime config lock")
+            .model_profiles
+            .clone()
+    }
+}
+
 impl SessionHost {
     /// Construct a host with explicit optional local storage and default bounds.
     pub fn new(store_root: Option<PathBuf>) -> Self {
@@ -68,6 +103,22 @@ impl SessionHost {
             .external_tools = Some(tools);
         self
     }
+    /// Attach an optional isolated credentials store file path (`credentials.toml`).
+    ///
+    /// By default no credentials file is read, keeping tests and unconfigured
+    /// hosts isolated from `~/.tars/credentials.toml`.
+    #[must_use]
+    pub fn with_credentials_path(mut self, path: Option<PathBuf>) -> Self {
+        let inner = Arc::get_mut(&mut self.inner)
+            .expect("credentials path is attached before the host is cloned");
+        inner.options.credentials_path = path.clone();
+        inner
+            .runtime_config
+            .get_mut()
+            .expect("runtime config lock")
+            .credentials_path = path;
+        self
+    }
     /// Attach an optional user-level command permissions file path (`permissions.toml`).
     ///
     /// By default no user-level rules file is read, keeping tests and unconfigured
@@ -75,9 +126,13 @@ impl SessionHost {
     /// `config.config_dir().map(|dir| dir.join("permissions.toml"))`.
     #[must_use]
     pub fn with_user_rules_path(mut self, path: Option<PathBuf>) -> Self {
-        Arc::get_mut(&mut self.inner)
-            .expect("user rules path is attached before the host is cloned")
-            .options
+        let inner = Arc::get_mut(&mut self.inner)
+            .expect("user rules path is attached before the host is cloned");
+        inner.options.user_rules_path = path.clone();
+        inner
+            .runtime_config
+            .get_mut()
+            .expect("runtime config lock")
             .user_rules_path = path;
         self
     }
@@ -85,13 +140,34 @@ impl SessionHost {
     #[must_use]
     pub fn with_model_profiles(
         mut self,
-        profiles: std::collections::BTreeMap<String, crate::agents::ModelProfile>,
+        profiles: BTreeMap<String, crate::agents::ModelProfile>,
     ) -> Self {
-        Arc::get_mut(&mut self.inner)
-            .expect("model profiles are attached before the host is cloned")
-            .options
+        let inner = Arc::get_mut(&mut self.inner)
+            .expect("model profiles are attached before the host is cloned");
+        inner.options.model_profiles = profiles.clone();
+        inner
+            .runtime_config
+            .get_mut()
+            .expect("runtime config lock")
             .model_profiles = profiles;
         self
+    }
+    /// Update the runtime credentials path, user rules path, and child-agent
+    /// model profiles in place without replacing the host's open session table.
+    pub fn update_runtime_config(
+        &self,
+        credentials_path: Option<PathBuf>,
+        user_rules_path: Option<PathBuf>,
+        model_profiles: BTreeMap<String, crate::agents::ModelProfile>,
+    ) {
+        let mut config = self
+            .inner
+            .runtime_config
+            .write()
+            .expect("runtime config lock");
+        config.credentials_path = credentials_path;
+        config.user_rules_path = user_rules_path;
+        config.model_profiles = model_profiles;
     }
     /// Construct with validated count limits; no directory or credential is read yet.
     pub fn with_options(
@@ -104,6 +180,11 @@ impl SessionHost {
         {
             return Err(ApplicationError::InvalidOptions);
         }
+        let runtime_config = HostRuntimeConfig {
+            credentials_path: options.credentials_path.clone(),
+            user_rules_path: options.user_rules_path.clone(),
+            model_profiles: options.model_profiles.clone(),
+        };
         Ok(Self {
             inner: Arc::new(HostInner {
                 id: uuid::Uuid::now_v7(),
@@ -113,6 +194,7 @@ impl SessionHost {
                 tool_resources: crate::tools::ToolResources::new(16),
                 external_tools: None,
                 options,
+                runtime_config: RwLock::new(runtime_config),
                 external_hosts: std::sync::atomic::AtomicUsize::new(1),
                 snapshot_clones: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 #[cfg(test)]
@@ -234,7 +316,7 @@ impl SessionHost {
             self.inner.snapshot_clones.clone(),
             self.inner.store.clone(),
             self.inner.io.clone(),
-            self.inner.options.model_profiles.clone(),
+            self.inner.model_profiles(),
         ));
         // Registration and supervision are synchronous; no caller-owned await gap.
         entries.insert(id, entry.clone());

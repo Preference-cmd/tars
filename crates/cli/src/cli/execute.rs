@@ -18,6 +18,7 @@ pub(super) struct TransientRunRequest {
     pub external_tools: ExternalTools,
     pub model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
     pub user_rules_path: Option<PathBuf>,
+    pub credentials_path: Option<PathBuf>,
     pub input: Option<String>,
     pub used_stdin_input: bool,
     pub images: Vec<PathBuf>,
@@ -53,6 +54,7 @@ pub(super) fn run(options: RunOptions) -> ExitCode {
             external_tools: options.external_tools,
             model_profiles: options.model_profiles,
             user_rules_path: options.user_rules_path,
+            credentials_path: options.credentials_path,
             input,
             used_stdin_input: options.stdin,
             images: options.images,
@@ -120,6 +122,7 @@ async fn execute_transient(request: TransientRunRequest) -> (ExitCode, bool) {
     let host = SessionHost::new(None)
         .with_external_tools(request.external_tools)
         .with_user_rules_path(request.user_rules_path)
+        .with_credentials_path(request.credentials_path)
         .with_model_profiles(request.model_profiles);
     let session = match host.create(prepared).await {
         Ok(session) => session,

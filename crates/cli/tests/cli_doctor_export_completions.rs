@@ -1021,3 +1021,71 @@ fn completions_and_dedicated_help_outputs_match_contract() {
         }
     }
 }
+
+#[test]
+fn doctor_cli_inspects_sibling_credentials_store_and_flags_insecure_permissions() {
+    use tars_core::config::CredentialsStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    let recovery = dir.path().join("recovery");
+    fs::create_dir_all(&store).unwrap();
+    fs::create_dir_all(&recovery).unwrap();
+
+    let cfg_path = dir.path().join("config.toml");
+    let creds_path = dir.path().join("credentials.toml");
+    fs::write(
+        &cfg_path,
+        format!(
+            "version = 1\nstore = '{}'\nrecovery_dir = '{}'\ndefault_profile = 'work'\n[profiles.work]\nprovider = 'openai-chat'\nmodel = 'gpt-4o'\n",
+            store.display(),
+            recovery.display(),
+        ),
+    )
+    .unwrap();
+
+    CredentialsStore::set(&creds_path, "work", SECRET_TOKEN).unwrap();
+
+    let ok_out = tars_bin()
+        .args(["doctor", "--config"])
+        .arg(&cfg_path)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(ok_out.status.success(), "{ok_out:?}");
+    let ok_val = json_out(&ok_out);
+    assert_eq!(ok_val["fail"], 0);
+    let items = ok_val["items"].as_array().unwrap();
+    assert!(
+        items
+            .iter()
+            .any(|i| i["label"] == "Credentials store" && i["status"] == "ok"),
+        "{items:?}"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|i| i["label"] == "Store work" && i["status"] == "ok"),
+        "{items:?}"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&creds_path, fs::Permissions::from_mode(0o644)).unwrap();
+        let fail_out = tars_bin()
+            .args(["doctor", "--config"])
+            .arg(&cfg_path)
+            .output()
+            .unwrap();
+        assert_eq!(fail_out.status.code(), Some(1), "{fail_out:?}");
+        assert_no_secret(&fail_out);
+        let stdout = text(&fail_out.stdout);
+        assert!(
+            stdout.contains("[fail] [credentials] Credentials store"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("chmod 600"), "{stdout}");
+    }
+}

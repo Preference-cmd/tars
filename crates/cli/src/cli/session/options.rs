@@ -39,6 +39,7 @@ pub(crate) enum SessionCommand {
         external_tools: ExternalTools,
         model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
         user_rules_path: Option<PathBuf>,
+        credentials_path: Option<PathBuf>,
         trust_workspace_rules: bool,
         trust_workspace_agents: bool,
         load: Option<PathBuf>,
@@ -52,6 +53,7 @@ pub(crate) enum SessionCommand {
         external_tools: ExternalTools,
         model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
         user_rules_path: Option<PathBuf>,
+        credentials_path: Option<PathBuf>,
         trust_workspace_rules: bool,
         trust_workspace_agents: bool,
         input: Option<String>,
@@ -419,6 +421,7 @@ impl SessionCommand {
         let config = configuration::load(&values, no_config)?;
         let model_profiles = config.model_profiles();
         let user_rules_path = config.config_dir().map(|dir| dir.join("permissions.toml"));
+        let credentials_path = configuration::credentials_path_for(&config, no_config);
         let store = values
             .get("--store")
             .map(PathBuf::from)
@@ -475,6 +478,7 @@ impl SessionCommand {
                     external_tools: ExternalTools::resolve(&config),
                     model_profiles,
                     user_rules_path,
+                    credentials_path,
                     trust_workspace_rules,
                     trust_workspace_agents,
                     load: values.get("--load").map(PathBuf::from),
@@ -506,6 +510,7 @@ impl SessionCommand {
                     external_tools: ExternalTools::resolve(&config),
                     model_profiles,
                     user_rules_path,
+                    credentials_path,
                     trust_workspace_rules,
                     trust_workspace_agents,
                     input,

@@ -148,6 +148,7 @@ pub(super) struct TransientPrintOptions {
     pub external_tools: ExternalTools,
     pub model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
     pub user_rules_path: Option<PathBuf>,
+    pub credentials_path: Option<PathBuf>,
     pub positional: Option<String>,
     pub input: Option<String>,
     pub stdin: bool,
@@ -163,6 +164,7 @@ pub(super) struct ResumePrintOptions {
     pub external_tools: ExternalTools,
     pub model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
     pub user_rules_path: Option<PathBuf>,
+    pub credentials_path: Option<PathBuf>,
     pub trust_workspace_rules: bool,
     pub trust_workspace_agents: bool,
     pub positional: Option<String>,
@@ -420,6 +422,7 @@ impl PrintCommand {
         let external_tools = ExternalTools::resolve(&config);
         let model_profiles = config.model_profiles();
         let user_rules_path = config.config_dir().map(|dir| dir.join("permissions.toml"));
+        let credentials_path = configuration::credentials_path_for(&config, no_config);
         let output_format = format_builder.build();
 
         if is_resume {
@@ -468,6 +471,7 @@ impl PrintCommand {
                 external_tools,
                 model_profiles,
                 user_rules_path,
+                credentials_path,
                 trust_workspace_rules,
                 trust_workspace_agents,
                 positional: positional_prompt,
@@ -498,6 +502,7 @@ impl PrintCommand {
             external_tools,
             model_profiles,
             user_rules_path,
+            credentials_path,
             positional: positional_prompt,
             input,
             stdin,
@@ -742,6 +747,7 @@ pub(super) fn run(command: PrintCommand) -> ExitCode {
                 external_tools: opts.external_tools,
                 model_profiles: opts.model_profiles,
                 user_rules_path: opts.user_rules_path,
+                credentials_path: opts.credentials_path,
                 input: prepared_input.input,
                 used_stdin_input: prepared_input.used_stdin_input,
                 images: opts.images,
@@ -812,6 +818,7 @@ fn run_resume(opts: ResumePrintOptions) -> ExitCode {
             opts.external_tools,
             opts.model_profiles,
             opts.user_rules_path,
+            opts.credentials_path,
             opts.trust_workspace_rules,
             opts.trust_workspace_agents,
             prepared_input.input,

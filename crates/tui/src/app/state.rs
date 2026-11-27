@@ -675,6 +675,8 @@ pub(crate) struct App {
     pub(crate) search_reason: Option<String>,
     /// User-level permissions file path (`~/.tars/permissions.toml`), or `None` when `--no-config`.
     pub(crate) user_rules_path: Option<std::path::PathBuf>,
+    /// Isolated credentials file path (`~/.tars/credentials.toml`), or `None` when `--no-config`.
+    pub(crate) credentials_path: Option<std::path::PathBuf>,
     /// Deferred external `$EDITOR` request executed by `App::run` outside `EventStream`.
     pub(super) pending_external_edit: Option<PendingExternalEdit>,
     /// Whether the startup action (`Default`, `-c`, `-r`) still awaits initial `list()`.
@@ -704,8 +706,10 @@ impl App {
             .config
             .config_dir()
             .map(|dir| dir.join("permissions.toml"));
+        let credentials_path = options.credentials_path.clone();
         let host = SessionHost::new(Some(options.store.clone()))
             .with_user_rules_path(user_rules_path.clone())
+            .with_credentials_path(credentials_path.clone())
             .with_model_profiles(options.config.model_profiles());
         let startup_backend: Arc<dyn super::startup::StartupBackend> =
             Arc::new(super::startup::ProcessBackend::new(options.config.clone()));
@@ -756,6 +760,7 @@ impl App {
             external_tools: None,
             search_reason: None,
             user_rules_path,
+            credentials_path,
             pending_external_edit: None,
             startup_action_pending: true,
             pending_resume_selector: None,

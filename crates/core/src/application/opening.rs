@@ -477,7 +477,7 @@ async fn load_command_rules(
     host: &Arc<HostInner>,
     definition: &crate::definition::SessionDefinition,
 ) -> Result<LoadedCommandRules, ApplicationError> {
-    let user_rules = match host.options.user_rules_path.clone() {
+    let user_rules = match host.user_rules_path() {
         Some(path) => saving::io_semaphore(&host.io, move || {
             crate::permission::rules::load_rules_file(&path)
         })
@@ -800,6 +800,7 @@ async fn assembled(
     };
     let mut base = crate::assembly::SessionResources::new(host.tool_resources.clone())
         .with_storage(host.store.as_ref().map(|store| store.root().to_path_buf()))
+        .with_credentials_path(host.credentials_path())
         .with_compaction(history, auto_compact, compact_threshold)
         .with_usage(usage)
         .with_skills(Arc::new(std::sync::RwLock::new(registry)))

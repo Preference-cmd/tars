@@ -72,6 +72,7 @@ fn write_preset_config(dir: &Path, store: &Path, ws: Option<&Path>) -> PathBuf {
 fn configured_trust_app(dir: &Path, cfg_path: &Path, workspace: Option<PathBuf>) -> App {
     let config = Arc::new(Config::load(ConfigSource::File(cfg_path.to_path_buf())).unwrap());
     let preset = config.preset(None).unwrap();
+    let credentials_path = config.config_dir().map(|dir| dir.join("credentials.toml"));
     let mut app = App::new(Options {
         store: dir.join("store"),
         recovery_dir: dir.to_path_buf(),
@@ -79,6 +80,7 @@ fn configured_trust_app(dir: &Path, cfg_path: &Path, workspace: Option<PathBuf>)
         profile: None,
         preset,
         config_path: Some(cfg_path.to_path_buf()),
+        credentials_path,
         workspace,
         code_execution_enabled: None,
         no_config: false,
@@ -711,6 +713,7 @@ async fn ux06_doctor_menu_tab_complete_async_report_and_early_close() {
     let cfg_path = write_preset_config(dir.path(), &dir.path().join("store"), None);
     let config = Arc::new(Config::load(ConfigSource::File(cfg_path.clone())).unwrap());
     let preset = config.preset(None).unwrap();
+    let credentials_path = config.config_dir().map(|dir| dir.join("credentials.toml"));
     let mut app = App::new(Options {
         store: dir.path().join("store"),
         recovery_dir: dir.path().to_path_buf(),
@@ -718,6 +721,7 @@ async fn ux06_doctor_menu_tab_complete_async_report_and_early_close() {
         profile: None,
         preset,
         config_path: Some(cfg_path),
+        credentials_path,
         workspace: None,
         code_execution_enabled: None,
         no_config: false,
@@ -782,6 +786,14 @@ async fn ux06_doctor_menu_tab_complete_async_report_and_early_close() {
         "{view}"
     );
     assert!(view.contains("[ok]") || view.contains("[warn]"), "{view}");
+    if let Some(Panel::Info { lines, .. }) = &app.panel {
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Credentials store") && l.contains("credentials.toml")),
+            "{lines:?}"
+        );
+    }
     if let Ok(path_val) = std::env::var("PATH")
         && path_val.len() > 8
     {

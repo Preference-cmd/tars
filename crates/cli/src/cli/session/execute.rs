@@ -74,6 +74,7 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 external_tools,
                 model_profiles,
                 user_rules_path,
+                credentials_path,
                 trust_workspace_rules,
                 trust_workspace_agents,
                 load,
@@ -86,6 +87,7 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                     external_tools,
                     model_profiles,
                     user_rules_path,
+                    credentials_path,
                     trust_workspace_rules,
                     trust_workspace_agents,
                     load,
@@ -101,6 +103,7 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 external_tools,
                 model_profiles,
                 user_rules_path,
+                credentials_path,
                 trust_workspace_rules,
                 trust_workspace_agents,
                 input,
@@ -116,6 +119,7 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                     external_tools,
                     model_profiles,
                     user_rules_path,
+                    credentials_path,
                     trust_workspace_rules,
                     trust_workspace_agents,
                     input,
@@ -531,6 +535,7 @@ async fn create(
     external_tools: tars_core::external_tools::ExternalTools,
     model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
     user_rules_path: Option<PathBuf>,
+    credentials_path: Option<PathBuf>,
     trust_workspace_rules: bool,
     trust_workspace_agents: bool,
     load: Option<PathBuf>,
@@ -560,6 +565,7 @@ async fn create(
     let host = managed_execution::definition_host(store)
         .with_external_tools(external_tools)
         .with_user_rules_path(user_rules_path)
+        .with_credentials_path(credentials_path)
         .with_model_profiles(model_profiles);
     let session = match host.create(prepared).await {
         Ok(session) => session,
@@ -665,6 +671,7 @@ async fn run_saved(
     external_tools: tars_core::external_tools::ExternalTools,
     model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
     user_rules_path: Option<PathBuf>,
+    credentials_path: Option<PathBuf>,
     trust_workspace_rules: bool,
     trust_workspace_agents: bool,
     input: Option<String>,
@@ -695,6 +702,7 @@ async fn run_saved(
         external_tools,
         model_profiles,
         user_rules_path,
+        credentials_path,
         trust_workspace_rules,
         trust_workspace_agents,
         input,
@@ -714,6 +722,7 @@ pub(crate) async fn run_saved_with_format(
     external_tools: tars_core::external_tools::ExternalTools,
     model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
     user_rules_path: Option<PathBuf>,
+    credentials_path: Option<PathBuf>,
     trust_workspace_rules: bool,
     trust_workspace_agents: bool,
     input: Option<String>,
@@ -726,6 +735,7 @@ pub(crate) async fn run_saved_with_format(
     let host = SessionHost::new(Some(store))
         .with_external_tools(external_tools)
         .with_user_rules_path(user_rules_path)
+        .with_credentials_path(credentials_path)
         .with_model_profiles(model_profiles);
     let session = match host.open(id.into()).await {
         Ok(session) => session,

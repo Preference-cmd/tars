@@ -886,6 +886,7 @@ impl App {
         let sandbox_status = self.sandbox_status.clone();
         let external_tools = self.external_tools.clone();
         let user_rules_path = self.user_rules_path.clone();
+        let credentials_path = self.credentials_path.clone();
 
         self.spawn_job(None, super::jobs::JobKind::Doctor, async move {
             let result = super::jobs::blocking(move || {
@@ -902,6 +903,7 @@ impl App {
                     sandbox: sandbox_status.as_ref(),
                     external_tools: external_tools.as_ref(),
                     user_rules_path: user_rules_path.as_deref(),
+                    credentials_path: credentials_path.as_deref(),
                 };
                 tars_core::doctor::run_diagnostics(&input).format_lines()
             })

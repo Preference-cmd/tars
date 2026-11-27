@@ -43,6 +43,7 @@ type Responder = Arc<dyn Fn(usize, &Value) -> WireReply + Send + Sync>;
 struct WireServer {
     endpoint: String,
     requests: Arc<Mutex<Vec<Value>>>,
+    headers: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     task: Option<std::thread::JoinHandle<()>>,
 }
@@ -59,6 +60,8 @@ impl WireServer {
         let endpoint = format!("http://{}{path}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = requests.clone();
+        let captured_headers = Arc::new(Mutex::new(Vec::new()));
+        let headers_for_server = captured_headers.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
 
@@ -84,6 +87,7 @@ impl WireServer {
                 };
 
                 let captured = captured.clone();
+                let captured_headers = headers_for_server.clone();
                 let responder = responder.clone();
                 let idx = call_counter.fetch_add(1, Ordering::SeqCst);
                 let path = path.to_owned();
@@ -93,7 +97,7 @@ impl WireServer {
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
                     let mut bytes = Vec::new();
-                    let (start, length) = loop {
+                    let (start, length, raw_headers) = loop {
                         let mut chunk = [0; 4096];
                         let count = match socket.read(&mut chunk) {
                             Ok(0) | Err(_) => return,
@@ -111,7 +115,7 @@ impl WireServer {
                                         .then(|| value.trim().parse::<usize>().unwrap())
                                 })
                                 .unwrap();
-                            break (end + 4, length);
+                            break (end + 4, length, headers.to_owned());
                         }
                     };
                     while bytes.len() < start + length {
@@ -124,6 +128,7 @@ impl WireServer {
                     }
                     let req_json: Value =
                         serde_json::from_slice(&bytes[start..start + length]).unwrap();
+                    captured_headers.lock().unwrap().push(raw_headers);
                     captured.lock().unwrap().push(req_json.clone());
                     let reply = responder(idx, &req_json);
                     let body = encode_sse(provider, reply, idx);
@@ -139,6 +144,7 @@ impl WireServer {
         Self {
             endpoint,
             requests,
+            headers: captured_headers,
             stop,
             task: Some(task),
         }
@@ -867,4 +873,134 @@ fn extract_json_field_from_req(req: &Value, field: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn store_backed_credentials_work_for_root_and_child_agents_and_update_runtime_config_preserves_open_sessions()
+ {
+    use tars_core::application::{ApplicationError, AssemblyError, CredentialUnavailableReason};
+    use tars_core::config::CredentialsStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    let store = dir.path().join("store");
+    let creds_path = dir.path().join("credentials.toml");
+    let root_secret = "sk-root-store-secret-111";
+    let child_secret = "sk-child-store-secret-222";
+    CredentialsStore::set(&creds_path, "root-cred", root_secret).unwrap();
+    CredentialsStore::set(&creds_path, "child-cred", child_secret).unwrap();
+
+    // 1. Unconfigured host (`credentials_path: None`) fails closed on CredentialRef::Store.
+    let isolated_host = SessionHost::new(Some(store.clone()));
+    let mut blocked_def = wire_definition(Provider::OpenAiChat, "http://127.0.0.1:1/unused", &ws);
+    blocked_def.credential = CredentialRef::Store("root-cred".into());
+    let err = match isolated_host
+        .create(PreparedCreate::prepare_transient(blocked_def, None).unwrap())
+        .await
+    {
+        Ok(_) => panic!("unconfigured host must reject CredentialRef::Store"),
+        Err(err) => err,
+    };
+    assert!(matches!(
+        err,
+        ApplicationError::Assembly(AssemblyError::CredentialUnavailable(
+            CredentialUnavailableReason::StoreDisabled { ref name }
+        )) if name == "root-cred"
+    ));
+
+    // 2. Host with an already-open session preserves `HostInner.entries` across `update_runtime_config`,
+    //    and newly created sessions (both root and child agents) resolve store credentials via the updated config.
+    let host = SessionHost::new(Some(store.clone()));
+    let existing_def = wire_definition(Provider::OpenAiChat, "http://127.0.0.1:1/unused", &ws);
+    let existing_session = host
+        .create(PreparedCreate::prepare_persistent(existing_def, None).unwrap())
+        .await
+        .unwrap();
+    let existing_id = existing_session.target().conversation_id().clone();
+
+    let parent_server = WireServer::start(
+        Provider::OpenAiChat,
+        Arc::new(|call_idx, _req| match call_idx {
+            0 => WireReply::Calls(vec![(
+                "spawn_agent".into(),
+                json!({
+                    "agent": "explore",
+                    "prompt": "do child work",
+                    "background": false,
+                    "model": { "profile": "child-prof" }
+                }),
+            )]),
+            _ => WireReply::Text("root done".into()),
+        }),
+    );
+    let child_server = WireServer::start(
+        Provider::OpenAiChat,
+        Arc::new(|_call_idx, _req| WireReply::Text("child done".into())),
+    );
+
+    let mut updated_profiles = BTreeMap::new();
+    let mut child_profile =
+        make_child_profile("child-prof", Provider::OpenAiChat, &child_server.endpoint);
+    child_profile.credential = CredentialRef::Store("child-cred".into());
+    updated_profiles.insert("child-prof".into(), child_profile);
+
+    host.update_runtime_config(Some(creds_path), None, updated_profiles);
+
+    // Existing open session is still tracked in `HostInner.entries` and saves cleanly!
+    assert!(host.lookup(&existing_id).is_some());
+    host.close(&existing_session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+    drop(existing_session);
+
+    // New session uses updated `credentials_path` and `model_profiles` for root + child turns.
+    let mut root_def = wire_definition(Provider::OpenAiChat, &parent_server.endpoint, &ws);
+    root_def.credential = CredentialRef::Store("root-cred".into());
+    let session = host
+        .create(PreparedCreate::prepare_persistent(root_def, None).unwrap())
+        .await
+        .unwrap();
+    let work = session
+        .submit(SubmitRequest {
+            request_key: "store-turn".into(),
+            blocks: vec![text_input("delegate to child")],
+        })
+        .unwrap()
+        .work;
+    let obs = session.wait(&work, Duration::from_secs(15)).await.unwrap();
+    assert!(matches!(obs.state, WorkState::Finished(_)), "{obs:?}");
+
+    let parent_headers = parent_server
+        .headers
+        .lock()
+        .unwrap()
+        .join("\n")
+        .to_ascii_lowercase();
+    let child_headers = child_server
+        .headers
+        .lock()
+        .unwrap()
+        .join("\n")
+        .to_ascii_lowercase();
+    assert!(
+        parent_headers
+            .contains(&format!("authorization: bearer {root_secret}").to_ascii_lowercase()),
+        "root turn did not receive store credential: {parent_headers}"
+    );
+    assert!(
+        child_headers
+            .contains(&format!("authorization: bearer {child_secret}").to_ascii_lowercase()),
+        "child turn did not receive store credential: {child_headers}"
+    );
+
+    // Persisted SQLite record must never contain plaintext secrets (`CR03`).
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+    drop(session);
+    let db_bytes = fs::read(store.join("tars.db")).unwrap();
+    let db_lossy = String::from_utf8_lossy(&db_bytes);
+    assert!(!db_lossy.contains(root_secret));
+    assert!(!db_lossy.contains(child_secret));
 }
