@@ -222,6 +222,80 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
         }
         Panel::Commands { query, selected } => (query, *selected, true),
         Panel::Sessions { query, selected } => (query, *selected, false),
+        Panel::Models { query, selected } => {
+            let rows = Layout::vertical([
+                Constraint::Length(2),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        "Models  /",
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(query),
+                ])),
+                rows[0],
+            );
+            let profiles = app.matching_model_profiles(query);
+            let mut items: Vec<ListItem<'_>> = profiles
+                .iter()
+                .map(|profile| {
+                    let is_active = match app.options.profile.as_deref() {
+                        Some(active_name) => active_name == profile.name,
+                        None => app
+                            .entries
+                            .get(app.selected)
+                            .map(|e| e.model() == profile.model)
+                            .unwrap_or_else(|| {
+                                app.options.preset.as_ref().is_some_and(|p| {
+                                    p.model == profile.model && p.provider == profile.provider
+                                })
+                            }),
+                    };
+                    let escaped_name = crate::transcript::display_single_line(&profile.name);
+                    let escaped_model = crate::transcript::display_single_line(&profile.model);
+                    let title = if is_active {
+                        format!("{escaped_name}  [active]")
+                    } else {
+                        escaped_name
+                    };
+                    ListItem::new(vec![
+                        Line::from(title),
+                        Line::styled(
+                            format!("  {} · {escaped_model}", profile.provider.as_str()),
+                            Style::default().fg(MUTED),
+                        ),
+                    ])
+                })
+                .collect();
+            items.push(ListItem::new(vec![
+                Line::from("Custom settings (/new)..."),
+                Line::styled(
+                    "  Open full session creation form",
+                    Style::default().fg(MUTED),
+                ),
+            ]));
+            let mut state =
+                ListState::default().with_selected(Some((*selected).min(items.len() - 1)));
+            frame.render_stateful_widget(
+                List::new(items)
+                    .highlight_symbol("❯ ")
+                    .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                rows[1],
+                &mut state,
+            );
+            frame.render_widget(
+                Paragraph::new(
+                    "↑↓ select · type to filter · Enter switch (new session) · Esc back",
+                )
+                .style(Style::default().fg(MUTED)),
+                rows[2],
+            );
+            return;
+        }
         Panel::Info {
             title,
             kind,

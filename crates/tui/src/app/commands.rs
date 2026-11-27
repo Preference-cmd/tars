@@ -20,6 +20,10 @@ pub(crate) enum Panel {
         query: String,
         selected: usize,
     },
+    Models {
+        query: String,
+        selected: usize,
+    },
     Info {
         title: String,
         kind: InfoKind,
@@ -45,6 +49,15 @@ pub(super) const DOCTOR_PANEL_TITLE: &str = "Doctor · environment & configurati
 
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("new", "Create a session with model settings"),
+    (
+        "clear",
+        "Start a fresh session with current model preset and workspace",
+    ),
+    (
+        "resume",
+        "Resume a saved session by ID/prefix or open session picker",
+    ),
+    ("model", "Switch model profile in a new session"),
     ("sessions", "Find and open a saved or active session"),
     ("agents", "List session agents and switch transcript view"),
     ("queue", "Inspect, pop, or clear queued prompts"),
@@ -144,6 +157,23 @@ impl App {
         });
         matches
     }
+    pub(crate) fn matching_model_profiles(
+        &self,
+        query: &str,
+    ) -> Vec<tars_core::agents::ModelProfile> {
+        let needle = query.trim().to_lowercase();
+        self.options
+            .config
+            .model_profiles()
+            .into_values()
+            .filter(|profile| {
+                needle.is_empty()
+                    || profile.name.to_lowercase().contains(&needle)
+                    || profile.model.to_lowercase().contains(&needle)
+                    || profile.provider.as_str().contains(&needle)
+            })
+            .collect()
+    }
     pub(super) fn show_commands(&mut self) {
         self.panel = Some(Panel::Commands {
             query: String::new(),
@@ -187,7 +217,44 @@ impl App {
                     .with_code_execution(self.options.code_execution_enabled),
                 )
             }
+            "clear" => self.clear_command(),
+            "resume" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("resume").unwrap_or("").trim();
+                self.resume_command(arg);
+            }
+            "model" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("model").unwrap_or("").trim();
+                if arg.is_empty() {
+                    let profiles = self.matching_model_profiles("");
+                    if profiles.is_empty() {
+                        self.notice =
+                            "No model profiles configured; use /new or add [profiles.<name>] to config.toml"
+                                .into();
+                    } else {
+                        let selected = self
+                            .options
+                            .profile
+                            .as_deref()
+                            .and_then(|active| profiles.iter().position(|p| p.name == active))
+                            .or_else(|| {
+                                self.entries.get(self.selected).and_then(|entry| {
+                                    profiles.iter().position(|p| p.model == entry.model())
+                                })
+                            })
+                            .unwrap_or(0);
+                        self.panel = Some(Panel::Models {
+                            query: String::new(),
+                            selected,
+                        });
+                    }
+                } else {
+                    self.switch_model_profile(arg);
+                }
+            }
             "sessions" => {
+                self.pending_resume_selector = None;
                 self.list();
                 // The picker is ordered, so start on the current session's row.
                 let selected = self
@@ -309,6 +376,9 @@ impl App {
                     "Ctrl-D / Delete (in /sessions)   Delete a closed session with confirmation",
                     "/doctor   Check configuration, credentials, storage, sandbox and tools",
                     "/init   Analyze the workspace and create or update AGENTS.md",
+                    "/clear   Start a fresh session with current model preset and workspace",
+                    "/resume [selector]   Open session picker or jump to a saved session",
+                    "/model [profile]   Switch model profile in a new session",
                     "/agents [name|id|main]   List session agents (x cancels running, Enter switches)",
                     "/mode [name]   Show or change the permission mode",
                     "/rules [list | remove <N> | clear]   Show active rules or manage session rules",
@@ -1203,6 +1273,49 @@ impl App {
             }
             Panel::Commands { query, selected } => (query, selected, true),
             Panel::Sessions { query, selected } => (query, selected, false),
+            Panel::Models { query, selected } => {
+                let profiles = self.matching_model_profiles(query);
+                let total = profiles.len() + 1;
+                *selected = (*selected).min(total.saturating_sub(1));
+                match key.code {
+                    KeyCode::Up => *selected = selected.saturating_sub(1),
+                    KeyCode::Down => *selected = (*selected + 1).min(total.saturating_sub(1)),
+                    KeyCode::Enter if key.kind == KeyEventKind::Press => {
+                        if let Some(profile) = profiles.get(*selected) {
+                            let name = profile.name.clone();
+                            self.panel = None;
+                            self.switch_model_profile(&name);
+                            return;
+                        }
+                        self.panel = None;
+                        self.form = Some(
+                            input::Form::new(
+                                self.options.config.clone(),
+                                self.options.profile.clone(),
+                                self.options.preset.as_ref(),
+                            )
+                            .with_code_execution(self.options.code_execution_enabled),
+                        );
+                        return;
+                    }
+                    KeyCode::Backspace => {
+                        query.pop();
+                        *selected = 0;
+                    }
+                    KeyCode::Char(c)
+                        if !key.modifiers.intersects(
+                            crossterm::event::KeyModifiers::CONTROL
+                                | crossterm::event::KeyModifiers::ALT,
+                        ) =>
+                    {
+                        query.push(c);
+                        *selected = 0;
+                    }
+                    _ => {}
+                }
+                self.panel = Some(panel);
+                return;
+            }
             Panel::Info {
                 kind,
                 scroll,
@@ -1283,6 +1396,33 @@ impl App {
                             }
                         }
                         crate::input::image::ImageArgCompletion::None => {}
+                    }
+                } else if let Some(arg_prefix) = input::strip_model_command_prefix(clean) {
+                    let profile_names: Vec<String> =
+                        self.options.config.model_profiles().into_keys().collect();
+                    match input::complete_model_arg(arg_prefix, &profile_names) {
+                        input::ModelArgCompletion::Modified {
+                            replacement,
+                            notice,
+                        } => {
+                            *query = format!("model {replacement}");
+                            *selected = 0;
+                            if let Some(msg) = notice {
+                                if let Some(entry) = self.entries.get_mut(self.selected) {
+                                    entry.notice = msg;
+                                } else {
+                                    self.notice = msg;
+                                }
+                            }
+                        }
+                        input::ModelArgCompletion::Notice(msg) => {
+                            if let Some(entry) = self.entries.get_mut(self.selected) {
+                                entry.notice = msg;
+                            } else {
+                                self.notice = msg;
+                            }
+                        }
+                        input::ModelArgCompletion::None => {}
                     }
                 }
             }

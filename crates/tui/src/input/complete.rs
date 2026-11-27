@@ -35,6 +35,7 @@ pub(crate) fn set_editor_text(
 pub(crate) fn complete_editor(
     editor: &mut TextArea<'static>,
     workspace_root: Option<&Path>,
+    profile_names: &[String],
 ) -> CompleteResult {
     let cursor = editor.cursor();
     let (line_count, line) = {
@@ -59,6 +60,13 @@ pub(crate) fn complete_editor(
         && let Some(arg_prefix) = super::image::strip_image_command_prefix(before_cursor)
     {
         return complete_image_in_editor(editor, &line, cursor_byte, arg_prefix, workspace_root);
+    }
+
+    if line_count == 1
+        && before_cursor.starts_with('/')
+        && let Some(arg_prefix) = strip_model_command_prefix(before_cursor)
+    {
+        return complete_model_in_editor(editor, &line, cursor_byte, arg_prefix, profile_names);
     }
 
     let token_start = before_cursor
@@ -86,6 +94,8 @@ pub(crate) fn slash_command_takes_args(cmd: &str) -> bool {
     matches!(
         cmd,
         "mode"
+            | "resume"
+            | "model"
             | "auto_compact"
             | "agents"
             | "rules"
@@ -95,6 +105,95 @@ pub(crate) fn slash_command_takes_args(cmd: &str) -> bool {
             | "image"
             | "export-md"
     )
+}
+
+pub(crate) enum ModelArgCompletion {
+    None,
+    Modified {
+        replacement: String,
+        notice: Option<String>,
+    },
+    Notice(String),
+}
+
+pub(crate) fn strip_model_command_prefix(input: &str) -> Option<&str> {
+    let rest = input
+        .strip_prefix("/model")
+        .or_else(|| input.strip_prefix("model"))?;
+    let first = rest.chars().next()?;
+    first.is_whitespace().then(|| rest.trim_start())
+}
+
+pub(crate) fn complete_model_arg(arg_prefix: &str, profile_names: &[String]) -> ModelArgCompletion {
+    if arg_prefix.chars().any(char::is_whitespace) {
+        return ModelArgCompletion::None;
+    }
+    if profile_names.is_empty() {
+        return ModelArgCompletion::Notice("No model profiles configured".into());
+    }
+    let mut matches: Vec<&str> = profile_names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| name.starts_with(arg_prefix))
+        .collect();
+    if matches.is_empty() && !arg_prefix.is_empty() {
+        let lower = arg_prefix.to_ascii_lowercase();
+        matches = profile_names
+            .iter()
+            .map(String::as_str)
+            .filter(|name| name.to_ascii_lowercase().starts_with(&lower))
+            .collect();
+    }
+    match matches.as_slice() {
+        [] => ModelArgCompletion::Notice(format!(
+            "No matching profile for '{}'",
+            escape_untrusted_text(arg_prefix)
+        )),
+        [single] => ModelArgCompletion::Modified {
+            replacement: (*single).to_owned(),
+            notice: None,
+        },
+        many => {
+            let lcp = longest_common_prefix(many);
+            let notice = format_candidate_notice(
+                "Profiles",
+                many.iter().map(|name| escape_untrusted_text(name)),
+            );
+            if lcp.len() > arg_prefix.len() {
+                ModelArgCompletion::Modified {
+                    replacement: lcp,
+                    notice: Some(notice),
+                }
+            } else {
+                ModelArgCompletion::Notice(notice)
+            }
+        }
+    }
+}
+
+fn complete_model_in_editor(
+    editor: &mut TextArea<'static>,
+    line: &str,
+    cursor_byte: usize,
+    arg_prefix: &str,
+    profile_names: &[String],
+) -> CompleteResult {
+    let command_prefix_len = cursor_byte - arg_prefix.len();
+    let command_prefix = &line[..command_prefix_len];
+    match complete_model_arg(arg_prefix, profile_names) {
+        ModelArgCompletion::None => CompleteResult::None,
+        ModelArgCompletion::Modified {
+            replacement,
+            notice,
+        } => {
+            let completed = format!("{command_prefix}{replacement}");
+            let new_line = format!("{completed}{}", &line[cursor_byte..]);
+            let target_col = completed.chars().count();
+            replace_line_and_move_cursor(editor, 0, new_line, target_col);
+            CompleteResult::Modified { notice }
+        }
+        ModelArgCompletion::Notice(notice) => CompleteResult::Notice(notice),
+    }
 }
 
 fn complete_slash_command(

@@ -137,7 +137,8 @@ impl App {
             }
             if let Some(panel) = &mut self.panel {
                 if let super::commands::Panel::Commands { query, selected }
-                | super::commands::Panel::Sessions { query, selected } = panel
+                | super::commands::Panel::Sessions { query, selected }
+                | super::commands::Panel::Models { query, selected } = panel
                 {
                     query.extend(text.chars().filter(|c| !c.is_control()));
                     *selected = 0;

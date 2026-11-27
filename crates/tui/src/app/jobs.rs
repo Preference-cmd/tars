@@ -295,25 +295,46 @@ impl App {
             }
             Message::Listed(result) => {
                 self.listing = false;
+                let pending_resume = self.pending_resume_selector.take();
+                let is_startup = std::mem::replace(&mut self.startup_action_pending, false);
                 match result {
                     Err(error) => self.notice = error.to_string(),
                     Ok(listed) => {
-                        for item in listed {
+                        for item in &listed {
                             let id = item.conversation_id.as_str().to_owned();
-                            if self.entries.iter().any(|e| e.id() == id) {
+                            if let Some(existing) = self.entries.iter_mut().find(|e| e.id() == id) {
+                                if let Ok(summary) = &item.record {
+                                    if existing.workspace_root.is_none() {
+                                        existing.workspace_root =
+                                            summary.definition.workspace_root.clone();
+                                    }
+                                    if existing.session.is_none() {
+                                        existing.title = summary.title.clone();
+                                        if summary.updated_at_ms > 0 {
+                                            existing.updated_at_ms = summary.updated_at_ms;
+                                        }
+                                    }
+                                }
                                 continue;
                             }
-                            let (model, title, updated_at_ms, prompt_cache, code_execution) =
-                                match &item.record {
-                                    Ok(summary) => (
-                                        summary.definition.model.clone(),
-                                        summary.title.clone(),
-                                        summary.updated_at_ms,
-                                        summary.definition.prompt_cache,
-                                        summary.definition.code_execution,
-                                    ),
-                                    Err(_) => ("invalid record".into(), None, 0, true, None),
-                                };
+                            let (
+                                model,
+                                title,
+                                updated_at_ms,
+                                prompt_cache,
+                                code_execution,
+                                workspace_root,
+                            ) = match &item.record {
+                                Ok(summary) => (
+                                    summary.definition.model.clone(),
+                                    summary.title.clone(),
+                                    summary.updated_at_ms,
+                                    summary.definition.prompt_cache,
+                                    summary.definition.code_execution,
+                                    summary.definition.workspace_root.clone(),
+                                ),
+                                Err(_) => ("invalid record".into(), None, 0, true, None, None),
+                            };
                             let mut entry = Entry::new(id, model);
                             entry.title = title;
                             if updated_at_ms > 0 {
@@ -321,7 +342,8 @@ impl App {
                             }
                             entry.prompt_cache = prompt_cache;
                             entry.code_execution = code_execution;
-                            entry.notice = match (item.record, item.active) {
+                            entry.workspace_root = workspace_root;
+                            entry.notice = match (&item.record, &item.active) {
                                 (Err(error), _) => format!("Invalid record: {error}"),
                                 (_, Err(error)) => format!("Lock status unavailable: {error}"),
                                 (_, Ok(true)) => "Active in another process".into(),
@@ -329,18 +351,126 @@ impl App {
                             };
                             self.entries.push(entry);
                         }
-                        if self.entries.is_empty()
-                            && self.options.auto_onboard
-                            && !self.onboarding_dismissed
-                            && self.onboarding.is_none()
-                            && self.form.is_none()
-                            && self.panel.is_none()
+
+                        let can_route_list = !self.quitting
                             && self.confirmation.is_none()
-                            && !self.quitting
-                        {
-                            self.onboarding = Some(crate::input::OnboardingForm::new(
-                                std::env::current_dir().ok(),
-                            ));
+                            && self.form.is_none()
+                            && self.onboarding.is_none();
+
+                        if !can_route_list {
+                            // Never open sessions or install panels behind an active modal or shutdown.
+                        } else if let Some(selector) = pending_resume {
+                            match tars_core::application::resolve_session_selector_from_listings(
+                                &selector, &listed,
+                            ) {
+                                Ok(id) => {
+                                    if let Some(pos) =
+                                        self.entries.iter().position(|e| e.id() == id.as_str())
+                                    {
+                                        self.switch_or_open_entry(pos);
+                                    }
+                                }
+                                Err(err) => {
+                                    self.notice =
+                                        crate::transcript::display_single_line(&err.to_string());
+                                    self.panel = Some(super::commands::Panel::Sessions {
+                                        query: selector,
+                                        selected: 0,
+                                    });
+                                }
+                            }
+                        } else if is_startup {
+                            match self.options.startup_action.clone() {
+                                crate::options::StartupAction::ContinueLatest => {
+                                    match tars_core::application::resolve_session_selector_from_listings(
+                                        "latest", &listed,
+                                    ) {
+                                        Ok(id) => {
+                                            if let Some(pos) = self
+                                                .entries
+                                                .iter()
+                                                .position(|e| e.id() == id.as_str())
+                                            {
+                                                self.switch_or_open_entry(pos);
+                                            }
+                                        }
+                                        Err(
+                                            tars_core::application::SessionSelectorError::NotFound {
+                                                ..
+                                            },
+                                        ) => {
+                                            self.notice =
+                                                "No saved sessions to continue; use /new to start"
+                                                    .into();
+                                        }
+                                        Err(err) => {
+                                            self.notice =
+                                                crate::transcript::display_single_line(
+                                                    &err.to_string(),
+                                                );
+                                        }
+                                    }
+                                }
+                                crate::options::StartupAction::Resume(selector) => {
+                                    match tars_core::application::resolve_session_selector_from_listings(
+                                        &selector, &listed,
+                                    ) {
+                                        Ok(id) => {
+                                            if let Some(pos) = self
+                                                .entries
+                                                .iter()
+                                                .position(|e| e.id() == id.as_str())
+                                            {
+                                                self.switch_or_open_entry(pos);
+                                            }
+                                        }
+                                        Err(err) => {
+                                            self.notice =
+                                                crate::transcript::display_single_line(
+                                                    &err.to_string(),
+                                                );
+                                            self.panel = Some(super::commands::Panel::Sessions {
+                                                query: selector.trim().to_owned(),
+                                                selected: 0,
+                                            });
+                                        }
+                                    }
+                                }
+                                crate::options::StartupAction::OpenSessionPicker => {
+                                    let selected = self
+                                        .matching_sessions("")
+                                        .iter()
+                                        .position(|&index| index == self.selected)
+                                        .unwrap_or(0);
+                                    self.panel = Some(super::commands::Panel::Sessions {
+                                        query: String::new(),
+                                        selected,
+                                    });
+                                }
+                                crate::options::StartupAction::Default => {
+                                    if self.entries.is_empty()
+                                        && self.options.auto_onboard
+                                        && !self.onboarding_dismissed
+                                        && self.onboarding.is_none()
+                                        && self.form.is_none()
+                                        && self.panel.is_none()
+                                        && self.confirmation.is_none()
+                                        && !self.quitting
+                                    {
+                                        self.onboarding =
+                                            Some(crate::input::OnboardingForm::new(
+                                                self.options
+                                                    .workspace
+                                                    .clone()
+                                                    .or_else(|| std::env::current_dir().ok()),
+                                            ));
+                                    } else if !self.options.no_config
+                                        && self.options.preset.is_some()
+                                    {
+                                        self.create_default_startup_session();
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -360,11 +490,13 @@ impl App {
                             entry.approval_queue.clear();
                             entry.approval_reason = None;
                             entry.approval_scroll = 0;
-                            entry.model = session.definition().model;
+                            let def = session.definition();
+                            entry.model = def.model;
                             entry.title = session.title();
                             entry.updated_at_ms = session.updated_at_ms();
-                            entry.prompt_cache = session.definition().prompt_cache;
-                            entry.code_execution = session.definition().code_execution;
+                            entry.prompt_cache = def.prompt_cache;
+                            entry.code_execution = def.code_execution;
+                            entry.workspace_root = def.workspace_root;
                             let report = session.open_report();
                             entry.workspace_rules_trust =
                                 super::state::WorkspaceRulesTrustPrompt::from_report(
@@ -822,6 +954,7 @@ impl App {
                         entry.model.clone(),
                         entry.prompt_cache,
                         entry.code_execution,
+                        entry.workspace_root.clone(),
                     )
                 });
                 match result {
@@ -829,21 +962,28 @@ impl App {
                         let new_id_str = new_id.as_str().to_owned();
                         let short = new_id_str.get(..8).unwrap_or(&new_id_str).to_owned();
                         if self.entries.iter().all(|e| e.id() != new_id_str) {
-                            let (model, title, updated_at_ms, prompt_cache, code_execution) =
-                                match listing.and_then(|item| item.record.ok()) {
-                                    Some(summary) => (
-                                        summary.definition.model,
-                                        summary.title,
-                                        summary.updated_at_ms,
-                                        summary.definition.prompt_cache,
-                                        summary.definition.code_execution,
-                                    ),
-                                    None => {
-                                        let (m, pc, ce) = fallback
-                                            .unwrap_or_else(|| ("unknown".into(), true, None));
-                                        (m, None, 0, pc, ce)
-                                    }
-                                };
+                            let (
+                                model,
+                                title,
+                                updated_at_ms,
+                                prompt_cache,
+                                code_execution,
+                                workspace_root,
+                            ) = match listing.and_then(|item| item.record.ok()) {
+                                Some(summary) => (
+                                    summary.definition.model,
+                                    summary.title,
+                                    summary.updated_at_ms,
+                                    summary.definition.prompt_cache,
+                                    summary.definition.code_execution,
+                                    summary.definition.workspace_root,
+                                ),
+                                None => {
+                                    let (m, pc, ce, ws) = fallback
+                                        .unwrap_or_else(|| ("unknown".into(), true, None, None));
+                                    (m, None, 0, pc, ce, ws)
+                                }
+                            };
                             let mut entry = Entry::new(new_id_str.clone(), model);
                             entry.title = title;
                             if updated_at_ms > 0 {
@@ -851,6 +991,7 @@ impl App {
                             }
                             entry.prompt_cache = prompt_cache;
                             entry.code_execution = code_execution;
+                            entry.workspace_root = workspace_root;
                             self.entries.push(entry);
                         }
                         if let Some(pos) = self.entries.iter().position(|e| e.id() == new_id_str) {
@@ -968,6 +1109,8 @@ impl App {
                 let message = format!("Background task failed: {detail}");
                 if kind == JobKind::List {
                     self.listing = false;
+                    self.pending_resume_selector = None;
+                    self.startup_action_pending = false;
                     self.notice = message;
                     return;
                 }
@@ -1104,6 +1247,26 @@ impl App {
                     panel.lines = vec![message];
                 }
             }
+        }
+    }
+
+    /// Switch to an existing open entry or open a closed entry at `pos`.
+    fn switch_or_open_entry(&mut self, pos: usize) {
+        let Some(entry) = self.entries.get(pos) else {
+            return;
+        };
+        let short = entry.id().get(..8).unwrap_or(entry.id()).to_owned();
+        let already_open = entry.session.is_some();
+        let busy = entry.busy.is_some();
+        self.panel = None;
+        self.selected = pos;
+        self.refresh_size_flags();
+        self.update_approval_guard();
+        self.update_workspace_trust_guard();
+        if already_open {
+            self.notice = format!("Switched to session {short}");
+        } else if !busy {
+            self.open();
         }
     }
 

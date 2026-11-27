@@ -2,7 +2,7 @@ use super::support::{Server, app, create, ctrl, key, until};
 use crate::{
     app::{App, COMMANDS, Clock, Panel, matching_commands},
     input::{Form, OnboardingForm},
-    options::{self, Options},
+    options::{self, Options, StartupAction},
     render,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -42,10 +42,12 @@ fn onboard_app(dir: &Path, config_path: PathBuf) -> App {
         profile: None,
         preset: None,
         config_path: None,
+        workspace: None,
         code_execution_enabled: None,
         no_config: false,
         auto_onboard: true,
         onboarding_config_path: Some(config_path),
+        startup_action: StartupAction::Default,
     });
     app.clock = Clock::manual(std::time::Instant::now());
     app
@@ -415,10 +417,12 @@ async fn ux06_doctor_menu_tab_complete_async_report_and_early_close() {
         profile: None,
         preset,
         config_path: Some(cfg_path),
+        workspace: None,
         code_execution_enabled: None,
         no_config: false,
         auto_onboard: false,
         onboarding_config_path: None,
+        startup_action: StartupAction::Default,
     });
     app.clock = Clock::manual(std::time::Instant::now());
 

@@ -88,7 +88,7 @@ _tars_completions() {
     fi
 
     local top_commands="run session tools doctor completions"
-    local top_flags="-p --print -c --continue --resume --stream --stream-json --output-format --json --image --config --no-config --profile --store --recovery-dir --workspace --tools --permission-mode --code-execution --no-code-execution --provider --model --api-key-env --endpoint --input --stdin --timeout-secs --max-tokens --reasoning-effort --extra-body --render-options --max-model-attempts --context-window --auto-compact --prompt-cache --command-network --mcp --system --system-file --dynamic-context --dynamic-context-file --skill-dir --no-skills --load --save --trust-workspace-rules --trust-workspace-agents -h --help -V --version"
+    local top_flags="-p --print -c --continue -r --resume --stream --stream-json --output-format --json --image --config --no-config --profile --store --recovery-dir --workspace --tools --permission-mode --code-execution --no-code-execution --provider --model --api-key-env --endpoint --input --stdin --timeout-secs --max-tokens --reasoning-effort --extra-body --render-options --max-model-attempts --context-window --auto-compact --prompt-cache --command-network --mcp --system --system-file --dynamic-context --dynamic-context-file --skill-dir --no-skills --load --save --trust-workspace-rules --trust-workspace-agents -h --help -V --version"
     local session_commands="create run list show compact history repair rename delete fork export-materials export-markdown import-legacy"
     local tools_commands="status install"
     local shells="bash zsh fish"
@@ -231,7 +231,8 @@ _tars() {
         '--print[Run headlessly in print mode]'
         '-c[Continue most recently updated session]'
         '--continue[Continue most recently updated session]'
-        '--resume[Continue a saved session by ID, prefix, or latest]:selector:'
+        '-r[Resume a saved session by ID, prefix, or open picker]::selector:'
+        '--resume[Continue a saved session by ID, prefix, or open picker]::selector:'
         '--stream[Stream incremental response text to stdout]'
         '--stream-json[Stream NDJSON progress events and result to stdout]'
         '--output-format[Output format]:format:(text json stream-json)'
@@ -379,7 +380,7 @@ complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a completions -
 
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds; or __fish_seen_subcommand_from run" -s p -l print -d "Run headlessly in print mode"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -s c -l continue -d "Continue latest saved session"
-complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -l resume -r -d "Continue saved session by ID, prefix, or latest"
+complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -s r -l resume -d "Resume saved session by ID, prefix, or open picker"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds; or __fish_seen_subcommand_from run" -l stream -d "Stream incremental response text"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds; or __fish_seen_subcommand_from run" -l stream-json -d "Stream NDJSON progress events"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds; or __fish_seen_subcommand_from run" -l output-format -r -a "text json stream-json" -d "Output format"

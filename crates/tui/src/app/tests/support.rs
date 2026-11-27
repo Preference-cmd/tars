@@ -1,5 +1,9 @@
 use super::super::App;
-use crate::{app::Clock, input::Form, options::Options};
+use crate::{
+    app::Clock,
+    input::Form,
+    options::{Options, StartupAction},
+};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui_textarea::TextArea;
 use serde_json::Value;
@@ -21,10 +25,12 @@ pub(super) fn app(dir: &std::path::Path) -> App {
         profile: None,
         preset: None,
         config_path: None,
+        workspace: None,
         code_execution_enabled: None,
         no_config: false,
         auto_onboard: false,
         onboarding_config_path: None,
+        startup_action: StartupAction::Default,
     });
     app.clock = Clock::manual(std::time::Instant::now());
     app

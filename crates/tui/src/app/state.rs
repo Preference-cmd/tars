@@ -357,6 +357,7 @@ pub(crate) struct Entry {
     pub updated_at_ms: u64,
     pub prompt_cache: bool,
     pub code_execution: Option<tars_core::definition::CodeExecutionSettings>,
+    pub workspace_root: Option<std::path::PathBuf>,
     pub session: Option<ManagedSession>,
     pub(super) prepared: Option<PreparedCreate>,
     pub busy: Option<&'static str>,
@@ -421,6 +422,7 @@ impl Entry {
             updated_at_ms,
             prompt_cache: true,
             code_execution: None,
+            workspace_root: None,
             session: None,
             prepared: None,
             busy: None,
@@ -630,6 +632,10 @@ pub(crate) struct App {
     pub(crate) user_rules_path: Option<std::path::PathBuf>,
     /// Deferred external `$EDITOR` request executed by `App::run` outside `EventStream`.
     pub(super) pending_external_edit: Option<PendingExternalEdit>,
+    /// Whether the startup action (`Default`, `-c`, `-r`) still awaits initial `list()`.
+    pub(crate) startup_action_pending: bool,
+    /// Deferred `/resume <selector>` target resolved once `list()` completes.
+    pub(crate) pending_resume_selector: Option<String>,
 }
 impl App {
     pub fn new(options: Options) -> Self {
@@ -688,6 +694,8 @@ impl App {
             search_reason: None,
             user_rules_path,
             pending_external_edit: None,
+            startup_action_pending: true,
+            pending_resume_selector: None,
         }
     }
     pub(super) fn entry_mut(&mut self, key: &Key) -> Option<&mut Entry> {

@@ -18,6 +18,9 @@ Interactive mode (default when stdin and stdout are terminals):
   --profile NAME      Named model preset (otherwise default_profile)
   --store DIR         Session store directory (defaults to ~/.tars/data or $TARS_HOME/data)
   --recovery-dir DIR  Recovery export directory (default configured or current directory)
+  --workspace DIR     Workspace root directory for the session
+  -c, --continue      Continue the most recently updated saved session
+  -r, --resume [SEL]  Resume a saved session by ID/prefix, or open session picker
   --code-execution    Enable sandboxed read-only run_code
   --no-code-execution Disable run_code even when enabled in configuration
 
@@ -25,6 +28,9 @@ Interactive slash commands:
   /doctor    Check configuration, credentials, storage, sandbox and tools
   /init      Analyze the workspace and create or update AGENTS.md
   /new       Create a session with model settings (F2)
+  /clear     Start a fresh session with the current model preset and workspace
+  /resume    Open the session picker or jump to a session by ID/prefix
+  /model     Switch model profile in a new session
   /sessions  Find and open a saved or active session
   /agents    List session agents and switch transcript view
   /mode      Show or change the permission mode (Shift-Tab cycles)
@@ -234,22 +240,7 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                 }
             }
         }
-        [first, ..]
-            if matches!(
-                first.to_str(),
-                Some(
-                    "--config"
-                        | "--no-config"
-                        | "--profile"
-                        | "--store"
-                        | "--recovery-dir"
-                        | "--code-execution"
-                        | "--no-code-execution"
-                )
-            ) =>
-        {
-            tars_tui::run(args)
-        }
+        _ if is_interactive_invocation(&args) => tars_tui::run(args),
         _ => {
             let _ = writeln!(
                 io::stderr().lock(),
@@ -258,6 +249,53 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Returns whether top-level `args` form an interactive TUI invocation.
+///
+/// Scans tokens before `--`, skipping values consumed by value-taking flags
+/// (including an optional selector after `-r` / `--resume` when the next token
+/// does not start with `-`). Standalone `-h`/`--help` and `-V`/`--version` are
+/// handled earlier; here they are permitted only alongside interactive flags.
+fn is_interactive_invocation(args: &[OsString]) -> bool {
+    let mut saw_interactive_flag = false;
+    let mut iter = args.iter().peekable();
+    while let Some(arg) = iter.next() {
+        let Some(token) = arg.to_str() else {
+            return false;
+        };
+        if token == "--" {
+            break;
+        }
+        match token {
+            "--config" | "--profile" | "--store" | "--recovery-dir" | "--workspace" => {
+                saw_interactive_flag = true;
+                if iter
+                    .peek()
+                    .and_then(|next| next.to_str())
+                    .is_some_and(|next| !next.starts_with("--"))
+                {
+                    let _ = iter.next();
+                }
+            }
+            "-r" | "--resume" => {
+                saw_interactive_flag = true;
+                if iter
+                    .peek()
+                    .and_then(|next| next.to_str())
+                    .is_some_and(|next| !next.starts_with('-'))
+                {
+                    let _ = iter.next();
+                }
+            }
+            "--no-config" | "--code-execution" | "--no-code-execution" | "-c" | "--continue" => {
+                saw_interactive_flag = true;
+            }
+            "-h" | "--help" | "-V" | "--version" => {}
+            _ => return false,
+        }
+    }
+    saw_interactive_flag
 }
 
 fn is_session_subcommand(command: Option<&str>) -> bool {

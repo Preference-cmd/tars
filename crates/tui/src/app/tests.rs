@@ -18,6 +18,7 @@ mod streaming;
 mod tools;
 
 mod approval;
+mod claude_alignment;
 mod code_execution;
 mod command;
 mod compaction;

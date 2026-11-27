@@ -28,6 +28,314 @@ pub(super) fn export(
 }
 
 impl App {
+    pub(super) fn default_workspace_tools(&self) -> Vec<tars_core::definition::WorkspaceTool> {
+        self.sandbox_status
+            .as_ref()
+            .map(tars_core::sandbox::SandboxStatus::is_available)
+            .or_else(|| self.sandbox.as_ref().map(|check| check.available))
+            .map(tars_core::config::default_tools_for_sandbox)
+            .unwrap_or_else(tars_core::config::default_tools_for_current_platform)
+    }
+
+    pub(super) fn active_or_cli_workspace(&self) -> Option<PathBuf> {
+        self.entries
+            .get(self.selected)
+            .and_then(|entry| {
+                entry
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.definition().workspace_root)
+                    .or_else(|| entry.workspace_root.clone())
+            })
+            .or_else(|| self.options.workspace.clone())
+    }
+
+    pub(super) fn prepare_and_open_definition(
+        &mut self,
+        definition: tars_core::definition::SessionDefinition,
+    ) -> Result<(String, String), String> {
+        let model = definition.model.clone();
+        let prompt_cache = definition.prompt_cache;
+        let code_execution = definition.code_execution;
+        let workspace_root = definition.workspace_root.clone();
+        let prepared = PreparedCreate::prepare_persistent(definition, None)
+            .map_err(|error| error.to_string())?;
+        let id = prepared.conversation_id().as_str().to_owned();
+        let mut entry = Entry::new(id.clone(), model.clone());
+        entry.prompt_cache = prompt_cache;
+        entry.code_execution = code_execution;
+        entry.workspace_root = workspace_root;
+        entry.prepared = Some(prepared);
+        self.entries.push(entry);
+        self.selected = self.entries.len() - 1;
+        self.refresh_size_flags();
+        self.open();
+        self.update_approval_guard();
+        self.update_workspace_trust_guard();
+        Ok((id, model))
+    }
+
+    fn resolve_preset_definition(
+        &self,
+        profile: Option<&str>,
+        preset: &tars_core::definition::SessionDefinition,
+        workspace_root: Option<PathBuf>,
+        tools: Option<Vec<tars_core::definition::WorkspaceTool>>,
+    ) -> Result<tars_core::definition::SessionDefinition, String> {
+        if self.options.config.preset(profile).ok().flatten().is_some() {
+            self.options
+                .config
+                .definition(
+                    profile,
+                    tars_core::config::DefinitionOverrides {
+                        workspace_root,
+                        tools,
+                        code_execution_enabled: self.options.code_execution_enabled,
+                        ..Default::default()
+                    },
+                )
+                .map_err(|error| error.to_string())
+        } else {
+            let mut definition = preset.clone();
+            definition.workspace_root = workspace_root;
+            if let Some(tools) = tools {
+                definition.tools = tools;
+            }
+            Ok(definition)
+        }
+    }
+
+    pub(super) fn create_default_startup_session(&mut self) {
+        if self.quitting
+            || self.confirmation.is_some()
+            || self.onboarding.is_some()
+            || self.form.is_some()
+            || self.panel.is_some()
+            || !self.capacity()
+        {
+            return;
+        }
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.session.is_some() || entry.busy.is_some())
+        {
+            return;
+        }
+        let Some(preset) = self.options.preset.clone() else {
+            return;
+        };
+        let workspace_root = self
+            .options
+            .workspace
+            .clone()
+            .or_else(|| preset.workspace_root.clone())
+            .or_else(|| std::env::current_dir().ok());
+        let tools = if preset.tools.is_empty() && workspace_root.is_some() {
+            Some(self.default_workspace_tools())
+        } else {
+            None
+        };
+        let definition = match self.resolve_preset_definition(
+            self.options.profile.as_deref(),
+            &preset,
+            workspace_root,
+            tools,
+        ) {
+            Ok(definition) => definition,
+            Err(error) => {
+                self.notice = format!(
+                    "Could not start default session: {} · Run /doctor or /new",
+                    crate::transcript::display_single_line(&error)
+                );
+                return;
+            }
+        };
+        if let Err(error) = self.prepare_and_open_definition(definition) {
+            self.notice = format!(
+                "Could not start default session: {} · Run /doctor or /new",
+                crate::transcript::display_single_line(&error)
+            );
+        }
+    }
+
+    pub(super) fn clear_command(&mut self) {
+        if self.quitting
+            || self.confirmation.is_some()
+            || self.onboarding.is_some()
+            || self.form.is_some()
+            || !self.capacity()
+        {
+            return;
+        }
+        let Some(preset) = self.options.preset.clone() else {
+            self.notice = "No default model preset configured; use /new".into();
+            return;
+        };
+        let workspace_root = self
+            .active_or_cli_workspace()
+            .or_else(|| preset.workspace_root.clone())
+            .or_else(|| std::env::current_dir().ok());
+        let tools = if preset.tools.is_empty() && workspace_root.is_some() {
+            Some(self.default_workspace_tools())
+        } else {
+            None
+        };
+        let definition = match self.resolve_preset_definition(
+            self.options.profile.as_deref(),
+            &preset,
+            workspace_root,
+            tools,
+        ) {
+            Ok(definition) => definition,
+            Err(error) => {
+                self.notice = format!(
+                    "Could not start fresh session: {} · Run /doctor or /new",
+                    crate::transcript::display_single_line(&error)
+                );
+                return;
+            }
+        };
+        match self.prepare_and_open_definition(definition) {
+            Ok((id, _)) => {
+                let short_id = id.get(..8).unwrap_or(&id);
+                self.notice = format!("Started fresh session {short_id}");
+            }
+            Err(error) => {
+                self.notice = format!(
+                    "Could not start fresh session: {} · Run /doctor or /new",
+                    crate::transcript::display_single_line(&error)
+                );
+            }
+        }
+    }
+
+    pub(super) fn resume_command(&mut self, arg: &str) {
+        let trimmed = arg.trim();
+        if trimmed.is_empty() {
+            self.pending_resume_selector = None;
+            self.list();
+            let selected = self
+                .matching_sessions("")
+                .iter()
+                .position(|&index| index == self.selected)
+                .unwrap_or(0);
+            self.panel = Some(super::commands::Panel::Sessions {
+                query: String::new(),
+                selected,
+            });
+            return;
+        }
+        if !self.listing && !self.capacity() {
+            return;
+        }
+        self.pending_resume_selector = Some(trimmed.to_owned());
+        self.list();
+    }
+
+    pub(super) fn switch_model_profile(&mut self, profile_name: &str) {
+        if self.quitting
+            || self.confirmation.is_some()
+            || self.onboarding.is_some()
+            || self.form.is_some()
+            || !self.capacity()
+        {
+            return;
+        }
+        let trimmed = profile_name.trim();
+        if trimmed.is_empty() || !self.options.config.model_profiles().contains_key(trimmed) {
+            self.notice = format!(
+                "Profile '{}' not found (or no profiles in config.toml); use /new",
+                crate::transcript::display_single_line(trimmed)
+            );
+            return;
+        }
+        let active_or_cli_ws = self.active_or_cli_workspace();
+        let base_def = match self.options.config.definition(
+            Some(trimmed),
+            tars_core::config::DefinitionOverrides {
+                workspace_root: active_or_cli_ws.clone(),
+                code_execution_enabled: self.options.code_execution_enabled,
+                ..Default::default()
+            },
+        ) {
+            Ok(definition) => definition,
+            Err(error) => {
+                self.notice = format!(
+                    "Could not switch to profile {}: {} · Run /doctor or /new",
+                    crate::transcript::display_single_line(trimmed),
+                    crate::transcript::display_single_line(&error.to_string())
+                );
+                return;
+            }
+        };
+        let workspace_root = active_or_cli_ws
+            .or_else(|| base_def.workspace_root.clone())
+            .or_else(|| std::env::current_dir().ok());
+        let needs_tools = base_def.tools.is_empty() && workspace_root.is_some();
+        let definition = if base_def.workspace_root != workspace_root || needs_tools {
+            let tools = needs_tools.then(|| self.default_workspace_tools());
+            match self.options.config.definition(
+                Some(trimmed),
+                tars_core::config::DefinitionOverrides {
+                    workspace_root,
+                    tools,
+                    code_execution_enabled: self.options.code_execution_enabled,
+                    ..Default::default()
+                },
+            ) {
+                Ok(definition) => definition,
+                Err(error) => {
+                    self.notice = format!(
+                        "Could not switch to profile {}: {} · Run /doctor or /new",
+                        crate::transcript::display_single_line(trimmed),
+                        crate::transcript::display_single_line(&error.to_string())
+                    );
+                    return;
+                }
+            }
+        } else {
+            base_def
+        };
+        match self.prepare_and_open_definition(definition.clone()) {
+            Ok((id, model)) => {
+                let profile_preset = match (
+                    self.options.config.preset(Some(trimmed)),
+                    self.options.code_execution_enabled,
+                ) {
+                    (Ok(Some(_)), Some(_)) => self
+                        .options
+                        .config
+                        .definition(
+                            Some(trimmed),
+                            tars_core::config::DefinitionOverrides {
+                                code_execution_enabled: self.options.code_execution_enabled,
+                                ..Default::default()
+                            },
+                        )
+                        .ok(),
+                    (Ok(preset), _) => preset,
+                    (Err(_), _) => None,
+                };
+                self.options.profile = Some(trimmed.to_owned());
+                self.options.preset = profile_preset.or(Some(definition));
+                let short_id = id.get(..8).unwrap_or(&id);
+                self.notice = format!(
+                    "Switched to profile {} ({}) in new session {short_id}",
+                    crate::transcript::display_single_line(trimmed),
+                    crate::transcript::display_single_line(&model),
+                );
+            }
+            Err(error) => {
+                self.notice = format!(
+                    "Could not switch to profile {}: {} · Run /doctor or /new",
+                    crate::transcript::display_single_line(trimmed),
+                    crate::transcript::display_single_line(&error)
+                );
+            }
+        }
+    }
+
     pub(super) fn list(&mut self) {
         if self.listing || !self.capacity() {
             return;
@@ -52,24 +360,13 @@ impl App {
                 return;
             }
         };
-        let model = definition.model.clone();
-        let prompt_cache = definition.prompt_cache;
-        let code_execution = definition.code_execution;
-        let prepared = match PreparedCreate::prepare_persistent(definition, None) {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                form.error = error.to_string();
-                return;
+        if let Err(error) = self.prepare_and_open_definition(definition) {
+            if let Some(form) = self.form.as_mut() {
+                form.error = error;
             }
-        };
-        let mut entry = Entry::new(prepared.conversation_id().as_str().to_owned(), model);
-        entry.prompt_cache = prompt_cache;
-        entry.code_execution = code_execution;
-        entry.prepared = Some(prepared);
-        self.entries.push(entry);
-        self.selected = self.entries.len() - 1;
+            return;
+        }
         self.form = None;
-        self.open();
     }
     pub(super) fn open(&mut self) {
         if !self.capacity() {
@@ -441,6 +738,7 @@ impl App {
         let model = definition.model.clone();
         let prompt_cache = definition.prompt_cache;
         let code_execution = definition.code_execution;
+        let workspace_root = definition.workspace_root.clone();
         let prepared = match PreparedCreate::prepare_persistent(definition, None) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -456,6 +754,7 @@ impl App {
         let mut entry = Entry::new(prepared.conversation_id().as_str().to_owned(), model);
         entry.prompt_cache = prompt_cache;
         entry.code_execution = code_execution;
+        entry.workspace_root = workspace_root;
         entry.prepared = Some(prepared);
         self.entries.push(entry);
         self.selected = self.entries.len() - 1;
@@ -662,7 +961,8 @@ impl App {
             .session
             .as_ref()
             .and_then(|session| session.definition().workspace_root);
-        match input::complete_editor(&mut entry.editor, workspace_root.as_deref()) {
+        let profile_names: Vec<String> = self.options.config.model_profiles().into_keys().collect();
+        match input::complete_editor(&mut entry.editor, workspace_root.as_deref(), &profile_names) {
             input::CompleteResult::None => {}
             input::CompleteResult::Modified { notice } => {
                 entry.reset_history_cursor();
@@ -670,6 +970,7 @@ impl App {
                     entry.notice = notice;
                 } else if entry.notice.starts_with("Commands: ")
                     || entry.notice.starts_with("Paths: ")
+                    || entry.notice.starts_with("Profiles: ")
                     || entry.notice.starts_with("Image: ")
                     || entry.notice.starts_with("Subcommands: ")
                     || entry.notice.starts_with("No matching ")
