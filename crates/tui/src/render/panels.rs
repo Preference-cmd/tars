@@ -687,8 +687,14 @@ pub(super) fn confirm(frame: &mut Frame<'_>, confirmation: &crate::app::Confirma
         rows[0],
     );
     frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }), rows[1]);
+    let hint = match confirmation {
+        Confirmation::Quit { .. } => "y or Ctrl-C quit · n / Esc cancel",
+        Confirmation::Close { .. } | Confirmation::Discard | Confirmation::DeleteSession { .. } => {
+            "Confirm? y / n · Esc / Ctrl-C cancel"
+        }
+    };
     frame.render_widget(
-        Paragraph::new("Confirm? y / n · Esc back")
+        Paragraph::new(hint)
             .wrap(Wrap { trim: false })
             .style(Style::default().fg(ACCENT)),
         rows[2],
@@ -1049,7 +1055,7 @@ fn render_workspace_trust_prompt(
         .collect();
     frame.render_widget(Paragraph::new(visible).block(diff_block()), regions[1]);
 
-    let hint = "Enter / y trust · n / Esc decline · ↑↓ PgUp PgDn scroll";
+    let hint = "Enter / y trust · n / Esc / Ctrl-C decline · ↑↓ PgUp PgDn scroll";
     let hint_style = if app.is_workspace_trust_guarded() {
         Style::default().fg(MUTED).add_modifier(Modifier::DIM)
     } else {

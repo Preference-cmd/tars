@@ -646,7 +646,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     let minimum_height = if approval_visible { 19 } else { 12 };
     if app.too_small || area.width < 30 || area.height < minimum_height {
         let message = if approval_visible {
-            "Resize to at least 30 x 19 to answer the pending confirmation. Esc cancels this turn. Ctrl-Q quits."
+            "Resize to at least 30 x 19 to answer the pending confirmation. Esc / Ctrl-C cancels this turn. Ctrl-Q quits."
         } else {
             "Resize to 30 x 12. Ctrl-C / Ctrl-Q quits."
         };

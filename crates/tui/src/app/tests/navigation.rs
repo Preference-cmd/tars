@@ -122,7 +122,11 @@ async fn compact_layout_keeps_menu_and_confirmation_controls_visible() {
             .iter()
             .map(|c| c.symbol())
             .collect::<String>();
-        assert!(screen.contains("y / n"), "{width}x{height}: {screen}");
+        let normalized = screen.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            normalized.contains("y or Ctrl-C quit · n / Esc cancel"),
+            "{width}x{height}: {normalized}"
+        );
         app.event(key(KeyCode::Char('n')));
         app.event(key(KeyCode::Esc));
     }

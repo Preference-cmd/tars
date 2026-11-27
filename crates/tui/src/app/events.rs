@@ -97,6 +97,7 @@ impl App {
         self.update_workspace_trust_guard();
         self.update_repair_guard();
         self.update_folder_trust_guard();
+        self.update_ctrl_c_exit_grace();
         let is_guarded = self.is_approval_guarded();
         let is_workspace_trust_guarded = self.is_workspace_trust_guarded();
         if let Event::Resize(width, height) = event {
@@ -136,6 +137,7 @@ impl App {
             if self.quitting || self.confirmation.is_some() {
                 return;
             }
+            self.ctrl_c_exit_armed = false;
             if let Some(panel) = &mut self.panel {
                 if let super::commands::Panel::Commands { query, selected }
                 | super::commands::Panel::Sessions { query, selected }
@@ -172,9 +174,26 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return;
         }
+        if key.kind == KeyEventKind::Repeat && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return;
+        }
+        if !input::control(key, 'c') {
+            self.ctrl_c_exit_armed = false;
+        }
         if let Some(confirmation) = self.confirmation.take() {
             if key.kind != KeyEventKind::Press {
                 self.confirmation = Some(confirmation);
+                return;
+            }
+            if input::control(key, 'c') {
+                match confirmation {
+                    Confirmation::Quit { .. } => self.quitting = true,
+                    Confirmation::Close { .. }
+                    | Confirmation::Discard
+                    | Confirmation::DeleteSession { .. } => {}
+                }
+                self.update_approval_guard();
+                self.update_workspace_trust_guard();
                 return;
             }
             match key.code {
@@ -196,6 +215,10 @@ impl App {
         }
         if input::control(key, 'q') {
             self.request_quit();
+            return;
+        }
+        if input::control(key, 'c') {
+            self.handle_ctrl_c();
             return;
         }
         if self.panel.is_some() {
@@ -596,6 +619,56 @@ enum TrustPromptKind {
 }
 
 impl App {
+    fn handle_ctrl_c(&mut self) {
+        if self.folder_trust.is_some() {
+            self.quitting = true;
+            return;
+        }
+        let now = self.clock.now();
+        if let Some(entry) = self.entries.get_mut(self.selected)
+            && !entry.approval_queue.is_empty()
+        {
+            clear_approvals(entry);
+            self.cancel();
+            self.update_approval_guard();
+            self.last_ctrl_c_cancel_at = Some(now);
+            self.ctrl_c_exit_armed = false;
+            return;
+        }
+        let trust_kind = self.entries.get(self.selected).and_then(|entry| {
+            if entry.workspace_rules_trust.is_some() {
+                Some(TrustPromptKind::Rules)
+            } else if entry.workspace_agents_trust.is_some() {
+                Some(TrustPromptKind::Agents)
+            } else {
+                None
+            }
+        });
+        if let Some(kind) = trust_kind {
+            self.decline_workspace_trust(kind);
+            return;
+        }
+        if self.entry_has_active_work() {
+            self.cancel();
+            self.last_ctrl_c_cancel_at = Some(now);
+            self.ctrl_c_exit_armed = false;
+            self.set_active_notice("Cancellation requested; press Ctrl-C again once idle to exit");
+            return;
+        }
+        let in_grace = self.last_ctrl_c_cancel_at.is_some_and(|cancel_at| {
+            now.saturating_duration_since(cancel_at) < super::state::CTRL_C_EXIT_GRACE_WINDOW
+        });
+        if in_grace && !self.ctrl_c_exit_armed {
+            self.ctrl_c_exit_armed = true;
+            self.set_active_notice("Press Ctrl-C again to exit");
+            return;
+        }
+        self.panel = None;
+        self.last_ctrl_c_cancel_at = None;
+        self.ctrl_c_exit_armed = false;
+        self.request_quit();
+    }
+
     fn folder_trust_key(&mut self, key: crossterm::event::KeyEvent) {
         if key.kind != KeyEventKind::Press {
             return;

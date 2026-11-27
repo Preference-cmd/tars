@@ -27,6 +27,10 @@ pub(crate) const MAX_QUEUED_PROMPTS: usize = 8;
 /// changes without a key press, so keys typed for something else do not decide it.
 pub(crate) const CONFIRM_GUARD_WINDOW: Duration = Duration::from_millis(500);
 
+/// Grace window after a `Ctrl+C` cancellation during which an idle `Ctrl+C`
+/// arms exit confirmation instead of quitting immediately.
+pub(crate) const CTRL_C_EXIT_GRACE_WINDOW: Duration = Duration::from_millis(1500);
+
 /// Armable window that ignores keys until it expires.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GuardWindow {
@@ -689,6 +693,10 @@ pub(crate) struct App {
     pub(crate) clipboard_sink: Option<ClipboardSink>,
     /// Scratch composer used when no session entry exists yet.
     pub(crate) scratch_editor: TextArea<'static>,
+    /// Timestamp when `Ctrl+C` last cancelled active work or cleared pending approvals.
+    pub(crate) last_ctrl_c_cancel_at: Option<Instant>,
+    /// Whether an idle `Ctrl+C` inside the post-cancel grace window has armed exit.
+    pub(crate) ctrl_c_exit_armed: bool,
 }
 impl App {
     pub fn new(options: Options) -> Self {
@@ -757,6 +765,8 @@ impl App {
             recently_deleted: HashSet::new(),
             clipboard_sink: None,
             scratch_editor: input::editor(),
+            last_ctrl_c_cancel_at: None,
+            ctrl_c_exit_armed: false,
         }
     }
 
@@ -989,6 +999,28 @@ impl App {
         self.trusted_workspace.as_ref().is_some_and(|t| t == ws)
             || self.trusted_workspace_raw.as_ref().is_some_and(|t| t == ws)
     }
+    /// Return whether the currently selected entry has active work that `Ctrl+C` should cancel.
+    ///
+    /// Explicitly excludes `entry.work.is_some()` because finished turns retain
+    /// `entry.work` for `/repair`.
+    pub(crate) fn entry_has_active_work(&self) -> bool {
+        self.entries.get(self.selected).is_some_and(|entry| {
+            entry.busy == Some("submitting")
+                || entry.is_turn_running()
+                || entry.session.as_ref().is_some_and(|session| {
+                    session.has_active_execution() || session.active_finite_background_tasks() > 0
+                })
+        })
+    }
+    /// Clear the post-cancel `Ctrl+C` exit grace state once the window expires.
+    pub(crate) fn update_ctrl_c_exit_grace(&mut self) {
+        if let Some(cancel_at) = self.last_ctrl_c_cancel_at
+            && self.clock.now().saturating_duration_since(cancel_at) >= CTRL_C_EXIT_GRACE_WINDOW
+        {
+            self.last_ctrl_c_cancel_at = None;
+            self.ctrl_c_exit_armed = false;
+        }
+    }
     #[cfg(test)]
     pub(crate) fn advance_clock(&mut self, duration: Duration) {
         self.clock.advance(duration);
@@ -997,5 +1029,6 @@ impl App {
         self.update_repair_guard();
         self.update_folder_trust_guard();
         self.update_startup_guard();
+        self.update_ctrl_c_exit_grace();
     }
 }

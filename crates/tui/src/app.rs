@@ -16,6 +16,8 @@ pub(crate) use clock::Clock;
 pub(crate) use commands::TRUST_PANEL_TITLE;
 pub(crate) use commands::{COMMANDS, InfoKind, Panel, matching_commands};
 pub(crate) use startup::Startup;
+#[cfg(test)]
+pub(crate) use state::CTRL_C_EXIT_GRACE_WINDOW;
 pub(crate) use state::{
     App, CONFIRM_GUARD_WINDOW, Confirmation, Entry, GuardWindow, QueuedPrompt, WorkspaceTrustLine,
     WorkspaceTrustLineKind,

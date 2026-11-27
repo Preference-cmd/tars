@@ -87,9 +87,10 @@ _tars_completions() {
         prev="${COMP_WORDS[COMP_CWORD-1]}"
     fi
 
-    local top_commands="run session tools doctor completions"
+    local top_commands="run session trust tools doctor completions"
     local top_flags="-p --print -c --continue -r --resume --stream --stream-json --output-format --json --image --config --no-config --profile --store --recovery-dir --workspace --tools --permission-mode --code-execution --no-code-execution --provider --model --api-key-env --endpoint --input --stdin --timeout-secs --max-tokens --reasoning-effort --extra-body --render-options --max-model-attempts --context-window --auto-compact --prompt-cache --command-network --mcp --system --system-file --dynamic-context --dynamic-context-file --skill-dir --no-skills --load --save --trust-workspace-rules --trust-workspace-agents -h --help -V --version"
     local session_commands="create run list show compact history repair rename delete fork export-materials export-markdown import-legacy"
+    local trust_commands="list revoke"
     local tools_commands="status install"
     local shells="bash zsh fish"
 
@@ -147,6 +148,18 @@ _tars_completions() {
             COMPREPLY=( $(compgen -W "$session_flags" -- "$cur") )
             return 0
             ;;
+        trust)
+            if [[ -z "$subcmd" && "$cur" != -* ]]; then
+                COMPREPLY=( $(compgen -W "$trust_commands" -- "$cur") )
+                return 0
+            fi
+            if [[ "$subcmd" == "list" ]]; then
+                COMPREPLY=( $(compgen -W "--store --config --no-config --json -h --help" -- "$cur") )
+            else
+                COMPREPLY=( $(compgen -W "--store --config --no-config -h --help" -- "$cur") )
+            fi
+            return 0
+            ;;
         tools)
             if [[ -z "$subcmd" && "$cur" != -* ]]; then
                 COMPREPLY=( $(compgen -W "$tools_commands" -- "$cur") )
@@ -192,10 +205,11 @@ complete -F _tars_completions tars
 const ZSH_SCRIPT: &str = r#"#compdef tars
 
 _tars() {
-    local -a top_commands session_commands tools_commands shells
+    local -a top_commands session_commands trust_commands tools_commands shells
     top_commands=(
         'run:Execute one transient work with a model'
         'session:Manage and run persistent sessions'
+        'trust:List or revoke trusted workspace folders'
         'tools:Check or install external tools'
         'doctor:Run read-only environment and configuration diagnostics'
         'completions:Generate static shell completion scripts'
@@ -214,6 +228,10 @@ _tars() {
         'export-materials:Export validated Context materials'
         'export-markdown:Export conversation as GitHub-Flavored Markdown'
         'import-legacy:Import a tars-session-v2.4 JSON record'
+    )
+    trust_commands=(
+        'list:List trusted workspace folders'
+        'revoke:Revoke trust for a workspace folder'
     )
     tools_commands=(
         'status:Show external tool and sandbox status'
@@ -312,6 +330,29 @@ _tars() {
                 '-h[Show help]' \
                 '--help[Show help]'
             ;;
+        trust)
+            if [[ -z "$subcmd" && "${words[CURRENT]}" != -* ]]; then
+                _describe -t trust-commands 'trust subcommands' trust_commands
+                return
+            fi
+            if [[ "$subcmd" == "list" ]]; then
+                _arguments -s \
+                    '--store[Session store directory]:dir:_files -/' \
+                    '--config[Shared TOML configuration file]:file:_files' \
+                    '--no-config[Ignore global configuration]' \
+                    '--json[Structured JSON output]' \
+                    '-h[Show help]' \
+                    '--help[Show help]'
+            else
+                _arguments -s \
+                    '--store[Session store directory]:dir:_files -/' \
+                    '--config[Shared TOML configuration file]:file:_files' \
+                    '--no-config[Ignore global configuration]' \
+                    '-h[Show help]' \
+                    '--help[Show help]' \
+                    '*:workspace:_files -/'
+            fi
+            ;;
         tools)
             if [[ -z "$subcmd" && "${words[CURRENT]}" != -* ]]; then
                 _describe -t tools-commands 'tools subcommands' tools_commands
@@ -366,14 +407,16 @@ compdef _tars tars
 
 const FISH_SCRIPT: &str = r#"# fish completion for tars
 
-set -l top_cmds run session tools doctor completions
+set -l top_cmds run session trust tools doctor completions
 set -l session_cmds create run list show compact history repair rename delete fork export-materials export-markdown import-legacy
+set -l trust_cmds list revoke
 set -l tools_cmds status install
 
 complete -c tars -f
 
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a run -d "Execute one transient work with a model"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a session -d "Save and reopen persistent sessions"
+complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a trust -d "List or revoke trusted workspace folders"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a tools -d "Check or install external tools"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a doctor -d "Run read-only diagnostics"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a completions -d "Generate shell completion script"
@@ -416,6 +459,10 @@ complete -c tars -n "__fish_seen_subcommand_from session; and not __fish_seen_su
 complete -c tars -n "__fish_seen_subcommand_from session" -l agent -r -d "Agent UUID or unique name"
 complete -c tars -n "__fish_seen_subcommand_from session" -l last -r -d "Newest N blocks"
 complete -c tars -n "__fish_seen_subcommand_from session" -l output -r -F -d "New output file path"
+
+complete -c tars -n "__fish_seen_subcommand_from trust; and not __fish_seen_subcommand_from $trust_cmds" -a list -d "List trusted workspace folders"
+complete -c tars -n "__fish_seen_subcommand_from trust; and not __fish_seen_subcommand_from $trust_cmds" -a revoke -d "Revoke trust for a workspace folder"
+complete -c tars -n "__fish_seen_subcommand_from trust; and __fish_seen_subcommand_from revoke" -a "(__fish_complete_directories)" -d "Workspace directory"
 
 complete -c tars -n "__fish_seen_subcommand_from tools; and not __fish_seen_subcommand_from $tools_cmds" -a status -d "Show external tool and sandbox status"
 complete -c tars -n "__fish_seen_subcommand_from tools; and not __fish_seen_subcommand_from $tools_cmds" -a install -d "Download and install managed tools"

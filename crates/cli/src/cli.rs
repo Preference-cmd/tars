@@ -12,6 +12,7 @@ mod output_format;
 mod print;
 mod session;
 mod tools;
+mod trust;
 pub(crate) mod usage_json;
 
 pub(crate) use command::run;

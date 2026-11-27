@@ -22,6 +22,7 @@ mod claude_alignment;
 mod code_execution;
 mod command;
 mod compaction;
+mod ctrl_c_exit;
 mod ergonomics;
 mod export_md;
 mod history;

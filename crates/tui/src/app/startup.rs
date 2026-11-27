@@ -230,8 +230,8 @@ impl Startup {
     /// The key hint for the current phase, when a key does something.
     pub(crate) fn hint(&self) -> Option<&'static str> {
         match self.phase {
-            Phase::Asking => Some("y installs · n or Esc skips · Ctrl-Q quits"),
-            Phase::Downloading | Phase::Rechecking => Some("Ctrl-Q quits"),
+            Phase::Asking => Some("y installs · n or Esc skips · Ctrl-Q / Ctrl-C quits"),
+            Phase::Downloading | Phase::Rechecking => Some("Ctrl-Q / Ctrl-C quits"),
             Phase::Checking => None,
         }
     }
@@ -315,9 +315,16 @@ impl App {
 
     /// Keys during startup: quit, or answer the one question. Everything else
     /// is ignored, including every key inside the 0.5 s window after the
-    /// question appears.
+    /// question appears (`Ctrl+C` and `Ctrl+Q` quit unconditionally).
     fn startup_key(&mut self, key: KeyEvent) {
-        if key.kind == KeyEventKind::Release {
+        if key.kind != KeyEventKind::Press {
+            return;
+        }
+        if self.startup.is_none() {
+            return;
+        }
+        if input::control(key, 'c') || input::control(key, 'q') {
+            self.quit_startup();
             return;
         }
         let Some(startup) = self.startup.as_ref() else {
@@ -327,10 +334,6 @@ impl App {
             return;
         }
         let phase = startup.phase;
-        if input::control(key, 'q') {
-            self.quit_startup();
-            return;
-        }
         if phase != Phase::Asking {
             return;
         }

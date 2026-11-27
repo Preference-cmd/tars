@@ -67,7 +67,7 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
                      /help      Keyboard shortcuts and session behavior\n\n\
                      Keys: / or F1 commands · Enter / Ctrl-S submit · Ctrl-J newline · Tab complete\n      \
                      PageUp/Down scroll · F3 open · F4 next · F5 refresh · Ctrl-O/F6 tools · F7 repair\n      \
-                     Esc / Ctrl-C cancel · Ctrl-W close · Ctrl-Q quit · Ctrl-R retry · Ctrl-E export"
+                     Esc cancel · Ctrl-C cancel/exit · Ctrl-W close · Ctrl-Q quit · Ctrl-R retry · Ctrl-E export"
                 );
                 return Ok(None);
             }

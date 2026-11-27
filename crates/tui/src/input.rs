@@ -301,7 +301,9 @@ impl Form {
         Ok(definition)
     }
     pub fn key(&mut self, key: KeyEvent) {
-        if key.kind == KeyEventKind::Release {
+        if key.kind == KeyEventKind::Release
+            || (key.kind == KeyEventKind::Repeat && key.modifiers.contains(KeyModifiers::CONTROL))
+        {
             return;
         }
         match key.code {

@@ -8,6 +8,7 @@ Usage: tars [interactive options]
        tars -p [prompt] [options]
        tars run --provider <protocol> --model <id> (--input <text> | --stdin | --image <path>) [options]
        tars session <create | run | list | show | compact | history | repair | rename | delete | fork | export-materials | export-markdown | import-legacy> [options]
+       tars trust <list | revoke> [options]
        tars tools <status | install> [options]
        tars doctor [options]
        tars completions <bash | zsh | fish>
@@ -26,6 +27,7 @@ Interactive mode (default when stdin and stdout are terminals):
 
 Interactive slash commands:
   /doctor    Check configuration, credentials, storage, sandbox and tools
+  /trust     Show folder trust and workspace .tars trust status
   /init      Analyze the workspace and create or update AGENTS.md
   /new       Create a session with model settings (F2)
   /clear     Start a fresh session with the current model preset and workspace
@@ -42,6 +44,7 @@ Commands:
   -p, --print    Run headlessly with positional prompt or piped stdin; see tars -p --help
   run            Execute one work with a real model and explicitly selected workspace tools; see tars run --help
   session        Save and reopen sessions; see tars session --help
+  trust          List or revoke trusted workspace folders; see tars trust --help
   tools          Check or install the external search tool; see tars tools --help
   doctor         Run read-only environment and configuration diagnostics; see tars doctor --help
   completions    Generate static shell completion scripts; see tars completions --help
@@ -163,6 +166,31 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             Err(error) => {
                 let hint = if error.is_argument() {
                     ". Use tars session --help."
+                } else {
+                    ""
+                };
+                let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
+                error.exit_code()
+            }
+        },
+        [one] if one == "trust" => output(super::trust::HELP),
+        [one, help] if one == "trust" && (help == "--help" || help == "-h") => {
+            output(super::trust::HELP)
+        }
+        [one, command, rest @ ..]
+            if one == "trust"
+                && matches!(command.to_str(), Some("list" | "revoke"))
+                && rest.iter().any(|arg| arg == "--help" || arg == "-h") =>
+        {
+            output(super::trust::subcommand_help(
+                command.to_str().unwrap_or(""),
+            ))
+        }
+        [one, rest @ ..] if one == "trust" => match super::trust::TrustCommand::parse(rest) {
+            Ok(command) => super::trust::run(command),
+            Err(error) => {
+                let hint = if error.is_argument() {
+                    ". Use tars trust --help."
                 } else {
                     ""
                 };

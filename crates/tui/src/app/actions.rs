@@ -1001,6 +1001,15 @@ impl App {
         );
         self.update_workspace_trust_guard();
     }
+    pub(super) fn set_active_notice(&mut self, msg: impl Into<String>) {
+        let msg = msg.into();
+        if let Some(entry) = self.entries.get_mut(self.selected) {
+            entry.notice = msg;
+        } else {
+            self.notice = msg;
+        }
+    }
+
     pub(super) fn cancel(&mut self) {
         if let Some(entry) = self.entries.get_mut(self.selected)
             && let Some(session) = &entry.session
@@ -1707,6 +1716,7 @@ impl App {
         self.update_workspace_trust_guard();
         self.update_repair_guard();
         self.update_folder_trust_guard();
+        self.update_ctrl_c_exit_grace();
         self.try_dequeue_ready();
         let animating = self.startup.is_none()
             && self
