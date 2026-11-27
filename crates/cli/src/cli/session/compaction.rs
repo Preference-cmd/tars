@@ -22,7 +22,11 @@ pub(super) async fn compact(
     // Opening reads the saved definition; compaction calls the session's own
     // model, so the configured credential environment must still resolve.
     let host = managed_execution::definition_host(store);
-    let session = match host.open(id.clone().into()).await {
+    let resolved_id = match super::execute::resolve_selector(&host, &id, json_output).await {
+        Ok(id) => id,
+        Err(code) => return code,
+    };
+    let session = match host.open(resolved_id.clone()).await {
         Ok(session) => session,
         // Another process holding the writer reports the surrounding
         // commands' existing busy error.
@@ -30,7 +34,7 @@ pub(super) async fn compact(
     };
     managed_execution::report_open_notices(&session);
     let mut value = json!({
-        "status": "not_started", "conversation_id": id, "trigger": null,
+        "status": "not_started", "conversation_id": resolved_id.as_str(), "trigger": null,
         "estimate_before": null, "estimate_after": null, "record_id": null, "merge_record_id": null, "summary_block_id": null, "blocks": null, "saved": false,
         "revision": null, "error": null, "save_error": null, "recovery_file": null,
         "recovery_importable": null, "recovery_error": null, "close_error": null,
@@ -148,8 +152,12 @@ pub(super) async fn history(
     json_output: bool,
 ) -> ExitCode {
     let host = managed_execution::definition_host(store);
+    let resolved_id = match super::execute::resolve_selector(&host, &id, json_output).await {
+        Ok(id) => id,
+        Err(code) => return code,
+    };
     let expansion = match host
-        .read_saved_history(&id.into(), agent.as_deref(), last)
+        .read_saved_history(&resolved_id, agent.as_deref(), last)
         .await
     {
         Ok(exp) => exp,

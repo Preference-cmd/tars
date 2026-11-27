@@ -766,6 +766,140 @@ impl App {
             },
         );
     }
+
+    pub(super) fn export_markdown(&mut self, raw_path: &str) {
+        if !self.capacity() {
+            return;
+        }
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            self.notice = "Open a session first to export Markdown".into();
+            return;
+        };
+        if entry.busy.is_some() {
+            entry.notice =
+                "Wait for the current session operation before exporting Markdown".into();
+            return;
+        }
+        let Some(session) = entry.session.clone() else {
+            entry.notice = "Open a session first to export Markdown".into();
+            return;
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let viewing_child = entry.viewed_agent_id.is_some();
+        let target_agent_id = entry
+            .viewed_agent_id
+            .clone()
+            .unwrap_or_else(|| entry.id().to_owned());
+        let agent_label = if viewing_child {
+            Some(
+                entry
+                    .viewed_agent_label
+                    .clone()
+                    .or_else(|| session.agent_snapshot(&target_agent_id).map(|s| s.name))
+                    .unwrap_or_else(|| target_agent_id.clone()),
+            )
+        } else {
+            None
+        };
+        let trimmed = raw_path.trim();
+        let output_path = if trimmed.is_empty() {
+            let short_id: String = entry.id().chars().take(8).collect();
+            let filename = match &agent_label {
+                Some(label) => {
+                    let slug = sanitize_export_filename_segment(label);
+                    format!("tars-export-{short_id}-{slug}-{now_ms}.md")
+                }
+                None => format!("tars-export-{short_id}-{now_ms}.md"),
+            };
+            self.options.recovery_dir.join(filename)
+        } else {
+            let Some(parsed) = crate::input::image::parse_single_image_path(trimmed) else {
+                entry.notice = "Usage: /export-md [path]".into();
+                return;
+            };
+            if parsed.contains('\0') {
+                entry.notice = "Invalid Markdown export path".into();
+                return;
+            }
+            if parsed == "~" || parsed.starts_with("~/") || parsed.contains("://") {
+                let Some(resolved) = crate::input::image::resolve_local_path(&parsed, None) else {
+                    entry.notice = format!(
+                        "Invalid Markdown export path: {}",
+                        tars_core::permission::escape_untrusted_text(&parsed)
+                    );
+                    return;
+                };
+                resolved
+            } else {
+                PathBuf::from(parsed)
+            }
+        };
+        let conversation_id: tars_core::session::ConversationId = entry.id().into();
+        let title = entry.title();
+        let fallback_model = entry.model().to_owned();
+        let host = self.host.clone();
+        let key = entry.key.clone();
+        entry.busy = Some("exporting markdown");
+        entry.notice = "Exporting Markdown...".into();
+        self.spawn_job(
+            Some(key.clone()),
+            super::jobs::JobKind::ExportMarkdown,
+            async move {
+                let result = match session
+                    .expanded_agent_conversation(&target_agent_id, None)
+                    .await
+                {
+                    Ok(expanded) => {
+                        let unreadable_count = expanded.unreadable_records.len();
+                        let model = if viewing_child {
+                            host.inspect_agent(&conversation_id, &target_agent_id)
+                                .await
+                                .ok()
+                                .map(|insp| insp.definition.model)
+                                .unwrap_or(fallback_model)
+                        } else {
+                            fallback_model
+                        };
+                        let options = tars_core::export::MarkdownExportOptions {
+                            title,
+                            model: Some(model),
+                            agent_label,
+                            exported_at_ms: Some(now_ms),
+                            include_prelude: false,
+                        };
+                        let markdown = tars_core::export::render_conversation_markdown(
+                            &conversation_id,
+                            &expanded,
+                            &options,
+                        );
+                        let write_path = output_path.clone();
+                        match super::jobs::blocking(move || {
+                            tars_core::export::save_markdown_new(&write_path, &markdown)
+                        })
+                        .await
+                        {
+                            Ok(Ok(())) => Ok((output_path, unreadable_count)),
+                            Ok(Err(error)) => Err(error.to_string()),
+                            Err(join_err) => Err(join_err.to_string()),
+                        }
+                    }
+                    Err(
+                        tars_core::application::ApplicationError::AgentBusy { .. }
+                        | tars_core::application::ApplicationError::Session(
+                            tars_core::session::SessionError::Busy { .. },
+                        ),
+                    ) => Err(
+                        "Wait for the current turn to finish before exporting Markdown".to_owned(),
+                    ),
+                    Err(error) => Err(error.to_string()),
+                };
+                Message::MarkdownExported { key, result }
+            },
+        );
+    }
     pub(super) fn switch_viewed_agent(&mut self, target_agent_id: &str) {
         let Some(entry) = self.entries.get_mut(self.selected) else {
             return;
@@ -1714,6 +1848,28 @@ Then create `AGENTS.md` at the workspace root (or update it if it already exists
             "{base}\n\n\
 Note: File write/edit tools are disabled in this session. Do not attempt to modify files; instead, output a concise, ready-to-save `AGENTS.md` draft directly in your response, grounded only in files you directly observed."
         )
+    }
+}
+
+fn sanitize_export_filename_segment(raw: &str) -> String {
+    let mut slug: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(32)
+        .collect();
+    while slug.ends_with('_') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "agent".to_owned()
+    } else {
+        slug
     }
 }
 

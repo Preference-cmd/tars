@@ -7,8 +7,10 @@ const HELP: &str = "TARS — agent application
 Usage: tars [interactive options]
        tars -p [prompt] [options]
        tars run --provider <protocol> --model <id> (--input <text> | --stdin | --image <path>) [options]
-       tars session <create | run | list | show | compact | history | repair | rename | delete | fork | export-materials | import-legacy> [options]
+       tars session <create | run | list | show | compact | history | repair | rename | delete | fork | export-materials | export-markdown | import-legacy> [options]
        tars tools <status | install> [options]
+       tars doctor [options]
+       tars completions <bash | zsh | fish>
 
 Interactive mode (default when stdin and stdout are terminals):
   --config FILE       Shared TOML configuration file
@@ -34,6 +36,8 @@ Commands:
   run            Execute one work with a real model and explicitly selected workspace tools; see tars run --help
   session        Save and reopen sessions; see tars session --help
   tools          Check or install the external search tool; see tars tools --help
+  doctor         Run read-only environment and configuration diagnostics; see tars doctor --help
+  completions    Generate static shell completion scripts; see tars completions --help
 
 Run options:
   --provider     openai-chat | openai-responses | anthropic (or configured profile)
@@ -184,6 +188,38 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
                 error.exit_code()
             }
         },
+        [one, help] if one == "doctor" && (help == "--help" || help == "-h") => {
+            output(super::doctor::HELP)
+        }
+        [one, rest @ ..] if one == "doctor" => match super::doctor::DoctorOptions::parse(rest) {
+            Ok(options) => super::doctor::run(options),
+            Err(error) => {
+                let hint = if error.is_argument() {
+                    ". Use tars doctor --help."
+                } else {
+                    ""
+                };
+                let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
+                error.exit_code()
+            }
+        },
+        [one, help] if one == "completions" && (help == "--help" || help == "-h") => {
+            output(super::completions::HELP)
+        }
+        [one, rest @ ..] if one == "completions" => {
+            match super::completions::CompletionsCommand::parse(rest) {
+                Ok(command) => super::completions::run(command),
+                Err(error) => {
+                    let hint = if error.is_argument() {
+                        ". Use tars completions --help."
+                    } else {
+                        ""
+                    };
+                    let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
+                    error.exit_code()
+                }
+            }
+        }
         _ if super::print::is_print_invocation(&args) => {
             match super::print::PrintCommand::parse(&args) {
                 Ok(command) => super::print::run(command),
@@ -239,6 +275,7 @@ fn is_session_subcommand(command: Option<&str>) -> bool {
                 | "delete"
                 | "fork"
                 | "export-materials"
+                | "export-markdown"
                 | "import-legacy"
         )
     )

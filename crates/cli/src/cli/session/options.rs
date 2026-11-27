@@ -18,6 +18,14 @@ pub(crate) enum SessionCommand {
         output: PathBuf,
         json: bool,
     },
+    ExportMarkdown {
+        store: PathBuf,
+        id: String,
+        agent: Option<String>,
+        last: Option<usize>,
+        output: Option<PathBuf>,
+        json: bool,
+    },
     ImportLegacy {
         record: PathBuf,
         store: PathBuf,
@@ -171,7 +179,15 @@ impl SessionCommand {
         }
         let id = if matches!(
             command,
-            "run" | "repair" | "compact" | "history" | "show" | "rename" | "delete" | "fork"
+            "run"
+                | "repair"
+                | "compact"
+                | "history"
+                | "show"
+                | "rename"
+                | "delete"
+                | "fork"
+                | "export-markdown"
         ) {
             let (id, rest) = args.split_first().ok_or("conversation ID is required")?;
             args = rest;
@@ -195,6 +211,7 @@ impl SessionCommand {
                 | "rename"
                 | "delete"
                 | "fork"
+                | "export-markdown"
                 | "import-legacy"
         ) {
             return Err(CliError::argument(format!(
@@ -351,10 +368,13 @@ impl SessionCommand {
                     }
                     images.push(PathBuf::from(value));
                 }
-                "--last" if command == "history" => {
+                "--last" if matches!(command, "history" | "export-markdown") => {
                     insert(&mut values, flag, &mut args)?;
                 }
-                "--agent" if matches!(command, "show" | "history") => {
+                "--agent" if matches!(command, "show" | "history" | "export-markdown") => {
+                    insert(&mut values, flag, &mut args)?;
+                }
+                "--output" if command == "export-markdown" => {
                     insert(&mut values, flag, &mut args)?;
                 }
                 "--title" if matches!(command, "rename" | "fork") => {
@@ -525,6 +545,25 @@ impl SessionCommand {
                     id: id.expect("history ID parsed"),
                     agent: string("--agent")?,
                     last,
+                    json,
+                })
+            }
+            "export-markdown" => {
+                let last = string("--last")?
+                    .map(|value| {
+                        value
+                            .parse::<usize>()
+                            .ok()
+                            .filter(|count| *count > 0)
+                            .ok_or("--last must be a positive integer")
+                    })
+                    .transpose()?;
+                Ok(Self::ExportMarkdown {
+                    store,
+                    id: id.expect("export-markdown ID parsed"),
+                    agent: string("--agent")?,
+                    last,
+                    output: values.get("--output").map(PathBuf::from),
                     json,
                 })
             }

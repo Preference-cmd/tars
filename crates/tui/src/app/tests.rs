@@ -22,6 +22,7 @@ mod code_execution;
 mod command;
 mod compaction;
 mod ergonomics;
+mod export_md;
 mod history;
 mod markdown;
 mod media;

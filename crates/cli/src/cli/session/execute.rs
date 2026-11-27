@@ -15,9 +15,10 @@ use std::process::ExitCode;
 use std::time::Duration;
 use tars_core::application::{
     ApplicationError, CloseOutcome, ClosePolicy, CommitDisposition, Lifecycle, PreparedCreate,
-    SaveStatus, SessionHost,
+    SaveStatus, SessionHost, SessionSelectorError,
 };
 use tars_core::definition::SessionDefinition;
+use tars_core::session::ConversationId;
 
 pub(crate) fn run(command: SessionCommand) -> ExitCode {
     if let SessionCommand::ExportMaterials {
@@ -186,6 +187,17 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 output: path,
                 json,
             } => (export_session_materials(store, id, path, json).await, false),
+            SessionCommand::ExportMarkdown {
+                store,
+                id,
+                agent,
+                last,
+                output,
+                json,
+            } => (
+                export_markdown(store, id, agent, last, output, json).await,
+                false,
+            ),
             SessionCommand::ExportMaterials {
                 target: ExportMaterialsTarget::Record(_),
                 ..
@@ -201,6 +213,155 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
     code
 }
 
+pub(super) async fn resolve_selector(
+    host: &SessionHost,
+    selector: &str,
+    json_output: bool,
+) -> Result<ConversationId, ExitCode> {
+    let format = if json_output {
+        OutputFormat::Json
+    } else {
+        OutputFormat::Text
+    };
+    resolve_selector_with_format(host, selector, format).await
+}
+
+pub(super) async fn resolve_selector_with_format(
+    host: &SessionHost,
+    selector: &str,
+    output_format: OutputFormat,
+) -> Result<ConversationId, ExitCode> {
+    match host.resolve_session_selector(selector).await {
+        Ok(id) => Ok(id),
+        Err(SessionSelectorError::EmptySelector) => {
+            let _ = writeln!(
+                io::stderr().lock(),
+                "TARS: session selector must not be empty. Use tars session --help."
+            );
+            Err(ExitCode::from(2))
+        }
+        Err(error) => Err(early_failure_with_format(output_format, &error.to_string())),
+    }
+}
+
+fn report_unreadable_history_records(records: &[tars_core::compact::UnreadableRecord]) {
+    for unreadable in records {
+        let _ = writeln!(
+            io::stderr().lock(),
+            "TARS: history record {} cannot be read: {}",
+            unreadable.record_id,
+            unreadable.error
+        );
+    }
+}
+
+async fn export_markdown(
+    store: PathBuf,
+    id: String,
+    agent: Option<String>,
+    last: Option<usize>,
+    output_path: Option<PathBuf>,
+    json_output: bool,
+) -> ExitCode {
+    let host = managed_execution::definition_host(store);
+    let resolved_id = match resolve_selector(&host, &id, json_output).await {
+        Ok(id) => id,
+        Err(code) => return code,
+    };
+    let inspection = match host.inspect(&resolved_id).await {
+        Ok(inspection) => inspection,
+        Err(error) => return early_failure(json_output, &application_error_message(&error)),
+    };
+    let (model, agent_label, json_agent) = if let Some(selector) = agent.as_deref() {
+        let agent_insp = match host.inspect_agent(&resolved_id, selector).await {
+            Ok(agent_insp) => agent_insp,
+            Err(error) => return early_failure(json_output, &application_error_message(&error)),
+        };
+        (
+            Some(agent_insp.definition.model),
+            Some(agent_insp.name.clone()),
+            Some(agent_insp.name),
+        )
+    } else {
+        (Some(inspection.definition.model), None, None)
+    };
+    let expansion = match host
+        .read_saved_history(&resolved_id, agent.as_deref(), last)
+        .await
+    {
+        Ok(exp) => exp,
+        Err(error) => return early_failure(json_output, &application_error_message(&error)),
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .ok();
+    let markdown = tars_core::export::render_conversation_markdown(
+        &resolved_id,
+        &expansion,
+        &tars_core::export::MarkdownExportOptions {
+            title: inspection.title,
+            model,
+            agent_label,
+            exported_at_ms: now_ms,
+            include_prelude: false,
+        },
+    );
+    let unreadable_count = expansion.unreadable_records.len();
+    if let Some(path) = output_path {
+        let write_path = path.clone();
+        let write_md = markdown.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            tars_core::export::save_markdown_new(&write_path, &write_md)
+        })
+        .await;
+        match saved {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return early_failure(json_output, &error.to_string()),
+            Err(join_err) => return early_failure(json_output, &join_err.to_string()),
+        }
+        let rendered = if json_output {
+            format!(
+                "{}\n",
+                json!({
+                    "status": "exported",
+                    "conversation_id": resolved_id.as_str(),
+                    "agent": json_agent,
+                    "unreadable_records": unreadable_count,
+                    "path": path,
+                })
+            )
+        } else {
+            format!("{}\n", path.display())
+        };
+        report_unreadable_history_records(&expansion.unreadable_records);
+        if output(&rendered) != ExitCode::SUCCESS || unreadable_count > 0 {
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    let rendered = if json_output {
+        format!(
+            "{}\n",
+            json!({
+                "status": "exported",
+                "conversation_id": resolved_id.as_str(),
+                "agent": json_agent,
+                "unreadable_records": unreadable_count,
+                "markdown": markdown,
+            })
+        )
+    } else {
+        markdown
+    };
+    report_unreadable_history_records(&expansion.unreadable_records);
+    if output(&rendered) != ExitCode::SUCCESS || unreadable_count > 0 {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
 async fn export_session_materials(
     store: PathBuf,
     id: String,
@@ -208,8 +369,12 @@ async fn export_session_materials(
     json_output: bool,
 ) -> ExitCode {
     let host = managed_execution::definition_host(store);
+    let resolved_id = match resolve_selector(&host, &id, json_output).await {
+        Ok(id) => id,
+        Err(code) => return code,
+    };
     match host
-        .export_session_materials(&id.clone().into(), &output_path)
+        .export_session_materials(&resolved_id, &output_path)
         .await
     {
         Ok(exported) => {
@@ -218,7 +383,7 @@ async fn export_session_materials(
                     "{}\n",
                     json!({
                         "status": "exported",
-                        "conversation_id": id,
+                        "conversation_id": resolved_id.as_str(),
                         "path": exported.path,
                         "media_dir": exported.media_dir,
                         "media_count": exported.media_count,
@@ -265,7 +430,10 @@ async fn import_legacy(record: PathBuf, store: PathBuf, json_output: bool) -> Ex
 
 async fn rename(store: PathBuf, id: String, title: Option<String>, json_output: bool) -> ExitCode {
     let host = managed_execution::definition_host(store);
-    let conv_id: tars_core::session::ConversationId = id.clone().into();
+    let conv_id = match resolve_selector(&host, &id, json_output).await {
+        Ok(id) => id,
+        Err(code) => return code,
+    };
     let updated_title = match host.rename(conv_id.clone(), title).await {
         Ok(title) => title,
         Err(error) => return early_failure(json_output, &application_error_message(&error)),
@@ -278,7 +446,7 @@ async fn rename(store: PathBuf, id: String, title: Option<String>, json_output: 
         output(&format!(
             "{}\n",
             json!({
-                "conversation_id": id,
+                "conversation_id": conv_id.as_str(),
                 "title": updated_title,
                 "revision": inspection.revision,
             })
@@ -286,7 +454,8 @@ async fn rename(store: PathBuf, id: String, title: Option<String>, json_output: 
     } else {
         let label = updated_title.as_deref().unwrap_or("(cleared)");
         output(&format!(
-            "Renamed session {id}: {label} (revision {})\n",
+            "Renamed session {}: {label} (revision {})\n",
+            conv_id.as_str(),
             inspection.revision
         ))
     }
@@ -294,18 +463,22 @@ async fn rename(store: PathBuf, id: String, title: Option<String>, json_output: 
 
 async fn delete(store: PathBuf, id: String, json_output: bool) -> ExitCode {
     let host = managed_execution::definition_host(store);
-    match host.delete(id.clone().into()).await {
+    let conv_id = match resolve_selector(&host, &id, json_output).await {
+        Ok(id) => id,
+        Err(code) => return code,
+    };
+    match host.delete(conv_id.clone()).await {
         Ok(()) => {
             if json_output {
                 output(&format!(
                     "{}\n",
                     json!({
-                        "conversation_id": id,
+                        "conversation_id": conv_id.as_str(),
                         "deleted": true,
                     })
                 ))
             } else {
-                output(&format!("Deleted session {id}\n"))
+                output(&format!("Deleted session {}\n", conv_id.as_str()))
             }
         }
         Err(error) => early_failure(json_output, &application_error_message(&error)),
@@ -314,7 +487,11 @@ async fn delete(store: PathBuf, id: String, json_output: bool) -> ExitCode {
 
 async fn fork(store: PathBuf, id: String, title: Option<String>, json_output: bool) -> ExitCode {
     let host = managed_execution::definition_host(store);
-    let new_id = match host.fork(id.clone().into(), title).await {
+    let source_id = match resolve_selector(&host, &id, json_output).await {
+        Ok(id) => id,
+        Err(code) => return code,
+    };
+    let new_id = match host.fork(source_id.clone(), title).await {
         Ok(new_id) => new_id,
         Err(error) => return early_failure(json_output, &application_error_message(&error)),
     };
@@ -326,7 +503,7 @@ async fn fork(store: PathBuf, id: String, title: Option<String>, json_output: bo
         output(&format!(
             "{}\n",
             json!({
-                "source_conversation_id": id,
+                "source_conversation_id": source_id.as_str(),
                 "conversation_id": new_id.as_str(),
                 "title": inspection.title,
                 "revision": inspection.revision,
@@ -339,7 +516,8 @@ async fn fork(store: PathBuf, id: String, title: Option<String>, json_output: bo
             .map(|t| format!(" · title: {t}"))
             .unwrap_or_default();
         output(&format!(
-            "Forked session {id} -> {}{title_suffix} (revision {})\n",
+            "Forked session {} -> {}{title_suffix} (revision {})\n",
+            source_id.as_str(),
             new_id.as_str(),
             inspection.revision
         ))
@@ -496,6 +674,11 @@ async fn run_saved(
     recovery_dir: PathBuf,
     output_format: OutputFormat,
 ) -> (ExitCode, bool) {
+    let resolver_host = SessionHost::new(Some(store.clone()));
+    let resolved_id = match resolve_selector_with_format(&resolver_host, &id, output_format).await {
+        Ok(id) => id,
+        Err(code) => return (code, false),
+    };
     let prepared_images = match managed_execution::prepare_images(&images) {
         Ok(images) => images,
         Err(error) => return (early_failure_with_format(output_format, &error), false),
@@ -508,7 +691,7 @@ async fn run_saved(
         };
     run_saved_with_format(
         store,
-        id,
+        resolved_id.as_str().to_owned(),
         external_tools,
         model_profiles,
         user_rules_path,

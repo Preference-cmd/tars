@@ -18,14 +18,18 @@ pub(super) async fn run(
 ) -> ExitCode {
     // Repair edits saved materials only; it never needs a server.
     let host = managed_execution::definition_host(store);
-    let session = match host.open(id.clone().into()).await {
+    let resolved_id = match super::execute::resolve_selector(&host, &id, json_output).await {
+        Ok(id) => id,
+        Err(code) => return code,
+    };
+    let session = match host.open(resolved_id.clone()).await {
         Ok(session) => session,
         Err(error) => return early_failure(json_output, &error.to_string()),
     };
     managed_execution::report_open_notices(&session);
     let current_revision = revision(&session.status().save).expect("opened persistent revision");
     let mut value = json!({
-        "status": "preview", "conversation_id": id, "mode": "remove_unpaired",
+        "status": "preview", "conversation_id": resolved_id.as_str(), "mode": "remove_unpaired",
         "revision": current_revision, "expected_revision": expected_revision,
         "uncommitted_results_available": false, "diagnosis": null, "plan": null,
         "applied": false, "saved": true, "error": null, "save_error": null,

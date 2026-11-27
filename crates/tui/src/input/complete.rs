@@ -85,7 +85,15 @@ pub(crate) fn complete_editor(
 pub(crate) fn slash_command_takes_args(cmd: &str) -> bool {
     matches!(
         cmd,
-        "mode" | "auto_compact" | "agents" | "rules" | "queue" | "rename" | "fork" | "image"
+        "mode"
+            | "auto_compact"
+            | "agents"
+            | "rules"
+            | "queue"
+            | "rename"
+            | "fork"
+            | "image"
+            | "export-md"
     )
 }
 

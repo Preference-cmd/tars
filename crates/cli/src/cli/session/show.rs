@@ -20,10 +20,14 @@ pub(super) async fn show(
     json_output: bool,
 ) -> ExitCode {
     let host = managed_execution::definition_host(store);
+    let resolved_id = match super::execute::resolve_selector(&host, &id, json_output).await {
+        Ok(id) => id,
+        Err(code) => return code,
+    };
     if let Some(selector) = agent {
-        return show_agent(host, id, selector, json_output).await;
+        return show_agent(host, resolved_id, selector, json_output).await;
     }
-    let inspection = match host.inspect(&id.clone().into()).await {
+    let inspection = match host.inspect(&resolved_id).await {
         Ok(inspection) => inspection,
         Err(error) => return early_failure(json_output, &error.to_string()),
     };
@@ -55,7 +59,7 @@ pub(super) async fn show(
         })
         .collect();
     let value = json!({
-        "conversation_id": id,
+        "conversation_id": resolved_id.as_str(),
         "title": inspection.title,
         "created_at_ms": inspection.created_at_ms,
         "updated_at_ms": inspection.updated_at_ms,
@@ -91,7 +95,7 @@ pub(super) async fn show(
     let rendered = if json_output {
         format!("{value}\n")
     } else {
-        let mut text = format!("Conversation {id}\n");
+        let mut text = format!("Conversation {}\n", resolved_id.as_str());
         if let Some(title) = &inspection.title {
             text.push_str(&format!("Title: {title}\n"));
         }
@@ -215,11 +219,11 @@ pub(super) async fn show(
 
 async fn show_agent(
     host: tars_core::application::SessionHost,
-    id: String,
+    id: tars_core::session::ConversationId,
     selector: String,
     json_output: bool,
 ) -> ExitCode {
-    let inspection = match host.inspect_agent(&id.clone().into(), &selector).await {
+    let inspection = match host.inspect_agent(&id, &selector).await {
         Ok(inspection) => inspection,
         Err(error) => return early_failure(json_output, &error.to_string()),
     };

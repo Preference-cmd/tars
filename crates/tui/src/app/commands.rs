@@ -85,6 +85,10 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("cancel", "Interrupt the current work"),
     ("retry", "Retry the original blocked save"),
     ("export", "Export current materials for recovery"),
+    (
+        "export-md",
+        "Export the current conversation to a Markdown file",
+    ),
     ("close", "Save and close the current session"),
     ("discard", "Confirm discarding local unsaved materials"),
     ("quit", "Save sessions and exit TARS"),
@@ -315,7 +319,8 @@ impl App {
                     "Esc / Ctrl-C   Interrupt work", "/ or F1   Commands; Esc returns",
                     "F2 new · F3 open · F4 next · F5 refresh", "F6 / /tools   Expand complete recorded tool results", "F7 / /repair   Preview and apply material repair", "PageUp / PageDown   Read conversation",
                     "Ctrl-Z undo · Ctrl-Y redo", "Ctrl-W close · Ctrl-Q save and quit",
-                    "Ctrl-R retry save · Ctrl-E export", "Ctrl-D discard with confirmation", "",
+                    "Ctrl-R retry save · Ctrl-E export", "Ctrl-D discard with confirmation",
+                    "/export-md [path]   Export current conversation to a Markdown file", "",
                     "Switching views keeps work and drafts. Saved sessions restore materials, not old work records.",
                     "Compaction replaces the context with a model-written summary; older conversation loads as you scroll up.",
                     "Use /status for full configuration, save state and error details."].into_iter().map(str::to_owned).collect(),
@@ -422,6 +427,11 @@ impl App {
             "cancel" => self.cancel(),
             "retry" => self.retry(),
             "export" => self.export(),
+            "export-md" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("export-md").unwrap_or("").trim();
+                self.export_markdown(arg);
+            }
             "close" => self.request_close(),
             "discard" => self.confirmation = Some(Confirmation::Discard),
             "quit" => self.request_quit(),

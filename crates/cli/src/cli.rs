@@ -2,7 +2,9 @@
 
 mod approval;
 mod command;
+mod completions;
 mod configuration;
+mod doctor;
 mod execute;
 mod managed_execution;
 mod options;

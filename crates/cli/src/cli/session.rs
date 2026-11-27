@@ -22,6 +22,7 @@ pub(super) fn subcommand_help(command: &str) -> &'static str {
         "delete" => DELETE_HELP,
         "fork" => FORK_HELP,
         "export-materials" => EXPORT_MATERIALS_HELP,
+        "export-markdown" => EXPORT_MARKDOWN_HELP,
         "import-legacy" => IMPORT_LEGACY_HELP,
         _ => HELP,
     }
@@ -217,6 +218,21 @@ Options:
   -h, --help          Show this help
 ";
 
+const EXPORT_MARKDOWN_HELP: &str = "Export a session's expanded conversation as GitHub-Flavored Markdown
+
+Usage: tars session export-markdown <conversation-id> --store <directory> [--agent <id-or-name>] [--last N] [--output <new-file>] [--json]
+
+Options:
+  --agent             Export history for one agent by UUID agent_id or unique name
+  --last N            Export only the newest N blocks
+  --output            Write Markdown to a new destination file (existing files are refused)
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured output
+  -h, --help          Show this help
+";
+
 const IMPORT_LEGACY_HELP: &str = "Import a validated tars-session-v2.4 JSON record into SQLite
 
 Usage: tars session import-legacy --record <file> --store <directory> [--json]
@@ -244,6 +260,7 @@ Usage: tars session create --store <directory> --provider <protocol> --model <id
        tars session fork <conversation-id> --store <directory> [--title <text>] [--json]
        tars session export-materials <conversation-id> --store <directory> (--output <new-file> | <new-file>) [--json]
        tars session export-materials --record <file> --output <new-file> [--json]
+       tars session export-markdown <conversation-id> --store <directory> [--agent <id-or-name>] [--last N] [--output <new-file>] [--json]
        tars session import-legacy --record <file> --store <directory> [--json]
 
 Create options:
@@ -321,6 +338,11 @@ History options:
   --agent             Expand history for one agent by UUID agent_id or unique name
   --last N            Print only the newest N blocks
 
+Export-markdown options:
+  --agent             Export history for one agent by UUID agent_id or unique name
+  --last N            Export only the newest N blocks
+  --output            Write Markdown to a new file (existing files are refused)
+
 Rename options:
   --title             New session title (1–160 characters, no control characters)
   --clear             Clear the saved session title (conflicts with --title)
@@ -365,6 +387,8 @@ history records.
 export-materials exports validated Context (and sidecar .media/ blobs when present)
 from a SQLite session, or extracts Context offline from a legacy v1/v2/v2.4 record.
 An existing output file is always refused.
+export-markdown renders the expanded conversation (skipping internal prelude
+blocks by default) to stdout or a new Markdown file (existing files are refused).
 import-legacy imports a validated tars-session-v2.4 JSON record (and any
 referenced .history/.artifacts files) into SQLite without modifying the source.
 Create saves the fixed definition and materials without calling a model.

@@ -35,8 +35,10 @@ fn help_version_and_argument_errors_remain_available_without_files() {
         assert!(stdout.contains("/compact"));
         assert!(stdout.contains("/help"));
         assert!(stdout.contains("tars run --provider <protocol>"));
-        assert!(stdout.contains("tars session <create | run | list | show | compact | history | repair | rename | delete | fork | export-materials | import-legacy>"));
+        assert!(stdout.contains("tars session <create | run | list | show | compact | history | repair | rename | delete | fork | export-materials | export-markdown | import-legacy>"));
         assert!(stdout.contains("tars tools <status | install>"));
+        assert!(stdout.contains("tars doctor"));
+        assert!(stdout.contains("tars completions <bash | zsh | fish>"));
         assert!(!stdout.contains("tars demo"));
         assert!(!stdout.contains("offline single-session"));
         assert!(!stdout.contains("tars-tui"));

@@ -104,6 +104,10 @@ pub(super) enum Message {
     Wrapped(Key, Rows, Option<Rows>),
     Retried(Key, Result<SaveStatus, ApplicationError>),
     Exported(Key, Result<(String, bool), String>),
+    MarkdownExported {
+        key: Key,
+        result: Result<(std::path::PathBuf, usize), String>,
+    },
     Closed(Key, Result<CloseOutcome, ApplicationError>),
     Renamed(Key, Result<Option<String>, ApplicationError>),
     Forked(
@@ -138,6 +142,7 @@ pub(super) enum JobKind {
     Close,
     Retry,
     Export,
+    ExportMarkdown,
     Rename,
     Fork,
     Delete,
@@ -729,6 +734,37 @@ impl App {
                     };
                 }
             }
+            Message::MarkdownExported { key, result } => {
+                if let Some(entry) = self.entry_mut(&key) {
+                    if entry.busy == Some("exporting markdown") {
+                        entry.busy = None;
+                    }
+                    entry.notice = match result {
+                        Ok((path, 0)) => format!(
+                            "Exported Markdown: {}",
+                            tars_core::permission::escape_untrusted_text(
+                                &path.display().to_string()
+                            )
+                        ),
+                        Ok((path, unreadable)) => format!(
+                            "Exported Markdown: {} ({unreadable} unreadable history record(s))",
+                            tars_core::permission::escape_untrusted_text(
+                                &path.display().to_string()
+                            )
+                        ),
+                        Err(error) => {
+                            let escaped = tars_core::permission::escape_untrusted_text(&error);
+                            if error
+                                == "Wait for the current turn to finish before exporting Markdown"
+                            {
+                                escaped
+                            } else {
+                                format!("Markdown export failed: {escaped}")
+                            }
+                        }
+                    };
+                }
+            }
             Message::StartupSandbox(check, raw) => self.startup_sandbox(check, raw),
             Message::StartupTools(check) => self.startup_tools(check),
             Message::StartupInstalled(result) => self.startup_installed(result),
@@ -1026,6 +1062,10 @@ impl App {
                         }
                         JobKind::Export => {
                             clear_busy(entry, "exporting");
+                            entry.notice = message.clone();
+                        }
+                        JobKind::ExportMarkdown => {
+                            clear_busy(entry, "exporting markdown");
                             entry.notice = message.clone();
                         }
                         JobKind::Rename => {
