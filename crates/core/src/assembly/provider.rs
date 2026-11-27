@@ -816,16 +816,18 @@ fn wrap_retry_and_count(
     }
 }
 
-/// Protocol gateway for the definition, using its environment credential.
+/// Protocol gateway for the definition, using its resolved credential.
 fn definition_gateway(
     definition: &SessionDefinition,
     media_resolver: Option<Arc<dyn MediaResolver>>,
 ) -> Result<Arc<dyn ModelGateway>, AssemblyError> {
-    let CredentialRef::Environment(name) = &definition.credential;
-    let api_key = std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or(AssemblyError::CredentialUnavailable)?;
+    let api_key = match &definition.credential {
+        CredentialRef::Environment(name) => std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(AssemblyError::CredentialUnavailable)?,
+        CredentialRef::Store(_) => return Err(AssemblyError::CredentialUnavailable),
+    };
     Ok(protocol_gateway(
         definition.protocol_render_options()?,
         api_key,

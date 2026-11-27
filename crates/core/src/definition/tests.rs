@@ -1021,3 +1021,80 @@ fn temperature_normalizes_negative_zero_validates_bounds_and_wires_run_options()
     def.temperature = Some(Temperature::new(1.0).unwrap());
     def.validate().unwrap();
 }
+
+#[test]
+fn credential_ref_store_roundtrips_and_preserves_environment_wire_format() {
+    let mut env_def = definition();
+    env_def.credential = CredentialRef::Environment("PATH".into());
+    env_def.validate().unwrap();
+    let env_json = serde_json::to_value(&env_def).unwrap();
+    assert_eq!(
+        env_json["credential"],
+        serde_json::json!({"environment": "PATH"})
+    );
+    assert_eq!(
+        serde_json::from_value::<SessionDefinition>(env_json).unwrap(),
+        env_def
+    );
+
+    let mut store_def = definition();
+    store_def.credential = CredentialRef::Store("work_openai-1".into());
+    store_def.validate().unwrap();
+    let store_json = serde_json::to_value(&store_def).unwrap();
+    assert_eq!(
+        store_json["credential"],
+        serde_json::json!({"store": "work_openai-1"})
+    );
+    assert_eq!(
+        serde_json::from_value::<SessionDefinition>(store_json).unwrap(),
+        store_def
+    );
+}
+
+#[test]
+fn valid_credential_name_and_session_definition_reject_invalid_names_without_echoing() {
+    use super::valid_credential_name;
+
+    let max_len_name = "a".repeat(64);
+    for good in [
+        "a",
+        "0",
+        "openai",
+        "openai-responses",
+        "work_2",
+        &max_len_name,
+    ] {
+        assert!(valid_credential_name(good), "expected valid: {good}");
+        let mut def = definition();
+        def.credential = CredentialRef::Store(good.to_owned());
+        assert!(def.validate().is_ok(), "expected valid def for {good}");
+    }
+
+    let overlong_name = "a".repeat(65);
+    for bad in [
+        "",
+        "_lead",
+        "-lead",
+        "work.prod",
+        "a b",
+        " lead",
+        "trail ",
+        "a/b",
+        "a\\b",
+        "a=secret",
+        "a:b",
+        "key\n",
+        "key\0",
+        "密钥",
+        &overlong_name,
+    ] {
+        assert!(!valid_credential_name(bad), "expected invalid: {bad:?}");
+        let mut def = definition();
+        def.credential = CredentialRef::Store(bad.to_owned());
+        let err = def.validate().unwrap_err();
+        assert_eq!(err, DefinitionError::InvalidCredentialReference);
+        if !bad.is_empty() && bad != "a" {
+            assert!(!err.to_string().contains(bad));
+        }
+    }
+}

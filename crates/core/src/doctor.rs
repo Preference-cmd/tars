@@ -406,25 +406,38 @@ fn check_credentials(
     items: &mut Vec<DoctorItem>,
 ) {
     if let Some(def) = resolved_profile {
-        let CredentialRef::Environment(env_name) = &def.credential;
-        if env_var_is_set(env_name) {
-            push_item(
-                items,
-                "credentials",
-                format!("Env {env_name}"),
-                DoctorStatus::Ok,
-                "set",
-                None,
-            );
-        } else {
-            push_item(
-                items,
-                "credentials",
-                format!("Env {env_name}"),
-                DoctorStatus::Fail,
-                "not set",
-                Some(format!("export {env_name}=...")),
-            );
+        match &def.credential {
+            CredentialRef::Environment(env_name) => {
+                if env_var_is_set(env_name) {
+                    push_item(
+                        items,
+                        "credentials",
+                        format!("Env {env_name}"),
+                        DoctorStatus::Ok,
+                        "set",
+                        None,
+                    );
+                } else {
+                    push_item(
+                        items,
+                        "credentials",
+                        format!("Env {env_name}"),
+                        DoctorStatus::Fail,
+                        "not set",
+                        Some(format!("export {env_name}=...")),
+                    );
+                }
+            }
+            CredentialRef::Store(name) => {
+                push_item(
+                    items,
+                    "credentials",
+                    format!("Store {name}"),
+                    DoctorStatus::Warn,
+                    "store check pending",
+                    Some(format!("tars auth set {name}")),
+                );
+            }
         }
     }
 

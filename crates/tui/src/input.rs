@@ -162,13 +162,15 @@ impl Form {
             Provider::OpenAiResponses => "openai-responses",
             Provider::Anthropic => "anthropic",
         };
-        let CredentialRef::Environment(name) = &preset.credential;
+        let credential_name = match &preset.credential {
+            CredentialRef::Environment(name) | CredentialRef::Store(name) => name,
+        };
         let mode_str = preset.permission_mode.map_or("ask", |m| m.as_str());
         let values = [
             provider.to_owned(),
             preset.model.clone(),
             preset.endpoint.clone().unwrap_or_default(),
-            name.clone(),
+            credential_name.clone(),
             preset.work_timeout_secs.unwrap_or(120).to_string(),
             preset
                 .workspace_root

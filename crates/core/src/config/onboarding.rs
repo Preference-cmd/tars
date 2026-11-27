@@ -3,7 +3,7 @@
 //! Writes only credential environment variable names (`api_key_env`), never
 //! plaintext API keys, and refuses to overwrite an existing configuration file.
 
-use super::{Config, ConfigError, ConfigSource, user_tars_dir};
+use super::{Config, ConfigError, ConfigSource, toml_string, user_tars_dir};
 use crate::definition::{Provider, WorkspaceTool, valid_environment_name, valid_http_endpoint};
 use crate::fs_atomic::{ReplaceMode, atomic_write_bytes};
 use crate::policy::PermissionMode;
@@ -229,28 +229,6 @@ pub fn write_initial_config(
     })?;
 
     Ok(Config::load(ConfigSource::File(path.to_path_buf()))?)
-}
-
-fn toml_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\u{0008}' => out.push_str("\\b"),
-            '\t' => out.push_str("\\t"),
-            '\n' => out.push_str("\\n"),
-            '\u{000C}' => out.push_str("\\f"),
-            '\r' => out.push_str("\\r"),
-            c if (c as u32) < 0x20 || c == '\u{007F}' => {
-                let _ = write!(out, "\\u{:04X}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]

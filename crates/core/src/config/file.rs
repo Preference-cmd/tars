@@ -166,6 +166,18 @@ impl Config {
             (Self::default(), None)
         };
 
+        config.load_mcp_for_base_dir(toml_base_dir.as_deref())?;
+
+        config.validate_profiles()?;
+        Ok(config)
+    }
+
+    /// Load sibling `mcp.json` (or explicit `TARS_MCP_CONFIG`) into `self` without
+    /// altering `self.source` or `self.profiles`.
+    pub(super) fn load_mcp_for_base_dir(
+        &mut self,
+        base_dir: Option<&Path>,
+    ) -> Result<(), ConfigError> {
         // Without TARS_MCP_CONFIG, mcp.json sits beside the TOML file. A missing
         // TOML path means no MCP file at all: never search the working directory.
         let (mcp_path, mcp_required) = if let Some(path) = std::env::var_os("TARS_MCP_CONFIG") {
@@ -181,7 +193,7 @@ impl Config {
                     .join(path)
             };
             (Some(path), true)
-        } else if let Some(base_dir) = toml_base_dir {
+        } else if let Some(base_dir) = base_dir {
             (Some(base_dir.join("mcp.json")), false)
         } else {
             (None, false)
@@ -201,9 +213,9 @@ impl Config {
                         return Err(ConfigError::TooLarge);
                     }
                     let (servers, warnings) = super::mcp::parse_mcp_json(&text)?;
-                    config.mcp_servers = servers;
-                    config.warnings = warnings;
-                    config.mcp_source = Some(mcp_path);
+                    self.mcp_servers = servers;
+                    self.warnings = warnings;
+                    self.mcp_source = Some(mcp_path);
                 }
                 Err(error) if !mcp_required && error.kind() == io::ErrorKind::NotFound => {
                     // Absence of a default mcp.json leaves the MCP catalog empty.
@@ -216,9 +228,7 @@ impl Config {
                 }
             }
         }
-
-        config.validate_profiles()?;
-        Ok(config)
+        Ok(())
     }
 
     pub(super) fn validate_profiles(&self) -> Result<(), ConfigError> {
@@ -587,6 +597,25 @@ pub enum ConfigError {
     /// Preset names must be nonblank.
     #[error("profile name must not be blank")]
     EmptyProfile,
+    /// Profile name does not match the allowed identifier syntax.
+    #[error(
+        "profile name must be 1..=64 ASCII alphanumeric, '_' or '-' characters starting with alphanumeric"
+    )]
+    InvalidProfileName,
+    /// Both `credential` and `api_key_env` were set on the same profile.
+    #[error("credential and api_key_env cannot both be set")]
+    ConflictingCredential,
+    /// Anthropic profiles require a positive `max_tokens` limit.
+    #[error("Anthropic profiles require a positive max_tokens value")]
+    AnthropicRequiresMaxTokens,
+    /// Configuration file path is a symbolic link.
+    #[error("configuration file {0:?} must not be a symlink")]
+    SymlinkNotAllowed(PathBuf),
+    /// Existing `config.toml` uses an inline or dotted `[profiles]` layout that cannot be safely updated in place.
+    #[error(
+        "config.toml uses an inline or dotted [profiles] layout that cannot be safely updated in place"
+    )]
+    UnsupportedProfileLayout,
     /// The `[external_tools] rg` value is not a usable source.
     #[error("[external_tools] rg must be \"auto\", \"managed\", \"system\", or an absolute path")]
     InvalidExternalTool,

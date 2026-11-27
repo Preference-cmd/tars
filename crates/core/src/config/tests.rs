@@ -1759,3 +1759,68 @@ temperature = 1.5
     .unwrap();
     assert!(Config::load(ConfigSource::File(bad_toml)).is_err());
 }
+
+#[test]
+fn profile_accepts_credential_store_ref_and_rejects_conflicting_api_key_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let ok_path = dir.path().join("ok.toml");
+    std::fs::write(
+        &ok_path,
+        r#"
+version = 1
+default_profile = "work"
+
+[profiles.work]
+provider = "openai-responses"
+model = "gpt-5.4"
+credential = "work_cred"
+"#,
+    )
+    .unwrap();
+    let config = Config::load(ConfigSource::File(ok_path)).unwrap();
+    let def = config.preset(None).unwrap().unwrap();
+    assert_eq!(def.credential, CredentialRef::Store("work_cred".into()));
+    let profiles = config.model_profiles();
+    assert_eq!(
+        profiles["work"].credential,
+        CredentialRef::Store("work_cred".into())
+    );
+
+    let conflict_path = dir.path().join("conflict.toml");
+    std::fs::write(
+        &conflict_path,
+        r#"
+version = 1
+default_profile = "work"
+
+[profiles.work]
+provider = "openai-responses"
+model = "gpt-5.4"
+credential = "work_cred"
+api_key_env = "OPENAI_API_KEY"
+"#,
+    )
+    .unwrap();
+    let err = Config::load(ConfigSource::File(conflict_path)).unwrap_err();
+    assert!(matches!(err, super::ConfigError::ConflictingCredential));
+
+    let invalid_cred_path = dir.path().join("invalid_cred.toml");
+    std::fs::write(
+        &invalid_cred_path,
+        r#"
+version = 1
+default_profile = "work"
+
+[profiles.work]
+provider = "openai-responses"
+model = "gpt-5.4"
+credential = "work.dotted"
+"#,
+    )
+    .unwrap();
+    let err = Config::load(ConfigSource::File(invalid_cred_path)).unwrap_err();
+    assert!(matches!(
+        err,
+        super::ConfigError::Definition(DefinitionError::InvalidCredentialReference)
+    ));
+}

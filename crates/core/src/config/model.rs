@@ -136,6 +136,7 @@ pub(super) struct Profile {
     provider: Provider,
     model: String,
     endpoint: Option<String>,
+    credential: Option<String>,
     api_key_env: Option<String>,
     timeout_secs: Option<u64>,
     capacity: Option<usize>,
@@ -179,17 +180,22 @@ pub(super) struct Profile {
 
 impl Profile {
     pub(super) fn to_model_profile(&self, name: &str) -> crate::agents::ModelProfile {
+        let credential = if let Some(store_name) = &self.credential {
+            CredentialRef::Store(store_name.clone())
+        } else {
+            CredentialRef::Environment(self.api_key_env.clone().unwrap_or_else(|| {
+                match self.provider {
+                    Provider::Anthropic => "ANTHROPIC_API_KEY".into(),
+                    _ => "OPENAI_API_KEY".into(),
+                }
+            }))
+        };
         crate::agents::ModelProfile {
             name: name.to_owned(),
             provider: self.provider,
             model: self.model.clone(),
             endpoint: self.endpoint.clone(),
-            credential: CredentialRef::Environment(self.api_key_env.clone().unwrap_or_else(|| {
-                match self.provider {
-                    Provider::Anthropic => "ANTHROPIC_API_KEY".into(),
-                    _ => "OPENAI_API_KEY".into(),
-                }
-            })),
+            credential,
             max_tokens: self.max_tokens,
             reasoning_effort: self.reasoning_effort.clone(),
             temperature: self.temperature.and_then(|t| Temperature::new(t).ok()),
@@ -321,6 +327,12 @@ pub(super) fn resolve(
         .model
         .or_else(|| profile.map(|p| p.model.clone()))
         .ok_or(ConfigError::ModelRequired)?;
+    if let Some(p) = profile
+        && p.credential.is_some()
+        && p.api_key_env.is_some()
+    {
+        return Err(ConfigError::ConflictingCredential);
+    }
     let timeout = options
         .timeout_secs
         .or(profile.and_then(|p| p.timeout_secs))
@@ -412,15 +424,18 @@ pub(super) fn resolve(
         endpoint: options
             .endpoint
             .or_else(|| profile.and_then(|p| p.endpoint.clone())),
-        credential: CredentialRef::Environment(
-            options
-                .api_key_env
-                .or_else(|| profile.and_then(|p| p.api_key_env.clone()))
-                .unwrap_or_else(|| match provider {
-                    Provider::Anthropic => "ANTHROPIC_API_KEY".into(),
-                    _ => "OPENAI_API_KEY".into(),
-                }),
-        ),
+        credential: if let Some(env_var) = options.api_key_env {
+            CredentialRef::Environment(env_var)
+        } else if let Some(store_name) = profile.and_then(|p| p.credential.clone()) {
+            CredentialRef::Store(store_name)
+        } else if let Some(env_var) = profile.and_then(|p| p.api_key_env.clone()) {
+            CredentialRef::Environment(env_var)
+        } else {
+            CredentialRef::Environment(match provider {
+                Provider::Anthropic => "ANTHROPIC_API_KEY".into(),
+                _ => "OPENAI_API_KEY".into(),
+            })
+        },
         work_timeout_secs: Some(timeout),
         retained_work_capacity: options
             .capacity

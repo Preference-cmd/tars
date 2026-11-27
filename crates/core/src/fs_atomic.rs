@@ -19,7 +19,7 @@ pub(crate) enum ReplaceMode {
 }
 
 /// Write `bytes` to a sibling temporary file, flush and `sync_all`, persist to
-/// `path` according to `mode`, and perform a best-effort parent-directory sync.
+/// `path` according to `replace`, and perform a best-effort parent-directory sync.
 ///
 /// Returns the exact number of bytes written. When `temp_prefix` is `Some`,
 /// the temporary file uses that prefix via [`tempfile::Builder`].
@@ -27,7 +27,22 @@ pub(crate) fn atomic_write_bytes(
     path: &Path,
     temp_prefix: Option<&str>,
     bytes: &[u8],
-    mode: ReplaceMode,
+    replace: ReplaceMode,
+) -> io::Result<u64> {
+    atomic_write_bytes_with_mode(path, temp_prefix, bytes, replace, None)
+}
+
+/// Write `bytes` to a sibling temporary file, flush and `sync_all`, optionally
+/// apply a Unix permission mode before persisting to `path`, and perform a
+/// best-effort parent-directory sync.
+///
+/// On non-Unix platforms, `mode` is accepted unconditionally and ignored.
+pub(crate) fn atomic_write_bytes_with_mode(
+    path: &Path,
+    temp_prefix: Option<&str>,
+    bytes: &[u8],
+    replace: ReplaceMode,
+    mode: Option<u32>,
 ) -> io::Result<u64> {
     let parent = path
         .parent()
@@ -41,7 +56,16 @@ pub(crate) fn atomic_write_bytes(
     };
     pending.write_all(bytes)?;
     pending.as_file().sync_all()?;
-    match mode {
+    #[cfg(unix)]
+    if let Some(raw_mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        pending
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(raw_mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    match replace {
         ReplaceMode::Overwrite => {
             pending.persist(path).map_err(|error| error.error)?;
         }
@@ -141,5 +165,41 @@ mod tests {
             atomic_write_bytes(&target, None, b"payload", ReplaceMode::Overwrite).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert!(dir_entries(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn atomic_write_bytes_with_mode_writes_and_sets_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("secret.toml");
+
+        let written = atomic_write_bytes_with_mode(
+            &target,
+            Some(".secret.pending-"),
+            b"secret payload",
+            ReplaceMode::Overwrite,
+            Some(0o600),
+        )
+        .unwrap();
+        assert_eq!(written, 14);
+        assert_eq!(std::fs::read(&target).unwrap(), b"secret payload");
+        assert_eq!(dir_entries(dir.path()), vec!["secret.toml"]);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+
+            atomic_write_bytes_with_mode(
+                &target,
+                Some(".secret.pending-"),
+                b"updated",
+                ReplaceMode::Overwrite,
+                Some(0o640),
+            )
+            .unwrap();
+            let updated_mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+            assert_eq!(updated_mode, 0o640);
+        }
     }
 }

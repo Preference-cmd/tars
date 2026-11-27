@@ -42,6 +42,8 @@ impl Provider {
 pub enum CredentialRef {
     /// Name of the environment variable resolved once when opening a session.
     Environment(String),
+    /// Name of the credential entry resolved from TARS's `credentials.toml` store.
+    Store(String),
 }
 
 /// Smallest accepted automatic-compaction trigger percentage.
@@ -238,9 +240,17 @@ impl SessionDefinition {
         if self.model.trim().is_empty() {
             return Err(DefinitionError::BlankModel);
         }
-        let CredentialRef::Environment(name) = &self.credential;
-        if !valid_environment_name(name) {
-            return Err(DefinitionError::InvalidCredentialReference);
+        match &self.credential {
+            CredentialRef::Environment(name) => {
+                if !valid_environment_name(name) {
+                    return Err(DefinitionError::InvalidCredentialReference);
+                }
+            }
+            CredentialRef::Store(name) => {
+                if !valid_credential_name(name) {
+                    return Err(DefinitionError::InvalidCredentialReference);
+                }
+            }
         }
         if self
             .endpoint
@@ -381,13 +391,29 @@ pub(crate) enum RenderOptions {
     Anthropic(AnthropicRenderOptions),
 }
 
-// Shared syntax for a stored credential reference and an MCP environment name.
+// Shared syntax for an environment credential reference and an MCP environment name.
 pub(crate) fn valid_environment_name(name: &str) -> bool {
     let mut bytes = name.bytes();
     bytes
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
         && bytes.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// Validate a credential store or profile entry name (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`).
+///
+/// Strictly disallows `.`, whitespace, control characters, and punctuation so
+/// unquoted TOML table headers like `[credentials.<name>]` and `[profiles.<name>]`
+/// never split into nested dotted tables.
+pub fn valid_credential_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    bytes[0].is_ascii_alphanumeric()
+        && bytes[1..]
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'-')
 }
 
 // Endpoint syntax shared by the model endpoint and remote MCP servers.
@@ -421,8 +447,10 @@ pub enum DefinitionError {
     /// No explicit nonblank model identifier was provided.
     #[error("model identifier must not be blank")]
     BlankModel,
-    /// The reference is not a portable environment variable name.
-    #[error("credential reference must name a valid environment variable")]
+    /// The reference is not a valid environment variable or credential store entry name.
+    #[error(
+        "credential reference must name a valid environment variable or credential store entry"
+    )]
     InvalidCredentialReference,
     /// Endpoint syntax or embedded credential-bearing components are forbidden.
     #[error("endpoint must be an absolute HTTP(S) URL without credentials, query or fragment")]
