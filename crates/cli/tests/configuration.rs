@@ -1032,7 +1032,7 @@ fn wm11_cli_rejects_unknown_mcp_ids_and_keeps_secrets_out_of_errors() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("option needs a value"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("option --mcp requires a value"));
     let output = cli(dir.path())
         .args([
             "session",
@@ -1045,7 +1045,8 @@ fn wm11_cli_rejects_unknown_mcp_ids_and_keeps_secrets_out_of_errors() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("unknown, duplicate, or inapplicable")
+        String::from_utf8_lossy(&output.stderr)
+            .contains("option --mcp is not applicable to session run")
     );
 }
 

@@ -5,6 +5,7 @@ use std::process::ExitCode;
 const HELP: &str = "TARS — agent application
 
 Usage: tars [interactive options]
+       tars -p [prompt] [options]
        tars run --provider <protocol> --model <id> (--input <text> | --stdin | --image <path>) [options]
        tars session <create | run | list | show | compact | history | repair | rename | delete | fork | export-materials | import-legacy> [options]
        tars tools <status | install> [options]
@@ -29,7 +30,8 @@ Interactive slash commands:
   /help      Keyboard shortcuts and session behavior
 
 Commands:
-  run            Execute one work with a real model and explicitly selected workspace tools
+  -p, --print    Run headlessly with positional prompt or piped stdin; see tars -p --help
+  run            Execute one work with a real model and explicitly selected workspace tools; see tars run --help
   session        Save and reopen sessions; see tars session --help
   tools          Check or install the external search tool; see tars tools --help
 
@@ -74,6 +76,9 @@ Run options:
   --load         Import a Context material file into a new session
   --save         Replace a material file after completion or controlled interruption
   --json         Output a structured result instead of answer text
+  --stream       Stream incremental response text to stdout and status to stderr
+  --stream-json  Stream NDJSON progress events and terminal result to stdout
+  --output-format  text | json | stream-json (conflicts with --json/--stream/--stream-json)
   --config       Shared TOML configuration file
   --profile      Named model preset (otherwise default_profile)
   --no-config    Ignore global configuration; conflicts with --config
@@ -104,6 +109,95 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
         [one] if one == "-V" || one == "--version" => {
             output(&format!("tars {}\n", env!("CARGO_PKG_VERSION")))
         }
+        [one] if one == "run" => output(super::options::HELP),
+        [one, help] if one == "run" && (help == "--help" || help == "-h") => {
+            output(super::options::HELP)
+        }
+        [one, rest @ ..] if one == "run" => match super::options::RunOptions::parse(rest) {
+            Ok(options) => super::execute::run(options),
+            Err(error) => {
+                let hint = if error.is_argument() {
+                    ". Use tars run --help."
+                } else {
+                    ""
+                };
+                let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
+                error.exit_code()
+            }
+        },
+        [one] if one == "session" => output(super::session::HELP),
+        [one, help] if one == "session" && (help == "--help" || help == "-h") => {
+            output(super::session::HELP)
+        }
+        [one, command, help]
+            if one == "session"
+                && is_session_subcommand(command.to_str())
+                && (help == "--help" || help == "-h") =>
+        {
+            output(super::session::subcommand_help(
+                command.to_str().unwrap_or(""),
+            ))
+        }
+        [one, command, _, help]
+            if one == "session"
+                && is_session_subcommand(command.to_str())
+                && (help == "--help" || help == "-h") =>
+        {
+            output(super::session::subcommand_help(
+                command.to_str().unwrap_or(""),
+            ))
+        }
+        [one, rest @ ..] if one == "session" => match super::session::SessionCommand::parse(rest) {
+            Ok(command) => super::session::run(command),
+            Err(error) => {
+                let hint = if error.is_argument() {
+                    ". Use tars session --help."
+                } else {
+                    ""
+                };
+                let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
+                error.exit_code()
+            }
+        },
+        [one] if one == "tools" => output(super::tools::HELP),
+        [one, help] if one == "tools" && (help == "--help" || help == "-h") => {
+            output(super::tools::HELP)
+        }
+        [one, command, help]
+            if one == "tools"
+                && matches!(command.to_str(), Some("status" | "install"))
+                && (help == "--help" || help == "-h") =>
+        {
+            output(super::tools::subcommand_help(
+                command.to_str().unwrap_or(""),
+            ))
+        }
+        [one, rest @ ..] if one == "tools" => match super::tools::ToolsCommand::parse(rest) {
+            Ok(command) => super::tools::run(command),
+            Err(error) => {
+                let hint = if error.is_argument() {
+                    ". Use tars tools --help."
+                } else {
+                    ""
+                };
+                let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
+                error.exit_code()
+            }
+        },
+        _ if super::print::is_print_invocation(&args) => {
+            match super::print::PrintCommand::parse(&args) {
+                Ok(command) => super::print::run(command),
+                Err(error) => {
+                    let hint = if error.is_argument() {
+                        ". Use tars -p --help."
+                    } else {
+                        ""
+                    };
+                    let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
+                    error.exit_code()
+                }
+            }
+        }
         [first, ..]
             if matches!(
                 first.to_str(),
@@ -120,74 +214,6 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
         {
             tars_tui::run(args)
         }
-        [one, help] if one == "run" && (help == "--help" || help == "-h") => output(HELP),
-        [one] if one == "session" => output(super::session::HELP),
-        [one, help] if one == "session" && (help == "--help" || help == "-h") => {
-            output(super::session::HELP)
-        }
-        [one, command, help]
-            if one == "session"
-                && matches!(
-                    command.to_str(),
-                    Some(
-                        "create"
-                            | "run"
-                            | "list"
-                            | "show"
-                            | "compact"
-                            | "history"
-                            | "repair"
-                            | "rename"
-                            | "delete"
-                            | "fork"
-                            | "export-materials"
-                            | "import-legacy"
-                    )
-                )
-                && (help == "--help" || help == "-h") =>
-        {
-            output(super::session::HELP)
-        }
-        [one, rest @ ..] if one == "session" => match super::session::SessionCommand::parse(rest) {
-            Ok(command) => super::session::run(command),
-            Err(error) => {
-                let hint = if error.is_argument() {
-                    ". Use tars session --help."
-                } else {
-                    ""
-                };
-                let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
-                error.exit_code()
-            }
-        },
-        [one, rest @ ..] if one == "run" => match super::options::RunOptions::parse(rest) {
-            Ok(options) => super::execute::run(options),
-            Err(error) => {
-                let hint = if error.is_argument() {
-                    ". Use tars run --help."
-                } else {
-                    ""
-                };
-                let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
-                error.exit_code()
-            }
-        },
-        [one] if one == "tools" => output(super::tools::HELP),
-        [one, help] if one == "tools" && (help == "--help" || help == "-h") => {
-            output(super::tools::HELP)
-        }
-        [one, rest @ ..] if one == "tools" => match super::tools::ToolsCommand::parse(rest) {
-            Ok(command) => super::tools::run(command),
-            Err(error) => {
-                let hint = if error.is_argument() {
-                    ". Use tars tools --help."
-                } else {
-                    ""
-                };
-                let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
-                error.exit_code()
-            }
-        },
         _ => {
             let _ = writeln!(
                 io::stderr().lock(),
@@ -196,6 +222,26 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn is_session_subcommand(command: Option<&str>) -> bool {
+    matches!(
+        command,
+        Some(
+            "create"
+                | "run"
+                | "list"
+                | "show"
+                | "compact"
+                | "history"
+                | "repair"
+                | "rename"
+                | "delete"
+                | "fork"
+                | "export-materials"
+                | "import-legacy"
+        )
+    )
 }
 
 pub(super) fn output(text: &str) -> ExitCode {

@@ -6,8 +6,229 @@ mod options;
 mod repair;
 mod show;
 
-pub(super) use execute::run;
+pub(super) use execute::{run, run_saved_with_format};
 pub(super) use options::SessionCommand;
+
+pub(super) fn subcommand_help(command: &str) -> &'static str {
+    match command {
+        "create" => CREATE_HELP,
+        "run" => RUN_HELP,
+        "list" => LIST_HELP,
+        "show" => SHOW_HELP,
+        "compact" => COMPACT_HELP,
+        "history" => HISTORY_HELP,
+        "repair" => REPAIR_HELP,
+        "rename" => RENAME_HELP,
+        "delete" => DELETE_HELP,
+        "fork" => FORK_HELP,
+        "export-materials" => EXPORT_MATERIALS_HELP,
+        "import-legacy" => IMPORT_LEGACY_HELP,
+        _ => HELP,
+    }
+}
+
+const CREATE_HELP: &str = "Create a persistent TARS session without calling a model
+
+Usage: tars session create --store <directory> --provider <protocol> --model <id> [options]
+
+Options:
+  --provider          openai-chat | openai-responses | anthropic (or profile)
+  --model             Model identifier (or profile)
+  --profile           Named model preset (otherwise default_profile)
+  --api-key-env       Credential variable, resolved when a session opens
+  --endpoint          Full HTTP(S) URL without credentials, query or fragment
+  --timeout-secs      Work deadline, 1–86400 seconds (default 120)
+  --capacity          Retained work record count (default 256)
+  --max-model-rounds  Per-work model call limit (default 10)
+  --max-tool-calls    Per-work tool call limit (default 64)
+  --max-tokens        Output token limit per model call (no default; required by anthropic)
+  --reasoning-effort  Effort text sent as written, e.g. low, high (default: provider's)
+  --extra-body        JSON object of further request fields, sent as written
+  --render-options    JSON object of the protocol's render options, e.g. max_tokens_field
+  --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
+  --context-window    Model context window in tokens; omitted leaves it unknown
+  --auto-compact      on | off | PERCENT (10–95, default on, 70)
+  --prompt-cache      on | off: prompt caching switch (default on)
+  --code-execution    Enable sandboxed read-only run_code (conflicts with --no-code-execution)
+  --no-code-execution Disable run_code even when enabled in configuration
+  --workspace         Root directory for selected workspace tools
+  --tools             Comma-separated list_directory,read_file,search_text,find_files,write_file,edit_file,run_command (default empty)
+  --command-network   Command network: none or open (default none)
+  --mcp               Comma-separated MCP server ids from mcp.json (default: profile; empty disables)
+  --permission-mode   read-only | ask | accept-edits | full-access (default: profile or ask)
+  --system            Inline static custom system prompt (conflicts with --system-file)
+  --system-file       UTF-8 static custom system prompt file, relative to cwd
+  --dynamic-context       Inline dynamic custom context (conflicts with --dynamic-context-file)
+  --dynamic-context-file  UTF-8 dynamic custom context file, relative to cwd
+  --skill-dir         Additional skill directory, relative to cwd (repeatable)
+  --no-skills         Disable skills discovery (conflicts with --skill-dir)
+  --load              Initial Context material file; creates a new conversation
+  --trust-workspace-rules   Trust allow rules in <workspace>/.tars/permissions.toml
+  --trust-workspace-agents  Trust presets in <workspace>/.tars/agents/
+  --recovery-dir      Material recovery directory on initial save failure
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured output
+  -h, --help          Show this help
+";
+
+const RUN_HELP: &str = "Run one turn on a saved persistent session
+
+Usage: tars session run <conversation-id> --store <directory> (--input <text> | --stdin | --image <path>) [options]
+
+Options:
+  --input             User text; mutually exclusive with --stdin
+  --stdin             Read UTF-8 user text until EOF
+  --image             Attach a local PNG/JPEG/GIF/WebP image file (repeatable, max 8)
+  --permission-mode   read-only | ask | accept-edits | full-access
+  --trust-workspace-rules   Trust allow rules in <workspace>/.tars/permissions.toml
+  --trust-workspace-agents  Trust presets in <workspace>/.tars/agents/
+  --recovery-dir      Material recovery directory on save failure
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured JSON result object
+  --stream            Stream incremental response text to stdout and status to stderr
+  --stream-json       Stream NDJSON progress events and terminal result to stdout
+  --output-format     text | json | stream-json (conflicts with --json/--stream/--stream-json)
+  -h, --help          Show this help
+";
+
+const LIST_HELP: &str = "List sessions in a store
+
+Usage: tars session list --store <directory> [--config <file> | --no-config] [--json]
+
+Options:
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured output
+  -h, --help          Show this help
+";
+
+const SHOW_HELP: &str = "Inspect a saved session or one of its agents
+
+Usage: tars session show <conversation-id> --store <directory> [--agent <id-or-name>] [--json]
+
+Options:
+  --agent             Inspect one agent by UUID agent_id or unique name
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured output
+  -h, --help          Show this help
+";
+
+const COMPACT_HELP: &str = "Summarize and replace the current context of a saved session
+
+Usage: tars session compact <conversation-id> --store <directory> [--recovery-dir <dir>] [--json]
+
+Options:
+  --recovery-dir      Material recovery directory if saving fails
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured output
+  -h, --help          Show this help
+";
+
+const HISTORY_HELP: &str = "Print the expanded full conversation history of a saved session
+
+Usage: tars session history <conversation-id> --store <directory> [--agent <id-or-name>] [--last N] [--json]
+
+Options:
+  --agent             Expand history for one agent by UUID agent_id or unique name
+  --last N            Print only the newest N blocks
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Print one JSON block per line
+  -h, --help          Show this help
+";
+
+const REPAIR_HELP: &str = "Inspect or remove unpaired tool declarations from a saved session
+
+Usage: tars session repair <conversation-id> --store <directory> [--dry-run | --apply --expected-revision N] [--json]
+
+Options:
+  --dry-run           Preview removal of unpaired declarations (default)
+  --apply             Apply the current candidate, then wait for saving
+  --expected-revision Saved revision reported by preview; required with --apply
+  --recovery-dir      Material export directory if saving the repair fails
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured output
+  -h, --help          Show this help
+";
+
+const RENAME_HELP: &str = "Update or clear the title of an unlocked session
+
+Usage: tars session rename <conversation-id> --store <directory> (--title <text> | --clear) [--json]
+
+Options:
+  --title             New session title (1–160 characters, no control characters)
+  --clear             Clear the saved session title (conflicts with --title)
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured output
+  -h, --help          Show this help
+";
+
+const DELETE_HELP: &str = "Permanently remove an unlocked session from the store
+
+Usage: tars session delete <conversation-id> --store <directory> [--json]
+
+Options:
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured output
+  -h, --help          Show this help
+";
+
+const FORK_HELP: &str = "Fork a session into an isolated copy at revision 1
+
+Usage: tars session fork <conversation-id> --store <directory> [--title <text>] [--json]
+
+Options:
+  --title             Optional title for the forked session (default: \"<source> (fork)\")
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured output
+  -h, --help          Show this help
+";
+
+const EXPORT_MATERIALS_HELP: &str = "Export validated Context materials from a session or legacy record
+
+Usage: tars session export-materials <conversation-id> --store <directory> (--output <new-file> | <new-file>) [--json]
+       tars session export-materials --record <file> --output <new-file> [--json]
+
+Options:
+  --output            New destination file path (existing files are refused)
+  --record            Offline legacy v1/v2/v2.4 record file
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured output
+  -h, --help          Show this help
+";
+
+const IMPORT_LEGACY_HELP: &str = "Import a validated tars-session-v2.4 JSON record into SQLite
+
+Usage: tars session import-legacy --record <file> --store <directory> [--json]
+
+Options:
+  --record            Source tars-session-v2.4 JSON record file
+  --store             Local store directory (or configured store)
+  --config            Shared TOML configuration file
+  --no-config         Ignore global configuration; conflicts with --config
+  --json              Structured output
+  -h, --help          Show this help
+";
 
 pub(super) const HELP: &str = "Persistent TARS sessions
 
@@ -75,6 +296,9 @@ Run options:
   --stdin             Read UTF-8 user text until EOF
   --image             Attach a local PNG/JPEG/GIF/WebP image file (repeatable, max 8;
                       text may be omitted when at least one --image is provided)
+  --stream            Stream incremental response text to stdout and status to stderr
+  --stream-json       Stream NDJSON progress events and terminal result to stdout
+  --output-format     text | json | stream-json (conflicts with --json/--stream/--stream-json)
   --permission-mode   read-only | ask | accept-edits | full-access
                       Change and save the current permission mode for this session.
                       Reopening reverts full-access to ask unless created as full-access.

@@ -1,4 +1,7 @@
+use super::output_format::OutputFormat;
+use causa::kernel::{BlockId, InvocationId, ToolResultStatus};
 use causa::runtime::new_block_id;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,7 +14,10 @@ use tars_core::media::{
     MAX_IMAGES_PER_MESSAGE, MediaError, PreparedImage, prepare_image_from_path,
 };
 use tars_core::permission::escape_untrusted_text;
-use tars_core::session::{SubmitRequest, WorkRef, WorkResult, WorkState};
+use tars_core::session::{
+    ProgressUpdate, SubmitRequest, ToolPhase, ToolProgress, WorkProgress, WorkRef, WorkResult,
+    WorkState,
+};
 
 pub(super) struct WorkReport {
     pub work: WorkRef,
@@ -19,6 +25,9 @@ pub(super) struct WorkReport {
     pub save: SaveWait,
     pub signal_failed: bool,
     pub usage: Option<tars_core::usage::WorkUsage>,
+    pub streamed_text: bool,
+    pub streamed_ends_with_newline: bool,
+    pub stream_write_failed: bool,
 }
 
 /// The independent save barrier either settled, was abandoned on a second Ctrl-C,
@@ -250,6 +259,7 @@ pub(super) async fn work(
     input: Option<String>,
     images: &[PreparedImage],
     connect_approvals: bool,
+    output_format: OutputFormat,
 ) -> Result<WorkReport, String> {
     let approver = if connect_approvals {
         Some(crate::cli::approval::spawn_approver(session))
@@ -275,7 +285,8 @@ pub(super) async fn work(
     let mut signal_failed = false;
     let mut stopping = false;
     let mut progress_open = true;
-    let mut reported_rule_calls = std::collections::HashSet::new();
+    let mut events_open = true;
+    let mut emitter = StreamEmitter::new(output_format, receipt.work.conversation_id.as_str());
     let initial_result = loop {
         let observation = tokio::select! {
             biased;
@@ -297,7 +308,7 @@ pub(super) async fn work(
             event = progress.recv(), if progress_open => {
                 match event {
                     Ok(event) if event.work == receipt.work => {
-                        report_progress_update(&event.update, &mut reported_rule_calls);
+                        emitter.on_progress_stdio(&event);
                     }
                     Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -306,18 +317,26 @@ pub(super) async fn work(
                 }
                 continue;
             }
+            event = events.recv(), if events_open => {
+                match event {
+                    Ok(ev) => emitter.on_session_event_stdio(&ev),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        events_open = false;
+                    }
+                }
+                continue;
+            }
         };
         if let WorkState::Finished(result) = observation.state {
-            for call in &observation.tools.calls {
-                report_tool_rule_provenance(call, &mut reported_rule_calls);
-            }
+            emitter.reconcile_tool_provenance_stdio(&observation.tools.calls);
             break result;
         }
     };
     loop {
         match progress.try_recv() {
             Ok(event) if event.work == receipt.work => {
-                report_progress_update(&event.update, &mut reported_rule_calls);
+                emitter.on_progress_stdio(&event);
             }
             Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
             Err(
@@ -337,9 +356,6 @@ pub(super) async fn work(
     let mut cancelled_during_settle = false;
     let mut save_prompted = false;
     let mut settled_work: Option<WorkRef> = None;
-    let mut events_open = true;
-    let mut agent_names = std::collections::HashMap::new();
-    let root_agent_id = receipt.work.conversation_id.as_str().to_owned();
 
     if stopping {
         if session.has_active_execution() {
@@ -387,7 +403,7 @@ pub(super) async fn work(
                 }
                 event = events.recv(), if events_open => {
                     match event {
-                        Ok(ev) => report_session_event(&ev, &root_agent_id, &mut agent_names),
+                        Ok(ev) => emitter.on_session_event_stdio(&ev),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             events_open = false;
@@ -396,7 +412,7 @@ pub(super) async fn work(
                 }
                 event = progress.recv(), if progress_open => {
                     match event {
-                        Ok(ev) => report_progress_update(&ev.update, &mut reported_rule_calls),
+                        Ok(ev) => emitter.on_progress_stdio(&ev),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             progress_open = false;
@@ -457,7 +473,7 @@ pub(super) async fn work(
                 }
                 event = events.recv(), if events_open => {
                     match event {
-                        Ok(ev) => report_session_event(&ev, &root_agent_id, &mut agent_names),
+                        Ok(ev) => emitter.on_session_event_stdio(&ev),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             events_open = false;
@@ -466,7 +482,7 @@ pub(super) async fn work(
                 }
                 event = progress.recv(), if progress_open => {
                     match event {
-                        Ok(ev) => report_progress_update(&ev.update, &mut reported_rule_calls),
+                        Ok(ev) => emitter.on_progress_stdio(&ev),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             progress_open = false;
@@ -479,7 +495,7 @@ pub(super) async fn work(
 
     loop {
         match events.try_recv() {
-            Ok(ev) => report_session_event(&ev, &root_agent_id, &mut agent_names),
+            Ok(ev) => emitter.on_session_event_stdio(&ev),
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
             Err(
                 tokio::sync::broadcast::error::TryRecvError::Empty
@@ -489,7 +505,7 @@ pub(super) async fn work(
     }
     loop {
         match progress.try_recv() {
-            Ok(ev) => report_progress_update(&ev.update, &mut reported_rule_calls),
+            Ok(ev) => emitter.on_progress_stdio(&ev),
             Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
             Err(
                 tokio::sync::broadcast::error::TryRecvError::Empty
@@ -506,9 +522,7 @@ pub(super) async fn work(
         && wakeup_work != receipt.work
         && let Ok(obs) = session.observe(&wakeup_work)
     {
-        for call in &obs.tools.calls {
-            report_tool_rule_provenance(call, &mut reported_rule_calls);
-        }
+        emitter.reconcile_tool_provenance_stdio(&obs.tools.calls);
         if let WorkState::Finished(res) = obs.state {
             final_work = wakeup_work;
             final_result = res;
@@ -544,78 +558,434 @@ pub(super) async fn work(
         save,
         signal_failed: signal_failed || wait_signal_failed,
         usage,
+        streamed_text: emitter.emitted_any_text,
+        streamed_ends_with_newline: emitter.last_char_was_newline,
+        stream_write_failed: emitter.stdout_failed,
     })
 }
 
-fn report_session_event(
-    event: &tars_core::events::SessionEvent,
-    root_agent_id: &str,
-    agent_names: &mut std::collections::HashMap<String, String>,
-) {
-    use tars_core::events::{OperationStatus, SessionEvent};
-    match event {
-        SessionEvent::AgentRegistered { agent_id, name, .. } => {
-            agent_names.insert(agent_id.clone(), name.clone());
+struct StreamEmitter {
+    format: OutputFormat,
+    root_agent_id: String,
+    agent_names: HashMap<String, String>,
+    emitted_any_text: bool,
+    round_emitted_text: bool,
+    round_completed: bool,
+    need_round_separator: bool,
+    last_char_was_newline: bool,
+    stdout_broken_pipe: bool,
+    stdout_failed: bool,
+    reported_rule_calls: HashSet<(InvocationId, BlockId)>,
+    reported_tool_phases: HashSet<(InvocationId, BlockId, &'static str, Option<&'static str>)>,
+}
+
+impl StreamEmitter {
+    fn new(format: OutputFormat, root_agent_id: &str) -> Self {
+        Self {
+            format,
+            root_agent_id: root_agent_id.to_owned(),
+            agent_names: HashMap::new(),
+            emitted_any_text: false,
+            round_emitted_text: false,
+            round_completed: false,
+            need_round_separator: false,
+            last_char_was_newline: false,
+            stdout_broken_pipe: false,
+            stdout_failed: false,
+            reported_rule_calls: HashSet::new(),
+            reported_tool_phases: HashSet::new(),
         }
-        SessionEvent::AutoWakeupLimitReached {
-            agent_id,
-            max_auto_wakeups,
-            ..
-        } => {
-            let label = agent_names
-                .get(agent_id)
-                .map(String::as_str)
-                .unwrap_or(agent_id.as_str());
-            let _ = writeln!(
-                io::stderr().lock(),
-                "TARS: auto-wakeup limit ({max_auto_wakeups}) reached for agent {}",
-                tars_core::permission::escape_untrusted_text(label),
-            );
+    }
+
+    fn on_progress_stdio(&mut self, event: &WorkProgress) {
+        let mut out = io::stdout().lock();
+        let mut err = io::stderr().lock();
+        self.on_progress(event, &mut out, &mut err);
+    }
+
+    fn on_session_event_stdio(&mut self, event: &tars_core::events::SessionEvent) {
+        let mut out = io::stdout().lock();
+        let mut err = io::stderr().lock();
+        self.on_session_event(event, &mut out, &mut err);
+    }
+
+    fn reconcile_tool_provenance_stdio(&mut self, calls: &[ToolProgress]) {
+        let mut err = io::stderr().lock();
+        for call in calls {
+            report_tool_rule_provenance(call, &mut self.reported_rule_calls, &mut err);
         }
-        SessionEvent::OperationStateChanged {
-            target_agent_id,
-            status,
-            ..
-        } if target_agent_id != root_agent_id && !matches!(status, OperationStatus::Creating) => {
-            let label = agent_names
-                .get(target_agent_id)
-                .map(String::as_str)
-                .unwrap_or(target_agent_id.as_str());
-            let _ = writeln!(
-                io::stderr().lock(),
-                "TARS: [agent: {}] {}",
-                tars_core::permission::escape_untrusted_text(label),
-                status.as_str(),
-            );
+    }
+
+    fn write_stdout(&mut self, out: &mut dyn Write, bytes: &[u8]) {
+        if self.stdout_broken_pipe || self.stdout_failed {
+            return;
         }
-        _ => {}
+        match out.write_all(bytes) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                self.stdout_broken_pipe = true;
+            }
+            Err(_) => {
+                self.stdout_failed = true;
+            }
+        }
+    }
+
+    fn flush_stdout(&mut self, out: &mut dyn Write) {
+        if self.stdout_broken_pipe || self.stdout_failed {
+            return;
+        }
+        match out.flush() {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                self.stdout_broken_pipe = true;
+            }
+            Err(_) => {
+                self.stdout_failed = true;
+            }
+        }
+    }
+
+    fn write_ndjson(&mut self, out: &mut dyn Write, value: &serde_json::Value) {
+        if self.stdout_broken_pipe || self.stdout_failed {
+            return;
+        }
+        if let Ok(line) = serde_json::to_string(value) {
+            self.write_stdout(out, line.as_bytes());
+            self.write_stdout(out, b"\n");
+            self.flush_stdout(out);
+        }
+    }
+
+    fn on_progress(&mut self, event: &WorkProgress, out: &mut dyn Write, err: &mut dyn Write) {
+        match self.format {
+            OutputFormat::Text | OutputFormat::Json => match &event.update {
+                ProgressUpdate::Compaction(progress) => {
+                    report_compaction_progress(progress, err, false);
+                }
+                ProgressUpdate::Tool(call) => {
+                    report_tool_rule_provenance(call, &mut self.reported_rule_calls, err);
+                }
+                _ => {}
+            },
+            OutputFormat::Stream => match &event.update {
+                ProgressUpdate::ModelStarted => {
+                    if self.round_emitted_text && !self.round_completed {
+                        let _ = writeln!(
+                            err,
+                            "TARS: model stream retrying; resetting current round preview"
+                        );
+                    }
+                    if self.emitted_any_text {
+                        self.need_round_separator = true;
+                    }
+                    self.round_emitted_text = false;
+                    self.round_completed = false;
+                }
+                ProgressUpdate::Text { delta, .. } => {
+                    if !delta.is_empty() {
+                        if self.need_round_separator {
+                            self.write_stdout(out, b"\n\n");
+                            self.need_round_separator = false;
+                        }
+                        self.write_stdout(out, delta.as_bytes());
+                        self.flush_stdout(out);
+                        self.emitted_any_text = true;
+                        self.round_emitted_text = true;
+                        self.last_char_was_newline = delta.ends_with('\n');
+                    }
+                }
+                ProgressUpdate::ModelOutputReady => {
+                    self.round_completed = true;
+                }
+                ProgressUpdate::Tool(call) => {
+                    report_tool_rule_provenance(call, &mut self.reported_rule_calls, err);
+                    let phase = tool_phase_name(call.phase);
+                    let status = call.status.as_ref().map(tool_status_name);
+                    if self.reported_tool_phases.insert((
+                        call.invocation_id.clone(),
+                        call.call_block_id,
+                        phase,
+                        status,
+                    )) {
+                        let label = format_tool_status_label(call.phase, status);
+                        let _ = writeln!(
+                            err,
+                            "TARS: tool {}: {label}",
+                            escape_untrusted_text(&call.tool_name),
+                        );
+                    }
+                }
+                ProgressUpdate::Compaction(progress) => {
+                    report_compaction_progress(progress, err, true);
+                }
+                ProgressUpdate::Reasoning { .. } | ProgressUpdate::ToolCallDelta { .. } => {}
+            },
+            OutputFormat::StreamJson => match &event.update {
+                ProgressUpdate::ModelStarted => {
+                    self.write_ndjson(
+                        out,
+                        &serde_json::json!({
+                            "type": "model_started",
+                            "conversation_id": event.work.conversation_id.as_str(),
+                            "work_id": event.work.turn_id.0,
+                            "invocation_id": {
+                                "turn_id": event.invocation_id.turn_id.0,
+                                "round_id": event.invocation_id.round_id.0,
+                            },
+                        }),
+                    );
+                }
+                ProgressUpdate::Text { delta, truncated } => {
+                    self.write_ndjson(
+                        out,
+                        &serde_json::json!({
+                            "type": "text_delta",
+                            "delta": delta,
+                            "truncated": truncated,
+                        }),
+                    );
+                }
+                ProgressUpdate::Reasoning { delta, truncated } => {
+                    self.write_ndjson(
+                        out,
+                        &serde_json::json!({
+                            "type": "reasoning_delta",
+                            "delta": delta,
+                            "truncated": truncated,
+                        }),
+                    );
+                }
+                ProgressUpdate::ToolCallDelta {
+                    call_index,
+                    name_delta,
+                    arguments_delta,
+                    truncated,
+                } => {
+                    self.write_ndjson(
+                        out,
+                        &serde_json::json!({
+                            "type": "tool_call_delta",
+                            "call_index": call_index,
+                            "name_delta": name_delta,
+                            "arguments_delta": arguments_delta,
+                            "truncated": truncated,
+                        }),
+                    );
+                }
+                ProgressUpdate::ModelOutputReady => {}
+                ProgressUpdate::Tool(call) => {
+                    report_tool_rule_provenance(call, &mut self.reported_rule_calls, err);
+                    let phase = tool_phase_name(call.phase);
+                    let status = call.status.as_ref().map(tool_status_name);
+                    if self.reported_tool_phases.insert((
+                        call.invocation_id.clone(),
+                        call.call_block_id,
+                        phase,
+                        status,
+                    )) {
+                        self.write_ndjson(
+                            out,
+                            &serde_json::json!({
+                                "type": "tool_progress",
+                                "tool_name": call.tool_name,
+                                "phase": phase,
+                                "status": status,
+                                "arguments_summary": call.arguments_summary,
+                            }),
+                        );
+                    }
+                }
+                ProgressUpdate::Compaction(progress) => {
+                    report_compaction_progress(progress, err, false);
+                    self.write_ndjson(out, &compaction_progress_json(progress));
+                }
+            },
+        }
+    }
+
+    fn on_session_event(
+        &mut self,
+        event: &tars_core::events::SessionEvent,
+        out: &mut dyn Write,
+        err: &mut dyn Write,
+    ) {
+        use tars_core::events::{OperationStatus, SessionEvent};
+        match event {
+            SessionEvent::AgentRegistered { agent_id, name, .. } => {
+                self.agent_names.insert(agent_id.clone(), name.clone());
+            }
+            SessionEvent::AutoWakeupLimitReached {
+                agent_id,
+                max_auto_wakeups,
+                ..
+            } => {
+                let label = self
+                    .agent_names
+                    .get(agent_id)
+                    .map(String::as_str)
+                    .unwrap_or(agent_id.as_str());
+                let _ = writeln!(
+                    err,
+                    "TARS: auto-wakeup limit ({max_auto_wakeups}) reached for agent {}",
+                    escape_untrusted_text(label),
+                );
+                if self.format == OutputFormat::StreamJson {
+                    self.write_ndjson(
+                        out,
+                        &serde_json::json!({
+                            "type": "agent_event",
+                            "event": "auto_wakeup_limit_reached",
+                            "agent_id": agent_id,
+                            "agent_name": label,
+                            "max_auto_wakeups": max_auto_wakeups,
+                        }),
+                    );
+                }
+            }
+            SessionEvent::OperationStateChanged {
+                operation_id,
+                target_agent_id,
+                parent_operation_id,
+                status,
+                ..
+            } if target_agent_id != &self.root_agent_id
+                && !matches!(status, OperationStatus::Creating) =>
+            {
+                let label = self
+                    .agent_names
+                    .get(target_agent_id)
+                    .map(String::as_str)
+                    .unwrap_or(target_agent_id.as_str());
+                let _ = writeln!(
+                    err,
+                    "TARS: [agent: {}] {}",
+                    escape_untrusted_text(label),
+                    status.as_str(),
+                );
+                if self.format == OutputFormat::StreamJson {
+                    self.write_ndjson(
+                        out,
+                        &serde_json::json!({
+                            "type": "agent_event",
+                            "event": "operation_state_changed",
+                            "agent_id": target_agent_id,
+                            "agent_name": label,
+                            "operation_id": operation_id,
+                            "parent_operation_id": parent_operation_id,
+                            "status": status.as_str(),
+                        }),
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 }
 
-fn report_progress_update(
-    update: &tars_core::session::ProgressUpdate,
-    reported_rule_calls: &mut std::collections::HashSet<(
-        causa::kernel::InvocationId,
-        causa::kernel::BlockId,
-    )>,
-) {
-    match update {
-        tars_core::session::ProgressUpdate::Compaction(progress) => {
-            report_compaction_progress(progress);
-        }
-        tars_core::session::ProgressUpdate::Tool(call) => {
-            report_tool_rule_provenance(call, reported_rule_calls);
-        }
-        _ => {}
+fn tool_phase_name(phase: ToolPhase) -> &'static str {
+    match phase {
+        ToolPhase::Waiting => "waiting",
+        ToolPhase::Running => "running",
+        ToolPhase::Returned => "returned",
+        ToolPhase::Committed => "committed",
+        ToolPhase::NotStarted => "not_started",
+        ToolPhase::Unknown => "unknown",
+    }
+}
+
+fn tool_status_name(status: &ToolResultStatus) -> &'static str {
+    match status {
+        ToolResultStatus::Succeeded => "succeeded",
+        ToolResultStatus::Failed => "failed",
+        ToolResultStatus::Rejected => "rejected",
+        ToolResultStatus::Cancelled => "cancelled",
+        ToolResultStatus::TimedOut => "timed_out",
+        ToolResultStatus::UnknownOutcome => "unknown_outcome",
+    }
+}
+
+fn format_tool_status_label(phase: ToolPhase, status: Option<&'static str>) -> String {
+    match phase {
+        ToolPhase::Waiting => "waiting".to_owned(),
+        ToolPhase::Running => "running".to_owned(),
+        ToolPhase::Returned => match status {
+            Some(s) if s != "succeeded" => format!("returned ({s})"),
+            _ => "returned".to_owned(),
+        },
+        ToolPhase::Committed => match status {
+            Some("succeeded") | None => "committed".to_owned(),
+            Some(s) => format!("committed ({s})"),
+        },
+        ToolPhase::NotStarted => "not_started".to_owned(),
+        ToolPhase::Unknown => "unknown".to_owned(),
+    }
+}
+
+fn compaction_progress_json(
+    progress: &tars_core::compact::CompactionProgress,
+) -> serde_json::Value {
+    use tars_core::compact::CompactionProgress;
+    match progress {
+        CompactionProgress::Started {
+            trigger,
+            estimate_before,
+        } => serde_json::json!({
+            "type": "compaction",
+            "stage": "started",
+            "trigger": trigger.name(),
+            "estimate_before": estimate_before,
+        }),
+        CompactionProgress::Finished {
+            trigger,
+            estimate_before,
+            estimate_after,
+            record,
+        } => serde_json::json!({
+            "type": "compaction",
+            "stage": "finished",
+            "trigger": trigger.name(),
+            "estimate_before": estimate_before,
+            "estimate_after": estimate_after,
+            "record": record,
+        }),
+        CompactionProgress::MicroCompacted {
+            trigger,
+            estimate_before,
+            estimate_after,
+            cleared_results,
+            record,
+        } => serde_json::json!({
+            "type": "compaction",
+            "stage": "micro_compacted",
+            "trigger": trigger.name(),
+            "estimate_before": estimate_before,
+            "estimate_after": estimate_after,
+            "cleared_results": cleared_results,
+            "record": record,
+        }),
+        CompactionProgress::Abandoned { trigger, reason } => serde_json::json!({
+            "type": "compaction",
+            "stage": "abandoned",
+            "trigger": trigger.name(),
+            "reason": reason.name(),
+        }),
+        CompactionProgress::Trimmed {
+            before_tokens,
+            after_tokens,
+        } => serde_json::json!({
+            "type": "compaction",
+            "stage": "trimmed",
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+        }),
     }
 }
 
 fn report_tool_rule_provenance(
-    call: &tars_core::session::ToolProgress,
-    reported_rule_calls: &mut std::collections::HashSet<(
-        causa::kernel::InvocationId,
-        causa::kernel::BlockId,
-    )>,
+    call: &ToolProgress,
+    reported_rule_calls: &mut HashSet<(InvocationId, BlockId)>,
+    err: &mut dyn Write,
 ) {
     let Some(summary) = call
         .permission_decision
@@ -626,15 +996,19 @@ fn report_tool_rule_provenance(
     };
     if reported_rule_calls.insert((call.invocation_id.clone(), call.call_block_id)) {
         let _ = writeln!(
-            io::stderr().lock(),
+            err,
             "TARS: {}: {}",
-            tars_core::permission::escape_untrusted_text(&call.tool_name),
+            escape_untrusted_text(&call.tool_name),
             summary
         );
     }
 }
 
-fn report_compaction_progress(progress: &tars_core::compact::CompactionProgress) {
+fn report_compaction_progress(
+    progress: &tars_core::compact::CompactionProgress,
+    err: &mut dyn Write,
+    verbose: bool,
+) {
     use tars_core::compact::{CompactionAbandon, CompactionProgress};
     match progress {
         CompactionProgress::Trimmed {
@@ -642,7 +1016,7 @@ fn report_compaction_progress(progress: &tars_core::compact::CompactionProgress)
             after_tokens,
         } => {
             let _ = writeln!(
-                io::stderr().lock(),
+                err,
                 "TARS: request frame temporarily trimmed (~{before_tokens} -> ~{after_tokens} tokens)"
             );
         }
@@ -650,9 +1024,49 @@ fn report_compaction_progress(progress: &tars_core::compact::CompactionProgress)
             reason: CompactionAbandon::PrefixTooLarge,
             ..
         } => {
+            let _ = writeln!(err, "TARS: fixed prefix too large; compaction skipped");
+        }
+        CompactionProgress::Started {
+            trigger,
+            estimate_before,
+        } if verbose => {
             let _ = writeln!(
-                io::stderr().lock(),
-                "TARS: fixed prefix too large; compaction skipped"
+                err,
+                "TARS: compacting ({}) ~{estimate_before} tokens",
+                trigger.name()
+            );
+        }
+        CompactionProgress::Finished {
+            trigger,
+            estimate_before,
+            estimate_after,
+            ..
+        } if verbose => {
+            let _ = writeln!(
+                err,
+                "TARS: compacted ({}) ~{estimate_before} -> ~{estimate_after} tokens",
+                trigger.name()
+            );
+        }
+        CompactionProgress::MicroCompacted {
+            trigger,
+            estimate_before,
+            estimate_after,
+            cleared_results,
+            ..
+        } if verbose => {
+            let _ = writeln!(
+                err,
+                "TARS: micro-compacted ({}) {cleared_results} tool result(s), ~{estimate_before} -> ~{estimate_after} tokens",
+                trigger.name()
+            );
+        }
+        CompactionProgress::Abandoned { trigger, reason } if verbose => {
+            let _ = writeln!(
+                err,
+                "TARS: compaction abandoned ({}): {}",
+                trigger.name(),
+                reason.name()
             );
         }
         CompactionProgress::Started { .. }
@@ -744,5 +1158,277 @@ mod tests {
         let warning = super::recovery_limit_warning(false);
         assert!(warning.contains("64 MiB"));
         assert!(warning.contains("cannot import"));
+    }
+
+    fn work_progress(round: u32, update: super::ProgressUpdate) -> super::WorkProgress {
+        let turn_id = causa::kernel::TurnId::new("work-1");
+        super::WorkProgress {
+            work: super::WorkRef {
+                conversation_id: "conv-1".into(),
+                turn_id: turn_id.clone(),
+            },
+            invocation_id: causa::kernel::InvocationId {
+                turn_id,
+                round_id: causa::kernel::RoundId(round),
+            },
+            update,
+        }
+    }
+
+    #[test]
+    fn stream_emitter_inserts_paragraph_break_between_rounds_and_reports_retry() {
+        use super::{OutputFormat, ProgressUpdate, StreamEmitter, ToolPhase, ToolProgress};
+        use causa::kernel::ToolResultStatus;
+
+        let mut emitter = StreamEmitter::new(OutputFormat::Stream, "conv-1");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        // Round 0: emits text, completes, then tool runs.
+        emitter.on_progress(
+            &work_progress(0, ProgressUpdate::ModelStarted),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(
+                0,
+                ProgressUpdate::Text {
+                    delta: "Checking".into(),
+                    truncated: false,
+                },
+            ),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(0, ProgressUpdate::ModelOutputReady),
+            &mut out,
+            &mut err,
+        );
+
+        let call_id = super::new_block_id();
+        let tool_running = ToolProgress {
+            invocation_id: causa::kernel::InvocationId {
+                turn_id: causa::kernel::TurnId::new("work-1"),
+                round_id: causa::kernel::RoundId(0),
+            },
+            call_block_id: call_id,
+            tool_name: "read\x1b[31m_file".into(),
+            arguments_summary: "{}".into(),
+            phase: ToolPhase::Running,
+            status: None,
+            operation_not_started: false,
+            permission_decision: None,
+        };
+        emitter.on_progress(
+            &work_progress(0, ProgressUpdate::Tool(tool_running.clone())),
+            &mut out,
+            &mut err,
+        );
+        // Duplicate phase update should be deduplicated.
+        emitter.on_progress(
+            &work_progress(0, ProgressUpdate::Tool(tool_running)),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(
+                0,
+                ProgressUpdate::Tool(ToolProgress {
+                    invocation_id: causa::kernel::InvocationId {
+                        turn_id: causa::kernel::TurnId::new("work-1"),
+                        round_id: causa::kernel::RoundId(0),
+                    },
+                    call_block_id: call_id,
+                    tool_name: "read\x1b[31m_file".into(),
+                    arguments_summary: "{}".into(),
+                    phase: ToolPhase::Committed,
+                    status: Some(ToolResultStatus::Failed),
+                    operation_not_started: false,
+                    permission_decision: None,
+                }),
+            ),
+            &mut out,
+            &mut err,
+        );
+
+        // Round 1: emits partial text then retries before ModelOutputReady!
+        emitter.on_progress(
+            &work_progress(1, ProgressUpdate::ModelStarted),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(
+                1,
+                ProgressUpdate::Text {
+                    delta: "Partial".into(),
+                    truncated: false,
+                },
+            ),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(1, ProgressUpdate::ModelStarted),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(
+                1,
+                ProgressUpdate::Text {
+                    delta: "Final".into(),
+                    truncated: false,
+                },
+            ),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(1, ProgressUpdate::ModelOutputReady),
+            &mut out,
+            &mut err,
+        );
+
+        let stdout = String::from_utf8(out).unwrap();
+        let stderr = String::from_utf8(err).unwrap();
+        assert_eq!(stdout, "Checking\n\nPartial\n\nFinal");
+        assert!(emitter.emitted_any_text);
+        assert!(!emitter.last_char_was_newline);
+        assert!(!stderr.contains('\x1b'));
+        assert_eq!(
+            stderr
+                .matches("TARS: tool read\\x1b[31m_file: running")
+                .count(),
+            1
+        );
+        assert!(stderr.contains("TARS: tool read\\x1b[31m_file: committed (failed)"));
+        assert!(stderr.contains("TARS: model stream retrying; resetting current round preview"));
+    }
+
+    #[test]
+    fn stream_json_emitter_writes_valid_ndjson_lines() {
+        use super::{OutputFormat, ProgressUpdate, StreamEmitter, ToolPhase, ToolProgress};
+        use causa::kernel::ToolResultStatus;
+        use tars_core::compact::{CompactionProgress, HistoryTrigger};
+        use tars_core::events::{AgentInteraction, OperationStatus, SessionEvent};
+
+        let mut emitter = StreamEmitter::new(OutputFormat::StreamJson, "conv-1");
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        emitter.on_progress(
+            &work_progress(0, ProgressUpdate::ModelStarted),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(
+                0,
+                ProgressUpdate::Text {
+                    delta: "hi".into(),
+                    truncated: false,
+                },
+            ),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(
+                0,
+                ProgressUpdate::Reasoning {
+                    delta: "think".into(),
+                    truncated: false,
+                },
+            ),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(
+                0,
+                ProgressUpdate::ToolCallDelta {
+                    call_index: 0,
+                    name_delta: Some("read_file".into()),
+                    arguments_delta: Some("{\"path\":\".\"}".into()),
+                    truncated: false,
+                },
+            ),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(
+                0,
+                ProgressUpdate::Tool(ToolProgress {
+                    invocation_id: causa::kernel::InvocationId {
+                        turn_id: causa::kernel::TurnId::new("work-1"),
+                        round_id: causa::kernel::RoundId(0),
+                    },
+                    call_block_id: super::new_block_id(),
+                    tool_name: "read_file".into(),
+                    arguments_summary: "{\"path\":\".\"}".into(),
+                    phase: ToolPhase::Committed,
+                    status: Some(ToolResultStatus::Succeeded),
+                    operation_not_started: false,
+                    permission_decision: None,
+                }),
+            ),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_progress(
+            &work_progress(
+                0,
+                ProgressUpdate::Compaction(CompactionProgress::Started {
+                    trigger: HistoryTrigger::Auto,
+                    estimate_before: 1200,
+                }),
+            ),
+            &mut out,
+            &mut err,
+        );
+        emitter.on_session_event(
+            &SessionEvent::AgentRegistered {
+                session_id: "conv-1".into(),
+                agent_id: "agent-2".into(),
+                name: "helper".into(),
+                preset_name: None,
+                interaction: AgentInteraction::Reusable,
+            },
+            &mut out,
+            &mut err,
+        );
+        emitter.on_session_event(
+            &SessionEvent::OperationStateChanged {
+                session_id: "conv-1".into(),
+                operation_id: "op-1".into(),
+                target_agent_id: "agent-2".into(),
+                parent_operation_id: None,
+                status: OperationStatus::Running,
+            },
+            &mut out,
+            &mut err,
+        );
+
+        let lines: Vec<serde_json::Value> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 7);
+        assert_eq!(lines[0]["type"], "model_started");
+        assert_eq!(lines[1]["type"], "text_delta");
+        assert_eq!(lines[2]["type"], "reasoning_delta");
+        assert_eq!(lines[3]["type"], "tool_call_delta");
+        assert_eq!(lines[4]["type"], "tool_progress");
+        assert_eq!(lines[4]["phase"], "committed");
+        assert_eq!(lines[4]["status"], "succeeded");
+        assert_eq!(lines[5]["type"], "compaction");
+        assert_eq!(lines[5]["stage"], "started");
+        assert_eq!(lines[6]["type"], "agent_event");
+        assert_eq!(lines[6]["agent_name"], "helper");
     }
 }

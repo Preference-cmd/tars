@@ -1,9 +1,11 @@
 use super::options::{ExportMaterialsTarget, SessionCommand};
 use crate::cli::command::{failure, output};
 use crate::cli::execute::{
-    application_error_message, early_failure, present_outcome, report_detail,
+    application_error_message, early_failure, early_failure_with_format, format_terminal_output,
+    present_outcome, report_detail,
 };
 use crate::cli::managed_execution::{self, RecoveryFile, SaveWait};
+use crate::cli::output_format::OutputFormat;
 use causa::kernel::Context;
 use causa::runtime::new_block_id;
 use serde_json::json;
@@ -105,7 +107,7 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                 images,
                 permission_mode,
                 recovery_dir,
-                json,
+                output_format,
             } => {
                 run_saved(
                     store,
@@ -120,7 +122,7 @@ pub(crate) fn run(command: SessionCommand) -> ExitCode {
                     images,
                     permission_mode,
                     recovery_dir,
-                    json,
+                    output_format,
                 )
                 .await
             }
@@ -492,18 +494,52 @@ async fn run_saved(
     images: Vec<PathBuf>,
     permission_mode: Option<tars_core::permission::PermissionMode>,
     recovery_dir: PathBuf,
-    json_output: bool,
+    output_format: OutputFormat,
 ) -> (ExitCode, bool) {
     let prepared_images = match managed_execution::prepare_images(&images) {
         Ok(images) => images,
-        Err(error) => return (early_failure(json_output, &error), false),
+        Err(error) => return (early_failure_with_format(output_format, &error), false),
     };
     let used_stdin_input = stdin;
     let input =
         match managed_execution::prepare_prompt_input(input, stdin, !prepared_images.is_empty()) {
             Ok(input) => input,
-            Err(error) => return (early_failure(json_output, error), false),
+            Err(error) => return (early_failure_with_format(output_format, error), false),
         };
+    run_saved_with_format(
+        store,
+        id,
+        external_tools,
+        model_profiles,
+        user_rules_path,
+        trust_workspace_rules,
+        trust_workspace_agents,
+        input,
+        used_stdin_input,
+        prepared_images,
+        permission_mode,
+        recovery_dir,
+        output_format,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_saved_with_format(
+    store: PathBuf,
+    id: String,
+    external_tools: tars_core::external_tools::ExternalTools,
+    model_profiles: std::collections::BTreeMap<String, tars_core::agents::ModelProfile>,
+    user_rules_path: Option<PathBuf>,
+    trust_workspace_rules: bool,
+    trust_workspace_agents: bool,
+    input: Option<String>,
+    used_stdin_input: bool,
+    prepared_images: Vec<tars_core::media::PreparedImage>,
+    permission_mode: Option<tars_core::permission::PermissionMode>,
+    recovery_dir: PathBuf,
+    output_format: OutputFormat,
+) -> (ExitCode, bool) {
     let host = SessionHost::new(Some(store))
         .with_external_tools(external_tools)
         .with_user_rules_path(user_rules_path)
@@ -512,7 +548,7 @@ async fn run_saved(
         Ok(session) => session,
         Err(error) => {
             return (
-                early_failure(json_output, &application_error_message(&error)),
+                early_failure_with_format(output_format, &application_error_message(&error)),
                 false,
             );
         }
@@ -524,7 +560,10 @@ async fn run_saved(
             let _ = host
                 .close(&session.target(), ClosePolicy::DiscardLocal)
                 .await;
-            return (early_failure(json_output, &error.to_string()), false);
+            return (
+                early_failure_with_format(output_format, &error.to_string()),
+                false,
+            );
         }
     } else {
         managed_execution::report_workspace_rules_notice(&session);
@@ -536,7 +575,10 @@ async fn run_saved(
             let _ = host
                 .close(&session.target(), ClosePolicy::DiscardLocal)
                 .await;
-            return (early_failure(json_output, &error.to_string()), false);
+            return (
+                early_failure_with_format(output_format, &error.to_string()),
+                false,
+            );
         }
     } else {
         managed_execution::report_workspace_agents_notice(&session);
@@ -548,13 +590,19 @@ async fn run_saved(
             let _ = host
                 .close(&session.target(), ClosePolicy::DiscardLocal)
                 .await;
-            return (early_failure(json_output, &error.to_string()), false);
+            return (
+                early_failure_with_format(output_format, &error.to_string()),
+                false,
+            );
         }
         if let Err(error) = session.wait_saved().await {
             let _ = host
                 .close(&session.target(), ClosePolicy::DiscardLocal)
                 .await;
-            return (early_failure(json_output, &error.to_string()), false);
+            return (
+                early_failure_with_format(output_format, &error.to_string()),
+                false,
+            );
         }
     }
     // An explicit mode supersedes the saved mode for this invocation, so the
@@ -563,14 +611,21 @@ async fn run_saved(
         managed_execution::report_open_notices(&session);
     }
     let connect_approvals = crate::cli::approval::should_connect_stdio(used_stdin_input);
-    let report =
-        match managed_execution::work(&session, input, &prepared_images, connect_approvals).await {
-            Ok(report) => report,
-            Err(error) => {
-                let _ = host.close(&session.target(), ClosePolicy::Save).await;
-                return (early_failure(json_output, &error), false);
-            }
-        };
+    let report = match managed_execution::work(
+        &session,
+        input,
+        &prepared_images,
+        connect_approvals,
+        output_format,
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = host.close(&session.target(), ClosePolicy::Save).await;
+            return (early_failure_with_format(output_format, &error), false);
+        }
+    };
     managed_execution::report_prelude_diagnostics(&session.prelude_diagnostics());
     let presented = present_outcome(&report.result);
     let status = presented.status;
@@ -667,28 +722,20 @@ async fn run_saved(
         let _ = writeln!(io::stderr().lock(), "TARS: {error}");
     }
     report_detail(detail.as_deref());
-    let rendered = if json_output {
-        format!(
-            "{}\n",
-            json!({
-                "status":status,"kind":kind,"text":text,"conversation_id":report.work.conversation_id.as_str(),
-                "work_id":report.work.turn_id.0,"saved":saved_revision.is_some(),"revision":saved_revision,
-                "error":error,"execution_error":execution_error,"save_error":save_error,
-                "save_wait_abandoned":abandoned,
-                "error_kind":model_error.as_ref().map(|failure| failure.kind),
-                "error_detail":model_error.as_ref().map(|failure| failure.detail.as_str()),
-                "recovery_file":recovery_file,"recovery_importable":recovery_importable,
-                "recovery_error":recovery_error,"close_error":close_error,
-                "close_outcome":close.as_ref().ok().map(close_value),
-                "usage": report.usage.as_ref().map(crate::cli::usage_json::work_usage_value),
-            })
-        )
-    } else if status == "completed" {
-        format!("{text}\n")
-    } else {
-        String::new()
-    };
-    if output(&rendered) != ExitCode::SUCCESS {
+    let json_value = json!({
+        "status":status,"kind":kind,"text":text,"conversation_id":report.work.conversation_id.as_str(),
+        "work_id":report.work.turn_id.0,"saved":saved_revision.is_some(),"revision":saved_revision,
+        "error":error,"execution_error":execution_error,"save_error":save_error,
+        "save_wait_abandoned":abandoned,
+        "error_kind":model_error.as_ref().map(|failure| failure.kind),
+        "error_detail":model_error.as_ref().map(|failure| failure.detail.as_str()),
+        "recovery_file":recovery_file,"recovery_importable":recovery_importable,
+        "recovery_error":recovery_error,"close_error":close_error,
+        "close_outcome":close.as_ref().ok().map(close_value),
+        "usage": report.usage.as_ref().map(crate::cli::usage_json::work_usage_value),
+    });
+    let rendered = format_terminal_output(output_format, status, &text, &report, json_value);
+    if report.stream_write_failed || output(&rendered) != ExitCode::SUCCESS {
         return (ExitCode::FAILURE, abandoned);
     }
     (ExitCode::from(code), abandoned)

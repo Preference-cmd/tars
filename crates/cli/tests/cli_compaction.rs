@@ -490,10 +490,15 @@ fn compaction_flags_resolve_into_the_definition_and_help_lists_them() {
             "session help lacks {expected}: {help}"
         );
     }
-    for command in ["create", "history", "compact", "show"] {
+    for (command, expected) in [
+        ("create", "--context-window"),
+        ("history", "--last"),
+        ("compact", "--recovery-dir"),
+        ("show", "--agent"),
+    ] {
         let output = cli().args(["session", command, "--help"]).output().unwrap();
         assert!(output.status.success(), "{command}: {output:?}");
-        assert!(String::from_utf8_lossy(&output.stdout).contains("--context-window"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains(expected));
     }
     let run_help = cli().args(["run", "--help"]).output().unwrap();
     let help = String::from_utf8_lossy(&run_help.stdout);

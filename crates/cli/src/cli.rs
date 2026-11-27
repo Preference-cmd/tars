@@ -6,6 +6,8 @@ mod configuration;
 mod execute;
 mod managed_execution;
 mod options;
+mod output_format;
+mod print;
 mod session;
 mod tools;
 pub(crate) mod usage_json;

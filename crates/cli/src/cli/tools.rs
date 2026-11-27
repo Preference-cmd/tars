@@ -15,6 +15,7 @@ use tars_core::config::{Config, ConfigSource};
 use tars_core::external_tools::{
     ExternalTools, InstallError, RIPGREP_VERSION, ToolSource, install_managed_rg,
 };
+use tars_core::permission::escape_untrusted_text;
 use tars_core::sandbox::{Sandbox, SandboxStatus};
 
 pub(super) const HELP: &str = "External tools used by TARS
@@ -41,6 +42,36 @@ Run `tars tools status` to see where the executable comes from and what to do
 when it is unavailable.
 ";
 
+pub(super) fn subcommand_help(command: &str) -> &'static str {
+    match command {
+        "status" => STATUS_HELP,
+        "install" => INSTALL_HELP,
+        _ => HELP,
+    }
+}
+
+const STATUS_HELP: &str = "Show external tool source, path, version, state and sandbox status
+
+Usage: tars tools status [--json] [--config <file> | --no-config]
+
+Options:
+  --json         Output structured JSON
+  --config       Shared TOML configuration file
+  --no-config    Ignore global configuration; conflicts with --config
+  -h, --help     Show this help
+";
+
+const INSTALL_HELP: &str = "Download and install the managed ripgrep binary
+
+Usage: tars tools install rg [--yes] [--config <file> | --no-config]
+
+Options:
+  --yes          Confirm download without prompting
+  --config       Shared TOML configuration file
+  --no-config    Ignore global configuration; conflicts with --config
+  -h, --help     Show this help
+";
+
 pub(super) enum ToolsCommand {
     Status { json: bool, selection: Selection },
     Install { yes: bool, selection: Selection },
@@ -58,12 +89,23 @@ impl ToolsCommand {
                 while let Some(flag) = rest.next() {
                     let flag = flag.to_str().ok_or("option must be UTF-8")?;
                     match flag {
-                        "--json" if !json => json = true,
+                        "--json" => {
+                            if json {
+                                return Err(CliError::argument("duplicate option: --json"));
+                            }
+                            json = true;
+                        }
                         "--config" | "--no-config" => selection.insert(flag, &mut rest)?,
-                        _ => {
-                            return Err(
-                                "status accepts only --json, --config and --no-config".into()
-                            );
+                        "--yes" => {
+                            return Err(CliError::argument(
+                                "option --yes is not applicable to tools status",
+                            ));
+                        }
+                        other => {
+                            return Err(CliError::argument(format!(
+                                "unknown option: {}",
+                                escape_untrusted_text(other)
+                            )));
                         }
                     }
                 }
@@ -77,25 +119,42 @@ impl ToolsCommand {
                     .to_str()
                     .ok_or("tool name must be UTF-8")?;
                 if name != "rg" {
-                    return Err("only rg can be installed".into());
+                    return Err(CliError::argument(format!(
+                        "unknown tool '{}': only rg can be installed",
+                        escape_untrusted_text(name)
+                    )));
                 }
                 let mut yes = false;
                 let mut selection = Selection::default();
                 while let Some(flag) = rest.next() {
                     let flag = flag.to_str().ok_or("option must be UTF-8")?;
                     match flag {
-                        "--yes" if !yes => yes = true,
+                        "--yes" => {
+                            if yes {
+                                return Err(CliError::argument("duplicate option: --yes"));
+                            }
+                            yes = true;
+                        }
                         "--config" | "--no-config" => selection.insert(flag, &mut rest)?,
-                        _ => {
-                            return Err(
-                                "install accepts only --yes, --config and --no-config".into()
-                            );
+                        "--json" => {
+                            return Err(CliError::argument(
+                                "option --json is not applicable to tools install",
+                            ));
+                        }
+                        other => {
+                            return Err(CliError::argument(format!(
+                                "unknown option: {}",
+                                escape_untrusted_text(other)
+                            )));
                         }
                     }
                 }
                 Ok(Self::Install { yes, selection })
             }
-            _ => Err("unknown tools command; use tars tools --help".into()),
+            other => Err(CliError::argument(format!(
+                "unknown tools command: {}; use tars tools --help",
+                escape_untrusted_text(other)
+            ))),
         }
     }
 }
@@ -113,12 +172,25 @@ impl Selection {
         values: &mut std::slice::Iter<'_, OsString>,
     ) -> Result<(), CliError> {
         match flag {
-            "--config" if self.config.is_none() => {
-                let path = values.next().ok_or("--config requires a path")?;
+            "--config" => {
+                let path = values
+                    .next()
+                    .ok_or_else(|| CliError::argument("option --config requires a value"))?;
+                if self.config.is_some() {
+                    return Err(CliError::argument("duplicate option: --config"));
+                }
+                if path.is_empty() {
+                    return Err(CliError::argument("option --config must not be empty"));
+                }
                 self.config = Some(PathBuf::from(path));
             }
-            "--no-config" if !self.no_config => self.no_config = true,
-            _ => return Err(format!("{flag} was given more than once").into()),
+            "--no-config" => {
+                if self.no_config {
+                    return Err(CliError::argument("duplicate option: --no-config"));
+                }
+                self.no_config = true;
+            }
+            _ => unreachable!("only --config and --no-config reach Selection::insert"),
         }
         Ok(())
     }

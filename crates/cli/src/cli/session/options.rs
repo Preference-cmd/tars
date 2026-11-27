@@ -1,9 +1,11 @@
 use crate::cli::configuration::{self, CliError, PreludeCliOptions};
+use crate::cli::output_format::{OutputFormat, OutputFormatBuilder};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use tars_core::definition::SessionDefinition;
 use tars_core::external_tools::ExternalTools;
+use tars_core::permission::escape_untrusted_text;
 
 pub(crate) enum ExportMaterialsTarget {
     Record(PathBuf),
@@ -49,7 +51,7 @@ pub(crate) enum SessionCommand {
         images: Vec<PathBuf>,
         permission_mode: Option<tars_core::permission::PermissionMode>,
         recovery_dir: PathBuf,
-        json: bool,
+        output_format: OutputFormat,
     },
     List {
         store: PathBuf,
@@ -101,6 +103,65 @@ pub(crate) enum SessionCommand {
     },
 }
 
+fn is_known_session_option(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--json"
+            | "--stream"
+            | "--stream-json"
+            | "--output-format"
+            | "--no-config"
+            | "--clear"
+            | "--trust-workspace-rules"
+            | "--trust-workspace-agents"
+            | "--no-skills"
+            | "--code-execution"
+            | "--no-code-execution"
+            | "--stdin"
+            | "--apply"
+            | "--dry-run"
+            | "--store"
+            | "--config"
+            | "--skill-dir"
+            | "--provider"
+            | "--model"
+            | "--api-key-env"
+            | "--endpoint"
+            | "--timeout-secs"
+            | "--capacity"
+            | "--max-model-rounds"
+            | "--max-tool-calls"
+            | "--load"
+            | "--max-tokens"
+            | "--reasoning-effort"
+            | "--extra-body"
+            | "--render-options"
+            | "--max-model-attempts"
+            | "--profile"
+            | "--workspace"
+            | "--tools"
+            | "--command-network"
+            | "--mcp"
+            | "--context-window"
+            | "--auto-compact"
+            | "--prompt-cache"
+            | "--system"
+            | "--system-file"
+            | "--dynamic-context"
+            | "--dynamic-context-file"
+            | "--input"
+            | "--image"
+            | "--last"
+            | "--agent"
+            | "--title"
+            | "--permission-mode"
+            | "--expected-revision"
+            | "--record"
+            | "--recovery-dir"
+            | "--output"
+    )
+}
+
 impl SessionCommand {
     pub(crate) fn parse(args: &[OsString]) -> Result<Self, CliError> {
         let (command, mut args) = args.split_first().ok_or("session command is required")?;
@@ -136,7 +197,10 @@ impl SessionCommand {
                 | "fork"
                 | "import-legacy"
         ) {
-            return Err("unknown session command".into());
+            return Err(CliError::argument(format!(
+                "unknown session command: {}",
+                escape_untrusted_text(command)
+            )));
         }
         let mut values = HashMap::new();
         let mut skill_dirs = Vec::new();
@@ -146,6 +210,7 @@ impl SessionCommand {
         let mut no_code_execution = false;
         let mut stdin = false;
         let mut json = false;
+        let mut format_builder = OutputFormatBuilder::default();
         let mut no_config = false;
         let mut trust_workspace_rules = false;
         let mut trust_workspace_agents = false;
@@ -156,38 +221,91 @@ impl SessionCommand {
         while let Some(flag) = args.next() {
             let flag = flag.to_str().ok_or("option must be UTF-8")?;
             match flag {
-                "--json" if !json => json = true,
-                "--no-config" if !no_config => no_config = true,
-                "--clear" if command == "rename" && !clear => clear = true,
-                "--trust-workspace-rules"
-                    if matches!(command, "create" | "run") && !trust_workspace_rules =>
-                {
+                "--json" if command == "run" => format_builder.set_flag("--json")?,
+                "--stream" if command == "run" => format_builder.set_flag("--stream")?,
+                "--stream-json" if command == "run" => format_builder.set_flag("--stream-json")?,
+                "--output-format" if command == "run" => {
+                    format_builder.set_output_format(&mut args)?;
+                }
+                "--json" => {
+                    if json {
+                        return Err(CliError::argument("duplicate option: --json"));
+                    }
+                    json = true;
+                }
+                "--no-config" => {
+                    if no_config {
+                        return Err(CliError::argument("duplicate option: --no-config"));
+                    }
+                    no_config = true;
+                }
+                "--clear" if command == "rename" => {
+                    if clear {
+                        return Err(CliError::argument("duplicate option: --clear"));
+                    }
+                    clear = true;
+                }
+                "--trust-workspace-rules" if matches!(command, "create" | "run") => {
+                    if trust_workspace_rules {
+                        return Err(CliError::argument(
+                            "duplicate option: --trust-workspace-rules",
+                        ));
+                    }
                     trust_workspace_rules = true;
                 }
-                "--trust-workspace-agents"
-                    if matches!(command, "create" | "run") && !trust_workspace_agents =>
-                {
+                "--trust-workspace-agents" if matches!(command, "create" | "run") => {
+                    if trust_workspace_agents {
+                        return Err(CliError::argument(
+                            "duplicate option: --trust-workspace-agents",
+                        ));
+                    }
                     trust_workspace_agents = true;
                 }
-                "--no-skills" if command == "create" && !no_skills => no_skills = true,
-                "--code-execution" if command == "create" && !code_execution => {
+                "--no-skills" if command == "create" => {
+                    if no_skills {
+                        return Err(CliError::argument("duplicate option: --no-skills"));
+                    }
+                    no_skills = true;
+                }
+                "--code-execution" if command == "create" => {
+                    if code_execution {
+                        return Err(CliError::argument("duplicate option: --code-execution"));
+                    }
                     code_execution = true;
                 }
-                "--no-code-execution" if command == "create" && !no_code_execution => {
+                "--no-code-execution" if command == "create" => {
+                    if no_code_execution {
+                        return Err(CliError::argument("duplicate option: --no-code-execution"));
+                    }
                     no_code_execution = true;
                 }
-                "--stdin" if command == "run" && !stdin => stdin = true,
-                "--apply" if command == "repair" && !apply => apply = true,
-                "--dry-run" if command == "repair" && !dry_run => dry_run = true,
+                "--stdin" if command == "run" => {
+                    if stdin {
+                        return Err(CliError::argument("duplicate option: --stdin"));
+                    }
+                    stdin = true;
+                }
+                "--apply" if command == "repair" => {
+                    if apply {
+                        return Err(CliError::argument("duplicate option: --apply"));
+                    }
+                    apply = true;
+                }
+                "--dry-run" if command == "repair" => {
+                    if dry_run {
+                        return Err(CliError::argument("duplicate option: --dry-run"));
+                    }
+                    dry_run = true;
+                }
                 "--store" | "--config" => {
                     insert(&mut values, flag, &mut args)?;
                 }
                 "--skill-dir" if command == "create" => {
                     let value = args
                         .next()
-                        .ok_or_else(|| CliError::argument("option needs a value"))?;
+                        .ok_or_else(|| CliError::argument("option --skill-dir requires a value"))?;
                     if value.is_empty() {
-                        return Err(CliError::argument("empty --skill-dir option"));
+                        return Err(CliError::argument("option --skill-dir must not be empty"));
                     }
                     skill_dirs.push(PathBuf::from(value));
                 }
@@ -227,9 +345,9 @@ impl SessionCommand {
                 "--image" if command == "run" => {
                     let value = args
                         .next()
-                        .ok_or_else(|| CliError::argument("option needs a value"))?;
+                        .ok_or_else(|| CliError::argument("option --image requires a value"))?;
                     if value.is_empty() {
-                        return Err(CliError::argument("empty --image option"));
+                        return Err(CliError::argument("option --image must not be empty"));
                     }
                     images.push(PathBuf::from(value));
                 }
@@ -254,7 +372,17 @@ impl SessionCommand {
                 "--recovery-dir" if matches!(command, "create" | "run" | "repair" | "compact") => {
                     insert(&mut values, flag, &mut args)?;
                 }
-                _ => return Err("unknown, duplicate, or inapplicable session option".into()),
+                other if is_known_session_option(other) => {
+                    return Err(CliError::argument(format!(
+                        "option {other} is not applicable to session {command}"
+                    )));
+                }
+                other => {
+                    return Err(CliError::argument(format!(
+                        "unknown session option: {}",
+                        escape_untrusted_text(other)
+                    )));
+                }
             }
         }
         let string = |key| -> Result<Option<String>, CliError> {
@@ -369,7 +497,7 @@ impl SessionCommand {
                         .map(PathBuf::from)
                         .or_else(|| config.recovery_dir().map(PathBuf::from))
                         .unwrap_or_else(|| PathBuf::from(".")),
-                    json,
+                    output_format: format_builder.build(),
                 })
             }
             "compact" => Ok(Self::Compact {
@@ -449,16 +577,21 @@ fn insert<'a>(
 ) -> Result<(), CliError> {
     let value = args
         .next()
-        .ok_or_else(|| CliError::argument("option needs a value"))?;
-    if (value.is_empty()
+        .ok_or_else(|| CliError::argument(format!("option {flag} requires a value")))?;
+    if values.contains_key(flag) {
+        return Err(CliError::argument(format!("duplicate option: {flag}")));
+    }
+    if value.is_empty()
         && !matches!(
             flag,
             "--tools" | "--mcp" | "--system" | "--dynamic-context" | "--title"
-        ))
-        || values.insert(flag, value).is_some()
+        )
     {
-        return Err(CliError::argument("empty or duplicate option"));
+        return Err(CliError::argument(format!(
+            "option {flag} must not be empty"
+        )));
     }
+    values.insert(flag, value);
     Ok(())
 }
 
@@ -474,12 +607,23 @@ fn parse_export_materials(args: &[OsString]) -> Result<SessionCommand, CliError>
         while let Some(flag) = options.next() {
             let flag = flag.to_str().ok_or("option must be UTF-8")?;
             match flag {
-                "--json" if !json => json = true,
+                "--json" => {
+                    if json {
+                        return Err(CliError::argument("duplicate option: --json"));
+                    }
+                    json = true;
+                }
                 "--record" | "--output" => insert(&mut values, flag, &mut options)?,
-                _ => {
-                    return Err(
-                        "export-materials accepts only --record, --output, and --json".into(),
-                    );
+                other if is_known_session_option(other) => {
+                    return Err(CliError::argument(format!(
+                        "option {other} is not applicable to session export-materials"
+                    )));
+                }
+                other => {
+                    return Err(CliError::argument(format!(
+                        "unknown session option: {}",
+                        escape_untrusted_text(other)
+                    )));
                 }
             }
         }
@@ -512,17 +656,43 @@ fn parse_export_materials(args: &[OsString]) -> Result<SessionCommand, CliError>
     while let Some(arg) = options.next() {
         let token = arg.to_str().ok_or("option must be UTF-8")?;
         match token {
-            "--json" if !json => json = true,
-            "--no-config" if !no_config => no_config = true,
+            "--json" => {
+                if json {
+                    return Err(CliError::argument("duplicate option: --json"));
+                }
+                json = true;
+            }
+            "--no-config" => {
+                if no_config {
+                    return Err(CliError::argument("duplicate option: --no-config"));
+                }
+                no_config = true;
+            }
             "--store" | "--config" | "--output" => insert(&mut values, token, &mut options)?,
             "--record" => return Err("--record cannot be combined with a conversation ID".into()),
-            other if !other.starts_with('-') && positional_output.is_none() => {
+            other if !other.starts_with('-') => {
+                if positional_output.is_some() {
+                    return Err(CliError::argument(format!(
+                        "unexpected positional argument: {}",
+                        escape_untrusted_text(other)
+                    )));
+                }
                 if other.is_empty() {
-                    return Err("empty output path".into());
+                    return Err(CliError::argument("output path must not be empty"));
                 }
                 positional_output = Some(PathBuf::from(arg));
             }
-            _ => return Err("unknown, duplicate, or inapplicable session option".into()),
+            other if is_known_session_option(other) => {
+                return Err(CliError::argument(format!(
+                    "option {other} is not applicable to session export-materials"
+                )));
+            }
+            other => {
+                return Err(CliError::argument(format!(
+                    "unknown session option: {}",
+                    escape_untrusted_text(other)
+                )));
+            }
         }
     }
     let output = match (values.get("--output").map(PathBuf::from), positional_output) {

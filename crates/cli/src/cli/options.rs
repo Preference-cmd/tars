@@ -1,9 +1,61 @@
 use super::configuration::{self, CliError, PreludeCliOptions};
+use super::output_format::{OutputFormat, OutputFormatBuilder};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use tars_core::definition::SessionDefinition;
 use tars_core::external_tools::ExternalTools;
+use tars_core::permission::escape_untrusted_text;
+
+pub(super) const HELP: &str = "Execute one transient work with a real model
+
+Usage: tars run --provider <protocol> --model <id> (--input <text> | --stdin | --image <path>) [options]
+
+Options:
+  --provider          openai-chat | openai-responses | anthropic (or configured profile)
+  --model             Model identifier (or configured profile)
+  --input             User text; mutually exclusive with --stdin
+  --stdin             Read UTF-8 user text until EOF
+  --image             Attach a local PNG/JPEG/GIF/WebP image file (repeatable, max 8;
+                      text may be omitted when at least one --image is provided)
+  --api-key-env       Credential variable (default OPENAI_API_KEY / ANTHROPIC_API_KEY)
+  --endpoint          Full HTTP endpoint override, including the path
+  --timeout-secs      Work deadline, 1–86400 seconds (default 120)
+  --max-tokens        Output token limit per model call (no default; required by anthropic)
+  --reasoning-effort  Effort text sent as written, e.g. low, high (default: provider's)
+  --extra-body        JSON object of further request fields, sent as written
+  --render-options    JSON object of the protocol's render options, e.g. max_tokens_field
+  --max-model-attempts  Model calls per round on transient or rate-limit failure (default 1)
+  --context-window    Model context window in tokens; omitted leaves it unknown and
+                      disables automatic compaction
+  --auto-compact      on | off | PERCENT: automatic compaction switch, or a trigger
+                      percentage in 10–95 that also enables it (default on, 70)
+  --prompt-cache      on | off: prompt caching switch (default on)
+  --code-execution    Enable sandboxed read-only run_code (conflicts with --no-code-execution)
+  --no-code-execution Disable run_code even when enabled in configuration
+  --workspace         Root directory for workspace tools; relative to current directory
+  --tools             Comma-separated list_directory,read_file,search_text,find_files,write_file,edit_file,run_command (default empty)
+  --command-network   Command network: none or open (default none)
+  --mcp               Comma-separated ids from mcp.json (default: profile; empty disables)
+  --permission-mode   read-only | ask | accept-edits | full-access (default: profile or ask)
+  --system            Inline static custom system prompt (conflicts with --system-file)
+  --system-file       UTF-8 static custom system prompt file, relative to cwd
+  --dynamic-context       Inline dynamic custom context (conflicts with --dynamic-context-file)
+  --dynamic-context-file  UTF-8 dynamic custom context file, relative to cwd
+  --skill-dir         Additional skill directory, relative to cwd (repeatable)
+  --no-skills         Disable skills discovery, <available_skills> injection, and load_skill
+                      (conflicts with --skill-dir)
+  --load              Import a Context material file into a new session
+  --save              Replace a material file after completion or controlled interruption
+  --json              Output a structured JSON result object
+  --stream            Stream incremental response text to stdout and status to stderr
+  --stream-json       Stream NDJSON progress events and terminal result to stdout
+  --output-format     text | json | stream-json (conflicts with --json/--stream/--stream-json)
+  --config            Shared TOML configuration file
+  --profile           Named model preset (otherwise default_profile)
+  --no-config         Ignore global configuration; conflicts with --config
+  -h, --help          Show this help
+";
 
 pub(super) struct RunOptions {
     pub definition: SessionDefinition,
@@ -16,7 +68,7 @@ pub(super) struct RunOptions {
     pub images: Vec<PathBuf>,
     pub load: Option<PathBuf>,
     pub save: Option<PathBuf>,
-    pub json: bool,
+    pub output_format: OutputFormat,
 }
 
 impl RunOptions {
@@ -28,29 +80,63 @@ impl RunOptions {
         let mut code_execution = false;
         let mut no_code_execution = false;
         let mut stdin = false;
-        let mut json = false;
+        let mut format_builder = OutputFormatBuilder::default();
         let mut no_config = false;
         let mut args = args.iter();
         while let Some(flag) = args.next() {
             let flag = flag.to_str().ok_or("option must be UTF-8")?;
             match flag {
-                "--stdin" if !stdin => stdin = true,
-                "--json" if !json => json = true,
-                "--no-config" if !no_config => no_config = true,
-                "--no-skills" if !no_skills => no_skills = true,
-                "--code-execution" if !code_execution => code_execution = true,
-                "--no-code-execution" if !no_code_execution => no_code_execution = true,
+                "--stdin" => {
+                    if stdin {
+                        return Err(CliError::argument("duplicate option: --stdin"));
+                    }
+                    stdin = true;
+                }
+                "--json" | "--stream" | "--stream-json" => {
+                    format_builder.set_flag(flag)?;
+                }
+                "--output-format" => {
+                    format_builder.set_output_format(&mut args)?;
+                }
+                "--no-config" => {
+                    if no_config {
+                        return Err(CliError::argument("duplicate option: --no-config"));
+                    }
+                    no_config = true;
+                }
+                "--no-skills" => {
+                    if no_skills {
+                        return Err(CliError::argument("duplicate option: --no-skills"));
+                    }
+                    no_skills = true;
+                }
+                "--code-execution" => {
+                    if code_execution {
+                        return Err(CliError::argument("duplicate option: --code-execution"));
+                    }
+                    code_execution = true;
+                }
+                "--no-code-execution" => {
+                    if no_code_execution {
+                        return Err(CliError::argument("duplicate option: --no-code-execution"));
+                    }
+                    no_code_execution = true;
+                }
                 "--skill-dir" => {
-                    let value = args.next().ok_or("option needs a value")?;
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::argument("option --skill-dir requires a value"))?;
                     if value.is_empty() {
-                        return Err("empty --skill-dir option".into());
+                        return Err(CliError::argument("option --skill-dir must not be empty"));
                     }
                     skill_dirs.push(PathBuf::from(value));
                 }
                 "--image" => {
-                    let value = args.next().ok_or("option needs a value")?;
+                    let value = args
+                        .next()
+                        .ok_or_else(|| CliError::argument("option --image requires a value"))?;
                     if value.is_empty() {
-                        return Err("empty --image option".into());
+                        return Err(CliError::argument("option --image must not be empty"));
                     }
                     images.push(PathBuf::from(value));
                 }
@@ -81,15 +167,27 @@ impl RunOptions {
                 | "--system-file"
                 | "--dynamic-context"
                 | "--dynamic-context-file" => {
-                    let value = args.next().ok_or("option needs a value")?;
-                    if (value.is_empty()
-                        && !matches!(flag, "--tools" | "--mcp" | "--system" | "--dynamic-context"))
-                        || values.insert(flag, value).is_some()
-                    {
-                        return Err("empty or duplicate option".into());
+                    let value = args.next().ok_or_else(|| {
+                        CliError::argument(format!("option {flag} requires a value"))
+                    })?;
+                    if values.contains_key(flag) {
+                        return Err(CliError::argument(format!("duplicate option: {flag}")));
                     }
+                    if value.is_empty()
+                        && !matches!(flag, "--tools" | "--mcp" | "--system" | "--dynamic-context")
+                    {
+                        return Err(CliError::argument(format!(
+                            "option {flag} must not be empty"
+                        )));
+                    }
+                    values.insert(flag, value);
                 }
-                _ => return Err("unknown or duplicate option".into()),
+                other => {
+                    return Err(CliError::argument(format!(
+                        "unknown option: {}",
+                        escape_untrusted_text(other)
+                    )));
+                }
             }
         }
         let string = |key| -> Result<Option<String>, CliError> {
@@ -138,7 +236,7 @@ impl RunOptions {
             images,
             load: values.get("--load").map(PathBuf::from),
             save: values.get("--save").map(PathBuf::from),
-            json,
+            output_format: format_builder.build(),
         })
     }
 }
