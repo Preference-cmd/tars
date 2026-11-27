@@ -26,7 +26,8 @@ default_profile = "work"
 [profiles.work]
 provider = "openai-chat"
 model = "your-model-id"
-api_key_env = "OPENAI_API_KEY"
+credential = "work"
+# api_key_env = "OPENAI_API_KEY"
 # endpoint = "http://127.0.0.1:8080/v1/chat/completions"
 timeout_secs = 120
 capacity = 256
@@ -52,7 +53,7 @@ max_tool_calls = 64
 # max_edit_segments = 16
 ```
 
-`version` must be 1; `store`, `recovery_dir`, `default_profile` and `profiles` may be omitted. Every model preset must contain a provider and a non-empty model. The provider is `openai-chat`, `openai-responses` or `anthropic`. When the remaining fields are omitted the table defaults apply: deadline 120 seconds, 256 retained works, at most 10 model calls and 64 tool declarations per work; `api_key_env` defaults to OPENAI_API_KEY or ANTHROPIC_API_KEY depending on the protocol. `max_tokens` (the output token limit for each model call), `reasoning_effort`, and `temperature` have no defaults and are not sent when omitted; the `anthropic` protocol requires `max_tokens`, and a request is rejected before sending when it is not configured. `temperature` accepts finite values in `0.0..=2.0` (`0.0..=1.0` for `anthropic`), validated at load time and when child agents apply `model.temperature`. The corresponding command-line arguments are `--max-tokens` and `--reasoning-effort`. Named `[profiles.<name>]` entries also serve as authorized model presets selectable by child agents via `spawn_agent` (`model.profile`) and are surfaced to the model in the dynamic `<model_profiles>` prelude section. `reasoning_effort` is text that is written as-is into that protocol's strength field in the request; TARS keeps no list of accepted values because they vary by model and service (common ones are `low`, `medium` and `high`, and some services use `off` to disable reasoning), and an error returned when the service does not accept the value is shown as-is. `extra_body` is a table merged as-is into the request body for settings that exist only in a particular protocol or model, such as the `anthropic` `thinking` object. When a key collides with one TARS writes itself, if both sides are tables they are merged key by key; for example, `reasoning = { summary = "auto" }` on the `openai-responses` protocol coexists with the strength written by `reasoning_effort`; otherwise the value TARS writes wins (such as `model`, messages and tools), and the table's values are ignored without an error. The command-line argument is `--extra-body`, whose value is a JSON object that wholly replaces the preset's table when given. On the `anthropic` protocol, setting only `reasoning_effort` does not automatically add a `thinking` object; write it in `extra_body` when needed. `max_model_attempts` is the total number of attempts (including the first) allowed for each model call on transient failures or rate limits; omitted or 1 means no retry, and the command-line argument is `--max-model-attempts`. When set above 1, `StreamRetryGateway` retries `Transient` and `TimedOut` failures on `invoke` and before the first streaming delta, and also retries pre-`Done` mid-stream interruptions (`Transient`, `TimedOut`, `UnknownOutcome`, or premature EOF) within the same attempt budget—re-emitting `ProgressUpdate::ModelStarted` so streaming previews reset instead of concatenating attempts—while never retrying `Permanent`/`InvalidRequest`/`Undecodable`/`Cancelled` failures, never retrying after `Done` or across tool execution, and never exceeding the work deadline. Saved session records that lack these fields read them as unconfigured.
+`version` must be 1; `store`, `recovery_dir`, `default_profile` and `profiles` may be omitted. Every model preset must contain a provider and a non-empty model. The provider is `openai-chat`, `openai-responses` or `anthropic`. When the remaining fields are omitted the table defaults apply: deadline 120 seconds, 256 retained works, at most 10 model calls and 64 tool declarations per work. Credential resolution defaults to TARS's isolated `0600` `credentials.toml` store (using `credential = "<name>"`, or the profile name `<name>` when both `credential` and `api_key_env` are omitted) with no implicit fallback to global `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` shell environment variables; see [Isolated credentials store](#isolated-credentials-store-credentialstoml) below. `max_tokens` (the output token limit for each model call), `reasoning_effort`, and `temperature` have no defaults and are not sent when omitted; the `anthropic` protocol requires `max_tokens`, and a request is rejected before sending when it is not configured. `temperature` accepts finite values in `0.0..=2.0` (`0.0..=1.0` for `anthropic`), validated at load time and when child agents apply `model.temperature`. The corresponding command-line arguments are `--max-tokens` and `--reasoning-effort`. Named `[profiles.<name>]` entries also serve as authorized model presets selectable by child agents via `spawn_agent` (`model.profile`) and are surfaced to the model in the dynamic `<model_profiles>` prelude section. `reasoning_effort` is text that is written as-is into that protocol's strength field in the request; TARS keeps no list of accepted values because they vary by model and service (common ones are `low`, `medium` and `high`, and some services use `off` to disable reasoning), and an error returned when the service does not accept the value is shown as-is. `extra_body` is a table merged as-is into the request body for settings that exist only in a particular protocol or model, such as the `anthropic` `thinking` object. When a key collides with one TARS writes itself, if both sides are tables they are merged key by key; for example, `reasoning = { summary = "auto" }` on the `openai-responses` protocol coexists with the strength written by `reasoning_effort`; otherwise the value TARS writes wins (such as `model`, messages and tools), and the table's values are ignored without an error. The command-line argument is `--extra-body`, whose value is a JSON object that wholly replaces the preset's table when given. On the `anthropic` protocol, setting only `reasoning_effort` does not automatically add a `thinking` object; write it in `extra_body` when needed. `max_model_attempts` is the total number of attempts (including the first) allowed for each model call on transient failures or rate limits; omitted or 1 means no retry, and the command-line argument is `--max-model-attempts`. When set above 1, `StreamRetryGateway` retries `Transient` and `TimedOut` failures on `invoke` and before the first streaming delta, and also retries pre-`Done` mid-stream interruptions (`Transient`, `TimedOut`, `UnknownOutcome`, or premature EOF) within the same attempt budget—re-emitting `ProgressUpdate::ModelStarted` so streaming previews reset instead of concatenating attempts—while never retrying `Permanent`/`InvalidRequest`/`Undecodable`/`Cancelled` failures, never retrying after `Done` or across tool execution, and never exceeding the work deadline. Saved session records that lack these fields read them as unconfigured.
 
 `permission_mode` is the initial permission mode for a new session and defaults to `ask`; the choices are `read-only`, `ask`, `accept-edits` and `full-access`. The command-line counterpart is `--permission-mode`, and the TUI new-session form also has the field. Runtime switching, the meaning of the four modes and the saving rules are in [Workspace tools](workspace-tools.md#confirmation-and-permission-modes).
 
@@ -84,20 +85,64 @@ All fields are validated against their safety floors and hard ceilings at config
 
 A transient `tars run` uses a fixed retained work capacity of `17` (1 initial user turn plus up to 16 automatic reactive wakeups for background child agents).
 
-All presets are validated at load time; unknown fields, duplicate keys, invalid types, invalid presets, empty paths and unsupported versions all fail. A file is at most 1 MiB. Parse diagnostics show only line and column and never echo TOML values; a plaintext `api_key` field is not accepted. The actual credential is read from the named environment variable when the session is opened.
+All presets are validated at load time; unknown fields, duplicate keys, invalid types, invalid presets, empty paths and unsupported versions all fail. A `config.toml` file is at most 1 MiB. Parse diagnostics show only line and column and never echo TOML values; a plaintext `api_key` field is not accepted in `config.toml`. The actual credential is resolved when the session is opened from TARS's `0600` `credentials.toml` store (or from an explicitly configured environment variable when `api_key_env` / `--api-key-env` is specified).
 
 Paths do not expand `~` or `$VAR`. Relative `store` and `recovery_dir` are based on the directory containing the TOML file; relative command-line paths are based on the current working directory. The store is created according to the existing Store rules, while recovery_dir must already exist. Without a configured store, persistent CLI subcommands and `--no-config` TUI runs require an explicit `--store`; when configuration is enabled (`!no_config`), interactive `tars` defaults `store` to `<user_tars_dir>/data` (`$TARS_HOME/data` or `~/.tars/data`).
 
 ```sh
+tars auth set work
 tars run --config ./config.toml --profile work --input 'Analyze the current problem'
 tars session create --config ./config.toml --model another-model --json
 tars session list --config ./config.toml --json
 tars --config ./config.toml --profile work
 ```
 
-Selecting `--profile NAME` takes precedence over default_profile. Arguments override the selected preset field by field; endpoint, credential reference, deadline and limits that are not overridden still come from the preset. CLI model arguments apply to `run` and `session create`; `session run` accepts neither `--profile` nor model overrides. `--store` and `--recovery-dir` override the corresponding paths in the configuration.
+Selecting `--profile NAME` takes precedence over `default_profile`. Arguments override the selected preset field by field; endpoint, credential reference (`--credential` or `--api-key-env`), deadline and limits that are not overridden still come from the preset. CLI model arguments apply to `run` and `session create`; `session run` accepts neither `--profile` nor model overrides. `--store` and `--recovery-dir` override the corresponding paths in the configuration.
 
-When interactive `tars` launches unconfigured (`!no_config`, no `config.toml`, no preset, empty store), its first-run onboarding panel can atomically create the initial `<user_tars_dir>/config.toml` via `CreateNew` (`tars_core::config::write_initial_config`, storing only env var names and never overwriting an existing file). Once configured, the TUI `/new` form is filled from the selected preset, and changes affect only the new session at hand without rewriting global configuration; capacity/call limits, generation settings, prelude/skills settings and `render_options` that the preset does not display are preserved as-is. A future GUI should reuse the same loading and parsing module.
+TARS never auto-creates or silently rewrites `config.toml` at startup. Inside the TUI, running `/provider` lets the user explicitly pick a preset (or custom provider) and save `credential = "<name>"` into `config.toml` via `tars_core::config::upsert_profile_in_config` alongside the `0600` `credentials.toml` entry—preserving comments, unrelated profiles, and existing `[profiles.<name>.*]` sub-tables and validating against sibling `mcp.json` before atomic replacement. Once configured, the TUI `/new` form is filled from the selected preset, and changes affect only the new session at hand without rewriting global configuration; capacity/call limits, generation settings, prelude/skills settings and `render_options` that the preset does not display are preserved as-is. A future GUI should reuse the same loading and parsing module.
+
+## Isolated credentials store (`credentials.toml`)
+
+Model API keys live in TARS's private `0600` `credentials.toml` store rather than `config.toml`, SQLite `tars.db`, or global shell environment variables (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`).
+
+### Locations and isolation
+
+- **Default user store**: `<user_tars_dir>/credentials.toml` (`$TARS_HOME/credentials.toml` when `TARS_HOME` is an absolute path, otherwise `~/.tars/credentials.toml` on Unix/macOS or `%USERPROFILE%\.tars\credentials.toml` on Windows).
+- **Explicit configuration sibling**: when `--config FILE` or `TARS_CONFIG` selects a configuration file, TARS resolves the sibling `<config_dir>/credentials.toml` (resolving relative paths via `std::path::absolute` before taking `.parent()`, so `--config config.toml` uses `<cwd>/credentials.toml`). Project directories are never searched automatically.
+- **`--no-config` isolation**: under `--no-config`, `credentials_path` is always `None`—TARS never reads global `~/.tars/credentials.toml` when opening or creating sessions (use `--api-key-env <VAR>` or `env:<VAR>` in `/new` for isolated runs).
+
+### Schema and security invariants
+
+```toml
+version = 1
+
+[credentials.default]
+api_key = "sk-..."
+
+[credentials.anthropic]
+api_key = "sk-ant-..."
+```
+
+- **Strict parsing**: `version` must be `1`, unknown fields are rejected (`deny_unknown_fields`), entry names must match `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` (rejecting `.`, whitespace, control characters, `/`, `\`, `=`, `:`, and overly long keys), and trimmed `api_key` values must be non-empty and free of control characters.
+- **File size bound**: reads are capped at `256 KiB` (`MAX_CREDENTIALS_FILE_BYTES`); larger files fail closed.
+- **Symlink & `O_NOFOLLOW` protection**: before reading or writing, TARS checks `symlink_metadata` to reject symlinks (including dangling symlinks) and non-regular files. On Unix, opens use `O_RDONLY | O_NOFOLLOW` and re-verify `(dev, ino)` identity against `symlink_metadata`.
+- **Fail-closed `0600` permissions**: on Unix, any group or other permission bits (`mode & 0o077 != 0`) fail closed with remediation guidance (`chmod 600 <path>`). New parent directories are created with mode `0o700`, and writes stage a temporary file set to `0o600` and synced before atomic `persist` replacement.
+- **Zero secret echo**: `CredentialsError` (`Display` and `Debug`), `CredentialsStore`'s `Debug`, CLI output, `DoctorReport`, and SQLite records never contain plaintext `api_key` values or raw TOML lines; syntax errors report only `line` and `column`.
+
+### Profile resolution, overrides, and saved sessions
+
+- **No implicit global env fallback**: omitting both `credential` and `api_key_env` in `[profiles.<name>]` resolves to `CredentialRef::Store("<name>")` (defaulting to the profile name, which must itself satisfy `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`). When no profile is active and neither `--credential` nor `--api-key-env` is given, CLI resolution defaults to `CredentialRef::Store(provider.as_str())` (`openai-chat`, `openai-responses`, or `anthropic`). Setting `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` in the shell never takes effect implicitly.
+- **Mutual exclusion & precedence**: `credential` and `api_key_env` are mutually exclusive within a single `[profiles.<name>]` (failing config load with exit code `1`), and `--credential` and `--api-key-env` are mutually exclusive on the CLI (exit code `2`). Passing `--credential <name>` overrides a profile's `api_key_env`, and passing `--api-key-env <VAR>` (explicit opt-in for CI/headless automation) overrides a profile's `credential`.
+- **Saved `SessionDefinition` compatibility**: persisted `SessionDefinition` records store `CredentialRef::Store(name)` (`{"store":"<name>"}`) or `CredentialRef::Environment(var)` (`{"environment":"<VAR>"}`), preserving backward-compatible reopening of existing SQLite `tars.db` and legacy `tars-session-v2.4` records.
+
+### Managing credentials (`tars auth`, `--credential`, and `doctor`)
+
+- **`tars auth set <name> [--stdin] [--config FILE]`**: stores or updates `<name>` in `0600` `credentials.toml`. Passing a secret as a CLI argument is strictly rejected (exit code `2`) to keep secrets out of shell history and `ps`. Interactive terminals prompt without echoing; non-TTY pipelines use `--stdin` (up to `16 KiB`, trimming trailing whitespace/newlines). `--no-config` is rejected with exit code `2`.
+- **`tars auth list [--config FILE] [--json]`**: lists stored credential names (one per line, or `{"path": "...", "credentials": [...]}` with `--json`) without ever printing secret values.
+- **`tars auth remove <name> [--config FILE]`**: atomically removes `<name>` while preserving `0600` permissions (exits `1` if missing).
+- **`tars auth path [--config FILE]`**: prints the resolved `credentials.toml` path.
+- **`--credential <name>`**: accepted by `tars run`, `tars -p`/`--print`, and `tars session create` (mutually exclusive with `--api-key-env`).
+- **Diagnostics (`tars doctor` / TUI `/doctor`)**: validates `credentials.toml` (non-symlink, `0600` permissions, size, syntax, entry count) and verifies that the selected profile's `Store` entry or `Environment` variable is present without echoing any secret.
 
 ## Session prelude and skills
 

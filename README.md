@@ -1,10 +1,10 @@
 # TARS
 
-TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI commands (`-p`/`--print`, `run`, `session`, `trust`, `tools`, `doctor`, `completions`). TARS is in early-stage development (`v0.1.0` prebuilt macOS/Linux binaries available via GitHub Releases, or build from source via Cargo).
+TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI commands (`-p`/`--print`, `run`, `session`, `auth`, `trust`, `tools`, `doctor`, `completions`). TARS is in early-stage development (`v0.1.0` prebuilt macOS/Linux binaries available via GitHub Releases, or build from source via Cargo).
 
 ## Key features
 
-- **Multi-protocol providers:** `openai-chat`, `openai-responses`, and `anthropic` with custom endpoints, env-only API keys, and multimodal image attachments (PNG, JPEG, GIF, WebP).
+- **Multi-protocol providers:** `openai-chat`, `openai-responses`, and `anthropic` with custom endpoints, an isolated `0600` `credentials.toml` store (with explicit env-var opt-in for CI/headless automation), and multimodal image attachments (PNG, JPEG, GIF, WebP).
 - **Workspace safety:** Four permission modes, read-before-write guards, macOS Seatbelt and Linux Bubblewrap (`bwrap` + `seccomp-BPF`) sandboxing, and layered command rules.
 - **Long-session compaction:** Automatic output spilling, micro-compaction, working briefs, prompt caching, and `recall`.
 - **Persistent sessions:** Local SQLite storage with OS file locks, atomic commits, recovery export, and interrupted-turn repair.
@@ -56,13 +56,21 @@ cargo build --workspace --locked --release
 
 This produces `./target/release/tars` (`target\release\tars.exe` on Windows).
 
-Set a provider API key in your shell (`OPENAI_API_KEY` for OpenAI protocols or `ANTHROPIC_API_KEY` for Anthropic).
+Store a provider API key in TARS's isolated `0600` `credentials.toml` store (TARS does not implicitly read `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` from your shell):
+
+```sh
+# Interactive TTY prompt (no echo) or pipe via --stdin:
+tars auth set openai-responses
+# Or launch `tars` and run `/provider` inside the TUI to pick a preset and save your key.
+```
+
+For CI or headless automation, opt in explicitly to environment variables via `--api-key-env <VAR>` (or `api_key_env = "<VAR>"` in `config.toml`, or `env:<VAR>` in `/new`).
 
 The examples below assume `tars` is on your `PATH` (use `./target/release/tars` when running a local source build).
 
 ### Interactive TUI
 
-Launch `tars` directly in an interactive terminal: before creating or opening a default session on an untrusted workspace (`--workspace DIR` or the current working directory), `tars` displays a folder-trust prompt (`Do you trust the files in this folder?`; `n` / `Esc` / `Ctrl-C` exits without writing configuration or trust records). Once the folder is trusted, `tars` automatically creates and opens a ready workspace-bound session with sandbox-appropriate tools when a default profile is configured (and `--no-config` is not passed), or enters the minimalist welcome screen non-blockingly (`✓ Trusted` badge and `/new (F2)` / `~/.tars/config.toml` guidance) without auto-writing `~/.tars/config.toml`. Supports `-c`/`--continue` (most recently updated session), `-r`/`--resume [SELECTOR]` (session picker or ID/prefix match), slash commands (`/clear`, `/resume`, `/model`, `/copy`, `/trust`, `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/queue`, `/image`, `/rename`, `/fork`, `/edit`, `/mode`, `/compact`, `/export-md`, `/help`), tiered `Ctrl-C` (cancelling active work/approvals or declining `.tars/` trust prompts first, and cleanly saving and exiting when idle), `Ctrl-O` to expand full tool results/diffs, and paste/drag-and-drop local image attachments:
+Launch `tars` directly in an interactive terminal: before creating or opening a default session on an untrusted workspace (`--workspace DIR` or the current working directory), `tars` displays a folder-trust prompt (`Do you trust the files in this folder?`; `n` / `Esc` / `Ctrl-C` exits without writing configuration or trust records). Once the folder is trusted, `tars` automatically creates and opens a ready workspace-bound session with sandbox-appropriate tools when a default profile is configured (and `--no-config` is not passed), or enters the minimalist welcome screen non-blockingly (`✓ Trusted` badge and `/provider` / `/new (F2)` guidance) without auto-writing `~/.tars/config.toml`. Use `/provider` for a 2-step preset wizard (`openai`, `anthropic`, `openrouter`, `deepseek`, `xai`, `gemini`, `ollama`, or `Custom`) with masked API key input and in-place hot reload, or `/new` (`F2`) with pure `◀ value ▶` enum selectors, workspace/tool prefill, and live credential status badges. Supports `-c`/`--continue` (most recently updated session), `-r`/`--resume [SELECTOR]` (session picker or ID/prefix match), slash commands (`/provider`, `/clear`, `/resume`, `/model`, `/copy`, `/trust`, `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/queue`, `/image`, `/rename`, `/fork`, `/edit`, `/mode`, `/compact`, `/export-md`, `/help`), tiered `Ctrl-C` (cancelling active work/approvals or declining `.tars/` trust prompts first, and cleanly saving and exiting when idle), `Ctrl-O` to expand full tool results/diffs, and paste/drag-and-drop local image attachments:
 
 ```sh
 # Launch directly (prompts to trust an untrusted folder, then auto-starts a session when configured or opens the welcome screen):
@@ -82,8 +90,16 @@ tars -h
 ### Headless print mode (`tars -p`), persistent sessions & diagnostics
 
 ```sh
+# Manage isolated 0600 credentials (never accepts plaintext secrets on the CLI)
+tars auth set work
+printf '%s\n' "$CI_TOKEN" | tars auth set ci --stdin
+tars auth list --json
+tars auth path
+
 # Headless print mode: positional prompt, `--` for leading-dash prompts, and auto-piped stdin
-tars -p --provider openai-responses --model "$MODEL_ID" "Summarize the workspace layout"
+tars -p --provider openai-responses --model "$MODEL_ID" --credential work "Summarize the workspace layout"
+# Explicit env-var opt-in for CI / headless automation (or with --no-config):
+tars -p --no-config --provider openai-responses --model "$MODEL_ID" --api-key-env CI_API_KEY "Summarize the workspace layout"
 git diff | tars -p --profile fast "Review this diff"
 tars -p -- -explain-this-flag
 
@@ -165,11 +181,11 @@ Dependencies flow strictly one way (`tars-cli` → `tars-tui` → `tars-core` �
 
 - [Changelog](CHANGELOG.md) — release history and known limitations
 - [Current implementation](docs/README.md) — code layout, module boundaries, and local verification checks
-- [Shared configuration](docs/configuration.md) — TOML schema, presets, compaction, prelude/skills, external tools, and MCP
+- [Shared configuration](docs/configuration.md) — TOML schema, isolated `0600` `credentials.toml`, `tars auth`, presets, compaction, prelude/skills, external tools, and MCP
 - [Workspace tools](docs/workspace-tools.md) — file safety, permission modes, command rules, workspace trust boundaries, platform sandboxes (Seatbelt/Bubblewrap), `run_code`, and record migration
 - [Session lifecycle](docs/session-lifecycle.md) — session assembly, execution, saving, closing, and usage statistics
 - [Session continuation](docs/session-continuation.md) — repairing interrupted tool batches
-- [TUI guide](docs/tui.md) — folder trust wizard, terminal layout, keybindings, tiered `Ctrl+C` exit, `/trust`, startup checks, and history display
+- [TUI guide](docs/tui.md) — folder trust wizard, `/provider` wizard, `/new` form selectors & badges, terminal layout, keybindings, tiered `Ctrl+C` exit, `/trust`, startup checks, and history display
 - [config.example.toml](config.example.toml) & [mcp.example.json](mcp.example.json) — starter configuration examples
 
 ## Contributing

@@ -99,8 +99,12 @@ authoritative acceptance list per proposal scope.
 - Keep shared application behavior independent of CLI/TUI/GUI presentation.
   Entry points adapt input, output and UI events to shared operations.
 - Shared TOML supplies new-session defaults. Explicit input overrides those
-  defaults; reopening always uses the saved SessionDefinition. Keep secrets as
-  environment references and do not automatically rewrite global configuration.
+  defaults; reopening always uses the saved SessionDefinition. Keep secrets out
+  of `config.toml` and SQLite by storing named references resolved from TARS's
+  private `0600` `credentials.toml` store (with optional explicit `api_key_env` /
+  `--api-key-env` environment-variable references for headless/CI), and never
+  automatically rewrite global configuration without an explicit user action
+  (such as `/provider`).
 - Use `foo.rs` plus `foo/` for library modules, never `mod.rs`. Keep index files
   limited to documentation, declarations and explicit re-exports.
 - Deny unsafe code and document public library APIs. Explain new dependencies
