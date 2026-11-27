@@ -62,10 +62,11 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<Option<Options
                      /sessions  Find and open a saved or active session\n  \
                      /agents    List session agents and switch transcript view\n  \
                      /mode      Show or change permission mode (Shift-Tab cycles)\n  \
+                     /copy      Copy last reply, fenced code block, or session ID\n  \
                      /compact   Summarize and replace the current context\n  \
                      /help      Keyboard shortcuts and session behavior\n\n\
                      Keys: / or F1 commands · Enter / Ctrl-S submit · Ctrl-J newline · Tab complete\n      \
-                     PageUp/Down scroll · F3 open · F4 next · F5 refresh · F6 tools · F7 repair\n      \
+                     PageUp/Down scroll · F3 open · F4 next · F5 refresh · Ctrl-O/F6 tools · F7 repair\n      \
                      Esc / Ctrl-C cancel · Ctrl-W close · Ctrl-Q quit · Ctrl-R retry · Ctrl-E export"
                 );
                 return Ok(None);

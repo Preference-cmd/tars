@@ -132,9 +132,77 @@ impl Drop for Screen {
     }
 }
 
+/// Maximum raw clipboard payload accepted by OSC 52 (`1 MiB`).
+pub(crate) const MAX_OSC52_RAW_BYTES: usize = 1024 * 1024;
+
+/// Encode bytes with RFC 4648 standard Base64 (`+`, `/`, `=` padding).
+pub(crate) fn encode_base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut chunks = input.chunks_exact(3);
+    for chunk in &mut chunks {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        out.push(TABLE[(n & 0x3f) as usize] as char);
+    }
+    match chunks.remainder() {
+        [a] => {
+            let n = u32::from(*a) << 16;
+            out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+            out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        [a, b] => {
+            let n = (u32::from(*a) << 16) | (u32::from(*b) << 8);
+            out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+            out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Write an OSC 52 clipboard sequence (`c` selection) to `writer`, wrapping in
+/// a tmux DCS passthrough envelope when `in_tmux` is true.
+pub(crate) fn write_osc52_clipboard_with_tmux(
+    writer: &mut impl io::Write,
+    bytes: &[u8],
+    in_tmux: bool,
+) -> io::Result<()> {
+    if bytes.len() > MAX_OSC52_RAW_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "clipboard payload exceeds 1 MiB limit",
+        ));
+    }
+    let encoded = encode_base64(bytes);
+    if in_tmux {
+        write!(writer, "\x1bPtmux;\x1b\x1b]52;c;{encoded}\x07\x1b\\")?;
+    } else {
+        write!(writer, "\x1b]52;c;{encoded}\x07")?;
+    }
+    writer.flush()
+}
+
+/// Write an OSC 52 clipboard sequence to `stdout`, detecting `$TMUX` automatically.
+pub(crate) fn write_osc52_clipboard(bytes: &[u8]) -> io::Result<()> {
+    let in_tmux = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
+    let mut stdout = io::stdout().lock();
+    write_osc52_clipboard_with_tmux(&mut stdout, bytes, in_tmux)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Screen, SuppressTerminalRestore, terminal_restore_allowed};
+    use super::{
+        MAX_OSC52_RAW_BYTES, Screen, SuppressTerminalRestore, encode_base64,
+        terminal_restore_allowed, write_osc52_clipboard_with_tmux,
+    };
+    use std::io;
 
     #[test]
     fn suppression_guard_toggles_only_for_its_scope() {
@@ -177,5 +245,46 @@ mod tests {
         })();
         assert!(result.is_err());
         assert!(!crossterm::terminal::is_raw_mode_enabled().unwrap());
+    }
+
+    #[test]
+    fn encode_base64_matches_rfc4648_test_vectors_and_utf8() {
+        assert_eq!(encode_base64(b""), "");
+        assert_eq!(encode_base64(b"f"), "Zg==");
+        assert_eq!(encode_base64(b"fo"), "Zm8=");
+        assert_eq!(encode_base64(b"foo"), "Zm9v");
+        assert_eq!(encode_base64(b"foob"), "Zm9vYg==");
+        assert_eq!(encode_base64(b"fooba"), "Zm9vYmE=");
+        assert_eq!(encode_base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(encode_base64(&[0x00, 0xff, 0x80, 0x7f]), "AP+Afw==");
+        // UTF-8 CJK + emoji ("你好")
+        assert_eq!(encode_base64("你好".as_bytes()), "5L2g5aW9");
+    }
+
+    #[test]
+    fn write_osc52_clipboard_formats_standard_and_tmux_sequences() {
+        let mut std_out = Vec::new();
+        write_osc52_clipboard_with_tmux(&mut std_out, b"hello", false).unwrap();
+        assert_eq!(std_out, b"\x1b]52;c;aGVsbG8=\x07");
+
+        let mut tmux_out = Vec::new();
+        write_osc52_clipboard_with_tmux(&mut tmux_out, b"hello", true).unwrap();
+        assert_eq!(tmux_out, b"\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\");
+    }
+
+    #[test]
+    fn write_osc52_clipboard_rejects_payload_exceeding_one_mib() {
+        let exact = vec![b'a'; MAX_OSC52_RAW_BYTES];
+        let mut ok_buf = Vec::new();
+        write_osc52_clipboard_with_tmux(&mut ok_buf, &exact, false).unwrap();
+        assert!(ok_buf.starts_with(b"\x1b]52;c;"));
+        assert!(ok_buf.ends_with(b"\x07"));
+
+        let oversized = vec![b'a'; MAX_OSC52_RAW_BYTES + 1];
+        let mut err_buf = Vec::new();
+        let err = write_osc52_clipboard_with_tmux(&mut err_buf, &oversized, false).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("1 MiB"));
+        assert!(err_buf.is_empty());
     }
 }

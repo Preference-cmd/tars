@@ -16,8 +16,9 @@ mod graphemes;
 pub(crate) mod image;
 mod onboarding;
 pub(crate) use complete::{
-    CompleteResult, ModelArgCompletion, complete_editor, complete_model_arg, set_editor_text,
-    slash_command_takes_args, strip_model_command_prefix,
+    CompleteResult, ModelArgCompletion, complete_copy_arg, complete_editor, complete_model_arg,
+    set_editor_text, slash_command_takes_args, strip_copy_command_prefix,
+    strip_model_command_prefix,
 };
 pub(crate) use graphemes::edit;
 pub(crate) use onboarding::{ONBOARDING_FIELD_NAMES, OnboardingForm};

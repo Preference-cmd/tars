@@ -34,6 +34,7 @@ Interactive slash commands:
   /sessions  Find and open a saved or active session
   /agents    List session agents and switch transcript view
   /mode      Show or change the permission mode (Shift-Tab cycles)
+  /copy      Copy last reply, fenced code block, or session ID
   /compact   Summarize and replace the current context
   /help      Keyboard shortcuts and session behavior
 

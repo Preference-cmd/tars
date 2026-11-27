@@ -621,6 +621,9 @@ pub(super) struct PendingExternalEdit {
     pub(super) key: Key,
     pub(super) initial: String,
 }
+/// Injectable clipboard writer callback for capturing OSC 52 payloads in tests.
+pub(crate) type ClipboardSink = Box<dyn FnMut(&[u8]) -> std::io::Result<()> + Send>;
+
 pub(crate) struct App {
     pub host: SessionHost,
     pub options: Options,
@@ -679,6 +682,8 @@ pub(crate) struct App {
     pub(crate) list_generation: u64,
     /// Deleted session IDs kept until a `list()` spawned after the delete settles.
     pub(crate) recently_deleted: HashSet<String>,
+    /// Optional injectable clipboard sink used by tests to capture OSC 52 writes without a TTY.
+    pub(crate) clipboard_sink: Option<ClipboardSink>,
 }
 impl App {
     pub fn new(options: Options) -> Self {
@@ -743,6 +748,21 @@ impl App {
             tick_phase: 0,
             list_generation: 0,
             recently_deleted: HashSet::new(),
+            clipboard_sink: None,
+        }
+    }
+
+    pub(crate) fn write_clipboard(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        if bytes.len() > crate::terminal::MAX_OSC52_RAW_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "clipboard payload exceeds 1 MiB limit",
+            ));
+        }
+        if let Some(sink) = self.clipboard_sink.as_mut() {
+            sink(bytes)
+        } else {
+            crate::terminal::write_osc52_clipboard(bytes)
         }
     }
     pub(super) fn entry_mut(&mut self, key: &Key) -> Option<&mut Entry> {

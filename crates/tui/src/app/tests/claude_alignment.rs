@@ -1691,3 +1691,320 @@ async fn cc06_cc08_stale_listed_after_delete_never_resurrects_session() {
     ));
     assert!(!app.recently_deleted.contains(&keep_id));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cc09_copy_command_modes_child_agent_fallback_errors_and_tab_completion() {
+    use super::support::{Server, create};
+    use crate::app::{COMMANDS, Entry};
+    use crate::input::slash_command_takes_args;
+    use crate::terminal::{MAX_OSC52_RAW_BYTES, write_osc52_clipboard_with_tmux};
+    use crate::transcript::{Transcript, TranscriptSegment};
+    use causa::kernel::{BlockContent, BlockMeta, ContentPart, ContextBlock, Role, SealedPart};
+    use std::sync::{Arc, Mutex};
+    use tars_core::application::SpawnAgentRequest;
+    use tars_core::definition::ChildNarrowingRequest;
+    use tars_core::events::{AgentInteraction, OnParentComplete, OperationExecutionMode};
+
+    assert!(COMMANDS.iter().any(|(name, _)| *name == "copy"));
+    assert!(slash_command_takes_args("copy"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::new().await;
+    let mut app = app(dir.path());
+
+    // Capture OSC 52 output via injectable clipboard sink without touching a real TTY.
+    let captured_raw: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_wire: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+    let raw_clone = captured_raw.clone();
+    let wire_clone = captured_wire.clone();
+    app.clipboard_sink = Some(Box::new(move |bytes: &[u8]| {
+        let mut wire = Vec::new();
+        write_osc52_clipboard_with_tmux(&mut wire, bytes, false)?;
+        raw_clone.lock().unwrap().push(bytes.to_vec());
+        wire_clone.lock().unwrap().push(wire);
+        Ok(())
+    }));
+
+    // 0. No entries yet -> clean error notices without writing clipboard.
+    run_command(&mut app, "copy");
+    assert!(app.notice.contains("No active session"), "{}", app.notice);
+    assert!(captured_raw.lock().unwrap().is_empty());
+
+    // Help panel lists /copy.
+    run_command(&mut app, "help");
+    match &app.panel {
+        Some(Panel::Info { lines, .. }) => {
+            assert!(
+                lines.iter().any(|l| l.contains("/copy [code [N] | id]")),
+                "{lines:?}"
+            );
+        }
+        _ => panic!("expected help panel"),
+    }
+    app.panel = None;
+
+    create(&mut app, &server.endpoint).await;
+    let conv_id = app.entries[0].id().to_owned();
+
+    // No assistant reply yet -> error notice.
+    run_command(&mut app, "copy");
+    assert!(
+        app.entries[0].notice.contains("No assistant reply"),
+        "{}",
+        app.entries[0].notice
+    );
+    assert!(captured_raw.lock().unwrap().is_empty());
+
+    // Populate materials:
+    // 1) assistant message with 2 fenced code blocks (1 tagged rust, 1 untagged)
+    // 2) assistant message with prose only (no code blocks)
+    // 3) assistant message with ONLY ContentPart::Sealed (must be skipped!)
+    let session = app.entries[0].session.clone().unwrap();
+    let snap = session.read_materials().unwrap();
+    let mut blocks = snap.context.blocks().to_vec();
+    let reply_with_code = concat!(
+        "Here are two snippets:\n\n",
+        "```rust\n",
+        "fn first() {\n",
+        "    println!(\"one\");\n",
+        "}\n",
+        "```\n\n",
+        "And an untagged block:\n\n",
+        "```\n",
+        "echo two\n",
+        "```\n",
+    );
+    let reply_prose_only = "Final plain prose reply without any fenced code.";
+    blocks.push(ContextBlock::new(
+        causa::runtime::new_block_id(),
+        BlockContent::text(Role::Assistant, reply_with_code),
+        BlockMeta::from_source("assistant"),
+    ));
+    blocks.push(ContextBlock::new(
+        causa::runtime::new_block_id(),
+        BlockContent::text(Role::Assistant, reply_prose_only),
+        BlockMeta::from_source("assistant"),
+    ));
+    blocks.push(ContextBlock::new(
+        causa::runtime::new_block_id(),
+        BlockContent::Message {
+            role: Role::Assistant,
+            parts: vec![ContentPart::Sealed(SealedPart::new(
+                "anthropic_messages",
+                serde_json::json!({"thinking": "internal"}),
+            ))],
+        },
+        BlockMeta::from_source("assistant"),
+    ));
+    session.edit(snap.version, blocks).unwrap();
+
+    // 1. `/copy` copies the last non-empty assistant reply (skipping Sealed-only block) + OSC 52 framing.
+    run_command(&mut app, "copy");
+    assert_eq!(
+        String::from_utf8(captured_raw.lock().unwrap().pop().unwrap()).unwrap(),
+        reply_prose_only
+    );
+    let wire_bytes = captured_wire.lock().unwrap().pop().unwrap();
+    assert!(wire_bytes.starts_with(b"\x1b]52;c;"));
+    assert!(wire_bytes.ends_with(b"\x07"));
+    assert!(
+        app.entries[0].notice.contains(&format!(
+            "Copied last reply ({} chars)",
+            reply_prose_only.chars().count()
+        )),
+        "{}",
+        app.entries[0].notice
+    );
+
+    // 2. `/copy code` walks backward from prose-only reply to reply_with_code and copies its latest block (#2).
+    run_command(&mut app, "copy code");
+    assert_eq!(
+        String::from_utf8(captured_raw.lock().unwrap().pop().unwrap()).unwrap(),
+        "echo two"
+    );
+    assert!(
+        app.entries[0]
+            .notice
+            .contains("Copied code block #2 (1 lines, 8 chars) to clipboard via OSC 52"),
+        "{}",
+        app.entries[0].notice
+    );
+
+    // 3. `/copy code 1` copies the 1st fenced block (tagged `rust`) with language + line/char counts.
+    run_command(&mut app, "copy code 1");
+    assert_eq!(
+        String::from_utf8(captured_raw.lock().unwrap().pop().unwrap()).unwrap(),
+        "fn first() {\n    println!(\"one\");\n}"
+    );
+    assert!(
+        app.entries[0]
+            .notice
+            .contains("Copied code block #1 (rust, 3 lines, 35 chars) to clipboard via OSC 52"),
+        "{}",
+        app.entries[0].notice
+    );
+
+    // 4. Counterexamples: `/copy code 0`, `/copy code 99`, `/copy foo`, `/copy code abc`.
+    run_command(&mut app, "copy code 0");
+    assert!(
+        app.entries[0].notice.contains("#0 is invalid"),
+        "{}",
+        app.entries[0].notice
+    );
+    run_command(&mut app, "copy code 99");
+    assert_eq!(
+        app.entries[0].notice,
+        "Code block #99 not found (2 available)"
+    );
+    run_command(&mut app, "copy foo");
+    assert_eq!(app.entries[0].notice, "Usage: /copy [code [N] | id]");
+    run_command(&mut app, "copy code abc");
+    assert_eq!(app.entries[0].notice, "Usage: /copy [code [N] | id]");
+    assert!(captured_raw.lock().unwrap().is_empty());
+
+    // 5. `/copy id` copies full conversation_id even when session is unopened/closed.
+    run_command(&mut app, "copy id");
+    assert_eq!(
+        String::from_utf8(captured_raw.lock().unwrap().pop().unwrap()).unwrap(),
+        conv_id
+    );
+    assert!(
+        app.entries[0]
+            .notice
+            .contains(&format!("Copied session ID {}", &conv_id[..8])),
+        "{}",
+        app.entries[0].notice
+    );
+
+    // 6. Read-only child-agent view copies child agent's assistant reply, not root's.
+    server.release.add_permits(2);
+    let tars_core::application::SpawnAgentOutcome::Background(spawn) = session
+        .spawn_agent(SpawnAgentRequest {
+            caller_agent_id: conv_id.clone(),
+            caller_operation_id: None,
+            source_block_id: None,
+            name: "child-copy".into(),
+            preset_name: Some("explore".into()),
+            role_prompt: None,
+            prompt: "inspect".into(),
+            narrowing: ChildNarrowingRequest::default(),
+            interaction: AgentInteraction::Reusable,
+            execution_mode: OperationExecutionMode::Background,
+            on_parent_complete: OnParentComplete::Continue,
+            timeout_secs: None,
+            max_rounds: None,
+            coalesce_key: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected background spawn");
+    };
+    session.wait_settled().await.unwrap();
+    app.switch_viewed_agent(&spawn.agent_id);
+    assert!(app.entries[0].viewed_agent_id.is_some());
+    run_command(&mut app, "copy");
+    let child_copied = String::from_utf8(captured_raw.lock().unwrap().pop().unwrap()).unwrap();
+    assert_eq!(child_copied, "你好，terminal 👩‍💻");
+
+    // 7. Transcript fallback (unopened entry): merges multi-segment assistant turn split by media badge.
+    let mut closed_entry = Entry::new("closed-fallback-id-123456".into(), "fixture".into());
+    closed_entry.transcript = Arc::new(Transcript {
+        segments: vec![
+            TranscriptSegment::UserHeader,
+            TranscriptSegment::PlainBody("user prompt".into()),
+            TranscriptSegment::RoleHeader("● assistant".into()),
+            TranscriptSegment::MarkdownBody("Part one before media".into()),
+            TranscriptSegment::PlainBody("[media image/png shot.png (media:sha256:0000)]".into()),
+            TranscriptSegment::MarkdownBody("Part two:\n```sh\nls -la\n```".into()),
+        ],
+        ..Transcript::default()
+    });
+    app.entries.push(closed_entry);
+    app.selected = app.entries.len() - 1;
+
+    run_command(&mut app, "copy");
+    let merged = String::from_utf8(captured_raw.lock().unwrap().pop().unwrap()).unwrap();
+    assert!(merged.contains("Part one before media"), "{merged}");
+    assert!(merged.contains("Part two:"), "{merged}");
+
+    run_command(&mut app, "copy code");
+    assert_eq!(
+        String::from_utf8(captured_raw.lock().unwrap().pop().unwrap()).unwrap(),
+        "ls -la"
+    );
+
+    run_command(&mut app, "copy id");
+    assert_eq!(
+        String::from_utf8(captured_raw.lock().unwrap().pop().unwrap()).unwrap(),
+        "closed-fallback-id-123456"
+    );
+
+    // 8. Oversized payload (> 1 MiB) fails cleanly without writing clipboard.
+    app.entries[app.selected].transcript = Arc::new(Transcript {
+        segments: vec![
+            TranscriptSegment::RoleHeader("● assistant".into()),
+            TranscriptSegment::MarkdownBody("x".repeat(MAX_OSC52_RAW_BYTES + 1)),
+        ],
+        ..Transcript::default()
+    });
+    run_command(&mut app, "copy");
+    assert!(
+        app.entries[app.selected].notice.contains("1 MiB"),
+        "{}",
+        app.entries[app.selected].notice
+    );
+    assert!(captured_raw.lock().unwrap().is_empty());
+
+    // 9. No fenced code block anywhere -> clear error notice.
+    app.entries[app.selected].transcript = Arc::new(Transcript {
+        segments: vec![
+            TranscriptSegment::RoleHeader("● assistant".into()),
+            TranscriptSegment::MarkdownBody("plain text only".into()),
+        ],
+        ..Transcript::default()
+    });
+    run_command(&mut app, "copy code");
+    assert!(
+        app.entries[app.selected]
+            .notice
+            .contains("No fenced code block"),
+        "{}",
+        app.entries[app.selected].notice
+    );
+    assert!(captured_raw.lock().unwrap().is_empty());
+
+    // 10. Tab completion: `/cop` -> `/copy `, `/copy ` -> `Copy: code, id`, `/copy c` -> `/copy code`, `/copy i` -> `/copy id`.
+    app.entries[app.selected].editor = crate::input::editor();
+    app.event(Event::Paste("/cop".into()));
+    app.event(key(KeyCode::Tab));
+    assert_eq!(app.entries[app.selected].editor.lines(), &["/copy "]);
+
+    app.event(key(KeyCode::Tab));
+    assert!(
+        app.entries[app.selected].notice.contains("code")
+            && app.entries[app.selected].notice.contains("id"),
+        "{}",
+        app.entries[app.selected].notice
+    );
+
+    app.event(Event::Paste("c".into()));
+    app.event(key(KeyCode::Tab));
+    assert_eq!(app.entries[app.selected].editor.lines(), &["/copy code"]);
+
+    app.entries[app.selected].editor = crate::input::editor();
+    app.event(Event::Paste("/copy i".into()));
+    app.event(key(KeyCode::Tab));
+    assert_eq!(app.entries[app.selected].editor.lines(), &["/copy id"]);
+
+    // Tab completion inside Panel::Commands also completes `copy c` -> `copy code`.
+    app.event(key(KeyCode::F(1)));
+    for ch in "copy c".chars() {
+        app.event(key(KeyCode::Char(ch)));
+    }
+    app.event(key(KeyCode::Tab));
+    match &app.panel {
+        Some(Panel::Commands { query, .. }) => assert_eq!(query, "copy code"),
+        _ => panic!("expected commands panel"),
+    }
+}

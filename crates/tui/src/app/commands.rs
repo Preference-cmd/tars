@@ -102,6 +102,10 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "export-md",
         "Export the current conversation to a Markdown file",
     ),
+    (
+        "copy",
+        "Copy last assistant reply, fenced code block, or session ID",
+    ),
     ("close", "Save and close the current session"),
     ("discard", "Confirm discarding local unsaved materials"),
     ("quit", "Save sessions and exit TARS"),
@@ -393,7 +397,8 @@ impl App {
                     "Ctrl-Home / Ctrl-End (or Home/End when empty)   Jump to top / bottom",
                     "Ctrl-Z undo · Ctrl-Y redo", "Ctrl-W close · Ctrl-Q save and quit",
                     "Ctrl-R retry save · Ctrl-E export", "Ctrl-D discard with confirmation",
-                    "/export-md [path]   Export current conversation to a Markdown file", "",
+                    "/export-md [path]   Export current conversation to a Markdown file",
+                    "/copy [code [N] | id]   Copy last reply, fenced code block, or session ID", "",
                     "Switching views keeps work and drafts. Saved sessions restore materials, not old work records.",
                     "Compaction replaces the context with a model-written summary; older conversation loads as you scroll up.",
                     "Use /status for full configuration, save state and error details."].into_iter().map(str::to_owned).collect(),
@@ -504,6 +509,11 @@ impl App {
                 let clean = query.trim_start_matches('/').trim();
                 let arg = clean.strip_prefix("export-md").unwrap_or("").trim();
                 self.export_markdown(arg);
+            }
+            "copy" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("copy").unwrap_or("").trim();
+                self.copy_command(arg);
             }
             "close" => self.request_close(),
             "discard" => self.confirmation = Some(Confirmation::Discard),
@@ -1409,6 +1419,31 @@ impl App {
                             notice,
                         } => {
                             *query = format!("model {replacement}");
+                            *selected = 0;
+                            if let Some(msg) = notice {
+                                if let Some(entry) = self.entries.get_mut(self.selected) {
+                                    entry.notice = msg;
+                                } else {
+                                    self.notice = msg;
+                                }
+                            }
+                        }
+                        input::ModelArgCompletion::Notice(msg) => {
+                            if let Some(entry) = self.entries.get_mut(self.selected) {
+                                entry.notice = msg;
+                            } else {
+                                self.notice = msg;
+                            }
+                        }
+                        input::ModelArgCompletion::None => {}
+                    }
+                } else if let Some(arg_prefix) = input::strip_copy_command_prefix(clean) {
+                    match input::complete_copy_arg(arg_prefix) {
+                        input::ModelArgCompletion::Modified {
+                            replacement,
+                            notice,
+                        } => {
+                            *query = format!("copy {replacement}");
                             *selected = 0;
                             if let Some(msg) = notice {
                                 if let Some(entry) = self.entries.get_mut(self.selected) {

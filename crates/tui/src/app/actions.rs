@@ -1214,6 +1214,156 @@ impl App {
             },
         );
     }
+
+    pub(super) fn copy_command(&mut self, arg: &str) {
+        let tokens: Vec<&str> = arg.split_whitespace().collect();
+        let target = match tokens.as_slice() {
+            [] => CopyTarget::LastReply,
+            [sub] if sub.eq_ignore_ascii_case("id") => CopyTarget::SessionId,
+            [sub] if sub.eq_ignore_ascii_case("code") => CopyTarget::CodeBlock(None),
+            [sub, raw_idx] if sub.eq_ignore_ascii_case("code") => match raw_idx.parse::<usize>() {
+                Ok(0) => {
+                    self.set_copy_notice(
+                        "Code block #0 is invalid (1-based index required)".into(),
+                    );
+                    return;
+                }
+                Ok(n) => CopyTarget::CodeBlock(Some(n)),
+                Err(_) => {
+                    self.set_copy_notice("Usage: /copy [code [N] | id]".into());
+                    return;
+                }
+            },
+            _ => {
+                self.set_copy_notice("Usage: /copy [code [N] | id]".into());
+                return;
+            }
+        };
+
+        let Some(entry) = self.entries.get(self.selected) else {
+            self.set_copy_notice(match target {
+                CopyTarget::SessionId => "No active session to copy ID from".into(),
+                _ => "No active session".into(),
+            });
+            return;
+        };
+
+        if matches!(target, CopyTarget::SessionId) {
+            let full_id = entry.id().to_owned();
+            let short = full_id.get(..8).unwrap_or(&full_id).to_owned();
+            match self.write_clipboard(full_id.as_bytes()) {
+                Ok(()) => {
+                    self.set_copy_notice(format!(
+                        "Copied session ID {short} to clipboard via OSC 52"
+                    ));
+                }
+                Err(error) => {
+                    self.set_copy_notice(format!(
+                        "Failed to copy session ID: {}",
+                        crate::transcript::display_single_line(&error.to_string())
+                    ));
+                }
+            }
+            return;
+        }
+
+        let mut replies = if let Some(session) = entry.session.as_ref() {
+            let context = match entry.viewed_agent_id.as_deref() {
+                Some(agent_id) => session
+                    .read_agent_materials(agent_id)
+                    .ok()
+                    .map(|snap| snap.context),
+                None => session.read_materials().ok().map(|snap| snap.context),
+            };
+            context
+                .map(|ctx| collect_assistant_replies_from_blocks(ctx.blocks()))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if replies.is_empty() {
+            replies = collect_assistant_replies_from_transcript(&entry.transcript);
+        }
+
+        match target {
+            CopyTarget::SessionId => unreachable!("handled above"),
+            CopyTarget::LastReply => {
+                let Some(reply) = replies.last() else {
+                    self.set_copy_notice("No assistant reply to copy".into());
+                    return;
+                };
+                let chars = reply.chars().count();
+                match self.write_clipboard(reply.as_bytes()) {
+                    Ok(()) => {
+                        self.set_copy_notice(format!(
+                            "Copied last reply ({chars} chars) to clipboard via OSC 52"
+                        ));
+                    }
+                    Err(error) => {
+                        self.set_copy_notice(format!(
+                            "Failed to copy last reply: {}",
+                            crate::transcript::display_single_line(&error.to_string())
+                        ));
+                    }
+                }
+            }
+            CopyTarget::CodeBlock(index_opt) => {
+                let Some(blocks) = replies
+                    .iter()
+                    .rev()
+                    .map(|reply| extract_fenced_code_blocks(reply))
+                    .find(|blocks| !blocks.is_empty())
+                else {
+                    self.set_copy_notice("No fenced code block found in assistant replies".into());
+                    return;
+                };
+                let available = blocks.len();
+                let (one_based_idx, (lang, code)) = match index_opt {
+                    None => (available, &blocks[available - 1]),
+                    Some(n) if n <= available => (n, &blocks[n - 1]),
+                    Some(n) => {
+                        self.set_copy_notice(format!(
+                            "Code block #{n} not found ({available} available)"
+                        ));
+                        return;
+                    }
+                };
+                let lines = if code.is_empty() {
+                    0
+                } else {
+                    code.split('\n').count()
+                };
+                let chars = code.chars().count();
+                match self.write_clipboard(code.as_bytes()) {
+                    Ok(()) => {
+                        let lang_prefix = lang
+                            .as_deref()
+                            .map(|l| format!("{l}, "))
+                            .unwrap_or_default();
+                        self.set_copy_notice(format!(
+                            "Copied code block #{one_based_idx} ({lang_prefix}{lines} lines, {chars} chars) to clipboard via OSC 52"
+                        ));
+                    }
+                    Err(error) => {
+                        self.set_copy_notice(format!(
+                            "Failed to copy code block: {}",
+                            crate::transcript::display_single_line(&error.to_string())
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn set_copy_notice(&mut self, message: String) {
+        if let Some(entry) = self.entries.get_mut(self.selected) {
+            entry.notice = message;
+        } else {
+            self.notice = message;
+        }
+        self.dirty = true;
+    }
+
     pub(super) fn switch_viewed_agent(&mut self, target_agent_id: &str) {
         let Some(entry) = self.entries.get_mut(self.selected) else {
             return;
@@ -2211,6 +2361,172 @@ fn sanitize_export_filename_segment(raw: &str) -> String {
     } else {
         slug
     }
+}
+
+enum CopyTarget {
+    LastReply,
+    CodeBlock(Option<usize>),
+    SessionId,
+}
+
+fn collect_assistant_replies_from_blocks(blocks: &[causa::kernel::ContextBlock]) -> Vec<String> {
+    let mut replies = Vec::new();
+    for block in blocks {
+        if let Some(source) = block.meta().source.as_deref()
+            && (source == tars_core::compact::SUMMARY_SOURCE
+                || tars_core::prelude::is_any_prelude_source(source)
+                || source == tars_core::skills::SKILL_SOURCE
+                || source == tars_core::events::TASK_NOTIFICATION_SOURCE)
+        {
+            continue;
+        }
+        let causa::kernel::BlockContent::Message {
+            role: causa::kernel::Role::Assistant,
+            parts,
+        } = block.content()
+        else {
+            continue;
+        };
+        let mut buf = String::new();
+        let mut seen_media = false;
+        for part in parts {
+            match part {
+                causa::kernel::ContentPart::Text(text) => {
+                    if seen_media
+                        && !buf.is_empty()
+                        && !buf.ends_with('\n')
+                        && !text.0.starts_with('\n')
+                    {
+                        buf.push('\n');
+                    }
+                    seen_media = false;
+                    buf.push_str(&text.0);
+                }
+                causa::kernel::ContentPart::Media(_) => {
+                    seen_media = true;
+                }
+                causa::kernel::ContentPart::Sealed(_) => {}
+            }
+        }
+        if !buf.trim().is_empty() {
+            replies.push(buf);
+        }
+    }
+    replies
+}
+
+fn is_assistant_role_header(header: &str) -> bool {
+    let clean = header.trim().trim_start_matches('●').trim();
+    if clean.eq_ignore_ascii_case("assistant") || clean.eq_ignore_ascii_case("model") {
+        return true;
+    }
+    if clean.is_empty()
+        || clean.eq_ignore_ascii_case("system")
+        || clean.eq_ignore_ascii_case("user")
+        || clean.starts_with("Context summary")
+        || clean.starts_with("Session prelude")
+        || clean.starts_with("Prelude update")
+        || clean.starts_with("Skill")
+        || clean.starts_with("Task notification")
+    {
+        return false;
+    }
+    true
+}
+
+fn collect_assistant_replies_from_transcript(
+    transcript: &crate::transcript::Transcript,
+) -> Vec<String> {
+    use crate::transcript::TranscriptSegment;
+    let segments = &transcript.segments;
+    let mut replies = Vec::new();
+    let mut idx = 0;
+    while idx < segments.len() {
+        let TranscriptSegment::RoleHeader(header) = &segments[idx] else {
+            idx += 1;
+            continue;
+        };
+        let clean_empty = header.trim().trim_start_matches('●').trim().is_empty();
+        let header_is_assistant = is_assistant_role_header(header);
+        idx += 1;
+        let mut buf = String::new();
+        let mut saw_markdown = false;
+        while idx < segments.len() {
+            match &segments[idx] {
+                TranscriptSegment::MarkdownBody(body) => {
+                    saw_markdown = true;
+                    if !buf.is_empty() && !buf.ends_with('\n') && !body.starts_with('\n') {
+                        buf.push('\n');
+                    }
+                    buf.push_str(body);
+                    idx += 1;
+                }
+                TranscriptSegment::PlainBody(body) => {
+                    if !buf.is_empty() && !buf.ends_with('\n') && !body.starts_with('\n') {
+                        buf.push('\n');
+                    }
+                    buf.push_str(body);
+                    idx += 1;
+                }
+                _ => break,
+            }
+        }
+        if (header_is_assistant || (clean_empty && saw_markdown)) && !buf.trim().is_empty() {
+            replies.push(buf);
+        }
+    }
+    replies
+}
+
+fn extract_fenced_code_blocks(markdown: &str) -> Vec<(Option<String>, String)> {
+    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let parser = Parser::new_ext(markdown, options);
+    let mut blocks = Vec::new();
+    let mut active: Option<(Option<String>, String)> = None;
+    for event in parser {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
+                let lang = info
+                    .split_whitespace()
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .map(crate::transcript::display_single_line);
+                active = Some((lang, String::new()));
+            }
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Indented)) => {
+                active = None;
+            }
+            Event::Text(text) => {
+                if let Some((_, buf)) = &mut active {
+                    buf.push_str(&text);
+                }
+            }
+            Event::Html(html) => {
+                if let Some((_, buf)) = &mut active {
+                    buf.push_str(&html);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some((_, buf)) = &mut active {
+                    buf.push('\n');
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some((lang, raw)) = active.take() {
+                    let code = raw
+                        .strip_suffix("\r\n")
+                        .or_else(|| raw.strip_suffix('\n'))
+                        .unwrap_or(&raw)
+                        .to_owned();
+                    blocks.push((lang, code));
+                }
+            }
+            _ => {}
+        }
+    }
+    blocks
 }
 
 #[cfg(test)]
