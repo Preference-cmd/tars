@@ -62,10 +62,16 @@ The examples below assume `tars` is on your `PATH` (use `./target/release/tars` 
 
 ### Interactive TUI
 
-Launch `tars` directly in an interactive terminal (zero-config default store under `~/.tars/data` or `$TARS_HOME/data`, with a guided first-run setup panel when unconfigured; press `Esc` to skip or use `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/queue`, `/image`, `/rename`, `/fork`, `/edit`, `/mode`, `/compact`, `/export-md`, `/help`, or paste/drag-and-drop local image paths to attach screenshots):
+Launch `tars` directly in an interactive terminal: when a default profile is configured (and `--no-config` is not passed), `tars` automatically creates and opens a ready session bound to the workspace (`--workspace DIR` or the current working directory) and sandbox-appropriate tools; when unconfigured with an empty store, it opens the guided first-run setup panel (`Esc` skips). Supports `-c`/`--continue` (most recently updated session), `-r`/`--resume [SELECTOR]` (session picker or ID/prefix match), slash commands (`/clear`, `/resume`, `/model`, `/copy`, `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/queue`, `/image`, `/rename`, `/fork`, `/edit`, `/mode`, `/compact`, `/export-md`, `/help`), `Ctrl-O` to expand full tool results/diffs, and paste/drag-and-drop local image attachments:
 
 ```sh
+# Launch directly (auto-starts a workspace-bound session when configured, or onboarding when unconfigured):
 tars
+tars --workspace /path/to/repo
+# Continue the most recent session, open the session picker, or resume by ID/prefix:
+tars -c
+tars -r
+tars -r "$SHORT_PREFIX"
 # Or with an explicit config file, or isolated --no-config --store:
 tars --config /path/to/config.toml
 tars --no-config --store ./tars-data
