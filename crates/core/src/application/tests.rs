@@ -1,6 +1,7 @@
 mod claims;
 mod command_status;
 mod compaction;
+mod folder_trust;
 mod lifecycle;
 mod media;
 mod multi_agent;

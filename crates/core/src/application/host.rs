@@ -6,7 +6,7 @@ use crate::session::{ConversationId, WorkRef};
 use crate::store::SessionStore;
 use causa::kernel::ToolBatch;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 
@@ -681,6 +681,92 @@ impl SessionHost {
         super::saving::io_semaphore(&self.inner.io, move || {
             store
                 .delete_session(&raw_id)
+                .map_err(map_workflow_store_error)
+        })
+        .await
+    }
+
+    /// Return whether `workspace_root` has been trusted at the folder level.
+    ///
+    /// Returns `Ok(false)` when this host has no persistent store (`store = None`),
+    /// when `<store_root>/tars.db` does not exist yet, when the database is still on
+    /// schema v1, or when `workspace_root` does not exist on disk.
+    pub async fn is_workspace_folder_trusted(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<bool, ApplicationError> {
+        let Some(store) = self.inner.store.clone() else {
+            return Ok(false);
+        };
+        let path = workspace_root.to_path_buf();
+        super::saving::io_semaphore(&self.inner.io, move || {
+            store
+                .is_workspace_folder_trusted(&path)
+                .map_err(map_workflow_store_error)
+        })
+        .await
+    }
+
+    /// Persist folder-level trust for `workspace_root`.
+    ///
+    /// Canonicalizes `workspace_root`, verifies it is a directory, and stores its
+    /// hash and canonical path in `trusted_workspaces`. Does not trust `.tars/`
+    /// rules or agent definitions. Fails with [`ApplicationError::StoreUnavailable`]
+    /// when this host has no persistent store.
+    pub async fn trust_workspace_folder(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<(), ApplicationError> {
+        let store = self
+            .inner
+            .store
+            .clone()
+            .ok_or(ApplicationError::StoreUnavailable)?;
+        let path = workspace_root.to_path_buf();
+        super::saving::io_semaphore(&self.inner.io, move || {
+            store
+                .trust_workspace_folder(&path)
+                .map_err(map_workflow_store_error)
+        })
+        .await
+    }
+
+    /// List all persisted trusted workspace folders ordered by most recently trusted first.
+    ///
+    /// Returns an empty list when this host has no persistent store (`store = None`),
+    /// when `<store_root>/tars.db` does not exist yet, or when the database is on schema v1.
+    pub async fn list_trusted_workspace_folders(
+        &self,
+    ) -> Result<Vec<super::TrustedWorkspaceFolder>, ApplicationError> {
+        let Some(store) = self.inner.store.clone() else {
+            return Ok(Vec::new());
+        };
+        super::saving::io_semaphore(&self.inner.io, move || {
+            store
+                .list_trusted_workspace_folders()
+                .map_err(map_workflow_store_error)
+        })
+        .await
+    }
+
+    /// Revoke folder-level trust for `workspace_root`, returning whether a record was removed.
+    ///
+    /// Never creates `<store_root>/tars.db` or upgrades a schema v1 database, and never
+    /// touches `sessions` or `workspace_trust`. Fails with
+    /// [`ApplicationError::StoreUnavailable`] when this host has no persistent store.
+    pub async fn revoke_workspace_folder_trust(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<bool, ApplicationError> {
+        let store = self
+            .inner
+            .store
+            .clone()
+            .ok_or(ApplicationError::StoreUnavailable)?;
+        let path = workspace_root.to_path_buf();
+        super::saving::io_semaphore(&self.inner.io, move || {
+            store
+                .revoke_workspace_folder_trust(&path)
                 .map_err(map_workflow_store_error)
         })
         .await

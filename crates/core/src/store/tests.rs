@@ -852,7 +852,7 @@ fn title_derivation_skips_prelude_and_compaction_blocks() {
 }
 
 #[test]
-fn sqlite_schema_has_seven_tables_wal_pragmas_and_rejects_future_user_version() {
+fn sqlite_schema_has_eight_tables_wal_pragmas_and_rejects_future_user_version() {
     let folder = tempfile::tempdir().unwrap();
     let store = SessionStore::new(folder.path().into());
 
@@ -863,7 +863,7 @@ fn sqlite_schema_has_seven_tables_wal_pragmas_and_rejects_future_user_version() 
     assert!(!store.db_path().exists());
     assert!(!store.locks_dir().exists());
 
-    // Acquiring a writer initializes tars.db with all 7 tables and WAL PRAGMAs.
+    // Acquiring a writer initializes tars.db with all 8 tables and WAL PRAGMAs.
     let writer = store.acquire_writer(&fresh_id).unwrap();
     assert!(store.db_path().exists());
     let conn = schema::open_read_write(store.db_path()).unwrap();
@@ -879,7 +879,7 @@ fn sqlite_schema_has_seven_tables_wal_pragmas_and_rejects_future_user_version() 
     let user_version: u32 = conn
         .query_row("PRAGMA user_version;", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 1);
+    assert_eq!(user_version, 2);
 
     let tables: Vec<String> = {
         let mut stmt = conn
@@ -903,11 +903,12 @@ fn sqlite_schema_has_seven_tables_wal_pragmas_and_rejects_future_user_version() 
             "history_records",
             "operations",
             "sessions",
+            "trusted_workspaces",
             "workspace_trust",
         ]
     );
 
-    // Future schema version (> 1) must fail closed on both read and write opens.
+    // Future schema version (> 2) must fail closed on both read and write opens.
     drop(writer);
     conn.execute_batch("PRAGMA user_version = 99;").unwrap();
     drop(conn);
@@ -916,21 +917,21 @@ fn sqlite_schema_has_seven_tables_wal_pragmas_and_rejects_future_user_version() 
         store.list(),
         Err(StoreError::UnsupportedSchemaVersion {
             found: 99,
-            supported: 1
+            supported: 2
         })
     ));
     assert!(matches!(
         store.read_saved(&fresh_id),
         Err(StoreError::UnsupportedSchemaVersion {
             found: 99,
-            supported: 1
+            supported: 2
         })
     ));
     assert!(matches!(
         store.acquire_writer(&fresh_id),
         Err(StoreError::UnsupportedSchemaVersion {
             found: 99,
-            supported: 1
+            supported: 2
         })
     ));
 }
@@ -958,7 +959,7 @@ fn wal_concurrent_reads_succeed_while_writer_holds_os_lock_and_commits() {
 fn strict_history_store_enforces_foreign_key_against_missing_session() {
     let folder = tempfile::tempdir().unwrap();
     let store = SessionStore::new(folder.path().into());
-    // Ensure database exists with schema v1, but no session/agent rows.
+    // Ensure database exists with schema v2, but no session/agent rows.
     let _ = schema::open_read_write(store.db_path()).unwrap();
 
     let missing_id = Uuid::now_v7().to_string();
@@ -2044,4 +2045,514 @@ fn wf03_store_fork_session_isolates_history_artifacts_and_downgrades_permissions
         forked_full.definition.initial_permission_mode(),
         PermissionMode::FullAccess
     );
+}
+
+fn sha256_hex_for_test(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+#[test]
+fn schema_v1_migrates_in_place_to_v2_preserving_sessions_and_workspace_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("store"));
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let canon_ws = fs::canonicalize(&workspace).unwrap();
+
+    // Seed a schema v1 database without trusted_workspaces.
+    fs::create_dir_all(store.root()).unwrap();
+    let session_id = Uuid::now_v7().to_string();
+    let record = op(&session_id, None, "legacy v1 session").record;
+    {
+        let conn = rusqlite::Connection::open(store.db_path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                session_id        TEXT PRIMARY KEY,
+                revision          INTEGER NOT NULL CHECK (revision >= 0),
+                last_commit_id    TEXT NOT NULL,
+                policy_json       TEXT NOT NULL,
+                entry_agent_id    TEXT NOT NULL,
+                title             TEXT,
+                permission_mode   TEXT,
+                auto_compact      INTEGER,
+                compact_threshold INTEGER,
+                usage_json        TEXT,
+                created_at_ms     INTEGER NOT NULL,
+                updated_at_ms     INTEGER NOT NULL
+            );
+            CREATE TABLE agents (
+                session_id         TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                agent_id           TEXT NOT NULL,
+                name               TEXT NOT NULL,
+                preset_name        TEXT,
+                interaction        TEXT NOT NULL CHECK (interaction IN ('single_work', 'reusable')),
+                definition_json    TEXT NOT NULL,
+                material_revision  INTEGER NOT NULL CHECK (material_revision >= 0),
+                context_json       TEXT NOT NULL,
+                history_index_json TEXT NOT NULL DEFAULT '[]',
+                usage_json         TEXT,
+                created_at_ms      INTEGER NOT NULL,
+                updated_at_ms      INTEGER NOT NULL,
+                PRIMARY KEY (session_id, agent_id)
+            );
+            CREATE TABLE operations (
+                operation_id        TEXT PRIMARY KEY,
+                session_id          TEXT NOT NULL,
+                target_agent_id     TEXT NOT NULL,
+                parent_operation_id TEXT REFERENCES operations(operation_id),
+                parent_agent_id     TEXT,
+                source_block_id     TEXT,
+                dedup_fingerprint   TEXT,
+                execution_mode      TEXT NOT NULL CHECK (execution_mode IN ('sync', 'background')),
+                on_parent_complete  TEXT NOT NULL CHECK (on_parent_complete IN ('continue', 'cancel')),
+                depth               INTEGER NOT NULL CHECK (depth >= 0),
+                status              TEXT NOT NULL CHECK (status IN (
+                                        'creating', 'running', 'completed', 'cancelled',
+                                        'failed', 'deadline', 'faulted', 'interrupted'
+                                    )),
+                input_json          TEXT NOT NULL,
+                outcome_json        TEXT,
+                result_text         TEXT,
+                result_bytes        INTEGER,
+                created_at_ms       INTEGER NOT NULL,
+                finished_at_ms      INTEGER,
+                FOREIGN KEY (session_id, target_agent_id) REFERENCES agents(session_id, agent_id) ON DELETE CASCADE
+            );
+            CREATE TABLE agent_events (
+                event_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id      TEXT NOT NULL,
+                target_agent_id TEXT NOT NULL,
+                priority        TEXT NOT NULL CHECK (priority IN ('urgent', 'normal', 'low')),
+                source_kind     TEXT NOT NULL CHECK (source_kind IN (
+                                    'agent_operation', 'background_command', 'timer', 'user_steer'
+                                )),
+                source_id       TEXT NOT NULL,
+                coalesce_key    TEXT,
+                wake_policy     TEXT NOT NULL CHECK (wake_policy IN (
+                                    'wake_if_idle', 'deliver_on_next_turn', 'suppress_wake'
+                                )),
+                payload_json    TEXT NOT NULL,
+                state           TEXT NOT NULL CHECK (state IN ('pending', 'claimed', 'delivered', 'dropped')),
+                claimed_op_id   TEXT,
+                created_at_ms   INTEGER NOT NULL,
+                delivered_at_ms INTEGER,
+                FOREIGN KEY (session_id, target_agent_id) REFERENCES agents(session_id, agent_id) ON DELETE CASCADE
+            );
+            CREATE TABLE history_records (
+                session_id    TEXT NOT NULL,
+                agent_id      TEXT NOT NULL,
+                record_id     TEXT NOT NULL,
+                seq           INTEGER NOT NULL,
+                kind          TEXT NOT NULL,
+                summary_json  TEXT NOT NULL,
+                document_json TEXT NOT NULL,
+                PRIMARY KEY (session_id, agent_id, record_id),
+                FOREIGN KEY (session_id, agent_id) REFERENCES agents(session_id, agent_id) ON DELETE CASCADE
+            );
+            CREATE TABLE artifacts (
+                session_id  TEXT NOT NULL,
+                agent_id    TEXT NOT NULL,
+                artifact_id TEXT NOT NULL,
+                content     BLOB NOT NULL,
+                PRIMARY KEY (session_id, agent_id, artifact_id),
+                FOREIGN KEY (session_id, agent_id) REFERENCES agents(session_id, agent_id) ON DELETE CASCADE
+            );
+            CREATE TABLE workspace_trust (
+                workspace_hash TEXT NOT NULL,
+                kind           TEXT NOT NULL CHECK (kind IN ('permissions_toml', 'workspace_agents')),
+                workspace_root TEXT NOT NULL,
+                content_sha256 TEXT NOT NULL,
+                content        TEXT NOT NULL,
+                trusted_at_ms  INTEGER NOT NULL,
+                PRIMARY KEY (workspace_hash, kind)
+            );
+            PRAGMA user_version = 1;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (
+                session_id, revision, last_commit_id, policy_json, entry_agent_id,
+                title, permission_mode, auto_compact, compact_threshold, usage_json,
+                created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, 1, 70, NULL, ?6, ?7)",
+            params![
+                &session_id,
+                1_i64,
+                &record.last_commit_id,
+                r#"{"format":"tars-session-v2.4"}"#,
+                &session_id,
+                1_000_i64,
+                1_000_i64,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agents (
+                session_id, agent_id, name, preset_name, interaction,
+                definition_json, material_revision, context_json, history_index_json,
+                usage_json, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, 'main', NULL, 'reusable', ?3, 1, ?4, '[]', NULL, ?5, ?6)",
+            params![
+                &session_id,
+                &session_id,
+                serde_json::to_string(&record.definition).unwrap(),
+                serde_json::to_string(&record.context).unwrap(),
+                1_000_i64,
+                1_000_i64,
+            ],
+        )
+        .unwrap();
+        let rules = "version = 1\n";
+        conn.execute(
+            "INSERT INTO workspace_trust (
+                workspace_hash, kind, workspace_root, content_sha256, content, trusted_at_ms
+             ) VALUES (?1, 'permissions_toml', ?2, ?3, ?4, 1000)",
+            params![
+                sha256_hex_for_test(canon_ws.as_os_str().as_encoded_bytes()),
+                canon_ws.to_str().unwrap(),
+                sha256_hex_for_test(rules.as_bytes()),
+                rules,
+            ],
+        )
+        .unwrap();
+    }
+
+    // Read-only operations accept v1 without upgrading or failing on missing trusted_workspaces.
+    assert!(!store.is_workspace_folder_trusted(&workspace).unwrap());
+    assert!(store.list_trusted_workspace_folders().unwrap().is_empty());
+    assert!(!store.revoke_workspace_folder_trust(&workspace).unwrap());
+    {
+        let ro_conn = schema::open_read_only(store.db_path()).unwrap().unwrap();
+        assert_eq!(schema::read_user_version(&ro_conn).unwrap(), 1);
+        let has_table: i64 = ro_conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'trusted_workspaces'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_table, 0);
+    }
+
+    // First read-write open migrates v1 -> v2 idempotently while preserving existing data.
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    assert_eq!(schema::read_user_version(&conn).unwrap(), 2);
+    drop(conn);
+    let conn2 = schema::open_read_write(store.db_path()).unwrap();
+    assert_eq!(schema::read_user_version(&conn2).unwrap(), 2);
+    drop(conn2);
+
+    assert!(store.read_saved(&session_id).unwrap().is_some());
+    assert_eq!(
+        store
+            .read_workspace_rules_trust(&workspace)
+            .unwrap()
+            .as_deref(),
+        Some("version = 1\n")
+    );
+
+    // Folder trust now works on the migrated v2 store.
+    store.trust_workspace_folder(&workspace).unwrap();
+    assert!(store.is_workspace_folder_trusted(&workspace).unwrap());
+}
+
+#[test]
+fn folder_trust_missing_db_and_version_bounds_fail_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("store"));
+    let workspace = dir.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    // Missing tars.db: read/list/revoke must never create tars.db.
+    assert!(!store.is_workspace_folder_trusted(&workspace).unwrap());
+    assert!(store.list_trusted_workspace_folders().unwrap().is_empty());
+    assert!(!store.revoke_workspace_folder_trust(&workspace).unwrap());
+    assert!(!store.db_path().exists());
+
+    // Initialize v2 DB, then bump user_version to 3 (> supported 2).
+    store.trust_workspace_folder(&workspace).unwrap();
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    conn.execute_batch("PRAGMA user_version = 3;").unwrap();
+    drop(conn);
+
+    assert!(matches!(
+        schema::open_read_only(store.db_path()),
+        Err(StoreError::UnsupportedSchemaVersion {
+            found: 3,
+            supported: 2
+        })
+    ));
+    assert!(matches!(
+        schema::open_read_write(store.db_path()),
+        Err(StoreError::UnsupportedSchemaVersion {
+            found: 3,
+            supported: 2
+        })
+    ));
+    assert!(matches!(
+        store.is_workspace_folder_trusted(&workspace),
+        Err(StoreError::UnsupportedSchemaVersion {
+            found: 3,
+            supported: 2
+        })
+    ));
+    assert!(matches!(
+        store.trust_workspace_folder(&workspace),
+        Err(StoreError::UnsupportedSchemaVersion {
+            found: 3,
+            supported: 2
+        })
+    ));
+    assert!(matches!(
+        store.list_trusted_workspace_folders(),
+        Err(StoreError::UnsupportedSchemaVersion {
+            found: 3,
+            supported: 2
+        })
+    ));
+    assert!(matches!(
+        store.revoke_workspace_folder_trust(&workspace),
+        Err(StoreError::UnsupportedSchemaVersion {
+            found: 3,
+            supported: 2
+        })
+    ));
+}
+
+#[test]
+fn folder_trust_validation_tamper_resistance_and_isolation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("store"));
+    let ws_a = dir.path().join("ws-a");
+    let ws_b = dir.path().join("ws-b");
+    let missing_dir = dir.path().join("missing-dir");
+    let file_path = dir.path().join("not-a-dir.txt");
+    fs::create_dir_all(&ws_a).unwrap();
+    fs::create_dir_all(&ws_b).unwrap();
+    fs::write(&file_path, "hello").unwrap();
+
+    // Non-existent dir returns Ok(false) without creating tars.db.
+    assert!(!store.is_workspace_folder_trusted(&missing_dir).unwrap());
+    assert!(!store.db_path().exists());
+
+    // Non-directory trust request is rejected.
+    let err = store.trust_workspace_folder(&file_path).unwrap_err();
+    assert!(
+        matches!(err, StoreError::Io(_)),
+        "unexpected error: {err:?}"
+    );
+
+    // Trust ws_a: workspace_trust remains untouched and SessionStore::list() remains empty.
+    store.trust_workspace_folder(&ws_a).unwrap();
+    assert!(store.is_workspace_folder_trusted(&ws_a).unwrap());
+    assert!(!store.is_workspace_folder_trusted(&ws_b).unwrap());
+    assert_eq!(store.read_workspace_rules_trust(&ws_a).unwrap(), None);
+    assert_eq!(store.read_workspace_agents_trust(&ws_a).unwrap(), None);
+    assert!(store.list().unwrap().is_empty());
+
+    // Tampered workspace_root in trusted_workspaces must fail closed.
+    let canon_a = fs::canonicalize(&ws_a).unwrap();
+    let canon_b = fs::canonicalize(&ws_b).unwrap();
+    let hash_a = sha256_hex_for_test(canon_a.as_os_str().as_encoded_bytes());
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    conn.execute(
+        "UPDATE trusted_workspaces SET workspace_root = ?1 WHERE workspace_hash = ?2",
+        params![canon_b.to_str().unwrap(), hash_a],
+    )
+    .unwrap();
+    drop(conn);
+    assert!(!store.is_workspace_folder_trusted(&ws_a).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn folder_trust_canonicalizes_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("store"));
+    let real_ws = dir.path().join("real-ws");
+    let link_ws = dir.path().join("link-ws");
+    fs::create_dir_all(&real_ws).unwrap();
+    std::os::unix::fs::symlink(&real_ws, &link_ws).unwrap();
+
+    store.trust_workspace_folder(&link_ws).unwrap();
+    assert!(store.is_workspace_folder_trusted(&real_ws).unwrap());
+    assert!(store.is_workspace_folder_trusted(&link_ws).unwrap());
+    assert_eq!(store.list_trusted_workspace_folders().unwrap().len(), 1);
+}
+
+#[test]
+fn folder_trust_list_ordering_and_delete_session_isolation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("store"));
+    let ws_alpha = dir.path().join("alpha");
+    let ws_beta = dir.path().join("beta");
+    let ws_gamma = dir.path().join("gamma");
+    fs::create_dir_all(&ws_alpha).unwrap();
+    fs::create_dir_all(&ws_beta).unwrap();
+    fs::create_dir_all(&ws_gamma).unwrap();
+
+    store.trust_workspace_folder(&ws_alpha).unwrap();
+    store.trust_workspace_folder(&ws_beta).unwrap();
+    store.trust_workspace_folder(&ws_gamma).unwrap();
+
+    let canon_alpha = fs::canonicalize(&ws_alpha).unwrap();
+    let canon_beta = fs::canonicalize(&ws_beta).unwrap();
+    let canon_gamma = fs::canonicalize(&ws_gamma).unwrap();
+
+    // Set explicit timestamps: gamma=2000 (newest), alpha=1000 & beta=1000 (tie broken ASC).
+    let conn = schema::open_read_write(store.db_path()).unwrap();
+    for (canon, ts) in [
+        (&canon_alpha, 1000_i64),
+        (&canon_beta, 1000_i64),
+        (&canon_gamma, 2000_i64),
+    ] {
+        let hash = sha256_hex_for_test(canon.as_os_str().as_encoded_bytes());
+        conn.execute(
+            "UPDATE trusted_workspaces SET trusted_at_ms = ?1 WHERE workspace_hash = ?2",
+            params![ts, hash],
+        )
+        .unwrap();
+    }
+    drop(conn);
+
+    let listed = store.list_trusted_workspace_folders().unwrap();
+    assert_eq!(
+        listed,
+        vec![
+            TrustedWorkspaceFolder {
+                workspace_root: canon_gamma.clone(),
+                trusted_at_ms: 2000,
+            },
+            TrustedWorkspaceFolder {
+                workspace_root: canon_alpha.clone(),
+                trusted_at_ms: 1000,
+            },
+            TrustedWorkspaceFolder {
+                workspace_root: canon_beta.clone(),
+                trusted_at_ms: 1000,
+            },
+        ]
+    );
+
+    // Session deletion must preserve trusted_workspaces and workspace_trust.
+    let sid = Uuid::now_v7().to_string();
+    let writer = store.acquire_writer(&sid).unwrap();
+    writer.commit(&op(&sid, None, "session")).unwrap();
+    drop(writer);
+    store
+        .write_workspace_rules_trust(&ws_alpha, "version = 1\n")
+        .unwrap();
+
+    store.delete_session(&sid).unwrap();
+    assert!(store.is_workspace_folder_trusted(&ws_alpha).unwrap());
+    assert!(store.is_workspace_folder_trusted(&ws_beta).unwrap());
+    assert!(store.is_workspace_folder_trusted(&ws_gamma).unwrap());
+    assert_eq!(
+        store
+            .read_workspace_rules_trust(&ws_alpha)
+            .unwrap()
+            .as_deref(),
+        Some("version = 1\n")
+    );
+}
+
+#[test]
+fn revoke_workspace_folder_trust_handles_existing_deleted_and_isolation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("store"));
+    let ws = dir.path().join("ws");
+    let deleted_ws = dir.path().join("nested").join("deleted-ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::create_dir_all(&deleted_ws).unwrap();
+
+    // Seed session + workspace_trust + folder trust.
+    let sid = Uuid::now_v7().to_string();
+    let writer = store.acquire_writer(&sid).unwrap();
+    writer.commit(&op(&sid, None, "keep me")).unwrap();
+    drop(writer);
+    store
+        .write_workspace_rules_trust(&ws, "version = 1\n")
+        .unwrap();
+    store.trust_workspace_folder(&ws).unwrap();
+    store.trust_workspace_folder(&deleted_ws).unwrap();
+
+    // Revoke existing folder.
+    assert!(store.revoke_workspace_folder_trust(&ws).unwrap());
+    assert!(!store.is_workspace_folder_trusted(&ws).unwrap());
+    assert!(!store.revoke_workspace_folder_trust(&ws).unwrap());
+
+    // Delete directory, then revoke via path containing `.`/`..` and missing leaf.
+    fs::remove_dir_all(&deleted_ws).unwrap();
+    let parent_dotdot_path = dir
+        .path()
+        .join("nested")
+        .join("nonexistent-sub")
+        .join("..")
+        .join("deleted-ws");
+    assert!(
+        store
+            .revoke_workspace_folder_trust(&parent_dotdot_path)
+            .unwrap()
+    );
+    assert!(store.list_trusted_workspace_folders().unwrap().is_empty());
+
+    // Verify sessions and workspace_trust were not touched.
+    assert!(store.read_saved(&sid).unwrap().is_some());
+    assert_eq!(
+        store.read_workspace_rules_trust(&ws).unwrap().as_deref(),
+        Some("version = 1\n")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn revoke_workspace_folder_trust_handles_deleted_dir_via_relative_and_symlinked_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::new(dir.path().join("store"));
+    let real_parent = dir.path().join("real-parent");
+    let link_parent = dir.path().join("link-parent");
+    fs::create_dir_all(&real_parent).unwrap();
+    std::os::unix::fs::symlink(&real_parent, &link_parent).unwrap();
+
+    // 1. Deleted directory revoked through a symlinked parent.
+    let target_a = real_parent.join("target-a");
+    fs::create_dir_all(&target_a).unwrap();
+    store.trust_workspace_folder(&target_a).unwrap();
+    fs::remove_dir_all(&target_a).unwrap();
+    assert!(
+        store
+            .revoke_workspace_folder_trust(&link_parent.join("target-a"))
+            .unwrap()
+    );
+    assert!(store.list_trusted_workspace_folders().unwrap().is_empty());
+
+    // 2. Deleted directory revoked via a relative path without mutating process cwd.
+    let target_b = real_parent.join("target-b");
+    fs::create_dir_all(&target_b).unwrap();
+    store.trust_workspace_folder(&target_b).unwrap();
+    fs::remove_dir_all(&target_b).unwrap();
+
+    let cwd = std::env::current_dir().unwrap();
+    let abs_link_target = std::path::absolute(link_parent.join("target-b")).unwrap();
+    let mut rel_path = std::path::PathBuf::new();
+    for component in cwd.components() {
+        if matches!(component, std::path::Component::Normal(_)) {
+            rel_path.push("..");
+        }
+    }
+    for component in abs_link_target.components() {
+        if let std::path::Component::Normal(part) = component {
+            rel_path.push(part);
+        }
+    }
+    assert!(!rel_path.is_absolute());
+    assert!(store.revoke_workspace_folder_trust(&rel_path).unwrap());
+    assert!(store.list_trusted_workspace_folders().unwrap().is_empty());
 }

@@ -27,6 +27,7 @@ pub(crate) use record::{PreparedCommit, RecordMetadata, SavedSessionRecord, Wire
 pub(crate) use sqlite::{
     CommitResolution, MAX_RECORD_BYTES, PendingWriterKind, SessionStore, Writer,
 };
+pub use trust::TrustedWorkspaceFolder;
 
 #[cfg(test)]
 pub(crate) use sqlite::{FaultAction, FaultHook};

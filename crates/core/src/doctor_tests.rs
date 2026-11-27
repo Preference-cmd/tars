@@ -278,7 +278,7 @@ fn storage_check_is_read_only_verifies_sqlite_and_detects_legacy_sessions() {
         .find(|item| item.category == "storage" && item.label == "SQLite store")
         .unwrap();
     assert_eq!(sqlite_item.status, DoctorStatus::Ok);
-    assert!(sqlite_item.detail.contains("schema v1"));
+    assert!(sqlite_item.detail.contains("schema v2"));
 
     let legacy_item = populated_report
         .items

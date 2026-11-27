@@ -55,7 +55,7 @@ pub(crate) struct StoreMetrics {
 /// Persistent SQLite v3 store rooted at `<store_root>`.
 ///
 /// Layout:
-/// - `<store_root>/tars.db` (WAL database with 7-table schema v1)
+/// - `<store_root>/tars.db` (WAL database with 8-table schema v2)
 /// - `<store_root>/locks/<session_id>.lock` (OS advisory write lock per session)
 #[derive(Clone)]
 pub(crate) struct SessionStore {
@@ -318,7 +318,7 @@ impl SessionStore {
     ///
     /// Unbinds `operations.parent_operation_id` before deleting the `sessions` row
     /// so nested child operations (`depth >= 2`) cascade cleanly without foreign-key
-    /// failures. Never touches `workspace_trust`. Best-effort removes `<locks_dir>/<id>.lock`
+    /// failures. Never touches `workspace_trust` or `trusted_workspaces`. Best-effort removes `<locks_dir>/<id>.lock`
     /// after releasing the OS lock.
     pub(crate) fn delete_session(&self, id: &str) -> Result<(), StoreError> {
         canonical_uuid(id)?;

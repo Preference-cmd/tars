@@ -115,7 +115,7 @@ async fn mm01_submit_with_images_admission_and_rollback() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn mm02_sqlite_persistence_dedup_discard_reopen_and_tamper_fail_closed() {
-    assert_eq!(crate::store::schema::SCHEMA_VERSION, 1);
+    assert_eq!(crate::store::schema::SCHEMA_VERSION, 2);
 
     let root = tempfile::tempdir().unwrap();
     let host = SessionHost::new(Some(root.path().into()));

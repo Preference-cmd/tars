@@ -6,7 +6,14 @@ use std::fs;
 use std::path::Path;
 
 /// Supported `PRAGMA user_version` of `<store_root>/tars.db`.
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
+
+const TRUSTED_WORKSPACES_DDL: &str = "
+CREATE TABLE IF NOT EXISTS trusted_workspaces (
+    workspace_hash TEXT PRIMARY KEY,
+    workspace_root TEXT NOT NULL,
+    trusted_at_ms  INTEGER NOT NULL
+);";
 
 const SCHEMA_DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS sessions (
@@ -129,6 +136,12 @@ CREATE TABLE IF NOT EXISTS workspace_trust (
     trusted_at_ms  INTEGER NOT NULL,
     PRIMARY KEY (workspace_hash, kind)
 );
+
+CREATE TABLE IF NOT EXISTS trusted_workspaces (
+    workspace_hash TEXT PRIMARY KEY,
+    workspace_root TEXT NOT NULL,
+    trusted_at_ms  INTEGER NOT NULL
+);
 "#;
 
 /// Rolls back an active `BEGIN IMMEDIATE` transaction if dropped before [`Self::commit`].
@@ -198,7 +211,7 @@ pub(crate) fn read_user_version(conn: &Connection) -> Result<u32, StoreError> {
     Ok(version)
 }
 
-/// Open `<store_root>/tars.db` for read-write access, initializing schema v1 if fresh.
+/// Open `<store_root>/tars.db` for read-write access, initializing or migrating schema to v2.
 pub(crate) fn open_read_write(db_path: &Path) -> Result<Connection, StoreError> {
     if let Some(parent) = db_path.parent()
         && !parent.as_os_str().is_empty()
@@ -241,6 +254,30 @@ pub(crate) fn open_read_write(db_path: &Path) -> Result<Connection, StoreError> 
                 ));
             }
             conn.execute_batch(SCHEMA_DDL)?;
+            conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+            tx.commit()?;
+            return Ok(conn);
+        }
+        tx.rollback()?;
+    }
+    let version = read_user_version(&conn)?;
+    if version > SCHEMA_VERSION {
+        return Err(StoreError::UnsupportedSchemaVersion {
+            found: version,
+            supported: SCHEMA_VERSION,
+        });
+    }
+    if version == 1 {
+        let tx = ImmediateTx::begin(&conn)?;
+        let current = read_user_version(&conn)?;
+        if current > SCHEMA_VERSION {
+            return Err(StoreError::UnsupportedSchemaVersion {
+                found: current,
+                supported: SCHEMA_VERSION,
+            });
+        }
+        if current == 1 {
+            conn.execute_batch(TRUSTED_WORKSPACES_DDL)?;
             conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
             tx.commit()?;
         } else {
