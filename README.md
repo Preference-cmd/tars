@@ -1,6 +1,6 @@
 # TARS
 
-TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI subcommands (`run`, `session`, `tools`). TARS is in early-stage development (`v0.1.0` prebuilt macOS/Linux binaries available via GitHub Releases, or build from source via Cargo).
+TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI commands (`-p`/`--print`, `run`, `session`, `tools`, `doctor`, `completions`). TARS is in early-stage development (`v0.1.0` prebuilt macOS/Linux binaries available via GitHub Releases, or build from source via Cargo).
 
 ## Key features
 
@@ -62,7 +62,7 @@ The examples below assume `tars` is on your `PATH` (use `./target/release/tars` 
 
 ### Interactive TUI
 
-Launch `tars` directly in an interactive terminal (zero-config default store under `~/.tars/data` or `$TARS_HOME/data`, with a guided first-run setup panel when unconfigured; press `Esc` to skip or use `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/queue`, `/image`, `/rename`, `/fork`, `/edit`, `/mode`, `/compact`, `/help`, or paste/drag-and-drop local image paths to attach screenshots):
+Launch `tars` directly in an interactive terminal (zero-config default store under `~/.tars/data` or `$TARS_HOME/data`, with a guided first-run setup panel when unconfigured; press `Esc` to skip or use `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/queue`, `/image`, `/rename`, `/fork`, `/edit`, `/mode`, `/compact`, `/export-md`, `/help`, or paste/drag-and-drop local image paths to attach screenshots):
 
 ```sh
 tars
@@ -73,29 +73,47 @@ tars --no-config --store ./tars-data
 tars -h
 ```
 
-### CLI one-shot & persistent sessions
+### Headless print mode (`tars -p`), persistent sessions & diagnostics
 
 ```sh
-# One-shot execution with explicit material saving and optional image attachments
+# Headless print mode: positional prompt, `--` for leading-dash prompts, and auto-piped stdin
+tars -p --provider openai-responses --model "$MODEL_ID" "Summarize the workspace layout"
+git diff | tars -p --profile fast "Review this diff"
+tars -p -- -explain-this-flag
+
+# Streaming text (--stream) or NDJSON events (--stream-json / --output-format stream-json)
+tars -p --profile fast --stream "Write a short checklist"
+tars -p --profile fast --output-format stream-json "Inspect the repo"
+
+# Persistent continuation from `tars -p` (-c / --continue, or --resume <id|prefix|latest>)
+tars -p -c "Follow up on the previous turn"
+tars -p --resume "$SHORT_PREFIX" --store ./tars-data "Continue this session"
+
+# Explicit one-shot execution with material saving and optional image attachments
 tars run --provider openai-responses --model "$MODEL_ID" \
   --input 'Explain this design' --image diagram.png --save materials.json
 printf 'Continue analyzing the material' | tars run \
   --provider openai-responses --model "$MODEL_ID" --stdin \
   --load materials.json --save materials.json --json
 
-# Persistent sessions (creation itself does not call the model)
+# Persistent sessions (creation itself does not call the model; supports full ID, unique prefix, or `latest`)
 tars session create --store ./tars-data \
   --provider openai-chat --model "$MODEL_ID" --json
-tars session run "$SESSION_ID" --store ./tars-data \
-  --input 'Continue this session' --image screenshot.png --json
+tars session run latest --store ./tars-data \
+  --input 'Continue this session' --image screenshot.png --stream
 tars session list --store ./tars-data --json
-tars session show "$SESSION_ID" --store ./tars-data --json
-tars session rename "$SESSION_ID" --store ./tars-data --title 'Design review' --json
-tars session fork "$SESSION_ID" --store ./tars-data --title 'Alternative branch' --json
-tars session compact "$SESSION_ID" --store ./tars-data
-tars session history "$SESSION_ID" --store ./tars-data --last 3
-tars session export-materials "$SESSION_ID" --store ./tars-data --output exported.json --json
-tars session delete "$SESSION_ID" --store ./tars-data --json
+tars session show "$SHORT_PREFIX" --store ./tars-data --json
+tars session rename "$SHORT_PREFIX" --store ./tars-data --title 'Design review' --json
+tars session fork "$SHORT_PREFIX" --store ./tars-data --title 'Alternative branch' --json
+tars session compact "$SHORT_PREFIX" --store ./tars-data
+tars session history "$SHORT_PREFIX" --store ./tars-data --last 3
+tars session export-materials "$SHORT_PREFIX" --store ./tars-data --output exported.json --json
+tars session export-markdown "$SHORT_PREFIX" --store ./tars-data --output transcript.md --json
+tars session delete "$SHORT_PREFIX" --store ./tars-data --json
+
+# Read-only diagnostics and static shell completions
+tars doctor --json
+tars completions zsh
 ```
 
 ### Optional `rg` setup for `search_text`
