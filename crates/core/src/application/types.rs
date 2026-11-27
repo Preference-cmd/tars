@@ -526,6 +526,14 @@ pub enum ApplicationError {
         /// Candidate UUID `agent_id` values sharing that name.
         candidates: Vec<String>,
     },
+    /// Target agent is currently busy executing an operation and cannot yield idle materials.
+    #[error("agent {agent_id} is busy with active operation {active_operation_id}")]
+    AgentBusy {
+        /// Canonical agent identifier.
+        agent_id: String,
+        /// Active operation identifier currently executing on the agent.
+        active_operation_id: String,
+    },
     /// Permission state is not available on this session instance.
     #[error("permission state is not available for this session instance")]
     PermissionUnavailable,
@@ -744,4 +752,189 @@ pub struct CloseOutcome {
     pub pending_commit: Option<CommitDisposition>,
     /// Local materials were abandoned without confirming their snapshot as current.
     pub discarded_unconfirmed: bool,
+}
+
+/// Summary of a stored session returned when a short-ID prefix is ambiguous.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionCandidate {
+    /// Full conversation identifier.
+    pub conversation_id: ConversationId,
+    /// Short display prefix (first 8 characters or full ID if shorter).
+    pub short_id: String,
+    /// Optional user-assigned or derived session title.
+    pub title: Option<String>,
+    /// Model identifier saved in the session definition.
+    pub model: String,
+    /// Last update timestamp in Unix epoch milliseconds.
+    pub updated_at_ms: u64,
+}
+
+/// Structured failures when resolving a session selector (`id`, prefix, or `latest`).
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum SessionSelectorError {
+    /// Selector was empty or contained only whitespace.
+    #[error("session selector must not be empty")]
+    EmptySelector,
+    /// No stored session matched the selector (or store is empty for `latest`).
+    #[error("session not found: {}", escape_single_line(.selector))]
+    NotFound {
+        /// Original trimmed selector string.
+        selector: String,
+    },
+    /// Prefix matched multiple stored sessions; up to 5 candidates are included.
+    #[error("{}", format_ambiguous_selector(.selector, *.total_matches, .candidates))]
+    Ambiguous {
+        /// Original trimmed selector string.
+        selector: String,
+        /// Total number of matching sessions before truncating `candidates`.
+        total_matches: usize,
+        /// Up to 5 top-ranked candidate summaries (newest `updated_at_ms` first).
+        candidates: Vec<SessionCandidate>,
+    },
+    /// Persistent session store is not configured on this host.
+    #[error("session store is unavailable")]
+    StoreUnavailable,
+    /// Underlying store read error while listing sessions.
+    #[error("session store: {0}")]
+    Store(#[from] Arc<StoreError>),
+}
+
+fn escape_single_line(value: &str) -> String {
+    crate::policy::escape_untrusted_text(value).replace('\n', "\\n")
+}
+
+fn format_ambiguous_selector(
+    selector: &str,
+    total_matches: usize,
+    candidates: &[SessionCandidate],
+) -> String {
+    use std::fmt::Write;
+    let escaped_selector = escape_single_line(selector);
+    let mut out =
+        format!("session selector '{escaped_selector}' is ambiguous ({total_matches} matches):");
+    for candidate in candidates {
+        let model = escape_single_line(&candidate.model);
+        let short_id = escape_single_line(&candidate.short_id);
+        let _ = write!(out, "\n  {short_id} ({model})");
+        if let Some(title) = candidate.title.as_deref() {
+            let escaped_title = escape_single_line(title);
+            let _ = write!(out, " \"{escaped_title}\"");
+        }
+    }
+    if total_matches > candidates.len() {
+        let remaining = total_matches - candidates.len();
+        let _ = write!(
+            out,
+            "\n  ... and {remaining} more (total {total_matches} matches)"
+        );
+    }
+    out
+}
+
+/// Resolve a session selector (`<full-id>`, `<prefix>`, or `"latest"`) from listed records.
+///
+/// Resolution priority:
+/// 1. Empty or whitespace-only selector -> [`SessionSelectorError::EmptySelector`].
+/// 2. Exact `conversation_id` match (including literal `"latest"` or a prefix of another ID).
+/// 3. Exact lowercase `"latest"` -> valid session with greatest `updated_at_ms`,
+///    tie-broken deterministically by descending `conversation_id`.
+/// 4. ASCII case-insensitive prefix match -> unique match returns `Ok`, 0 matches returns
+///    [`SessionSelectorError::NotFound`], and >= 2 matches returns
+///    [`SessionSelectorError::Ambiguous`] with up to 5 candidates ordered by descending
+///    `updated_at_ms`, then ascending `conversation_id`.
+pub fn resolve_session_selector_from_listings(
+    selector: &str,
+    listings: &[SessionListing],
+) -> Result<ConversationId, SessionSelectorError> {
+    let trimmed = selector.trim();
+    if trimmed.is_empty() {
+        return Err(SessionSelectorError::EmptySelector);
+    }
+
+    if let Some(exact) = listings
+        .iter()
+        .find(|item| item.conversation_id.as_str() == trimmed)
+    {
+        return Ok(exact.conversation_id.clone());
+    }
+
+    if trimmed == "latest" {
+        let latest = listings
+            .iter()
+            .filter_map(|item| item.record.as_ref().ok().map(|rec| (item, rec)))
+            .max_by(|(a_item, a_rec), (b_item, b_rec)| {
+                a_rec.updated_at_ms.cmp(&b_rec.updated_at_ms).then_with(|| {
+                    a_item
+                        .conversation_id
+                        .as_str()
+                        .cmp(b_item.conversation_id.as_str())
+                })
+            });
+        return latest
+            .map(|(item, _)| item.conversation_id.clone())
+            .ok_or_else(|| SessionSelectorError::NotFound {
+                selector: trimmed.to_owned(),
+            });
+    }
+
+    let needle = trimmed.to_ascii_lowercase();
+    let mut matches: Vec<&SessionListing> = listings
+        .iter()
+        .filter(|item| {
+            item.conversation_id
+                .as_str()
+                .to_ascii_lowercase()
+                .starts_with(&needle)
+        })
+        .collect();
+
+    match matches.len() {
+        0 => Err(SessionSelectorError::NotFound {
+            selector: trimmed.to_owned(),
+        }),
+        1 => Ok(matches[0].conversation_id.clone()),
+        total_matches => {
+            matches.sort_by(|a, b| {
+                let a_key = a
+                    .record
+                    .as_ref()
+                    .map_or((false, 0), |rec| (true, rec.updated_at_ms));
+                let b_key = b
+                    .record
+                    .as_ref()
+                    .map_or((false, 0), |rec| (true, rec.updated_at_ms));
+                b_key
+                    .cmp(&a_key)
+                    .then_with(|| a.conversation_id.as_str().cmp(b.conversation_id.as_str()))
+            });
+            let candidates = matches
+                .into_iter()
+                .take(5)
+                .map(|item| {
+                    let short_id = item.conversation_id.as_str().chars().take(8).collect();
+                    match &item.record {
+                        Ok(rec) => SessionCandidate {
+                            conversation_id: item.conversation_id.clone(),
+                            short_id,
+                            title: rec.title.clone(),
+                            model: rec.definition.model.clone(),
+                            updated_at_ms: rec.updated_at_ms,
+                        },
+                        Err(_) => SessionCandidate {
+                            conversation_id: item.conversation_id.clone(),
+                            short_id,
+                            title: None,
+                            model: "(corrupt)".to_owned(),
+                            updated_at_ms: 0,
+                        },
+                    }
+                })
+                .collect();
+            Err(SessionSelectorError::Ambiguous {
+                selector: trimmed.to_owned(),
+                total_matches,
+                candidates,
+            })
+        }
+    }
 }

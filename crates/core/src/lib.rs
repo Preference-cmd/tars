@@ -15,6 +15,7 @@ pub mod config;
 pub mod definition;
 pub mod doctor;
 pub mod events;
+pub mod export;
 pub mod external_tools;
 pub(crate) mod fs_atomic;
 pub mod material;

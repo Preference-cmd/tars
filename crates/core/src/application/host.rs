@@ -304,6 +304,26 @@ impl SessionHost {
             })
             .collect())
     }
+
+    /// Resolve a session selector (`<full-id>`, unique `<prefix>`, or `"latest"`)
+    /// read-only against the persistent store without constructing sessions.
+    pub async fn resolve_session_selector(
+        &self,
+        selector: &str,
+    ) -> Result<ConversationId, SessionSelectorError> {
+        if selector.trim().is_empty() {
+            return Err(SessionSelectorError::EmptySelector);
+        }
+        let listings = self.list().await.map_err(|err| match err {
+            ApplicationError::StoreUnavailable => SessionSelectorError::StoreUnavailable,
+            ApplicationError::Store(store_err) => SessionSelectorError::Store(store_err),
+            other => SessionSelectorError::Store(Arc::new(
+                crate::store::StoreError::InvalidDatabase(other.to_string()),
+            )),
+        })?;
+        resolve_session_selector_from_listings(selector, &listings)
+    }
+
     /// Import a legacy `tars-session-v2.4` JSON record (plus its sibling
     /// `.history/*.json` and `.artifacts/*` files) into SQLite without modifying
     /// any source files.

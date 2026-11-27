@@ -2084,21 +2084,46 @@ impl SessionCoordinator {
         &self,
         agent_id: &str,
     ) -> Result<AgentMaterialSnapshot, CoordinatorError> {
+        self.read_agent_materials_with_history(agent_id)
+            .map(|(snapshot, _)| snapshot)
+    }
+
+    pub(crate) fn read_agent_materials_with_history(
+        &self,
+        agent_id: &str,
+    ) -> Result<
+        (
+            AgentMaterialSnapshot,
+            Option<Arc<crate::compact::history::HistoryStore>>,
+        ),
+        CoordinatorError,
+    > {
         let Some(entry) = self.entry.upgrade() else {
             return Err(ApplicationError::InstanceGone.into());
         };
         if agent_id == self.entry_agent_id {
-            let managed = crate::application::ManagedSession { entry };
+            let managed = crate::application::ManagedSession {
+                entry: entry.clone(),
+            };
             let snap = managed.read_materials()?;
-            return Ok(AgentMaterialSnapshot {
-                version: AgentMaterialVersion {
-                    target: snap.version.target,
-                    agent_id: agent_id.to_owned(),
-                    generation: snap.version.generation,
+            let history_store = entry
+                .lock()
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.compaction())
+                .and_then(|runtime| runtime.history());
+            return Ok((
+                AgentMaterialSnapshot {
+                    version: AgentMaterialVersion {
+                        target: snap.version.target,
+                        agent_id: agent_id.to_owned(),
+                        generation: snap.version.generation,
+                    },
+                    context: snap.context,
+                    history: snap.history,
                 },
-                context: snap.context,
-                history: snap.history,
-            });
+                history_store,
+            ));
         }
 
         let entry_state = entry.lock();
@@ -2116,15 +2141,24 @@ impl SessionCoordinator {
                 active_operation_id: active_op.clone(),
             });
         }
-        Ok(AgentMaterialSnapshot {
-            version: AgentMaterialVersion {
-                target: entry.target.clone(),
-                agent_id: agent_id.to_owned(),
-                generation: unit.generation,
+        let owner_history = unit
+            .owner
+            .as_ref()
+            .and_then(|o| o.compaction())
+            .and_then(|c| c.history());
+        let history_store = owner_history.or_else(|| unit.history_store.clone());
+        Ok((
+            AgentMaterialSnapshot {
+                version: AgentMaterialVersion {
+                    target: entry.target.clone(),
+                    agent_id: agent_id.to_owned(),
+                    generation: unit.generation,
+                },
+                context: unit.context.clone(),
+                history: unit.history.clone(),
             },
-            context: unit.context.clone(),
-            history: unit.history.clone(),
-        })
+            history_store,
+        ))
     }
 
     pub(crate) fn edit_agent_materials(

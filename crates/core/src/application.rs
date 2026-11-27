@@ -43,7 +43,8 @@ pub use types::{
     ContextUsage, HostOptions, Lifecycle, ManagedSubmitRejection, MaterialSnapshot,
     MaterialVersion, OpenReport, PreparedCreate, SaveStatus, SavedAgentInspection,
     SavedAgentSummary, SavedOperationSummary, SavedSessionInspection, SavedSessionSummary,
-    SessionListing, SessionStatus, SessionTarget, WorkspaceRulesReport,
+    SessionCandidate, SessionListing, SessionSelectorError, SessionStatus, SessionTarget,
+    WorkspaceRulesReport, resolve_session_selector_from_listings,
 };
 
 #[cfg(test)]

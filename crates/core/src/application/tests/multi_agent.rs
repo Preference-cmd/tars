@@ -3077,6 +3077,250 @@ async fn managed_session_cancel_agent_operation_cancels_active_suppresses_wake_a
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expanded_agent_conversation_expands_root_and_compacted_child_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(root.path().into()));
+    let main_gw = ScriptedGateway::simple("root reply");
+    let long_reply_1 = format!("child reply 1: {}", "beta ".repeat(1_000));
+    let worker_gw = ScriptedGateway::new(
+        vec![
+            ScriptedStep::text(long_reply_1),
+            ScriptedStep::text("compact brief"),
+            ScriptedStep::text("child reply 2"),
+        ],
+        "fallback",
+    );
+
+    host.set_test_gateway(Some(main_gw));
+    host.set_test_agent_gateway(Some(Arc::new(move |name, _| {
+        if name == "worker" {
+            Some(worker_gw.clone())
+        } else {
+            None
+        }
+    })));
+
+    let mut def = compacting_definition(Some(FIXTURE_WINDOW));
+    def.prelude.agents_enabled = true;
+
+    let session = host
+        .create(PreparedCreate::persistent(def, Context::new()))
+        .await
+        .unwrap();
+    let root_id = entry_id(&session);
+
+    let initial = session.submit(request("root-turn")).unwrap();
+    finished(&session, &initial.work).await;
+    session.wait_saved().await.unwrap();
+
+    let SpawnAgentOutcome::Completed(first_outcome) = session
+        .spawn_agent(SpawnAgentRequest {
+            caller_agent_id: root_id.clone(),
+            caller_operation_id: None,
+            source_block_id: None,
+            name: "worker".into(),
+            preset_name: None,
+            role_prompt: None,
+            prompt: format!("child turn 1: {}", "alpha ".repeat(100)),
+            narrowing: ChildNarrowingRequest::default(),
+            interaction: AgentInteraction::Reusable,
+            execution_mode: OperationExecutionMode::Sync,
+            on_parent_complete: OnParentComplete::Continue,
+            timeout_secs: None,
+            max_rounds: None,
+            coalesce_key: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected sync spawn outcome");
+    };
+    let child_id = first_outcome.agent_id;
+
+    let SpawnAgentOutcome::Completed(second_outcome) = session
+        .message_agent(MessageAgentRequest {
+            caller_agent_id: root_id.clone(),
+            caller_operation_id: None,
+            source_block_id: None,
+            target_agent_id: child_id.clone(),
+            prompt: "child turn 2: verify expansion".into(),
+            execution_mode: OperationExecutionMode::Sync,
+            on_parent_complete: OnParentComplete::Continue,
+            timeout_secs: None,
+            max_rounds: None,
+            coalesce_key: None,
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected sync message outcome");
+    };
+    assert_eq!(second_outcome.status, OperationStatus::Completed);
+    session.wait_settled().await.unwrap();
+
+    // Verify child agent actually compacted and recorded rewrite history.
+    let child_snap = session.read_agent_materials(&child_id).unwrap();
+    assert!(
+        !child_snap.history.is_empty(),
+        "expected child agent to record at least one compaction history entry"
+    );
+
+    // Root agent expansion matches expanded_conversation.
+    let root_via_agent_api = session
+        .expanded_agent_conversation(&root_id, None)
+        .await
+        .unwrap();
+    let root_direct = session.expanded_conversation(None).unwrap();
+    assert_eq!(root_via_agent_api, root_direct);
+
+    // Child agent expansion recovers summarized earlier turns plus current tail.
+    let child_expanded = session
+        .expanded_agent_conversation(&child_id, None)
+        .await
+        .unwrap();
+    assert!(
+        child_expanded.unreadable_records.is_empty(),
+        "unexpected unreadable records: {:?}",
+        child_expanded.unreadable_records
+    );
+    assert!(
+        child_expanded
+            .blocks
+            .iter()
+            .any(|b| matches!(b.status, crate::compact::BlockStatus::Summarized(_)))
+    );
+    let joined_text: String = child_expanded
+        .blocks
+        .iter()
+        .filter_map(|b| match b.block.content() {
+            BlockContent::Message { parts, .. } => Some(
+                parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        causa::kernel::ContentPart::Text(t) => Some(t.0.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(joined_text.contains("child turn 1:"));
+    assert!(joined_text.contains("child reply 1:"));
+    assert!(joined_text.contains("child turn 2: verify expansion"));
+    assert!(joined_text.contains("child reply 2"));
+
+    // Respects last_n limit.
+    let child_last_2 = session
+        .expanded_agent_conversation(&child_id, Some(2))
+        .await
+        .unwrap();
+    assert_eq!(child_last_2.blocks.len(), 2);
+
+    // Unknown agent returns ApplicationError::NotFound.
+    let missing = session
+        .expanded_agent_conversation("missing-agent", None)
+        .await;
+    assert!(
+        matches!(missing, Err(ApplicationError::NotFound)),
+        "expected NotFound, got {missing:?}"
+    );
+
+    let conv_id = session.target().conversation_id().clone();
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+
+    // Reopen session (`unit.owner == None` for the child agent, exercising `unit.history_store` fallback).
+    let host2 = SessionHost::new(Some(root.path().into()));
+    host2.set_test_gateway(Some(ScriptedGateway::simple("unused")));
+    let reopened = host2.open(conv_id).await.unwrap();
+    let reopened_child_expanded = reopened
+        .expanded_agent_conversation(&child_id, None)
+        .await
+        .unwrap();
+    assert_eq!(reopened_child_expanded, child_expanded);
+
+    host2
+        .close(&reopened.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expanded_agent_conversation_returns_agent_busy_when_child_is_running() {
+    let root = tempfile::tempdir().unwrap();
+    let host = SessionHost::new(Some(root.path().into()));
+    let main_gw = ScriptedGateway::simple("root done");
+    let child_entered = Arc::new(Notify::new());
+    let child_release = Arc::new(Notify::new());
+    let worker_gw = ScriptedGateway::new(
+        vec![ScriptedStep {
+            entered: Some(child_entered.clone()),
+            release: Some(child_release.clone()),
+            response_text: Some("child done".into()),
+            tool_calls: Vec::new(),
+            capture_blocks: None,
+            wait_for_cancel: false,
+        }],
+        "fallback",
+    );
+
+    host.set_test_gateway(Some(main_gw));
+    host.set_test_agent_gateway(Some(Arc::new(move |name, _| {
+        if name == "worker" {
+            Some(worker_gw.clone())
+        } else {
+            None
+        }
+    })));
+
+    let session = host
+        .create(PreparedCreate::persistent(definition(), Context::new()))
+        .await
+        .unwrap();
+    let root_id = entry_id(&session);
+
+    let initial = session.submit(request("root-start")).unwrap();
+    finished(&session, &initial.work).await;
+    session.wait_saved().await.unwrap();
+
+    let SpawnAgentOutcome::Background(receipt) = session
+        .spawn_agent(spawn_req(&root_id, "worker", "long running task"))
+        .await
+        .unwrap()
+    else {
+        panic!("expected background spawn outcome");
+    };
+    tokio::time::timeout(Duration::from_secs(5), child_entered.notified())
+        .await
+        .unwrap();
+
+    let busy_err = session
+        .expanded_agent_conversation(&receipt.agent_id, None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            busy_err,
+            ApplicationError::AgentBusy {
+                ref agent_id,
+                ref active_operation_id,
+            } if agent_id == &receipt.agent_id && active_operation_id == &receipt.operation_id
+        ),
+        "expected AgentBusy for active child operation, got {busy_err:?}"
+    );
+
+    child_release.notify_one();
+    session.wait_settled().await.unwrap();
+    host.close(&session.target(), ClosePolicy::Save)
+        .await
+        .unwrap();
+}
+
 struct CountingGateway {
     inner: Arc<dyn ModelGateway>,
     calls: Arc<AtomicUsize>,

@@ -1441,17 +1441,50 @@ impl ManagedSession {
                 .and_then(|owner| owner.compaction())
                 .and_then(|runtime| runtime.history())
         };
-        Ok(crate::compact::expand_conversation(
+        Ok(expand_snapshot_with_history(
             snapshot.context.blocks(),
             &snapshot.history,
             last_n,
-            |id| match &history {
-                Some(history) => history.read(id),
-                None => Err(crate::store::StoreError::InvalidHistory(
-                    "this session keeps no history records".into(),
-                )),
-            },
+            history.as_deref(),
         ))
+    }
+
+    /// Expand the current Context of one agent (`agent_id`) in this open session
+    /// into its full conversation.
+    ///
+    /// When `agent_id` matches the root entry agent
+    /// (`self.target().conversation_id().as_str()`), this delegates to
+    /// [`Self::expanded_conversation`]. For a child agent, it snapshots the idle
+    /// child agent's Context and history index and reads any referenced rewrite
+    /// records on the host's blocking storage pool so async callers never block
+    /// the executor.
+    pub async fn expanded_agent_conversation(
+        &self,
+        agent_id: &str,
+        last_n: Option<usize>,
+    ) -> Result<crate::compact::ExpandedConversation, ApplicationError> {
+        if agent_id == self.entry.target.conversation_id.as_str() {
+            let session = self.clone();
+            return saving::io_semaphore(&self.entry.io, move || {
+                session.expanded_conversation(last_n)
+            })
+            .await;
+        }
+        let coord = self
+            .coordinator()
+            .map_err(map_coordinator_error_for_history)?;
+        let (snapshot, history_store) = coord
+            .read_agent_materials_with_history(agent_id)
+            .map_err(map_coordinator_error_for_history)?;
+        saving::io_semaphore(&self.entry.io, move || {
+            Ok::<_, ApplicationError>(expand_snapshot_with_history(
+                snapshot.context.blocks(),
+                &snapshot.history,
+                last_n,
+                history_store.as_deref(),
+            ))
+        })
+        .await
     }
 
     /// Replace the current materials with a model-written brief and save it.
@@ -1987,4 +2020,35 @@ fn validate_request_media_references(
         }
     }
     Ok(())
+}
+
+fn expand_snapshot_with_history(
+    blocks: &[ContextBlock],
+    history: &[HistoryRecordEntry],
+    last_n: Option<usize>,
+    history_store: Option<&crate::compact::history::HistoryStore>,
+) -> crate::compact::ExpandedConversation {
+    crate::compact::expand_conversation(blocks, history, last_n, |id| match history_store {
+        Some(store) => store.read(id),
+        None => Err(crate::store::StoreError::InvalidHistory(
+            "this session keeps no history records".into(),
+        )),
+    })
+}
+
+fn map_coordinator_error_for_history(err: CoordinatorError) -> ApplicationError {
+    match err {
+        CoordinatorError::Application(app_err) => app_err,
+        CoordinatorError::UnknownAgent(_) => ApplicationError::NotFound,
+        CoordinatorError::AgentBusy {
+            agent_id,
+            active_operation_id,
+        } => ApplicationError::AgentBusy {
+            agent_id,
+            active_operation_id,
+        },
+        CoordinatorError::UnknownOperation(id) => ApplicationError::UnknownOperation(id),
+        CoordinatorError::Store(store_err) => ApplicationError::Store(store_err),
+        other => ApplicationError::Faulted(other.to_string()),
+    }
 }
