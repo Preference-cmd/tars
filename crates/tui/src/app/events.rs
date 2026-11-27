@@ -162,6 +162,8 @@ impl App {
                 } else if entry.approval_queue.is_empty() {
                     self.paste_into_composer(text);
                 }
+            } else {
+                input::paste(&mut self.scratch_editor, text, true);
             }
             return;
         }
@@ -414,10 +416,7 @@ impl App {
             && (key.code == KeyCode::F(1)
                 || (key.code == KeyCode::Char('/')
                     && key.modifiers.is_empty()
-                    && self
-                        .entries
-                        .get(self.selected)
-                        .is_none_or(|e| !e.has_text_draft())))
+                    && !self.has_active_text_draft()))
         {
             self.show_commands();
             return;
@@ -427,8 +426,8 @@ impl App {
                 .modifiers
                 .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
             {
+                self.active_editor_mut().insert_newline();
                 if let Some(entry) = self.entries.get_mut(self.selected) {
-                    entry.editor.insert_newline();
                     entry.reset_history_cursor();
                 }
             } else if key.kind == KeyEventKind::Press {
@@ -437,8 +436,8 @@ impl App {
             return;
         }
         if input::control(key, 'j') {
+            self.active_editor_mut().insert_newline();
             if let Some(entry) = self.entries.get_mut(self.selected) {
-                entry.editor.insert_newline();
                 entry.reset_history_cursor();
             }
             return;
@@ -552,6 +551,8 @@ impl App {
                         } else {
                             scroll_to_top(entry);
                         }
+                    } else if self.scratch_has_text_draft() {
+                        input::edit(&mut self.scratch_editor, key);
                     }
                 }
                 KeyCode::End if key.modifiers.is_empty() => {
@@ -561,20 +562,26 @@ impl App {
                         } else {
                             scroll_to_bottom(entry);
                         }
+                    } else if self.scratch_has_text_draft() {
+                        input::edit(&mut self.scratch_editor, key);
                     }
                 }
                 KeyCode::Up if key.modifiers.is_empty() => {
-                    if let Some(entry) = self.entries.get_mut(self.selected)
-                        && !entry.step_history_up()
-                    {
-                        input::edit(&mut entry.editor, key);
+                    if let Some(entry) = self.entries.get_mut(self.selected) {
+                        if !entry.step_history_up() {
+                            input::edit(&mut entry.editor, key);
+                        }
+                    } else {
+                        input::edit(&mut self.scratch_editor, key);
                     }
                 }
                 KeyCode::Down if key.modifiers.is_empty() => {
-                    if let Some(entry) = self.entries.get_mut(self.selected)
-                        && !entry.step_history_down()
-                    {
-                        input::edit(&mut entry.editor, key);
+                    if let Some(entry) = self.entries.get_mut(self.selected) {
+                        if !entry.step_history_down() {
+                            input::edit(&mut entry.editor, key);
+                        }
+                    } else {
+                        input::edit(&mut self.scratch_editor, key);
                     }
                 }
                 _ => {
@@ -591,6 +598,8 @@ impl App {
                         ) {
                             entry.reset_history_cursor();
                         }
+                    } else {
+                        input::edit(&mut self.scratch_editor, key);
                     }
                 }
             }

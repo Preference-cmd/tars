@@ -684,6 +684,8 @@ pub(crate) struct App {
     pub(crate) recently_deleted: HashSet<String>,
     /// Optional injectable clipboard sink used by tests to capture OSC 52 writes without a TTY.
     pub(crate) clipboard_sink: Option<ClipboardSink>,
+    /// Scratch composer used when no session entry exists yet.
+    pub(crate) scratch_editor: TextArea<'static>,
 }
 impl App {
     pub fn new(options: Options) -> Self {
@@ -749,7 +751,35 @@ impl App {
             list_generation: 0,
             recently_deleted: HashSet::new(),
             clipboard_sink: None,
+            scratch_editor: input::editor(),
         }
+    }
+
+    pub(crate) fn active_editor(&self) -> &TextArea<'static> {
+        self.entries
+            .get(self.selected)
+            .map_or(&self.scratch_editor, |entry| &entry.editor)
+    }
+
+    pub(crate) fn active_editor_mut(&mut self) -> &mut TextArea<'static> {
+        if let Some(entry) = self.entries.get_mut(self.selected) {
+            &mut entry.editor
+        } else {
+            &mut self.scratch_editor
+        }
+    }
+
+    pub(crate) fn scratch_has_text_draft(&self) -> bool {
+        self.scratch_editor
+            .lines()
+            .iter()
+            .any(|line| !line.is_empty())
+    }
+
+    pub(crate) fn has_active_text_draft(&self) -> bool {
+        self.entries
+            .get(self.selected)
+            .map_or_else(|| self.scratch_has_text_draft(), Entry::has_text_draft)
     }
 
     pub(crate) fn write_clipboard(&mut self, bytes: &[u8]) -> std::io::Result<()> {

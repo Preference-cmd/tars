@@ -67,6 +67,7 @@ impl App {
         entry.workspace_root = workspace_root;
         entry.prepared = Some(prepared);
         self.entries.push(entry);
+        self.scratch_editor = input::editor();
         self.selected = self.entries.len() - 1;
         self.refresh_size_flags();
         self.open();
@@ -426,16 +427,15 @@ impl App {
         if !self.capacity() {
             return;
         }
-        let Some(entry) = self.entries.get_mut(self.selected) else {
-            return;
-        };
-        let text = entry.editor.lines().join("\n");
+        let text = self.active_editor().lines().join("\n");
         if !text.contains('\n') {
             let trimmed = text.trim();
-            if trimmed == "/image"
-                || trimmed.starts_with("/image ")
-                || trimmed.starts_with("/image\t")
+            if self.entries.get(self.selected).is_some()
+                && (trimmed == "/image"
+                    || trimmed.starts_with("/image ")
+                    || trimmed.starts_with("/image\t"))
             {
+                let entry = &mut self.entries[self.selected];
                 if entry.viewed_agent_id.is_some() {
                     entry.notice =
                         "Viewing child agent (read-only); run /agents main to attach images".into();
@@ -454,8 +454,31 @@ impl App {
                 }
                 return;
             }
+            if let Some(rest) = trimmed.strip_prefix('/') {
+                let clean = rest.trim();
+                if let Some(cmd_idx) = Self::exact_command_index(clean) {
+                    *self.active_editor_mut() = input::editor();
+                    if let Some(entry) = self.entries.get_mut(self.selected) {
+                        entry.reset_history_cursor();
+                    }
+                    self.command(cmd_idx, clean);
+                    return;
+                }
+            }
         }
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            if !text.trim().is_empty() {
+                self.notice =
+                    "No active session — type /new (or F2) to create one, or /sessions to resume"
+                        .into();
+            }
+            return;
+        };
         if entry.session.is_none() {
+            if !text.trim().is_empty() {
+                entry.notice =
+                    "Session is not open — press /open (or F3) first, or /new to create one".into();
+            }
             return;
         }
         if entry.viewed_agent_id.is_some() {
@@ -764,6 +787,7 @@ impl App {
         entry.workspace_root = workspace_root;
         entry.prepared = Some(prepared);
         self.entries.push(entry);
+        self.scratch_editor = input::editor();
         self.selected = self.entries.len() - 1;
         self.onboarding = None;
         self.onboarding_dismissed = true;
@@ -960,39 +984,32 @@ impl App {
     }
 
     pub(super) fn complete_input(&mut self) {
-        let Some(entry) = self.entries.get_mut(self.selected) else {
-            return;
-        };
-        if entry.viewed_agent_id.is_some() {
-            return;
-        }
-        let workspace_root = entry
-            .session
-            .as_ref()
-            .and_then(|session| session.definition().workspace_root);
         let profile_names: Vec<String> = self.options.config.model_profiles().into_keys().collect();
-        match input::complete_editor(&mut entry.editor, workspace_root.as_deref(), &profile_names) {
-            input::CompleteResult::None => {}
-            input::CompleteResult::Modified { notice } => {
+        if let Some(entry) = self.entries.get_mut(self.selected) {
+            if entry.viewed_agent_id.is_some() {
+                return;
+            }
+            let workspace_root = entry
+                .session
+                .as_ref()
+                .and_then(|session| session.definition().workspace_root);
+            let result = input::complete_editor(
+                &mut entry.editor,
+                workspace_root.as_deref(),
+                &profile_names,
+            );
+            if matches!(result, input::CompleteResult::Modified { .. }) {
                 entry.reset_history_cursor();
-                if let Some(notice) = notice {
-                    entry.notice = notice;
-                } else if entry.notice.starts_with("Commands: ")
-                    || entry.notice.starts_with("Paths: ")
-                    || entry.notice.starts_with("Profiles: ")
-                    || entry.notice.starts_with("Image: ")
-                    || entry.notice.starts_with("Subcommands: ")
-                    || entry.notice.starts_with("No matching ")
-                    || entry.notice.starts_with("No workspace ")
-                    || entry.notice.starts_with("Invalid workspace ")
-                {
-                    entry.notice.clear();
-                }
             }
-            input::CompleteResult::Notice(notice) => {
-                entry.notice = notice;
-            }
+            apply_completion_result(&mut entry.notice, result);
+            return;
         }
+        let result = input::complete_editor(
+            &mut self.scratch_editor,
+            self.options.workspace.as_deref(),
+            &profile_names,
+        );
+        apply_completion_result(&mut self.notice, result);
     }
     pub(super) fn close(&mut self, index: usize, policy: ClosePolicy) {
         if !self.capacity() {
@@ -2527,6 +2544,34 @@ fn extract_fenced_code_blocks(markdown: &str) -> Vec<(Option<String>, String)> {
         }
     }
     blocks
+}
+
+fn is_completion_notice(notice: &str) -> bool {
+    notice.starts_with("Commands: ")
+        || notice.starts_with("Paths: ")
+        || notice.starts_with("Profiles: ")
+        || notice.starts_with("Image: ")
+        || notice.starts_with("Copy: ")
+        || notice.starts_with("Subcommands: ")
+        || notice.starts_with("No matching ")
+        || notice.starts_with("No workspace ")
+        || notice.starts_with("Invalid workspace ")
+}
+
+fn apply_completion_result(target: &mut String, result: input::CompleteResult) {
+    match result {
+        input::CompleteResult::None => {}
+        input::CompleteResult::Modified { notice } => {
+            if let Some(notice) = notice {
+                *target = notice;
+            } else if is_completion_notice(target) {
+                target.clear();
+            }
+        }
+        input::CompleteResult::Notice(notice) => {
+            *target = notice;
+        }
+    }
 }
 
 #[cfg(test)]

@@ -24,7 +24,9 @@ pub(crate) const fn footer_base_height() -> u16 {
 }
 
 fn is_obscured(app: &App) -> bool {
-    app.panel.is_some()
+    app.panel
+        .as_ref()
+        .is_some_and(|p| !matches!(p, crate::app::Panel::Commands { .. }))
         || app.form.is_some()
         || app.onboarding.is_some()
         || app.confirmation.is_some()
@@ -96,15 +98,13 @@ fn layout_heights(app: &App, width: u16, height: u16) -> LayoutHeights {
     let extra_bars = attachment_bar + queue_bar + activity_bar + scroll_bar;
 
     let cells = usize::from(width.saturating_sub(6).max(1));
-    let rows = app.entries.get(app.selected).map_or(1, |entry| {
-        entry
-            .editor
-            .lines()
-            .iter()
-            .map(|line| line.width().div_ceil(cells).max(1))
-            .sum::<usize>()
-            .clamp(1, 6) as u16
-    });
+    let rows = app
+        .active_editor()
+        .lines()
+        .iter()
+        .map(|line| line.width().div_ceil(cells).max(1))
+        .sum::<usize>()
+        .clamp(1, 6) as u16;
     let max_input = height
         .saturating_sub(header + footer_base + 1 + extra_bars)
         .max(3);
@@ -128,6 +128,23 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     } else {
         preview
     }
+}
+
+fn tail_slice_display_width(text: &str, max_width: usize) -> &str {
+    if text.width() <= max_width {
+        return text;
+    }
+    let mut cols = 0usize;
+    let mut start = text.len();
+    for (offset, grapheme) in text.grapheme_indices(true).rev() {
+        let w = grapheme.width();
+        if cols + w > max_width {
+            break;
+        }
+        cols += w;
+        start = offset;
+    }
+    &text[start..]
 }
 
 fn truncate_display_width(text: &str, max_width: usize) -> String {
@@ -923,9 +940,17 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             regions[4],
         );
     }
+    let commands_query = match &app.panel {
+        Some(crate::app::Panel::Commands { query, .. }) => Some(query.as_str()),
+        _ => None,
+    };
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(MUTED));
+        .border_style(Style::default().fg(if commands_query.is_some() {
+            ACCENT
+        } else {
+            MUTED
+        }));
     let inner = block.inner(regions[5]);
     frame.render_widget(block, regions[5]);
     frame.render_widget(
@@ -937,11 +962,31 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         width: inner.width.saturating_sub(2),
         ..inner
     };
-    if let Some(entry) = entry {
-        frame.render_widget(&entry.editor, editor_area);
-        if !entry.has_text_draft() && app.panel.is_none() {
-            frame.render_widget(
-                Paragraph::new(if entry.viewed_agent_id.is_some() {
+    if let Some(query) = commands_query {
+        let escaped = crate::transcript::display_single_line(query);
+        let full = format!("/{escaped}");
+        let max_text_width = usize::from(editor_area.width.saturating_sub(1));
+        let shown = tail_slice_display_width(&full, max_text_width);
+        let mut spans = vec![
+            Span::raw(shown.to_owned()),
+            Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)),
+        ];
+        if query.is_empty() {
+            let used = shown.width() + 1;
+            let rem = usize::from(editor_area.width).saturating_sub(used);
+            if rem > 0 {
+                spans.push(Span::styled(
+                    truncate_display_width(" type a command…", rem),
+                    Style::default().fg(MUTED),
+                ));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), editor_area);
+    } else {
+        frame.render_widget(app.active_editor(), editor_area);
+        if !app.has_active_text_draft() && app.panel.is_none() {
+            let placeholder = if let Some(entry) = entry {
+                if entry.viewed_agent_id.is_some() {
                     "Read-only child agent view · /agents to return to main"
                 } else if entry.session.is_some() {
                     if entry.pending_images.is_empty() {
@@ -951,19 +996,41 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                     }
                 } else {
                     "/open this session, or /new"
-                })
-                .style(Style::default().fg(MUTED)),
+                }
+            } else {
+                "/new to start · /sessions to resume"
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)),
+                    Span::styled(placeholder, Style::default().fg(MUTED)),
+                ])),
                 editor_area,
             );
         }
-    } else {
-        frame.render_widget(
-            Paragraph::new("/new to start · /sessions to resume").style(Style::default().fg(MUTED)),
-            editor_area,
-        );
     }
     footer(frame, app, regions[6], heights.queue_bar > 0);
-    if let Some(panel) = &app.panel {
+    if let Some(crate::app::Panel::Commands { query, selected }) = &app.panel {
+        let matches = crate::app::matching_commands(query);
+        let desired_rows = if matches.is_empty() {
+            if body.width < 33 { 2 } else { 1 }
+        } else {
+            matches.len().min(8) as u16
+        };
+        let show_header = regions[1].height >= 2;
+        let popup_height = (desired_rows + u16::from(show_header))
+            .min(regions[1].height)
+            .max(1);
+        let show_header = show_header && popup_height >= 2;
+        let popup_y = regions[1].y + regions[1].height.saturating_sub(popup_height);
+        let popup_area = Rect {
+            x: body.x,
+            y: popup_y,
+            width: body.width,
+            height: popup_height,
+        };
+        super::panels::commands_popup(frame, query, *selected, show_header, popup_area);
+    } else if let Some(panel) = &app.panel {
         super::panels::draw(
             frame,
             app,
@@ -1178,7 +1245,7 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect, show_queue: bool) {
         "↑↓ / PageUp PageDown scroll · Esc back"
     } else if app.panel.is_some() {
         "Type to filter · ↑↓ select · Enter choose · Esc back"
-    } else if entry.is_some_and(|e| e.has_text_draft()) {
+    } else if app.has_active_text_draft() {
         "Enter send · Ctrl-J newline · F1 commands · Esc interrupt"
     } else {
         "Enter send · Ctrl-J newline · / commands · Esc interrupt"

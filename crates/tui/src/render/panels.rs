@@ -11,9 +11,73 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
+pub(super) fn commands_popup(
+    frame: &mut Frame<'_>,
+    query: &str,
+    selected: usize,
+    show_header: bool,
+    area: Rect,
+) {
+    frame.render_widget(Clear, area);
+    let list_area = if show_header && area.height >= 2 {
+        let title = if area.width < 66 {
+            " Commands "
+        } else {
+            " Commands · ↑↓ select · Tab complete · Enter run · Esc close "
+        };
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(MUTED))
+            .title(Span::styled(title, Style::default().fg(MUTED)));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        inner
+    } else {
+        area
+    };
+    let matches = matching_commands(query);
+    if matches.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matching commands · Esc closes")
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(MUTED)),
+            list_area,
+        );
+        return;
+    }
+    let max_item_width = usize::from(list_area.width).saturating_sub(2);
+    let items: Vec<_> = matches
+        .iter()
+        .map(|&index| {
+            let (name, description) = COMMANDS[index];
+            let label = if name.len() > 12 {
+                format!("/{name}  ")
+            } else {
+                format!("/{name:<13}")
+            };
+            let spans = super::surface::truncate_spans_display_width(
+                vec![
+                    Span::raw(label),
+                    Span::styled(description, Style::default().fg(MUTED)),
+                ],
+                max_item_width,
+            );
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(selected.min(items.len() - 1)));
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("❯ ")
+            .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        list_area,
+        &mut state,
+    );
+}
+
 pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) {
     frame.render_widget(Clear, area);
-    let (query, selected, commands) = match panel {
+    let (query, selected) = match panel {
         Panel::ModeSelect { selected } => {
             let regions = Layout::vertical([
                 Constraint::Length(2),
@@ -220,8 +284,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
             );
             return;
         }
-        Panel::Commands { query, selected } => (query, *selected, true),
-        Panel::Sessions { query, selected } => (query, *selected, false),
+        Panel::Commands { .. } => {
+            unreachable!("Panel::Commands is rendered as a floating popup in surface::draw")
+        }
+        Panel::Sessions { query, selected } => (query, *selected),
         Panel::Models { query, selected } => {
             let rows = Layout::vertical([
                 Constraint::Length(2),
@@ -317,83 +383,59 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
             return;
         }
     };
-    let rows = if commands {
-        Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area)
-    } else {
-        Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(area)
-    };
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                if commands {
-                    "Commands  /"
-                } else {
-                    "Sessions  /"
-                },
+                "Sessions  /",
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::raw(query),
         ])),
         rows[0],
     );
-    let items: Vec<_> = if commands {
-        matching_commands(query)
-            .iter()
-            .map(|&index| {
-                let (name, description) = COMMANDS[index];
-                ListItem::new(vec![
-                    Line::from(format!("/{name}")),
-                    Line::styled(description, Style::default().fg(MUTED)),
-                ])
-            })
-            .collect()
-    } else {
-        app.matching_sessions(query)
-            .iter()
-            .map(|&index| {
-                let entry = &app.entries[index];
-                let waiting = if !entry.approval_queue.is_empty() {
-                    " · waiting for confirmation"
-                } else {
-                    ""
-                };
-                let model = entry.model();
-                let time_str = tars_core::format_timestamp_utc(entry.updated_at_ms());
-                let first_line = match entry.title() {
-                    Some(title) => format!(
-                        "{}  ·  {time_str}",
-                        tars_core::permission::escape_untrusted_text(&title)
-                    ),
-                    None => format!("{model}  ·  {time_str}"),
-                };
-                ListItem::new(vec![
-                    Line::from(first_line),
-                    Line::styled(
-                        format!("{model}{waiting}"),
-                        Style::default().fg(if waiting.is_empty() {
-                            MUTED
-                        } else {
-                            Color::Yellow
-                        }),
-                    ),
-                ])
-            })
-            .collect()
-    };
+    let items: Vec<_> = app
+        .matching_sessions(query)
+        .iter()
+        .map(|&index| {
+            let entry = &app.entries[index];
+            let waiting = if !entry.approval_queue.is_empty() {
+                " · waiting for confirmation"
+            } else {
+                ""
+            };
+            let model = entry.model();
+            let time_str = tars_core::format_timestamp_utc(entry.updated_at_ms());
+            let first_line = match entry.title() {
+                Some(title) => format!(
+                    "{}  ·  {time_str}",
+                    tars_core::permission::escape_untrusted_text(&title)
+                ),
+                None => format!("{model}  ·  {time_str}"),
+            };
+            ListItem::new(vec![
+                Line::from(first_line),
+                Line::styled(
+                    format!("{model}{waiting}"),
+                    Style::default().fg(if waiting.is_empty() {
+                        MUTED
+                    } else {
+                        Color::Yellow
+                    }),
+                ),
+            ])
+        })
+        .collect();
     if items.is_empty() {
         frame.render_widget(
-            Paragraph::new(if commands {
-                "No matching commands. Esc returns to your draft."
-            } else {
-                "No matching sessions. /new creates one."
-            })
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(MUTED)),
+            Paragraph::new("No matching sessions. /new creates one.")
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(MUTED)),
             rows[1],
         );
     } else {
@@ -406,13 +448,11 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
             &mut state,
         );
     }
-    if !commands {
-        frame.render_widget(
-            Paragraph::new("↑↓ select · Enter open · Ctrl-D/Del delete · Esc back")
-                .style(Style::default().fg(MUTED)),
-            rows[2],
-        );
-    }
+    frame.render_widget(
+        Paragraph::new("↑↓ select · Enter open · Ctrl-D/Del delete · Esc back")
+            .style(Style::default().fg(MUTED)),
+        rows[2],
+    );
 }
 
 pub(super) fn form(frame: &mut Frame<'_>, app: &App, area: Rect) {

@@ -2008,3 +2008,409 @@ async fn cc09_copy_command_modes_child_agent_fallback_errors_and_tab_completion(
         _ => panic!("expected commands panel"),
     }
 }
+
+fn render_buffer(app: &App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| render::draw(frame, app)).unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+    (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+}
+
+fn find_prompt_row(buf: &ratatui::buffer::Buffer) -> Option<(u16, u16)> {
+    // Search bottom-up so the composer prompt `❯` is found even if a list row
+    // above also has the highlight symbol `❯`.
+    for y in (0..buf.area.height).rev() {
+        for x in 0..buf.area.width {
+            if buf[(x, y)].symbol() == "❯" {
+                return Some((x, y));
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn empty_entries_scratch_editor_accepts_typing_paste_completion_and_commands() {
+    use crossterm::event::KeyModifiers;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    assert!(app.entries.is_empty());
+
+    // 1. Typing directly into the composer with no entries populates scratch_editor.
+    for ch in "hello".chars() {
+        app.event(key(KeyCode::Char(ch)));
+    }
+    assert_eq!(app.scratch_editor.lines(), &["hello"]);
+    assert!(app.has_active_text_draft());
+
+    // Typing `/` when scratch_editor already has text inserts `/` instead of opening Commands.
+    app.event(key(KeyCode::Char('/')));
+    assert!(app.panel.is_none());
+    assert_eq!(app.scratch_editor.lines(), &["hello/"]);
+
+    // Backspace, Home, End, and Ctrl-J multiline editing work on scratch_editor.
+    app.event(key(KeyCode::Backspace));
+    assert_eq!(app.scratch_editor.lines(), &["hello"]);
+    app.event(key(KeyCode::Home));
+    assert_eq!(app.scratch_editor.cursor(), (0, 0));
+    app.event(key(KeyCode::End));
+    assert_eq!(app.scratch_editor.cursor(), (0, 5));
+    app.event(Event::Key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('j'),
+        KeyModifiers::CONTROL,
+    )));
+    app.event(Event::Paste("world".into()));
+    assert_eq!(app.scratch_editor.lines(), &["hello", "world"]);
+
+    // Rendered bottom composer displays the scratch draft.
+    let buf = render_buffer(&app, 80, 24);
+    let all: String = (0..buf.area.height).map(|y| row_text(&buf, y)).collect();
+    assert!(all.contains("hello"), "{all}");
+    assert!(all.contains("world"), "{all}");
+
+    // Pressing Enter on plain text with no active session sets helpful notice.
+    app.event(key(KeyCode::Enter));
+    assert_eq!(
+        app.notice,
+        "No active session — type /new (or F2) to create one, or /sessions to resume"
+    );
+    assert_eq!(app.scratch_editor.lines(), &["hello", "world"]);
+
+    // Ctrl-Q respects scratch draft in request_quit confirmation.
+    app.event(Event::Key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('q'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(matches!(
+        app.confirmation,
+        Some(crate::app::Confirmation::Quit {
+            has_drafts: true,
+            ..
+        })
+    ));
+    app.event(key(KeyCode::Char('n')));
+    assert!(app.confirmation.is_none());
+
+    // 2. Tab completion works in scratch_editor and clears stale `"Copy: "` notice.
+    app.scratch_editor = crate::input::editor();
+    app.event(Event::Paste("/cop".into()));
+    app.event(key(KeyCode::Tab));
+    assert_eq!(app.scratch_editor.lines(), &["/copy "]);
+    app.event(key(KeyCode::Tab));
+    assert!(app.notice.starts_with("Copy: "), "{}", app.notice);
+    app.event(Event::Paste("c".into()));
+    app.event(key(KeyCode::Tab));
+    assert_eq!(app.scratch_editor.lines(), &["/copy code"]);
+    assert!(
+        app.notice.is_empty(),
+        "stale notice not cleared: {}",
+        app.notice
+    );
+
+    // 3. Typing `/help` directly into scratch_editor and pressing Enter executes and clears.
+    app.scratch_editor = crate::input::editor();
+    app.event(Event::Paste("/help".into()));
+    app.event(key(KeyCode::Enter));
+    assert!(matches!(
+        &app.panel,
+        Some(Panel::Info { title, .. }) if title == "Keyboard shortcuts"
+    ));
+    assert!(!app.scratch_has_text_draft());
+    app.event(key(KeyCode::Esc));
+    assert!(app.panel.is_none());
+
+    // 4. Typing `/image` when entries is empty dispatches cleanly and clears scratch_editor.
+    app.event(Event::Paste("/image".into()));
+    app.event(key(KeyCode::Enter));
+    assert!(!app.scratch_has_text_draft());
+    assert_eq!(app.notice, "Open or select a session first");
+
+    // 5. Typing `/new` into scratch_editor and pressing Enter opens the form and clears.
+    app.event(Event::Paste("/new".into()));
+    app.event(key(KeyCode::Enter));
+    assert!(app.form.is_some());
+    assert!(!app.scratch_has_text_draft());
+    app.event(key(KeyCode::Esc));
+    assert!(app.form.is_none());
+
+    // 6. Unopened session entry: `/help` dispatches, plain text sets helpful notice.
+    app.entries
+        .push(crate::app::Entry::new("stored-only".into(), "model".into()));
+    app.event(Event::Paste("/help".into()));
+    app.event(key(KeyCode::Enter));
+    assert!(matches!(
+        &app.panel,
+        Some(Panel::Info { title, .. }) if title == "Keyboard shortcuts"
+    ));
+    assert!(!app.entries[0].has_text_draft());
+    app.event(key(KeyCode::Esc));
+
+    app.event(Event::Paste("hello stored".into()));
+    app.event(key(KeyCode::Enter));
+    assert_eq!(
+        app.entries[0].notice,
+        "Session is not open — press /open (or F3) first, or /new to create one"
+    );
+}
+
+#[tokio::test]
+async fn slash_popup_keeps_input_box_fixed_shows_cursor_and_handles_backspace_and_tiny_terminal() {
+    use ratatui::style::Modifier;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+
+    // 1. Empty composer shows reversed cursor cell at column 0 before placeholder.
+    let before_buf = render_buffer(&app, 80, 24);
+    let (prompt_x, prompt_y) = find_prompt_row(&before_buf).expect("bottom composer prompt");
+    let cursor_cell = &before_buf[(prompt_x + 2, prompt_y)];
+    assert_eq!(cursor_cell.symbol(), " ");
+    assert!(
+        cursor_cell.modifier.contains(Modifier::REVERSED),
+        "empty composer cursor cell must be reversed: {cursor_cell:?}"
+    );
+    assert!(row_text(&before_buf, prompt_y).contains("/new to start"));
+
+    // 2. Pressing `/` keeps the bottom composer at the EXACT same `y` row, renders
+    //    `❯ /` + cursor there, opens the floating popup immediately above it, and
+    //    preserves the welcome content above the popup.
+    app.event(key(KeyCode::Char('/')));
+    assert!(matches!(
+        &app.panel,
+        Some(Panel::Commands { query, .. }) if query.is_empty()
+    ));
+    let slash_buf = render_buffer(&app, 80, 24);
+    let (slash_x, slash_y) = find_prompt_row(&slash_buf).expect("composer prompt with /");
+    assert_eq!(slash_x, prompt_x);
+    assert_eq!(
+        slash_y, prompt_y,
+        "bottom input box must not lift when pressing `/`"
+    );
+    let slash_row = row_text(&slash_buf, slash_y);
+    assert!(slash_row.contains("❯ /"), "{slash_row}");
+    assert!(slash_row.contains("type a command"), "{slash_row}");
+    assert_eq!(slash_buf[(slash_x + 2, slash_y)].symbol(), "/");
+    assert!(
+        slash_buf[(slash_x + 3, slash_y)]
+            .modifier
+            .contains(Modifier::REVERSED),
+        "cursor after `/` must be reversed"
+    );
+
+    // Floating popup header is anchored above the input box's top border, never at row 2.
+    let input_top_border_y = slash_y - 1;
+    let popup_header_y = (0..input_top_border_y)
+        .find(|&y| row_text(&slash_buf, y).contains("Commands"))
+        .expect("Commands popup header above input box");
+    assert!(
+        popup_header_y > 2,
+        "popup must float above composer rather than lifting to top row 2 (got y={popup_header_y})"
+    );
+    assert!(
+        row_text(&slash_buf, input_top_border_y - 1).contains('/'),
+        "bottom of popup must sit flush above input box"
+    );
+    let above_popup: String = (2..popup_header_y)
+        .map(|y| row_text(&slash_buf, y))
+        .collect();
+    assert!(
+        above_popup.contains("Welcome to TARS"),
+        "welcome must stay visible above popup: {above_popup}"
+    );
+
+    // 3. Typing filters query, Backspace on non-empty pops one char and stays open,
+    //    Backspace on empty closes Panel::Commands.
+    app.event(key(KeyCode::Char('h')));
+    app.event(key(KeyCode::Char('e')));
+    assert!(matches!(
+        &app.panel,
+        Some(Panel::Commands { query, .. }) if query == "he"
+    ));
+    app.event(key(KeyCode::Backspace));
+    assert!(matches!(
+        &app.panel,
+        Some(Panel::Commands { query, .. }) if query == "h"
+    ));
+    app.event(key(KeyCode::Backspace));
+    assert!(matches!(
+        &app.panel,
+        Some(Panel::Commands { query, .. }) if query.is_empty()
+    ));
+    app.event(key(KeyCode::Backspace));
+    assert!(
+        app.panel.is_none(),
+        "Backspace on empty Panel::Commands must close popup"
+    );
+
+    // Counterexample: Backspace on empty Panel::Sessions stays open.
+    app.event(key(KeyCode::F(1)));
+    for ch in "sessions".chars() {
+        app.event(key(KeyCode::Char(ch)));
+    }
+    app.event(key(KeyCode::Enter));
+    assert!(matches!(
+        &app.panel,
+        Some(Panel::Sessions { query, .. }) if query.is_empty()
+    ));
+    app.event(key(KeyCode::Backspace));
+    assert!(matches!(app.panel, Some(Panel::Sessions { .. })));
+    app.event(key(KeyCode::Esc));
+
+    // 4. With an active entry having scroll/activity bars, `/` does not shift input `y`.
+    let mut entry = crate::app::Entry::new("active-bars".into(), "model".into());
+    entry.scroll = Some(0);
+    entry.turn_in_flight = true;
+    app.entries.push(entry);
+    let bars_before = render_buffer(&app, 80, 24);
+    let (_, bars_y_before) = find_prompt_row(&bars_before).unwrap();
+    app.event(key(KeyCode::Char('/')));
+    let bars_after = render_buffer(&app, 80, 24);
+    let (_, bars_y_after) = find_prompt_row(&bars_after).unwrap();
+    assert_eq!(bars_y_after, bars_y_before);
+    app.event(key(KeyCode::Esc));
+    app.entries.clear();
+
+    // 5. Tiny terminal (30x12) with `/` open renders cleanly without panic and keeps composer intact.
+    let tiny_before = render_buffer(&app, 30, 12);
+    let (_, tiny_y_before) = find_prompt_row(&tiny_before).unwrap();
+
+    app.event(key(KeyCode::Char('/')));
+    let tiny_empty = render_buffer(&app, 30, 12);
+    let (_, tiny_y_empty) = find_prompt_row(&tiny_empty).unwrap();
+    assert_eq!(tiny_y_empty, tiny_y_before);
+    assert!(row_text(&tiny_empty, tiny_y_empty).contains("❯ /"));
+
+    // Long query tail-slices cleanly and keeps cursor visible at right edge.
+    app.event(Event::Paste("a_very_long_command_query_string".into()));
+    let tiny_long = render_buffer(&app, 30, 12);
+    let (tiny_x_long, tiny_y_long) = find_prompt_row(&tiny_long).unwrap();
+    assert_eq!(tiny_y_long, tiny_y_before);
+    let right_edge = 30 - 2 - 1;
+    assert!(
+        tiny_long[(right_edge, tiny_y_long)]
+            .modifier
+            .contains(Modifier::REVERSED),
+        "tail-sliced query must keep reversed cursor at right edge (prompt x={tiny_x_long})"
+    );
+    app.event(key(KeyCode::Esc));
+
+    // 6. Narrowing `/` to 1 match ("quit") and 0 matches ("zzz") at 80x24 and 30x12
+    //    keeps the "Commands" top border visible with zero blank gap and fixed input y.
+    for &(width, height) in &[(80u16, 24u16), (30u16, 12u16)] {
+        let base = render_buffer(&app, width, height);
+        let (_, base_y) = find_prompt_row(&base).unwrap();
+        let top_border_y = base_y - 1;
+
+        app.event(key(KeyCode::Char('/')));
+        app.event(Event::Paste("quit".into()));
+        let one_buf = render_buffer(&app, width, height);
+        let (_, one_y) = find_prompt_row(&one_buf).unwrap();
+        assert_eq!(one_y, base_y, "{width}x{height} 1-match shifted input y");
+        assert!(
+            row_text(&one_buf, top_border_y - 1).contains("❯ /quit"),
+            "{width}x{height} 1-match body missing: {}",
+            row_text(&one_buf, top_border_y - 1)
+        );
+        assert!(
+            row_text(&one_buf, top_border_y - 2).contains("Commands"),
+            "{width}x{height} 1-match header missing: {}",
+            row_text(&one_buf, top_border_y - 2)
+        );
+        app.event(key(KeyCode::Esc));
+
+        app.event(key(KeyCode::Char('/')));
+        app.event(Event::Paste("zzz".into()));
+        let zero_buf = render_buffer(&app, width, height);
+        let (_, zero_y) = find_prompt_row(&zero_buf).unwrap();
+        assert_eq!(zero_y, base_y, "{width}x{height} 0-match shifted input y");
+        let empty_rows = if width - 4 < 33 { 2 } else { 1 };
+        let header_y = top_border_y - 1 - empty_rows;
+        assert!(
+            row_text(&zero_buf, header_y).contains("Commands"),
+            "{width}x{height} 0-match header missing at y={header_y}: {}",
+            row_text(&zero_buf, header_y)
+        );
+        let body_text: String = ((header_y + 1)..top_border_y)
+            .map(|y| row_text(&zero_buf, y))
+            .collect();
+        assert!(
+            body_text.contains("No matching commands"),
+            "{width}x{height} 0-match body missing: {body_text}"
+        );
+        app.event(key(KeyCode::Esc));
+    }
+
+    // 7. Pressing F1 while a multiline draft exists renders cleanly at 80x24 and 30x12
+    //    and Esc restores the multiline draft intact.
+    app.event(Event::Paste(
+        "line1\nline2\nline3\nline4\nline5\nline6".into(),
+    ));
+    assert_eq!(app.scratch_editor.lines().len(), 6);
+    app.event(key(KeyCode::F(1)));
+    assert!(matches!(app.panel, Some(Panel::Commands { .. })));
+    for &(width, height) in &[(80u16, 24u16), (30u16, 12u16)] {
+        let multi_buf = render_buffer(&app, width, height);
+        let (_, multi_y) = find_prompt_row(&multi_buf).unwrap();
+        assert!(row_text(&multi_buf, multi_y).contains("❯ /"));
+    }
+    app.event(key(KeyCode::Esc));
+    assert!(app.panel.is_none());
+    assert_eq!(
+        app.scratch_editor.lines(),
+        &["line1", "line2", "line3", "line4", "line5", "line6"]
+    );
+}
+
+#[tokio::test]
+async fn scratch_draft_never_triggers_ghost_quit_confirmation_after_session_added() {
+    use crossterm::event::KeyModifiers;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = write_profiles_config(dir.path(), dir.path(), false);
+    let mut app = app_from_args(&["--config", cfg_path.to_str().unwrap()]);
+
+    // 1. Type into scratch_editor when entries is empty.
+    app.event(Event::Paste("stray scratch draft".into()));
+    assert!(app.scratch_has_text_draft());
+
+    // 2. If an entry exists with an empty editor, Ctrl-Q quits immediately without
+    //    a false confirmation from the unreachable scratch_editor.
+    app.entries
+        .push(crate::app::Entry::new("clean-entry".into(), "model".into()));
+    app.event(Event::Key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('q'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(
+        app.confirmation.is_none(),
+        "unreachable scratch_editor must not trigger quit confirmation"
+    );
+    assert!(app.quitting);
+
+    // 3. Real session creation via prepare_and_open_definition also clears scratch_editor
+    //    so a later delete cannot resurrect an old scratch draft.
+    let mut app2 = app_from_args(&["--config", cfg_path.to_str().unwrap()]);
+    app2.event(Event::Paste("stale before create".into()));
+    assert!(app2.scratch_has_text_draft());
+    let def = app2
+        .options
+        .config
+        .definition(None, Default::default())
+        .unwrap();
+    app2.prepare_and_open_definition(def).unwrap();
+    assert!(
+        !app2.scratch_has_text_draft(),
+        "prepare_and_open_definition must clear scratch_editor"
+    );
+    app2.entries.clear();
+    app2.event(Event::Key(crossterm::event::KeyEvent::new(
+        KeyCode::Char('q'),
+        KeyModifiers::CONTROL,
+    )));
+    assert!(app2.confirmation.is_none());
+    assert!(app2.quitting);
+}

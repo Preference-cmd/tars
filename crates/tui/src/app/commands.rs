@@ -185,8 +185,9 @@ impl App {
         });
     }
     pub(super) fn request_quit(&mut self) {
-        let has_drafts =
-            self.form.is_some() || self.entries.iter().any(super::state::Entry::has_draft);
+        let has_drafts = self.form.is_some()
+            || (self.entries.is_empty() && self.scratch_has_text_draft())
+            || self.entries.iter().any(super::state::Entry::has_draft);
         let has_queue = self.entries.iter().any(|e| !e.queued_prompts.is_empty());
         if has_drafts || has_queue {
             self.confirmation = Some(Confirmation::Quit {
@@ -209,7 +210,11 @@ impl App {
             self.close(self.selected, ClosePolicy::Save);
         }
     }
-    fn command(&mut self, index: usize, query: &str) {
+    pub(super) fn exact_command_index(clean: &str) -> Option<usize> {
+        let word = clean.split_whitespace().next()?.to_lowercase();
+        COMMANDS.iter().position(|(name, _)| *name == word)
+    }
+    pub(super) fn command(&mut self, index: usize, query: &str) {
         match COMMANDS[index].0 {
             "new" => {
                 self.form = Some(
@@ -1484,6 +1489,9 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
+                if commands && query.is_empty() {
+                    return;
+                }
                 query.pop();
                 *selected = 0;
             }
