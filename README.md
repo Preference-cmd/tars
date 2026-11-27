@@ -4,7 +4,7 @@ TARS is an open-source, local-first AI agent written in Rust and built on [`caus
 
 ## Key features
 
-- **Multi-protocol providers:** `openai-chat`, `openai-responses`, and `anthropic` with custom endpoints and env-only API keys.
+- **Multi-protocol providers:** `openai-chat`, `openai-responses`, and `anthropic` with custom endpoints, env-only API keys, and multimodal image attachments (PNG, JPEG, GIF, WebP).
 - **Workspace safety:** Four permission modes, read-before-write guards, macOS Seatbelt and Linux Bubblewrap (`bwrap` + `seccomp-BPF`) sandboxing, and layered command rules.
 - **Long-session compaction:** Automatic output spilling, micro-compaction, working briefs, prompt caching, and `recall`.
 - **Persistent sessions:** Local SQLite storage with OS file locks, atomic commits, recovery export, and interrupted-turn repair.
@@ -62,7 +62,7 @@ The examples below assume `tars` is on your `PATH` (use `./target/release/tars` 
 
 ### Interactive TUI
 
-Launch `tars` directly in an interactive terminal (zero-config default store under `~/.tars/data` or `$TARS_HOME/data`, with a guided first-run setup panel when unconfigured; press `Esc` to skip or use `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/queue`, `/rename`, `/fork`, `/edit`, `/mode`, `/compact`, `/help`):
+Launch `tars` directly in an interactive terminal (zero-config default store under `~/.tars/data` or `$TARS_HOME/data`, with a guided first-run setup panel when unconfigured; press `Esc` to skip or use `/doctor`, `/init`, `/new`, `/sessions`, `/agents`, `/queue`, `/image`, `/rename`, `/fork`, `/edit`, `/mode`, `/compact`, `/help`, or paste/drag-and-drop local image paths to attach screenshots):
 
 ```sh
 tars
@@ -76,9 +76,9 @@ tars -h
 ### CLI one-shot & persistent sessions
 
 ```sh
-# One-shot execution with explicit material saving
+# One-shot execution with explicit material saving and optional image attachments
 tars run --provider openai-responses --model "$MODEL_ID" \
-  --input 'Explain this design' --save materials.json
+  --input 'Explain this design' --image diagram.png --save materials.json
 printf 'Continue analyzing the material' | tars run \
   --provider openai-responses --model "$MODEL_ID" --stdin \
   --load materials.json --save materials.json --json
@@ -87,13 +87,14 @@ printf 'Continue analyzing the material' | tars run \
 tars session create --store ./tars-data \
   --provider openai-chat --model "$MODEL_ID" --json
 tars session run "$SESSION_ID" --store ./tars-data \
-  --input 'Continue this session' --json
+  --input 'Continue this session' --image screenshot.png --json
 tars session list --store ./tars-data --json
 tars session show "$SESSION_ID" --store ./tars-data --json
 tars session rename "$SESSION_ID" --store ./tars-data --title 'Design review' --json
 tars session fork "$SESSION_ID" --store ./tars-data --title 'Alternative branch' --json
 tars session compact "$SESSION_ID" --store ./tars-data
 tars session history "$SESSION_ID" --store ./tars-data --last 3
+tars session export-materials "$SESSION_ID" --store ./tars-data --output exported.json --json
 tars session delete "$SESSION_ID" --store ./tars-data --json
 ```
 
