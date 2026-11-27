@@ -196,6 +196,110 @@ pub(crate) fn write_osc52_clipboard(bytes: &[u8]) -> io::Result<()> {
     write_osc52_clipboard_with_tmux(&mut stdout, bytes, in_tmux)
 }
 
+struct RawModeGuard {
+    restore: bool,
+}
+
+impl RawModeGuard {
+    fn enter() -> io::Result<Self> {
+        let was_raw = crossterm::terminal::is_raw_mode_enabled().unwrap_or(false);
+        if !was_raw {
+            crossterm::terminal::enable_raw_mode()?;
+        }
+        Ok(Self { restore: !was_raw })
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        if self.restore {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+}
+
+fn read_secret_loop(
+    mut next_event: impl FnMut() -> io::Result<crossterm::event::Event>,
+) -> io::Result<String> {
+    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+
+    let mut secret = String::new();
+    loop {
+        let event = match next_event() {
+            Ok(event) => event,
+            Err(err) => {
+                secret.clear();
+                return Err(err);
+            }
+        };
+        match event {
+            Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
+                KeyCode::Enter => return Ok(secret),
+                KeyCode::Esc => {
+                    secret.clear();
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "secret entry cancelled",
+                    ));
+                }
+                KeyCode::Char('c' | 'C') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    secret.clear();
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "secret entry cancelled",
+                    ));
+                }
+                KeyCode::Char('\u{0003}') => {
+                    secret.clear();
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "secret entry cancelled",
+                    ));
+                }
+                KeyCode::Backspace => {
+                    secret.pop();
+                }
+                KeyCode::Char(ch)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && !ch.is_control() =>
+                {
+                    secret.push(ch);
+                }
+                _ => {}
+            },
+            Event::Paste(text) => {
+                secret.extend(text.chars().filter(|ch| !matches!(ch, '\r' | '\n')));
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn read_secret_from_tty(prompt: &str) -> io::Result<String> {
+    use std::io::{IsTerminal, Write};
+    if !io::stdin().is_terminal() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "interactive terminal is required to read a secret",
+        ));
+    }
+    let result = {
+        let _raw_guard = RawModeGuard::enter()?;
+        {
+            let mut stderr = io::stderr().lock();
+            stderr.write_all(prompt.as_bytes())?;
+            stderr.flush()?;
+        }
+        read_secret_loop(crossterm::event::read)
+    };
+    let mut stderr = io::stderr().lock();
+    let _ = stderr.write_all(b"\n");
+    let _ = stderr.flush();
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -286,5 +390,97 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("1 MiB"));
         assert!(err_buf.is_empty());
+    }
+
+    #[test]
+    fn read_secret_loop_collects_keystrokes_paste_and_backspace_until_enter() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+        use std::collections::VecDeque;
+
+        let mut events = VecDeque::from([
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('s'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('x'),
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('k'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('z'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('-'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Paste("abc\r\ndef\n".to_owned())),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('A'),
+                KeyModifiers::SHIFT,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('l'),
+                KeyModifiers::CONTROL,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            ))),
+        ]);
+
+        let secret = super::read_secret_loop(|| {
+            events
+                .pop_front()
+                .unwrap_or_else(|| Err(io::Error::other("eof")))
+        })
+        .unwrap();
+        assert_eq!(secret, "sk-abcdefA");
+    }
+
+    #[test]
+    fn read_secret_loop_returns_interrupted_on_ctrl_c_and_esc() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        use std::collections::VecDeque;
+
+        let mut ctrl_c_events = VecDeque::from([
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('s'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            ))),
+        ]);
+        let err = super::read_secret_loop(|| ctrl_c_events.pop_front().unwrap()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+
+        let mut esc_events = VecDeque::from([
+            Ok(Event::Key(KeyEvent::new(
+                KeyCode::Char('s'),
+                KeyModifiers::NONE,
+            ))),
+            Ok(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))),
+        ]);
+        let err = super::read_secret_loop(|| esc_events.pop_front().unwrap()).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+    }
+
+    #[test]
+    fn read_secret_from_tty_rejects_non_terminal_without_hanging() {
+        if !std::io::IsTerminal::is_terminal(&io::stdin()) {
+            let err = super::read_secret_from_tty("Key: ").unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        }
     }
 }

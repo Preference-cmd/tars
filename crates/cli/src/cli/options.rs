@@ -18,7 +18,8 @@ Options:
   --stdin             Read UTF-8 user text until EOF
   --image             Attach a local PNG/JPEG/GIF/WebP image file (repeatable, max 8;
                       text may be omitted when at least one --image is provided)
-  --api-key-env       Credential variable (default OPENAI_API_KEY / ANTHROPIC_API_KEY)
+  --credential        Credential entry name in credentials.toml (conflicts with --api-key-env)
+  --api-key-env       Explicit credential environment variable (overrides credentials.toml; conflicts with --credential)
   --endpoint          Full HTTP endpoint override, including the path
   --timeout-secs      Work deadline, 1–86400 seconds (default 120)
   --max-tokens        Output token limit per model call (no default; required by anthropic)
@@ -143,6 +144,7 @@ impl RunOptions {
                 }
                 "--provider"
                 | "--model"
+                | "--credential"
                 | "--api-key-env"
                 | "--endpoint"
                 | "--input"

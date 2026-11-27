@@ -95,3 +95,15 @@ async fn run_interactive(options: options::Options) -> ExitCode {
         ExitCode::SUCCESS
     }
 }
+
+/// Read a secret line interactively from the terminal without echoing characters.
+///
+/// Writes `prompt` to `stderr` and flushes it, enables `crossterm` raw mode
+/// with an RAII guard that restores the prior terminal mode on every exit path
+/// (`Enter`, `Ctrl+C`, `Esc`, I/O error, or drop), collects keystrokes and paste
+/// events (stripping `\r` and `\n`), prints a trailing `\n` to `stderr`, and
+/// returns the entered secret. Returns [`io::ErrorKind::Interrupted`] if the
+/// user cancels with `Ctrl+C` or `Esc`.
+pub fn read_secret_from_tty(prompt: &str) -> io::Result<String> {
+    terminal::read_secret_from_tty(prompt)
+}

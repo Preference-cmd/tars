@@ -36,7 +36,8 @@ Options:
   --provider          openai-chat | openai-responses | anthropic (or profile)
   --model             Model identifier (or profile)
   --profile           Named model preset (otherwise default_profile)
-  --api-key-env       Credential variable, resolved when a session opens
+  --credential        Credential entry name in credentials.toml (conflicts with --api-key-env)
+  --api-key-env       Explicit credential variable, resolved when a session opens
   --endpoint          Full HTTP(S) URL without credentials, query or fragment
   --timeout-secs      Work deadline, 1–86400 seconds (default 120)
   --capacity          Retained work record count (default 256)
@@ -267,7 +268,8 @@ Create options:
   --provider          openai-chat | openai-responses | anthropic (or profile)
   --model             Model identifier (or profile)
   --profile           Named model preset (otherwise default_profile)
-  --api-key-env       Credential variable, resolved when a session opens
+  --credential        Credential entry name in credentials.toml (conflicts with --api-key-env)
+  --api-key-env       Explicit credential variable, resolved when a session opens
   --endpoint          Full HTTP(S) URL without credentials, query or fragment
   --timeout-secs      Work deadline, 1–86400 seconds (default 120)
   --capacity          Retained work record count (default 256; not a byte limit)

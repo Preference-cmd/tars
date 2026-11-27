@@ -135,6 +135,7 @@ fn is_known_session_option(flag: &str) -> bool {
             | "--skill-dir"
             | "--provider"
             | "--model"
+            | "--credential"
             | "--api-key-env"
             | "--endpoint"
             | "--timeout-secs"
@@ -330,6 +331,7 @@ impl SessionCommand {
                 }
                 "--provider"
                 | "--model"
+                | "--credential"
                 | "--api-key-env"
                 | "--endpoint"
                 | "--timeout-secs"

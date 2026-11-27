@@ -8,6 +8,7 @@ Usage: tars [interactive options]
        tars -p [prompt] [options]
        tars run --provider <protocol> --model <id> (--input <text> | --stdin | --image <path>) [options]
        tars session <create | run | list | show | compact | history | repair | rename | delete | fork | export-materials | export-markdown | import-legacy> [options]
+       tars auth <set | list | remove | path> [options]
        tars trust <list | revoke> [options]
        tars tools <status | install> [options]
        tars doctor [options]
@@ -44,6 +45,7 @@ Commands:
   -p, --print    Run headlessly with positional prompt or piped stdin; see tars -p --help
   run            Execute one work with a real model and explicitly selected workspace tools; see tars run --help
   session        Save and reopen sessions; see tars session --help
+  auth           Manage isolated 0600 model credentials (credentials.toml); see tars auth --help
   trust          List or revoke trusted workspace folders; see tars trust --help
   tools          Check or install the external search tool; see tars tools --help
   doctor         Run read-only environment and configuration diagnostics; see tars doctor --help
@@ -56,7 +58,8 @@ Run options:
   --stdin        Read UTF-8 user text until EOF
   --image        Attach a local PNG/JPEG/GIF/WebP image file (repeatable, max 8;
                  text may be omitted when at least one --image is provided)
-  --api-key-env  Credential variable (default OPENAI_API_KEY / ANTHROPIC_API_KEY)
+  --credential   Credential store entry name in credentials.toml (conflicts with --api-key-env)
+  --api-key-env  Explicit credential environment variable (overrides credentials.toml; conflicts with --credential)
   --endpoint     Full HTTP endpoint override, including the path
   --timeout-secs Work deadline, 1–86400 seconds (default 120)
   --max-tokens   Output token limit per model call (no default; required by anthropic)
@@ -101,7 +104,7 @@ Options:
   -h, --help     Show this help
   -V, --version  Show the version
 
-Run/session/tools read --config, then TARS_CONFIG, then the global config path.
+Run/session/tools/auth read --config, then TARS_CONFIG, then the global config path.
 Explicit options override configured fields. Saved sessions keep their definition.
 Material export and --load import contain only the current Context, never the
 replaced blocks kept in history records.
@@ -166,6 +169,29 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> ExitCode {
             Err(error) => {
                 let hint = if error.is_argument() {
                     ". Use tars session --help."
+                } else {
+                    ""
+                };
+                let _ = writeln!(io::stderr().lock(), "TARS: {}{hint}", error.message());
+                error.exit_code()
+            }
+        },
+        [one] if one == "auth" => output(super::auth::HELP),
+        [one, help] if one == "auth" && (help == "--help" || help == "-h") => {
+            output(super::auth::HELP)
+        }
+        [one, command, rest @ ..]
+            if one == "auth"
+                && matches!(command.to_str(), Some("set" | "list" | "remove" | "path"))
+                && rest.iter().any(|arg| arg == "--help" || arg == "-h") =>
+        {
+            output(super::auth::subcommand_help(command.to_str().unwrap_or("")))
+        }
+        [one, rest @ ..] if one == "auth" => match super::auth::AuthCommand::parse(rest) {
+            Ok(command) => super::auth::run(command),
+            Err(error) => {
+                let hint = if error.is_argument() {
+                    ". Use tars auth --help."
                 } else {
                     ""
                 };

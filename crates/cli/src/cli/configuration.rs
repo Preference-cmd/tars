@@ -224,6 +224,20 @@ pub(super) fn definition(
         skills_enabled: prelude_cli.no_skills.then_some(false),
         ..Default::default()
     };
+    let credential = string(values, "--credential")?;
+    let api_key_env = string(values, "--api-key-env")?;
+    if credential.is_some() && api_key_env.is_some() {
+        return Err(CliError::argument(
+            "--credential and --api-key-env are mutually exclusive",
+        ));
+    }
+    if let Some(ref name) = credential
+        && !tars_core::definition::valid_credential_name(name)
+    {
+        return Err(CliError::argument(
+            "--credential must be 1..=64 ASCII alphanumeric, '_' or '-' characters starting with alphanumeric",
+        ));
+    }
     let overrides = DefinitionOverrides {
         provider,
         workspace_root: values.get("--workspace").map(|path| (*path).into()),
@@ -257,8 +271,8 @@ pub(super) fn definition(
             .transpose()?,
         model: string(values, "--model")?,
         endpoint: string(values, "--endpoint")?,
-        credential: None,
-        api_key_env: string(values, "--api-key-env")?,
+        credential,
+        api_key_env,
         timeout_secs: number("--timeout-secs")?,
         capacity: number("--capacity")?
             .map(usize::try_from)
@@ -334,6 +348,9 @@ fn definition_error(
         }
         ConfigError::SkillDirectory { .. } => has_skill_dirs,
         ConfigError::InvalidTools(_) => values.contains_key("--tools"),
+        ConfigError::ConflictingCredential => {
+            values.contains_key("--credential") || values.contains_key("--api-key-env")
+        }
         ConfigError::Definition(_) | ConfigError::ProviderRequired | ConfigError::ModelRequired => {
             true
         }

@@ -87,9 +87,10 @@ _tars_completions() {
         prev="${COMP_WORDS[COMP_CWORD-1]}"
     fi
 
-    local top_commands="run session trust tools doctor completions"
-    local top_flags="-p --print -c --continue -r --resume --stream --stream-json --output-format --json --image --config --no-config --profile --store --recovery-dir --workspace --tools --permission-mode --code-execution --no-code-execution --provider --model --api-key-env --endpoint --input --stdin --timeout-secs --max-tokens --reasoning-effort --extra-body --render-options --max-model-attempts --context-window --auto-compact --prompt-cache --command-network --mcp --system --system-file --dynamic-context --dynamic-context-file --skill-dir --no-skills --load --save --trust-workspace-rules --trust-workspace-agents -h --help -V --version"
+    local top_commands="run session auth trust tools doctor completions"
+    local top_flags="-p --print -c --continue -r --resume --stream --stream-json --output-format --json --image --config --no-config --profile --store --recovery-dir --workspace --tools --permission-mode --code-execution --no-code-execution --provider --model --credential --api-key-env --endpoint --input --stdin --timeout-secs --max-tokens --reasoning-effort --extra-body --render-options --max-model-attempts --context-window --auto-compact --prompt-cache --command-network --mcp --system --system-file --dynamic-context --dynamic-context-file --skill-dir --no-skills --load --save --trust-workspace-rules --trust-workspace-agents -h --help -V --version"
     local session_commands="create run list show compact history repair rename delete fork export-materials export-markdown import-legacy"
+    local auth_commands="set list remove path"
     local trust_commands="list revoke"
     local tools_commands="status install"
     local shells="bash zsh fish"
@@ -119,7 +120,7 @@ _tars_completions() {
     while [[ $i -lt $COMP_CWORD ]]; do
         local word="${COMP_WORDS[$i]}"
         case "$word" in
-            --config|--profile|--store|--recovery-dir|--workspace|--tools|--permission-mode|--resume|--output-format|--image|--input|--provider|--model|--api-key-env|--endpoint|--timeout-secs|--max-tokens|--reasoning-effort|--extra-body|--render-options|--max-model-attempts|--context-window|--auto-compact|--prompt-cache|--command-network|--mcp|--system|--system-file|--dynamic-context|--dynamic-context-file|--skill-dir|--load|--save|--agent|--last|--title|--expected-revision|--record|--output)
+            --config|--profile|--store|--recovery-dir|--workspace|--tools|--permission-mode|--resume|--output-format|--image|--input|--provider|--model|--credential|--api-key-env|--endpoint|--timeout-secs|--max-tokens|--reasoning-effort|--extra-body|--render-options|--max-model-attempts|--context-window|--auto-compact|--prompt-cache|--command-network|--mcp|--system|--system-file|--dynamic-context|--dynamic-context-file|--skill-dir|--load|--save|--agent|--last|--title|--expected-revision|--record|--output)
                 i=$((i + 2))
                 continue
                 ;;
@@ -144,8 +145,29 @@ _tars_completions() {
                 COMPREPLY=( $(compgen -W "$session_commands" -- "$cur") )
                 return 0
             fi
-            local session_flags="--store --config --no-config --json --agent --last --output --record --recovery-dir --input --stdin --image --stream --stream-json --output-format --permission-mode --trust-workspace-rules --trust-workspace-agents --title --clear --dry-run --apply --expected-revision --provider --model --profile --workspace --tools --code-execution --no-code-execution -h --help"
+            local session_flags="--store --config --no-config --json --agent --last --output --record --recovery-dir --input --stdin --image --stream --stream-json --output-format --permission-mode --trust-workspace-rules --trust-workspace-agents --title --clear --dry-run --apply --expected-revision --provider --model --profile --credential --api-key-env --workspace --tools --code-execution --no-code-execution -h --help"
             COMPREPLY=( $(compgen -W "$session_flags" -- "$cur") )
+            return 0
+            ;;
+        auth)
+            if [[ -z "$subcmd" && "$cur" != -* ]]; then
+                COMPREPLY=( $(compgen -W "$auth_commands" -- "$cur") )
+                return 0
+            fi
+            case "$subcmd" in
+                set)
+                    COMPREPLY=( $(compgen -W "--stdin --config -h --help" -- "$cur") )
+                    ;;
+                list)
+                    COMPREPLY=( $(compgen -W "--config --json -h --help" -- "$cur") )
+                    ;;
+                remove|path)
+                    COMPREPLY=( $(compgen -W "--config -h --help" -- "$cur") )
+                    ;;
+                *)
+                    COMPREPLY=( $(compgen -W "-h --help" -- "$cur") )
+                    ;;
+            esac
             return 0
             ;;
         trust)
@@ -205,10 +227,11 @@ complete -F _tars_completions tars
 const ZSH_SCRIPT: &str = r#"#compdef tars
 
 _tars() {
-    local -a top_commands session_commands trust_commands tools_commands shells
+    local -a top_commands session_commands auth_commands trust_commands tools_commands shells
     top_commands=(
         'run:Execute one transient work with a model'
         'session:Manage and run persistent sessions'
+        'auth:Manage isolated 0600 model credentials'
         'trust:List or revoke trusted workspace folders'
         'tools:Check or install external tools'
         'doctor:Run read-only environment and configuration diagnostics'
@@ -232,6 +255,12 @@ _tars() {
     trust_commands=(
         'list:List trusted workspace folders'
         'revoke:Revoke trust for a workspace folder'
+    )
+    auth_commands=(
+        'set:Store or update a named API key'
+        'list:List stored credential names'
+        'remove:Remove a stored credential'
+        'path:Print the active credentials.toml path'
     )
     tools_commands=(
         'status:Show external tool and sandbox status'
@@ -259,6 +288,8 @@ _tars() {
         '--config[Shared TOML configuration file]:file:_files'
         '--no-config[Ignore global configuration]'
         '--profile[Named model preset]:profile:'
+        '--credential[Credential store entry name]:name:'
+        '--api-key-env[Credential environment variable]:var:'
         '--store[Session store directory]:dir:_files -/'
         '--recovery-dir[Recovery export directory]:dir:_files -/'
         '--workspace[Workspace root directory]:dir:_files -/'
@@ -278,7 +309,7 @@ _tars() {
     while (( i < CURRENT )); do
         local word="${words[$i]}"
         case "$word" in
-            --config|--profile|--store|--recovery-dir|--workspace|--tools|--permission-mode|--resume|--output-format|--image|--input|--provider|--model|--api-key-env|--endpoint|--timeout-secs|--max-tokens|--reasoning-effort|--extra-body|--render-options|--max-model-attempts|--context-window|--auto-compact|--prompt-cache|--command-network|--mcp|--system|--system-file|--dynamic-context|--dynamic-context-file|--skill-dir|--load|--save|--agent|--last|--title|--expected-revision|--record|--output)
+            --config|--profile|--store|--recovery-dir|--workspace|--tools|--permission-mode|--resume|--output-format|--image|--input|--provider|--model|--credential|--api-key-env|--endpoint|--timeout-secs|--max-tokens|--reasoning-effort|--extra-body|--render-options|--max-model-attempts|--context-window|--auto-compact|--prompt-cache|--command-network|--mcp|--system|--system-file|--dynamic-context|--dynamic-context-file|--skill-dir|--load|--save|--agent|--last|--title|--expected-revision|--record|--output)
                 (( i += 2 ))
                 continue
                 ;;
@@ -327,8 +358,41 @@ _tars() {
                 '--dry-run[Preview repair]' \
                 '--apply[Apply repair]' \
                 '--expected-revision[Expected revision]:rev:' \
+                '--credential[Credential store entry name]:name:' \
+                '--api-key-env[Credential environment variable]:var:' \
                 '-h[Show help]' \
                 '--help[Show help]'
+            ;;
+        auth)
+            if [[ -z "$subcmd" && "${words[CURRENT]}" != -* ]]; then
+                _describe -t auth-commands 'auth subcommands' auth_commands
+                return
+            fi
+            case "$subcmd" in
+                set)
+                    _arguments -s \
+                        '--stdin[Read secret from standard input]' \
+                        '--config[Shared TOML configuration file]:file:_files' \
+                        '-h[Show help]' \
+                        '--help[Show help]'
+                    ;;
+                list)
+                    _arguments -s \
+                        '--config[Shared TOML configuration file]:file:_files' \
+                        '--json[Structured JSON output]' \
+                        '-h[Show help]' \
+                        '--help[Show help]'
+                    ;;
+                remove|path)
+                    _arguments -s \
+                        '--config[Shared TOML configuration file]:file:_files' \
+                        '-h[Show help]' \
+                        '--help[Show help]'
+                    ;;
+                *)
+                    _arguments -s '-h[Show help]' '--help[Show help]'
+                    ;;
+            esac
             ;;
         trust)
             if [[ -z "$subcmd" && "${words[CURRENT]}" != -* ]]; then
@@ -407,8 +471,9 @@ compdef _tars tars
 
 const FISH_SCRIPT: &str = r#"# fish completion for tars
 
-set -l top_cmds run session trust tools doctor completions
+set -l top_cmds run session auth trust tools doctor completions
 set -l session_cmds create run list show compact history repair rename delete fork export-materials export-markdown import-legacy
+set -l auth_cmds set list remove path
 set -l trust_cmds list revoke
 set -l tools_cmds status install
 
@@ -416,6 +481,7 @@ complete -c tars -f
 
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a run -d "Execute one transient work with a model"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a session -d "Save and reopen persistent sessions"
+complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a auth -d "Manage isolated 0600 model credentials"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a trust -d "List or revoke trusted workspace folders"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a tools -d "Check or install external tools"
 complete -c tars -n "not __fish_seen_subcommand_from $top_cmds" -a doctor -d "Run read-only diagnostics"
@@ -432,6 +498,8 @@ complete -c tars -n "not __fish_seen_subcommand_from $top_cmds; or __fish_seen_s
 complete -c tars -l config -r -F -d "Shared TOML configuration file"
 complete -c tars -l no-config -d "Ignore global configuration"
 complete -c tars -l profile -r -d "Named model preset"
+complete -c tars -n "not __fish_seen_subcommand_from $top_cmds; or __fish_seen_subcommand_from run; or __fish_seen_subcommand_from session" -l credential -r -d "Credential store entry name"
+complete -c tars -n "not __fish_seen_subcommand_from $top_cmds; or __fish_seen_subcommand_from run; or __fish_seen_subcommand_from session" -l api-key-env -r -d "Credential environment variable"
 complete -c tars -l store -r -a "(__fish_complete_directories)" -d "Session store directory"
 complete -c tars -l recovery-dir -r -a "(__fish_complete_directories)" -d "Recovery export directory"
 complete -c tars -l workspace -r -a "(__fish_complete_directories)" -d "Workspace root directory"
@@ -459,6 +527,12 @@ complete -c tars -n "__fish_seen_subcommand_from session; and not __fish_seen_su
 complete -c tars -n "__fish_seen_subcommand_from session" -l agent -r -d "Agent UUID or unique name"
 complete -c tars -n "__fish_seen_subcommand_from session" -l last -r -d "Newest N blocks"
 complete -c tars -n "__fish_seen_subcommand_from session" -l output -r -F -d "New output file path"
+
+complete -c tars -n "__fish_seen_subcommand_from auth; and not __fish_seen_subcommand_from $auth_cmds" -a set -d "Store or update a named API key"
+complete -c tars -n "__fish_seen_subcommand_from auth; and not __fish_seen_subcommand_from $auth_cmds" -a list -d "List stored credential names"
+complete -c tars -n "__fish_seen_subcommand_from auth; and not __fish_seen_subcommand_from $auth_cmds" -a remove -d "Remove a stored credential"
+complete -c tars -n "__fish_seen_subcommand_from auth; and not __fish_seen_subcommand_from $auth_cmds" -a path -d "Print the active credentials.toml path"
+complete -c tars -n "__fish_seen_subcommand_from auth; and __fish_seen_subcommand_from set" -l stdin -d "Read secret from standard input"
 
 complete -c tars -n "__fish_seen_subcommand_from trust; and not __fish_seen_subcommand_from $trust_cmds" -a list -d "List trusted workspace folders"
 complete -c tars -n "__fish_seen_subcommand_from trust; and not __fish_seen_subcommand_from $trust_cmds" -a revoke -d "Revoke trust for a workspace folder"

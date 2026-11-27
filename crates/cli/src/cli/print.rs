@@ -44,10 +44,10 @@ Output format options:
   --output-format FMT text | json | stream-json (conflicts with --json/--stream/--stream-json)
 
 Transient model & tool options (cannot be used with -c / --resume):
-  --provider, --model, --profile, --api-key-env, --endpoint, --timeout-secs,
-  --max-tokens, --reasoning-effort, --extra-body, --render-options,
-  --max-model-attempts, --context-window, --auto-compact, --prompt-cache,
-  --code-execution, --no-code-execution, --workspace, --tools,
+  --provider, --model, --profile, --credential, --api-key-env, --endpoint,
+  --timeout-secs, --max-tokens, --reasoning-effort, --extra-body,
+  --render-options, --max-model-attempts, --context-window, --auto-compact,
+  --prompt-cache, --code-execution, --no-code-execution, --workspace, --tools,
   --command-network, --mcp, --system, --system-file, --dynamic-context,
   --dynamic-context-file, --skill-dir, --no-skills, --load, --save
 
@@ -107,6 +107,7 @@ fn takes_value(flag: &str) -> bool {
             | "--recovery-dir"
             | "--provider"
             | "--model"
+            | "--credential"
             | "--api-key-env"
             | "--endpoint"
             | "--input"
@@ -342,6 +343,7 @@ impl PrintCommand {
                 "--provider"
                 | "--model"
                 | "--profile"
+                | "--credential"
                 | "--api-key-env"
                 | "--endpoint"
                 | "--timeout-secs"
@@ -567,6 +569,7 @@ fn static_transient_only_flag(token: &str) -> &'static str {
         "--provider" => "--provider",
         "--model" => "--model",
         "--profile" => "--profile",
+        "--credential" => "--credential",
         "--api-key-env" => "--api-key-env",
         "--endpoint" => "--endpoint",
         "--timeout-secs" => "--timeout-secs",
