@@ -1,3 +1,4 @@
+pub use crate::media::multimodal_input;
 use causa::kernel::{BlockContent, BlockMeta, ContextBlock, Role};
 use causa::runtime::new_block_id;
 

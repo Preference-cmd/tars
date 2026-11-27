@@ -11,10 +11,13 @@ mod references;
 mod vocabulary;
 
 pub use file::{
-    MAX_IMPORT_BYTES, MaterialError, SavedMaterial, load, load_session_materials,
-    load_with_references, save, save_new, save_with_references,
+    ExportedMaterials, MAX_IMPORT_BYTES, MaterialError, SavedMaterial, load,
+    load_session_materials, load_with_media, load_with_references, media_sidecar_dir, save,
+    save_new, save_new_with_media, save_with_references,
 };
 pub(crate) use references::indexed as is_history_reference;
+pub(crate) use references::validate_managed_references;
+#[allow(unused_imports)]
 pub(crate) use references::validate_with_history as validate_references;
 pub use references::{DETACHED_HISTORY_NOTE, MaterialReference, detach_history_references};
 pub(crate) use vocabulary::decode as decode_stored;

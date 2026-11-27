@@ -1,6 +1,7 @@
 //! SQLite v3 session store, per-session OS advisory locks, and atomic writer commits.
 
 use std::{
+    collections::BTreeMap,
     fs::{self, File, OpenOptions, TryLockError},
     io::{self, Write},
     path::{Component, Path, PathBuf},
@@ -10,7 +11,7 @@ use std::{
     },
 };
 
-use causa::kernel::Context;
+use causa::kernel::{BlockContent, BlockId, ContentPart, Context};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -138,6 +139,27 @@ impl SessionStore {
             return Ok(None);
         };
         read_session_record(&conn, id)
+    }
+
+    /// Read all managed `media:sha256:*` blobs referenced by `record.context` and
+    /// entry-agent `history_records`, failing closed if any blob is missing.
+    pub(crate) fn load_managed_media_blobs(
+        &self,
+        id: &str,
+        record: &SavedSessionRecord,
+    ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        canonical_uuid(id)?;
+        let refs = collect_record_managed_media_block_ids(record);
+        if refs.is_empty() && record.history.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(conn) = schema::open_read_only(&self.db_path)? else {
+            if let Some((first_ref, first_block_id)) = refs.into_iter().next() {
+                return Err(missing_media_error(first_block_id, &first_ref));
+            }
+            return Ok(Vec::new());
+        };
+        load_managed_media_blobs_from_conn(&conn, id, id, record)
     }
 
     #[cfg(test)]
@@ -615,6 +637,16 @@ impl Writer {
         Ok(record)
     }
 
+    /// Read all managed `media:sha256:*` blobs referenced by `record.context` and
+    /// entry-agent `history_records`, failing closed if any blob is missing.
+    pub(crate) fn load_managed_media_blobs(
+        &self,
+        record: &SavedSessionRecord,
+    ) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+        let conn = self.conn.lock().map_err(|_| StoreError::Poisoned)?;
+        load_managed_media_blobs_from_conn(&conn, &self.id, &self.id, record)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn commit(
         &self,
@@ -631,6 +663,26 @@ impl Writer {
         target_agent_id: &str,
         delivered_ids: &[i64],
         dropped_ids: &[i64],
+    ) -> Result<SavedSessionRecord, StoreError> {
+        self.commit_with_consumed_events_and_media(
+            operation,
+            target_agent_id,
+            delivered_ids,
+            dropped_ids,
+            &[],
+        )
+    }
+
+    /// Atomically commit `operation`, mark `delivered_ids` / `dropped_ids` consumed,
+    /// persist `media_blobs` into `artifacts`, and verify all managed media references
+    /// in `operation.record.context` exist inside the exact same `BEGIN IMMEDIATE` transaction.
+    pub(crate) fn commit_with_consumed_events_and_media(
+        &self,
+        operation: &PreparedCommit,
+        target_agent_id: &str,
+        delivered_ids: &[i64],
+        dropped_ids: &[i64],
+        media_blobs: &[(String, Arc<[u8]>)],
     ) -> Result<SavedSessionRecord, StoreError> {
         operation.validate(&self.id)?;
         canonical_uuid(target_agent_id)?;
@@ -728,6 +780,7 @@ impl Writer {
             )?;
         }
         upsert_session_and_entry_agent(&conn, &operation.record, &serialized)?;
+        persist_and_verify_media_in_tx(&conn, &self.id, &operation.record.context, media_blobs)?;
         super::multi_agent::mark_events_consumed_in_tx(
             &conn,
             &self.id,
@@ -1224,6 +1277,144 @@ fn decode_session_row(
 
 fn revision(record: &Option<SavedSessionRecord>) -> Option<u64> {
     record.as_ref().map(|r| r.revision)
+}
+
+fn collect_blocks_managed_media_block_ids(
+    blocks: &[causa::kernel::ContextBlock],
+    into: &mut BTreeMap<String, BlockId>,
+) {
+    for block in blocks {
+        match block.content() {
+            BlockContent::Message { parts, .. } => {
+                for part in parts {
+                    if let ContentPart::Media(media) = part
+                        && crate::media::is_managed_media_ref(&media.reference)
+                    {
+                        into.entry(media.reference.clone()).or_insert(block.id());
+                    }
+                }
+            }
+            BlockContent::ToolResult(result) => {
+                for media in &result.media {
+                    if crate::media::is_managed_media_ref(&media.reference) {
+                        into.entry(media.reference.clone()).or_insert(block.id());
+                    }
+                }
+            }
+            BlockContent::ToolCall(_) | BlockContent::ToolChange(_) => {}
+        }
+    }
+}
+
+fn collect_record_managed_media_block_ids(
+    record: &SavedSessionRecord,
+) -> BTreeMap<String, BlockId> {
+    let mut map = BTreeMap::new();
+    collect_blocks_managed_media_block_ids(record.context.blocks(), &mut map);
+    map
+}
+
+fn missing_media_error(block_id: BlockId, reference: &str) -> StoreError {
+    StoreError::References(Arc::new(
+        crate::material::MaterialError::ReferenceUnavailable {
+            block_id,
+            source: io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("missing managed media blob {reference}"),
+            ),
+        },
+    ))
+}
+
+fn persist_and_verify_media_in_tx(
+    conn: &Connection,
+    session_id: &str,
+    context: &Context,
+    media_blobs: &[(String, Arc<[u8]>)],
+) -> Result<(), StoreError> {
+    for (reference, bytes) in media_blobs {
+        if crate::media::parse_managed_media_sha256(reference).is_none() {
+            return Err(StoreError::InvalidDatabase(format!(
+                "invalid managed media reference: {reference}"
+            )));
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO artifacts (session_id, agent_id, artifact_id, content)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, session_id, reference, bytes.as_ref()],
+        )?;
+    }
+    let mut required = BTreeMap::new();
+    collect_blocks_managed_media_block_ids(context.blocks(), &mut required);
+    for (reference, block_id) in required {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM artifacts
+                 WHERE session_id = ?1 AND agent_id = ?2 AND artifact_id = ?3",
+                params![session_id, session_id, reference],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(missing_media_error(block_id, &reference));
+        }
+    }
+    Ok(())
+}
+
+fn load_managed_media_blobs_from_conn(
+    conn: &Connection,
+    session_id: &str,
+    agent_id: &str,
+    record: &SavedSessionRecord,
+) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
+    let mut refs = BTreeMap::new();
+    collect_blocks_managed_media_block_ids(record.context.blocks(), &mut refs);
+    for entry in &record.history {
+        let row: Option<(i64, String)> = conn
+            .query_row(
+                "SELECT length(CAST(document_json AS BLOB)), document_json
+                 FROM history_records
+                 WHERE session_id = ?1 AND agent_id = ?2 AND record_id = ?3",
+                params![session_id, agent_id, &entry.record_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((len_i64, document_json)) = row {
+            let len = u64::try_from(len_i64).map_err(|_| {
+                StoreError::InvalidDatabase("negative history record length".into())
+            })?;
+            if len > crate::compact::history::MAX_HISTORY_BYTES as u64 {
+                return Err(StoreError::HistoryTooLarge {
+                    limit: crate::compact::history::MAX_HISTORY_BYTES,
+                });
+            }
+            let doc: crate::compact::HistoryRecord = serde_json::from_str(&document_json)?;
+            doc.validate(session_id, &entry.record_id)?;
+            for replacement in &doc.replacements {
+                collect_blocks_managed_media_block_ids(&replacement.originals, &mut refs);
+            }
+        }
+    }
+    if refs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut blobs = Vec::with_capacity(refs.len());
+    for (reference, block_id) in refs {
+        let bytes: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT CAST(content AS BLOB) FROM artifacts
+                 WHERE session_id = ?1 AND agent_id = ?2 AND artifact_id = ?3",
+                params![session_id, agent_id, &reference],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(bytes) = bytes else {
+            return Err(missing_media_error(block_id, &reference));
+        };
+        blobs.push((reference, bytes));
+    }
+    Ok(blobs)
 }
 
 #[cfg(test)]

@@ -20,15 +20,24 @@ pub(super) struct Scan {
     pub fatal: bool,
 }
 
-/// Check pairing and references. `history` is the session's rewrite record
-/// index and `artifacts` is the session's artifact store: a tool result's
-/// artifact reference to one of its indexed rewrite records or an existing
-/// readable file in its `.artifacts/` directory is supported; every other
-/// artifact or media reference is not.
+/// Check pairing and references without a session [`crate::media::MediaVault`].
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn scan(
     context: &Context,
     history: &[HistoryRecordEntry],
     artifacts: Option<&crate::compact::history::HistoryStore>,
+) -> Scan {
+    scan_with_media(context, history, artifacts, None)
+}
+
+/// Check pairing and references. `history` is the session's rewrite record
+/// index, `artifacts` is the session's artifact store, and `media_vault` is the
+/// session's managed image vault when inspecting the entry agent.
+pub(super) fn scan_with_media(
+    context: &Context,
+    history: &[HistoryRecordEntry],
+    artifacts: Option<&crate::compact::history::HistoryStore>,
+    media_vault: Option<&crate::media::MediaVault>,
 ) -> Scan {
     let mut diagnosis = RepairDiagnosis {
         block_count: context.blocks().len(),
@@ -91,7 +100,13 @@ pub(super) fn scan(
                         }
                         true
                     });
-                if !result.media.is_empty() || unsupported_artifact {
+                let media_error = result
+                    .media
+                    .iter()
+                    .find_map(|media| media_ref_error(media, artifacts, media_vault));
+                if let Some(msg) = media_error {
+                    diagnosis.push(RepairIssueKind::UnsupportedReference, id, msg);
+                } else if unsupported_artifact {
                     diagnosis.push(
                         RepairIssueKind::UnsupportedReference,
                         id,
@@ -103,15 +118,11 @@ pub(super) fn scan(
             // by the protocol render below.
             BlockContent::ToolChange(_) => {}
             BlockContent::Message { parts, .. } => {
-                if parts
-                    .iter()
-                    .any(|part| matches!(part, ContentPart::Media(_)))
-                {
-                    diagnosis.push(
-                        RepairIssueKind::UnsupportedReference,
-                        id,
-                        "Repair cannot resolve message media",
-                    );
+                if let Some(msg) = parts.iter().find_map(|part| match part {
+                    ContentPart::Media(media) => media_ref_error(media, artifacts, media_vault),
+                    _ => None,
+                }) {
+                    diagnosis.push(RepairIssueKind::UnsupportedReference, id, msg);
                 }
             }
         }
@@ -135,6 +146,30 @@ pub(super) fn scan(
         unpaired,
         fatal,
     }
+}
+
+fn media_ref_error(
+    media: &causa::kernel::MediaRef,
+    artifacts: Option<&crate::compact::history::HistoryStore>,
+    media_vault: Option<&crate::media::MediaVault>,
+) -> Option<&'static str> {
+    if crate::media::validate_managed_media_ref(media).is_err() {
+        return Some("Repair cannot resolve unmanaged or invalid media reference");
+    }
+    if crate::media::is_managed_media_ref(&media.reference) {
+        if let Some(vault) = media_vault
+            && !vault.contains(&media.reference)
+        {
+            return Some("Referenced managed media asset is missing from session vault");
+        }
+        return None;
+    }
+    if let Ok(artifact_id) = crate::compact::history::parse_spilled_artifact_id(&media.reference)
+        && artifacts.is_none_or(|store| store.verify_spilled_artifact(artifact_id).is_err())
+    {
+        return Some("Referenced media artifact is missing or unreadable");
+    }
+    None
 }
 
 pub(super) fn render(
@@ -187,17 +222,28 @@ pub(in crate::application) fn diagnose(
     artifacts: Option<&crate::compact::history::HistoryStore>,
     definition: &SessionDefinition,
 ) -> RepairDiagnosis {
-    diagnose_frame(context, history, artifacts, definition, false)
+    diagnose_frame(context, history, artifacts, None, definition, false)
+}
+
+pub(in crate::application) fn diagnose_with_media(
+    context: &Context,
+    history: &[HistoryRecordEntry],
+    artifacts: Option<&crate::compact::history::HistoryStore>,
+    media_vault: Option<&crate::media::MediaVault>,
+    definition: &SessionDefinition,
+) -> RepairDiagnosis {
+    diagnose_frame(context, history, artifacts, media_vault, definition, false)
 }
 
 fn diagnose_frame(
     context: &Context,
     history: &[HistoryRecordEntry],
     artifacts: Option<&crate::compact::history::HistoryStore>,
+    media_vault: Option<&crate::media::MediaVault>,
     definition: &SessionDefinition,
     require_frame: bool,
 ) -> RepairDiagnosis {
-    let mut scan = scan(context, history, artifacts);
+    let mut scan = scan_with_media(context, history, artifacts, media_vault);
     // Admission examines the old materials before the new input is appended.
     // Empty/text-only histories need no tool-exchange preflight and may be a
     // valid prefix of the next request even when not sendable on their own.
@@ -217,13 +263,14 @@ fn diagnose_frame(
     scan.diagnosis
 }
 
-pub(super) fn candidate_check(
+pub(super) fn candidate_check_with_media(
     context: &Context,
     history: &[HistoryRecordEntry],
     artifacts: Option<&crate::compact::history::HistoryStore>,
+    media_vault: Option<&crate::media::MediaVault>,
     definition: &SessionDefinition,
 ) -> Result<(), RepairError> {
-    let diagnosis = diagnose_frame(context, history, artifacts, definition, true);
+    let diagnosis = diagnose_frame(context, history, artifacts, media_vault, definition, true);
     if diagnosis.is_ready() {
         Ok(())
     } else {
@@ -236,9 +283,18 @@ pub(crate) fn admission_check(
     history: &[HistoryRecordEntry],
     artifacts: Option<&crate::compact::history::HistoryStore>,
 ) -> Result<(), RepairError> {
+    admission_check_with_media(context, history, artifacts, None)
+}
+
+pub(crate) fn admission_check_with_media(
+    context: &Context,
+    history: &[HistoryRecordEntry],
+    artifacts: Option<&crate::compact::history::HistoryStore>,
+    media_vault: Option<&crate::media::MediaVault>,
+) -> Result<(), RepairError> {
     // New-key admission only needs the linear material pairing check. Full
     // rendering belongs to inspection/repair, not the synchronous input path.
-    let diagnosis = scan(context, history, artifacts).diagnosis;
+    let diagnosis = scan_with_media(context, history, artifacts, media_vault).diagnosis;
     if diagnosis.is_ready() {
         Ok(())
     } else {
@@ -338,7 +394,13 @@ impl ManagedSession {
             .map(|work| inspect_original_batch(owner, work))
             .transpose()?;
         drop(state);
-        let diagnosis = diagnose(&context, &history, artifacts.as_deref(), &definition);
+        let diagnosis = diagnose_with_media(
+            &context,
+            &history,
+            artifacts.as_deref(),
+            Some(&self.entry.media_vault),
+            &definition,
+        );
         Ok(RepairInspection {
             version,
             diagnosis,

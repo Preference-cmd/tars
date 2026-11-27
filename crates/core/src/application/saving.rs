@@ -106,7 +106,7 @@ pub(super) fn prepare(entry: &Entry, state: &mut State) -> Result<(), Applicatio
 
 pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
     let _writer_guard = entry.writer_gate.lock().await;
-    let (writer, pending, consumed, attempted, history_store, entry_agent_id) = {
+    let (writer, pending, consumed, attempted, history_store, entry_agent_id, media_vault) = {
         let mut state = entry.lock();
         state.save_requested = false;
         state.save_in_flight = true;
@@ -147,6 +147,7 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
             attempted,
             history_store,
             entry.target.conversation_id.as_str().to_owned(),
+            entry.media_vault.clone(),
         )
     };
     // Both the supervisor and blocking closure own the writer. Dropping a wait
@@ -158,12 +159,29 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
                 CommitResolution::NotApplied => {}
             }
         }
-        check_artifact_references(&pending.record, history_store.as_deref())?;
-        writer.commit_with_consumed_events(
+        check_artifact_references(
+            &pending.record,
+            history_store.as_deref(),
+            Some(&media_vault),
+        )?;
+        let media_refs = crate::media::collect_context_managed_media_refs(&pending.record.context);
+        let media_blobs = media_vault
+            .snapshot_blobs_for_refs(&media_refs)
+            .map_err(|err| {
+                let block_id = first_block_for_media_refs(&pending.record.context, &media_refs);
+                crate::store::StoreError::References(Arc::new(
+                    crate::material::MaterialError::ReferenceUnavailable {
+                        block_id,
+                        source: std::io::Error::new(std::io::ErrorKind::NotFound, err.to_string()),
+                    },
+                ))
+            })?;
+        writer.commit_with_consumed_events_and_media(
             &pending,
             &entry_agent_id,
             &consumed.delivered_ids,
             &consumed.dropped_ids,
+            &media_blobs,
         )
     })
     .await;
@@ -329,77 +347,172 @@ pub(super) async fn io_semaphore<T: Send + 'static, E: Into<ApplicationError> + 
     .map_err(Into::into)
 }
 
-/// Deep check of the record's history and spilled artifact references before
+/// Deep check of the record's history, spilled artifact, and media references before
 /// it is written: history references must name a record in the record's own
 /// index whose file still exists and holds that original block; spilled artifact
-/// references (`artifact:<id>`) must exist and be readable in this session's
-/// `.artifacts/` directory. Runs on the blocking pool.
+/// references (`artifact:<id>`) must exist and be readable in SQLite `artifacts`;
+/// managed `media:sha256:<64hex>` references must be present in `media_vault`.
+/// Runs on the blocking pool.
 fn check_artifact_references(
     record: &SavedSessionRecord,
     history: Option<&crate::compact::history::HistoryStore>,
+    media_vault: Option<&crate::media::MediaVault>,
 ) -> Result<(), crate::store::StoreError> {
-    for block in record.context.blocks() {
-        let causa::kernel::BlockContent::ToolResult(result) = block.content() else {
-            continue;
-        };
-        let Some(artifact) = &result.output.artifact else {
-            continue;
-        };
+    let check_media = |block_id: causa::kernel::BlockId,
+                       media: &causa::kernel::MediaRef|
+     -> Result<(), crate::store::StoreError> {
         let refused = |source: std::io::Error| {
             crate::store::StoreError::References(Arc::new(
-                crate::material::MaterialError::ReferenceUnavailable {
-                    block_id: block.id(),
-                    source,
-                },
+                crate::material::MaterialError::ReferenceUnavailable { block_id, source },
             ))
         };
-        let invalid = |reason: String| {
+        crate::media::validate_managed_media_ref(media).map_err(|err| {
             refused(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("history artifact reference {}: {reason}", artifact.id),
+                err.to_string(),
             ))
-        };
-        if artifact
-            .id
-            .starts_with(crate::compact::history::ARTIFACT_ID_PREFIX)
+        })?;
+        if crate::media::is_managed_media_ref(&media.reference) {
+            if let Some(vault) = media_vault
+                && !vault.contains(&media.reference)
+            {
+                return Err(refused(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("missing managed media blob {}", media.reference),
+                )));
+            }
+            return Ok(());
+        }
+        if let Ok(artifact_id) =
+            crate::compact::history::parse_spilled_artifact_id(&media.reference)
         {
-            let artifact_id = crate::compact::history::parse_spilled_artifact_id(&artifact.id)
-                .map_err(|reason| invalid(reason.into()))?;
-            let history = history
-                .ok_or_else(|| invalid("this session keeps no artifact directory".into()))?;
+            let history = history.ok_or_else(|| {
+                refused(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "media artifact reference {}: this session keeps no artifact store",
+                        media.reference
+                    ),
+                ))
+            })?;
             history
                 .verify_spilled_artifact(artifact_id)
                 .map_err(|error| match error {
                     crate::store::StoreError::Io(source) => refused(std::io::Error::new(
                         source.kind(),
-                        format!("artifact reference {}: {source}", artifact.id),
+                        format!("media artifact reference {}: {source}", media.reference),
                     )),
-                    other => invalid(other.to_string()),
+                    other => refused(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("media artifact reference {}: {other}", media.reference),
+                    )),
                 })?;
-            continue;
         }
-        let (record_id, block_id) = crate::compact::history::parse_artifact_id(&artifact.id)
-            .map_err(|reason| invalid(reason.into()))?;
-        if !record
-            .history
-            .iter()
-            .any(|entry| entry.record_id == record_id)
-        {
-            return Err(invalid(
-                "the record is not in this session's history index".into(),
-            ));
+        Ok(())
+    };
+
+    for block in record.context.blocks() {
+        match block.content() {
+            causa::kernel::BlockContent::Message { parts, .. } => {
+                for part in parts {
+                    if let causa::kernel::ContentPart::Media(media) = part {
+                        check_media(block.id(), media)?;
+                    }
+                }
+            }
+            causa::kernel::BlockContent::ToolResult(result) => {
+                for media in &result.media {
+                    check_media(block.id(), media)?;
+                }
+                let Some(artifact) = &result.output.artifact else {
+                    continue;
+                };
+                let refused = |source: std::io::Error| {
+                    crate::store::StoreError::References(Arc::new(
+                        crate::material::MaterialError::ReferenceUnavailable {
+                            block_id: block.id(),
+                            source,
+                        },
+                    ))
+                };
+                let invalid = |reason: String| {
+                    refused(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("history artifact reference {}: {reason}", artifact.id),
+                    ))
+                };
+                if artifact
+                    .id
+                    .starts_with(crate::compact::history::ARTIFACT_ID_PREFIX)
+                {
+                    let artifact_id =
+                        crate::compact::history::parse_spilled_artifact_id(&artifact.id)
+                            .map_err(|reason| invalid(reason.into()))?;
+                    let history = history.ok_or_else(|| {
+                        invalid("this session keeps no artifact directory".into())
+                    })?;
+                    history
+                        .verify_spilled_artifact(artifact_id)
+                        .map_err(|error| match error {
+                            crate::store::StoreError::Io(source) => refused(std::io::Error::new(
+                                source.kind(),
+                                format!("artifact reference {}: {source}", artifact.id),
+                            )),
+                            other => invalid(other.to_string()),
+                        })?;
+                    continue;
+                }
+                let (record_id, block_id) =
+                    crate::compact::history::parse_artifact_id(&artifact.id)
+                        .map_err(|reason| invalid(reason.into()))?;
+                if !record
+                    .history
+                    .iter()
+                    .any(|entry| entry.record_id == record_id)
+                {
+                    return Err(invalid(
+                        "the record is not in this session's history index".into(),
+                    ));
+                }
+                let history = history
+                    .ok_or_else(|| invalid("this session keeps no history records".into()))?;
+                history
+                    .verify_artifact_reference(record_id, block_id)
+                    .map_err(|error| match error {
+                        crate::store::StoreError::Io(source) => refused(std::io::Error::new(
+                            source.kind(),
+                            format!("history artifact reference {}: {source}", artifact.id),
+                        )),
+                        other => invalid(other.to_string()),
+                    })?;
+            }
+            causa::kernel::BlockContent::ToolCall(_)
+            | causa::kernel::BlockContent::ToolChange(_) => {}
         }
-        let history =
-            history.ok_or_else(|| invalid("this session keeps no history records".into()))?;
-        history
-            .verify_artifact_reference(record_id, block_id)
-            .map_err(|error| match error {
-                crate::store::StoreError::Io(source) => refused(std::io::Error::new(
-                    source.kind(),
-                    format!("history artifact reference {}: {source}", artifact.id),
-                )),
-                other => invalid(other.to_string()),
-            })?;
     }
     Ok(())
+}
+
+fn first_block_for_media_refs(
+    context: &causa::kernel::Context,
+    refs: &std::collections::BTreeSet<String>,
+) -> causa::kernel::BlockId {
+    for block in context.blocks() {
+        match block.content() {
+            causa::kernel::BlockContent::Message { parts, .. } => {
+                if parts.iter().any(|part| {
+                    matches!(part, causa::kernel::ContentPart::Media(m) if refs.contains(&m.reference))
+                }) {
+                    return block.id();
+                }
+            }
+            causa::kernel::BlockContent::ToolResult(result) => {
+                if result.media.iter().any(|m| refs.contains(&m.reference)) {
+                    return block.id();
+                }
+            }
+            causa::kernel::BlockContent::ToolCall(_) | causa::kernel::BlockContent::ToolChange(_) => {}
+        }
+    }
+    causa::kernel::BlockId::new(uuid::Uuid::nil())
 }

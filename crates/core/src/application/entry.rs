@@ -28,6 +28,7 @@ pub(crate) struct Entry {
     pub coordinator: OnceLock<Arc<SessionCoordinator>>,
     pub agent_registry: Arc<RwLock<AgentRegistry>>,
     pub model_profiles: Arc<BTreeMap<String, ModelProfile>>,
+    pub media_vault: Arc<crate::media::MediaVault>,
     #[cfg(test)]
     pub panic_owner: Notify,
     #[cfg(test)]
@@ -108,6 +109,7 @@ impl Entry {
             coordinator: OnceLock::new(),
             agent_registry: Arc::new(RwLock::new(AgentRegistry::new())),
             model_profiles: Arc::new(model_profiles),
+            media_vault: Arc::new(crate::media::MediaVault::new()),
             snapshot_clones,
             state: Mutex::new(State {
                 definition: prepared.as_ref().map(|p| p.definition.clone()),

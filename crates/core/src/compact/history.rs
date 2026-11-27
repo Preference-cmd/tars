@@ -10,7 +10,7 @@
 
 use super::HistoryTrigger;
 use crate::store::{StoreError, schema};
-use causa::kernel::{BlockContent, BlockId, Context, ContextBlock};
+use causa::kernel::{BlockContent, BlockId, ContentPart, Context, ContextBlock};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -672,6 +672,54 @@ impl HistoryStore {
         Ok(bytes)
     }
 
+    /// Read bounded bytes from one spilled or media artifact in SQLite `artifacts`.
+    ///
+    /// Accepts either `<uuid>` or `artifact:<uuid>`. Returns `Ok(None)` when the
+    /// database or artifact row does not exist, and `Err(StoreError::HistoryTooLarge)`
+    /// if the stored payload exceeds `max_bytes`.
+    pub(crate) fn read_artifact_bytes(
+        &self,
+        artifact_id: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        let id = artifact_id
+            .strip_prefix(ARTIFACT_ID_PREFIX)
+            .unwrap_or(artifact_id);
+        if !is_canonical_uuid(id) {
+            return Err(StoreError::InvalidHistory(format!(
+                "artifact id is not a canonical UUID: {artifact_id}"
+            )));
+        }
+        let Some(conn) = schema::open_read_only(&self.db_path)? else {
+            return Ok(None);
+        };
+        let Some(len_i64): Option<i64> = conn
+            .query_row(
+                "SELECT length(CAST(content AS BLOB)) FROM artifacts
+                 WHERE session_id = ?1 AND agent_id = ?2 AND artifact_id = ?3",
+                params![self.conversation_id, self.agent_id, id],
+                |row| row.get(0),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let len = u64::try_from(len_i64)
+            .map_err(|_| StoreError::InvalidDatabase("negative artifact length".into()))?;
+        if len > max_bytes as u64 {
+            return Err(StoreError::HistoryTooLarge { limit: max_bytes });
+        }
+        let bytes = conn.query_row(
+            "SELECT CAST(content AS BLOB) FROM artifacts
+             WHERE session_id = ?1 AND agent_id = ?2 AND artifact_id = ?3",
+            params![self.conversation_id, self.agent_id, id],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+        #[cfg(test)]
+        self.artifact_read_count.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(bytes))
+    }
+
     /// Verify that a spilled artifact exists in SQLite `artifacts` and fits
     /// the 64 MiB limit without reading its payload bytes.
     pub(crate) fn verify_spilled_artifact(&self, artifact_id: &str) -> Result<(), StoreError> {
@@ -1061,14 +1109,35 @@ pub(crate) fn cleanup_records_for_agent(
     Ok(())
 }
 
-/// Collect spilled artifact UUIDs referenced by `blocks`.
-fn collect_spilled_artifact_ids(blocks: &[ContextBlock], into: &mut HashSet<String>) {
-    for block in blocks {
-        if let BlockContent::ToolResult(result) = block.content()
-            && let Some(artifact) = &result.output.artifact
-            && let Ok(artifact_id) = parse_spilled_artifact_id(&artifact.id)
-        {
+/// Collect spilled artifact UUIDs and managed `media:sha256:*` keys referenced by `blocks`.
+fn collect_referenced_artifact_ids(blocks: &[ContextBlock], into: &mut HashSet<String>) {
+    let record_media_ref = |reference: &str, into: &mut HashSet<String>| {
+        if crate::media::is_managed_media_ref(reference) {
+            into.insert(reference.to_owned());
+        } else if let Ok(artifact_id) = parse_spilled_artifact_id(reference) {
             into.insert(artifact_id.to_owned());
+        }
+    };
+    for block in blocks {
+        match block.content() {
+            BlockContent::Message { parts, .. } => {
+                for part in parts {
+                    if let ContentPart::Media(media) = part {
+                        record_media_ref(&media.reference, into);
+                    }
+                }
+            }
+            BlockContent::ToolResult(result) => {
+                if let Some(artifact) = &result.output.artifact
+                    && let Ok(artifact_id) = parse_spilled_artifact_id(&artifact.id)
+                {
+                    into.insert(artifact_id.to_owned());
+                }
+                for media in &result.media {
+                    record_media_ref(&media.reference, into);
+                }
+            }
+            BlockContent::ToolCall(_) | BlockContent::ToolChange(_) => {}
         }
     }
 }
@@ -1150,7 +1219,7 @@ pub(crate) fn cleanup_artifacts_for_agent(
     }
     let mut referenced = HashSet::new();
     if let Some(context) = context {
-        collect_spilled_artifact_ids(context.blocks(), &mut referenced);
+        collect_referenced_artifact_ids(context.blocks(), &mut referenced);
     }
     if existing.iter().any(|name| !referenced.contains(name)) && !entries.is_empty() {
         for entry in entries {
@@ -1158,7 +1227,7 @@ pub(crate) fn cleanup_artifacts_for_agent(
                 read_record_for_cleanup(&conn, conversation_id, agent_id, &entry.record_id)
             {
                 for replacement in &record.replacements {
-                    collect_spilled_artifact_ids(&replacement.originals, &mut referenced);
+                    collect_referenced_artifact_ids(&replacement.originals, &mut referenced);
                 }
             }
         }

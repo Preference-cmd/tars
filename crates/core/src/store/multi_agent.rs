@@ -197,7 +197,7 @@ fn validate_agent_materials(
     let history: Vec<crate::compact::HistoryRecordEntry> =
         serde_json::from_str(history_index_json)?;
     crate::compact::history::validate_index(&history)?;
-    crate::material::validate_references(&context, Some(&history), None)
+    crate::material::validate_managed_references(&context, &history)
         .map_err(|err| StoreError::References(Arc::new(err)))?;
     if let Some(usage_raw) = usage_json {
         let usage: WireSessionUsage = serde_json::from_str(usage_raw)?;

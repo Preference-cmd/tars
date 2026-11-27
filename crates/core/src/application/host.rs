@@ -707,8 +707,13 @@ impl SessionHost {
                 let context = owner.with_context(|ctx| ctx.clone())?;
                 (context, history, artifacts)
             };
-            super::repair::admission_check(&context, &history, artifacts.as_deref())
-                .map_err(|err| ApplicationError::ForkNotReady(err.to_string()))?;
+            super::repair::admission_check_with_media(
+                &context,
+                &history,
+                artifacts.as_deref(),
+                Some(&entry.media_vault),
+            )
+            .map_err(|err| ApplicationError::ForkNotReady(err.to_string()))?;
             let fork_guard = {
                 let mut state = entry.lock();
                 verify_fork_ready(&entry, &mut state, &source_id)?;
@@ -740,6 +745,73 @@ impl SessionHost {
         })
         .await?;
         Ok(new_id)
+    }
+
+    /// Export a session's detached Context and any referenced `media:sha256:*`
+    /// sidecar blobs without modifying the source session.
+    ///
+    /// Works for both an open idle session in this host and a saved closed
+    /// session in the store. Fails closed if any referenced media blob is
+    /// missing or corrupt.
+    pub async fn export_session_materials(
+        &self,
+        id: &ConversationId,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<crate::material::ExportedMaterials, ApplicationError> {
+        let output_path = path.as_ref().to_path_buf();
+        let open_entry = {
+            let entries = self
+                .inner
+                .entries
+                .lock()
+                .expect("directory has no callbacks");
+            entries.get(id).cloned()
+        };
+        if let Some(entry) = open_entry {
+            let managed = ManagedSession { entry };
+            let snapshot = managed.read_materials()?;
+            let detached = snapshot.detached_context();
+            let refs = crate::media::collect_context_managed_media_refs(&detached);
+            let blobs = managed.media_vault().snapshot_blobs_for_refs(&refs)?;
+            let blob_map: std::collections::BTreeMap<String, Vec<u8>> = blobs
+                .into_iter()
+                .map(|(reference, bytes)| (reference, bytes.to_vec()))
+                .collect();
+            return super::saving::io_semaphore(&self.inner.io, move || {
+                Ok::<_, ApplicationError>(crate::material::save_new_with_media(
+                    &output_path,
+                    &detached,
+                    &blob_map,
+                )?)
+            })
+            .await;
+        }
+
+        let store = self
+            .inner
+            .store
+            .clone()
+            .ok_or(ApplicationError::StoreUnavailable)?;
+        let raw_id = id.as_str().to_owned();
+        super::saving::io_semaphore(&self.inner.io, move || {
+            let Some(record) = store.read_saved(&raw_id)? else {
+                return Err(ApplicationError::NotFound);
+            };
+            let detached =
+                crate::material::detach_history_references(&record.context, &record.history);
+            let refs = crate::media::collect_context_managed_media_refs(&detached);
+            let blobs = store.load_managed_media_blobs(&raw_id, &record)?;
+            let blob_map: std::collections::BTreeMap<String, Vec<u8>> = blobs
+                .into_iter()
+                .filter(|(reference, _)| refs.contains(reference))
+                .collect();
+            Ok::<_, ApplicationError>(crate::material::save_new_with_media(
+                &output_path,
+                &detached,
+                &blob_map,
+            )?)
+        })
+        .await
     }
 
     /// Locate an opening or active instance without returning mutable access.

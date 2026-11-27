@@ -1,6 +1,6 @@
 use super::inspect::{
-    candidate_check, diagnose, extract_call_path, is_builtin_tool, scan, warning_kind,
-    warning_status_applies,
+    candidate_check_with_media, diagnose_with_media, extract_call_path, is_builtin_tool,
+    scan_with_media, warning_kind, warning_status_applies,
 };
 use super::types::*;
 use crate::application::{ApplicationError, ManagedSession, MaterialVersion};
@@ -101,16 +101,17 @@ pub(in crate::application) fn build_repair_plan(
     context: &Context,
     history: &[crate::compact::HistoryRecordEntry],
     artifacts: Option<&crate::compact::history::HistoryStore>,
+    media_vault: Option<&crate::media::MediaVault>,
     definition: &SessionDefinition,
     owner: Option<&crate::session::Session>,
     mode: &RepairMode,
 ) -> Result<BuiltRepairPlan, ApplicationError> {
-    let scan = scan(context, history, artifacts);
+    let scan = scan_with_media(context, history, artifacts, media_vault);
     if scan.fatal {
         return Err(RepairError::Materials(scan.diagnosis).into());
     }
     if scan.unpaired.is_empty() {
-        let diagnosis = diagnose(context, history, artifacts, definition);
+        let diagnosis = diagnose_with_media(context, history, artifacts, media_vault, definition);
         if !diagnosis.is_ready() {
             return Err(RepairError::Materials(diagnosis).into());
         }
@@ -226,7 +227,7 @@ pub(in crate::application) fn build_repair_plan(
     ));
     let candidate = Context::from_blocks(blocks)
         .map_err(|failure| SessionError::ContextEdit(failure.reason))?;
-    candidate_check(&candidate, history, artifacts, definition)?;
+    candidate_check_with_media(&candidate, history, artifacts, media_vault, definition)?;
     let summary = RepairSummary {
         original_blocks,
         candidate_blocks: candidate.blocks().len(),
@@ -269,6 +270,7 @@ impl ManagedSession {
             &context,
             &history,
             artifacts.as_deref(),
+            Some(&self.entry.media_vault),
             &definition,
             Some(owner),
             &mode,

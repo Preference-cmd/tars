@@ -33,6 +33,7 @@ pub struct PreparedCreate {
     pub(super) persistent: bool,
     pub(super) prelude_diagnostics: Vec<PreludeDiagnostic>,
     pub(super) skill_registry: Option<crate::skills::SkillRegistry>,
+    pub(super) media_blobs: Vec<(String, Vec<u8>)>,
 }
 impl PreparedCreate {
     /// Prepare a durable initial snapshot before any asynchronous operation.
@@ -133,7 +134,22 @@ impl PreparedCreate {
             persistent,
             prelude_diagnostics,
             skill_registry,
+            media_blobs: Vec::new(),
         }
+    }
+    /// Attach verified sidecar media blobs (e.g. from [`crate::material::load_with_media`])
+    /// to seed the session's media vault when created.
+    pub fn with_media_blobs(
+        mut self,
+        blobs: &std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> Result<Self, crate::media::MediaError> {
+        let mut verified = Vec::with_capacity(blobs.len());
+        for (reference, bytes) in blobs {
+            crate::media::verify_managed_blob(reference, bytes)?;
+            verified.push((reference.clone(), bytes.clone()));
+        }
+        self.media_blobs = verified;
+        Ok(self)
     }
     /// Read the identity allocated synchronously by preparation.
     pub fn conversation_id(&self) -> &ConversationId {
@@ -516,10 +532,21 @@ pub enum ApplicationError {
     /// User-level or workspace-level command permission rules file is invalid.
     #[error(transparent)]
     PermissionRules(#[from] crate::permission::rules::RulesFileError),
+    /// Media ingestion, quota, reference, or integrity validation failed.
+    #[error(transparent)]
+    Media(#[from] crate::media::MediaError),
+    /// Material export or sidecar verification failed.
+    #[error("material operation failed: {0}")]
+    Material(#[source] Arc<crate::material::MaterialError>),
 }
 impl From<StoreError> for ApplicationError {
     fn from(error: StoreError) -> Self {
         Self::Store(Arc::new(error))
+    }
+}
+impl From<crate::material::MaterialError> for ApplicationError {
+    fn from(error: crate::material::MaterialError) -> Self {
+        Self::Material(Arc::new(error))
     }
 }
 

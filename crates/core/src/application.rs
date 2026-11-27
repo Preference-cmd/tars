@@ -2,7 +2,7 @@
 
 mod execution;
 
-pub use execution::text_input;
+pub use execution::{multimodal_input, text_input};
 
 mod closing;
 mod coordinator;

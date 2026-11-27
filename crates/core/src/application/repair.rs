@@ -10,7 +10,7 @@ pub use types::{
     RepairWriteWarning,
 };
 
-pub(crate) use inspect::admission_check;
+pub(crate) use inspect::{admission_check, admission_check_with_media};
 pub(super) use inspect::{diagnose, inspect_original_batch};
 pub(super) use plan::{build_repair_plan, source_check};
 

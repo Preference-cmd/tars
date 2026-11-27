@@ -505,3 +505,107 @@ fn test_be16_detach_history_references_drops_spilled_artifacts_and_preserves_pre
     assert_eq!(structured_res.notes.len(), 1);
     assert_eq!(structured_res.notes[0].0, DETACHED_HISTORY_NOTE);
 }
+
+#[test]
+fn mm05_sidecar_media_round_trip_and_counterexamples() {
+    use std::collections::BTreeMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut png = Vec::from(*b"\x89PNG\r\n\x1a\n");
+    png.extend_from_slice(&[0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D', b'R']);
+    png.extend_from_slice(&[0x11; 17]);
+
+    let prepared = crate::media::prepare_image_from_bytes(png.clone(), Some("shot.png")).unwrap();
+    let user_block =
+        crate::media::multimodal_input(Some("hello"), &[prepared.media_ref()]).unwrap();
+    let context = Context::from_blocks(vec![user_block]).unwrap();
+
+    // Default save / save_new / load still reject unvalidated media references!
+    let plain_path = dir.path().join("plain.json");
+    assert!(matches!(
+        save_new(&plain_path, &context),
+        Err(MaterialError::ReferenceValidationRequired { .. })
+    ));
+    assert!(!plain_path.exists());
+
+    // save_new_with_media exports material JSON + sibling <file>.media/<sha256>.bin.
+    let bundle_path = dir.path().join("bundle.json");
+    let mut blobs = BTreeMap::new();
+    blobs.insert(prepared.reference.clone(), png.clone());
+    let exported = save_new_with_media(&bundle_path, &context, &blobs).unwrap();
+    assert_eq!(exported.path, bundle_path);
+    assert_eq!(exported.media_count, 1);
+    let sidecar_dir = media_sidecar_dir(&bundle_path);
+    assert_eq!(exported.media_dir.as_deref(), Some(sidecar_dir.as_path()));
+    let hex = crate::media::parse_managed_media_sha256(&prepared.reference).unwrap();
+    let sidecar_file = sidecar_dir.join(format!("{hex}.bin"));
+    assert!(sidecar_file.is_file());
+
+    // Default load still rejects detached media bundle without sidecar verification.
+    assert!(matches!(
+        load(&bundle_path),
+        Err(MaterialError::ReferenceValidationRequired { .. })
+    ));
+
+    // load_with_media verifies sidecar and restores exact context + blobs.
+    let (loaded_ctx, loaded_blobs) = load_with_media(&bundle_path).unwrap();
+    assert_eq!(loaded_ctx.blocks(), context.blocks());
+    assert_eq!(loaded_blobs.get(&prepared.reference), Some(&png));
+
+    // Text-only save_new_with_media creates NO empty .media directory.
+    let text_only_ctx = Context::from_blocks(vec![block(BlockContent::text(
+        causa::kernel::Role::User,
+        "just text",
+    ))])
+    .unwrap();
+    let text_only_path = dir.path().join("text-only.json");
+    let text_exported =
+        save_new_with_media(&text_only_path, &text_only_ctx, &BTreeMap::new()).unwrap();
+    assert_eq!(text_exported.media_dir, None);
+    assert_eq!(text_exported.media_count, 0);
+    assert!(!media_sidecar_dir(&text_only_path).exists());
+
+    // Tampered sidecar bytes -> fail-closed ReferenceUnavailable.
+    let saved_sidecar = std::fs::read(&sidecar_file).unwrap();
+    let mut tampered = saved_sidecar.clone();
+    *tampered.last_mut().unwrap() ^= 0xFF;
+    std::fs::write(&sidecar_file, &tampered).unwrap();
+    assert!(matches!(
+        load_with_media(&bundle_path),
+        Err(MaterialError::ReferenceUnavailable { .. })
+    ));
+
+    // Missing sidecar file -> fail-closed ReferenceUnavailable.
+    std::fs::remove_file(&sidecar_file).unwrap();
+    assert!(matches!(
+        load_with_media(&bundle_path),
+        Err(MaterialError::ReferenceUnavailable { .. })
+    ));
+
+    // Path traversal reference in JSON -> fail-closed ReferenceUnavailable.
+    let traversal_path = dir.path().join("traversal.json");
+    let traversal_ctx = Context::from_blocks(vec![ContextBlock::new(
+        new_block_id(),
+        BlockContent::Message {
+            role: causa::kernel::Role::User,
+            parts: vec![causa::kernel::ContentPart::Media(
+                causa::kernel::MediaRef::new("image/png", "media:sha256:../../etc/passwd"),
+            )],
+        },
+        BlockMeta::from_source("user"),
+    )])
+    .unwrap();
+    std::fs::write(&traversal_path, serde_json::to_vec(&traversal_ctx).unwrap()).unwrap();
+    assert!(matches!(
+        load_with_media(&traversal_path),
+        Err(MaterialError::ReferenceUnavailable { .. })
+    ));
+
+    // save_new_with_media rejects missing blob without creating destination file.
+    let missing_out = dir.path().join("missing-blob.json");
+    assert!(matches!(
+        save_new_with_media(&missing_out, &context, &BTreeMap::new()),
+        Err(MaterialError::ReferenceUnavailable { .. })
+    ));
+    assert!(!missing_out.exists());
+}

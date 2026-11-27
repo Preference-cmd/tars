@@ -82,6 +82,9 @@ pub(super) async fn initialize(
                 (a.agent_id.clone(), hist, ctx)
             })
             .collect();
+        let media_vault = entry.media_vault.clone();
+        let writer_for_media = writer.clone();
+        let record_for_media = record.clone();
         saving::io(host, move || {
             crate::compact::history::cleanup_records(store.root(), &id, &history)?;
             crate::compact::history::cleanup_artifacts(
@@ -104,6 +107,24 @@ pub(super) async fn initialize(
                     hist,
                     ctx.as_ref(),
                 )?;
+            }
+            if let Some(rec) = &record_for_media {
+                let blobs = writer_for_media.load_managed_media_blobs(rec)?;
+                for (reference, bytes) in blobs {
+                    media_vault
+                        .load_verified_blob(&reference, bytes)
+                        .map_err(|err| {
+                            crate::store::StoreError::References(Arc::new(
+                                crate::material::MaterialError::ReferenceUnavailable {
+                                    block_id: causa::kernel::BlockId::new(uuid::Uuid::nil()),
+                                    source: std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        err.to_string(),
+                                    ),
+                                },
+                            ))
+                        })?;
+                }
             }
             Ok(())
         })
@@ -137,6 +158,16 @@ pub(super) async fn initialize(
             let mut definition = prepared.definition.clone();
             if definition.permission_mode == Some(crate::permission::PermissionMode::Ask) {
                 definition.permission_mode = None;
+            }
+            for (reference, bytes) in &prepared.media_blobs {
+                entry
+                    .media_vault
+                    .load_verified_blob(reference, bytes.clone())?;
+            }
+            for reference in crate::media::collect_context_managed_media_refs(&prepared.context) {
+                if !entry.media_vault.contains(&reference) {
+                    return Err(crate::media::MediaError::MissingMedia { reference }.into());
+                }
             }
             let initial = definition.initial_permission_mode();
             (
@@ -293,6 +324,7 @@ pub(super) async fn initialize(
             Some(entry_inbox.clone()),
             Some(shared_approvals.clone()),
             extra_tools.clone(),
+            Some(entry.media_vault.clone()),
         )
         .await?;
         (
@@ -321,6 +353,7 @@ pub(super) async fn initialize(
             Some(entry_inbox.clone()),
             Some(shared_approvals.clone()),
             extra_tools,
+            Some(entry.media_vault.clone()),
         )
         .await?;
         (
@@ -328,6 +361,9 @@ pub(super) async fn initialize(
             Some(assembled_session.permissions),
         )
     };
+    if let Some(history_store) = owner.compaction().and_then(|c| c.history()) {
+        entry.media_vault.bind_history_store(history_store);
+    }
 
     let created_at_ms = crate::time::created_at_from_id(&entry_id).unwrap_or(saved.updated_at_ms);
     let entry_descriptor = AgentDescriptor {
@@ -748,6 +784,7 @@ async fn assembled(
     inbox: Option<Arc<InboxDrainHandle>>,
     shared_approvals: Option<Arc<ApprovalsHub>>,
     extra_tools: Vec<Arc<dyn causa::kernel::Tool>>,
+    media_vault: Option<Arc<crate::media::MediaVault>>,
 ) -> Result<crate::assembly::AssembledSession, ApplicationError> {
     let registry = match initial_skills {
         Some(registry) => registry,
@@ -777,6 +814,9 @@ async fn assembled(
     }
     if !extra_tools.is_empty() {
         base = base.with_extra_tools(extra_tools);
+    }
+    if let Some(media_vault) = media_vault {
+        base = base.with_media_vault(media_vault);
     }
     let base = match host.external_tools.clone() {
         Some(tools) => base.with_external_tools(tools),

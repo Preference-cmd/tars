@@ -142,7 +142,7 @@ impl SavedSessionRecord {
         record.validate(&record.conversation_id)?;
         Ok(record)
     }
-    pub(super) fn validate(&self, identity: &str) -> Result<(), StoreError> {
+    pub(crate) fn validate(&self, identity: &str) -> Result<(), StoreError> {
         if self.format != RECORD_FORMAT {
             return Err(StoreError::UnsupportedFormat(self.format.clone()));
         }
@@ -180,7 +180,7 @@ impl SavedSessionRecord {
             )));
         }
         crate::compact::history::validate_index(&self.history)?;
-        crate::material::validate_references(&self.context, Some(&self.history), None)
+        crate::material::validate_managed_references(&self.context, &self.history)
             .map_err(|e| StoreError::References(Arc::new(e)))
     }
 }
@@ -341,7 +341,7 @@ impl PreparedCommit {
             record,
         })
     }
-    pub(super) fn validate(&self, identity: &str) -> Result<(), StoreError> {
+    pub(crate) fn validate(&self, identity: &str) -> Result<(), StoreError> {
         if self.record.revision != successor(self.expected_revision)? {
             return Err(StoreError::InvalidRevision);
         }

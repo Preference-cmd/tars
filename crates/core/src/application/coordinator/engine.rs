@@ -714,6 +714,8 @@ impl SessionCoordinator {
         {
             return false;
         }
+        let entry_ref = self.entry.upgrade();
+        let entry_media = entry_ref.as_deref().map(|e| &*e.media_vault);
         for agent_id in &state.agent_order {
             let Some(unit) = state.agents.get(agent_id) else {
                 continue;
@@ -725,7 +727,13 @@ impl SessionCoordinator {
             {
                 continue;
             }
-            if passes_agent_guards(agent_id, &self.entry_agent_id, unit, entry_state) {
+            if passes_agent_guards(
+                agent_id,
+                &self.entry_agent_id,
+                unit,
+                entry_state,
+                entry_media,
+            ) {
                 return true;
             }
         }
@@ -2357,6 +2365,7 @@ impl SessionCoordinator {
             &unit.context,
             &unit.history,
             artifacts,
+            None,
             &unit.descriptor.definition,
             unit.owner.as_ref(),
             &mode,
@@ -3882,7 +3891,13 @@ impl SessionCoordinator {
                 {
                     continue;
                 }
-                if !passes_agent_guards(agent_id, &self.entry_agent_id, unit, &mut entry_state) {
+                if !passes_agent_guards(
+                    agent_id,
+                    &self.entry_agent_id,
+                    unit,
+                    &mut entry_state,
+                    Some(&entry.media_vault),
+                ) {
                     continue;
                 }
                 if unit.auto_wakeups_in_cycle >= max_auto {
@@ -4003,6 +4018,7 @@ impl SessionCoordinator {
                     &self.entry_agent_id,
                     unit,
                     &mut entry_state,
+                    Some(&entry.media_vault),
                 ) {
                     return;
                 }
@@ -4379,6 +4395,7 @@ fn passes_agent_guards(
     entry_agent_id: &str,
     unit: &AgentUnit,
     entry_state: &mut crate::application::entry::State,
+    entry_media_vault: Option<&crate::media::MediaVault>,
 ) -> bool {
     if !unit.is_idle_for_wakeup() || unit.assembly_error.is_some() {
         return false;
@@ -4398,7 +4415,14 @@ fn passes_agent_guards(
         let history = owner.history_entries();
         let artifacts = owner.compaction().and_then(|c| c.history());
         let ready = owner
-            .with_context(|ctx| repair::admission_check(ctx, &history, artifacts.as_deref()))
+            .with_context(|ctx| {
+                repair::admission_check_with_media(
+                    ctx,
+                    &history,
+                    artifacts.as_deref(),
+                    entry_media_vault,
+                )
+            })
             .is_ok_and(|res| res.is_ok());
         return ready;
     }

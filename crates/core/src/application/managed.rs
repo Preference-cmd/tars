@@ -513,8 +513,66 @@ impl ManagedSession {
     pub fn prelude_diagnostics(&self) -> Vec<crate::prelude::PreludeDiagnostic> {
         self.entry.lock().prelude_diagnostics.clone()
     }
+
+    /// Clone handle to this session's in-memory [`crate::media::MediaVault`].
+    pub fn media_vault(&self) -> Arc<crate::media::MediaVault> {
+        self.entry.media_vault.clone()
+    }
+
+    /// Submit text and/or verified raster images in a single user turn.
+    ///
+    /// Performs lifecycle, admission, and quota validation before updating the
+    /// session media vault, rolling back any newly added keys if low-level
+    /// submission fails.
+    pub fn submit_with_images(
+        &self,
+        request_key: impl Into<String>,
+        text: Option<&str>,
+        images: &[crate::media::PreparedImage],
+    ) -> Result<WorkReceipt, ApplicationError> {
+        let media_refs: Vec<causa::kernel::MediaRef> = images
+            .iter()
+            .map(crate::media::PreparedImage::media_ref)
+            .collect();
+        let block = crate::media::multimodal_input(text, &media_refs)?;
+        let request = SubmitRequest {
+            request_key: request_key.into(),
+            blocks: vec![block],
+        };
+        self.submit_inner(request, Some(images))
+            .map_err(|rejection| rejection.reason)
+    }
+
+    /// Export this open idle session's detached Context and any referenced
+    /// `media:sha256:*` blobs to a sidecar material bundle without overwriting an
+    /// existing file.
+    pub fn export_materials_with_media(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<crate::material::ExportedMaterials, ApplicationError> {
+        let snapshot = self.read_materials()?;
+        let detached = snapshot.detached_context();
+        let refs = crate::media::collect_context_managed_media_refs(&detached);
+        let blobs = self.entry.media_vault.snapshot_blobs_for_refs(&refs)?;
+        let blob_map: std::collections::BTreeMap<String, Vec<u8>> = blobs
+            .into_iter()
+            .map(|(reference, bytes)| (reference, bytes.to_vec()))
+            .collect();
+        Ok(crate::material::save_new_with_media(
+            path, &detached, &blob_map,
+        )?)
+    }
+
     /// Replay a retained key first; otherwise synchronously admit under the save barrier.
     pub fn submit(&self, request: SubmitRequest) -> Result<WorkReceipt, ManagedSubmitRejection> {
+        self.submit_inner(request, None)
+    }
+
+    fn submit_inner(
+        &self,
+        request: SubmitRequest,
+        images_to_admit: Option<&[crate::media::PreparedImage]>,
+    ) -> Result<WorkReceipt, ManagedSubmitRejection> {
         let mut state = self.entry.lock();
         let handle = state.handle.as_ref().expect("published handle").clone();
         if let Some(result) = handle.inspect_request(&request) {
@@ -530,12 +588,26 @@ impl ManagedSession {
         let history = owner.history_entries();
         let artifacts = owner.compaction().and_then(|c| c.history());
         let readiness = owner.with_context(|context| {
-            super::repair::admission_check(context, &history, artifacts.as_deref())
+            super::repair::admission_check_with_media(
+                context,
+                &history,
+                artifacts.as_deref(),
+                Some(&self.entry.media_vault),
+            )
         });
         let readiness = readiness
             .map_err(ApplicationError::from)
             .and_then(|result| result.map_err(Into::into));
         if let Err(reason) = readiness {
+            return Err(ManagedSubmitRejection { reason, request });
+        }
+        if images_to_admit.is_none()
+            && let Err(reason) = validate_request_media_references(
+                &request.blocks,
+                &self.entry.media_vault,
+                artifacts.as_deref(),
+            )
+        {
             return Err(ManagedSubmitRejection { reason, request });
         }
         // Retained works that a caller has already read keep the sheet full.
@@ -641,6 +713,19 @@ impl ManagedSession {
                     });
                 }
             };
+        let added_media_keys = if let Some(images) = images_to_admit {
+            match self.entry.media_vault.insert_batch_with_added(images) {
+                Ok((_, added_keys)) => added_keys,
+                Err(error) => {
+                    return Err(ManagedSubmitRejection {
+                        reason: error.into(),
+                        request,
+                    });
+                }
+            }
+        } else {
+            Vec::new()
+        };
         if let Some(next_registry) = next_registry {
             *skill_registry.write().expect("skill registry lock") = next_registry;
         }
@@ -651,12 +736,16 @@ impl ManagedSession {
                 .write()
                 .expect("agent registry lock") = next_agent_registry;
         }
-        let receipt = handle
-            .submit_with_prelude_updates(request, prelude_updates)
-            .map_err(|failure| ManagedSubmitRejection {
-                reason: failure.reason.into(),
-                request: failure.request,
-            })?;
+        let receipt = match handle.submit_with_prelude_updates(request, prelude_updates) {
+            Ok(receipt) => receipt,
+            Err(failure) => {
+                self.entry.media_vault.remove_keys(&added_media_keys);
+                return Err(ManagedSubmitRejection {
+                    reason: failure.reason.into(),
+                    request: failure.request,
+                });
+            }
+        };
         state.prelude_diagnostics = update_diagnostics;
         // The supervisor already exists. This synchronous registration holds the
         // application gate until it captures and confirms this work's materials.
@@ -1393,7 +1482,12 @@ impl ManagedSession {
             let artifacts = owner.compaction().and_then(|c| c.history());
             let readiness = owner.with_context(|context| {
                 self.entry.cloned_snapshot();
-                super::repair::admission_check(context, &history, artifacts.as_deref())
+                super::repair::admission_check_with_media(
+                    context,
+                    &history,
+                    artifacts.as_deref(),
+                    Some(&self.entry.media_vault),
+                )
             });
             match readiness {
                 Ok(Ok(())) => {}
@@ -1845,4 +1939,52 @@ impl Drop for CompactingGuard<'_> {
         }
         self.entry.changed();
     }
+}
+
+fn validate_request_media_references(
+    blocks: &[ContextBlock],
+    media_vault: &crate::media::MediaVault,
+    artifacts: Option<&crate::compact::history::HistoryStore>,
+) -> Result<(), ApplicationError> {
+    let check = |media: &causa::kernel::MediaRef| -> Result<(), ApplicationError> {
+        crate::media::validate_managed_media_ref(media)?;
+        if crate::media::is_managed_media_ref(&media.reference) {
+            if !media_vault.contains(&media.reference) {
+                return Err(crate::media::MediaError::MissingMedia {
+                    reference: media.reference.clone(),
+                }
+                .into());
+            }
+            return Ok(());
+        }
+        if let Ok(artifact_id) =
+            crate::compact::history::parse_spilled_artifact_id(&media.reference)
+            && artifacts.is_none_or(|store| store.verify_spilled_artifact(artifact_id).is_err())
+        {
+            return Err(crate::media::MediaError::MissingMedia {
+                reference: media.reference.clone(),
+            }
+            .into());
+        }
+        Ok(())
+    };
+    for block in blocks {
+        match block.content() {
+            causa::kernel::BlockContent::Message { parts, .. } => {
+                for part in parts {
+                    if let causa::kernel::ContentPart::Media(media) = part {
+                        check(media)?;
+                    }
+                }
+            }
+            causa::kernel::BlockContent::ToolResult(result) => {
+                for media in &result.media {
+                    check(media)?;
+                }
+            }
+            causa::kernel::BlockContent::ToolCall(_)
+            | causa::kernel::BlockContent::ToolChange(_) => {}
+        }
+    }
+    Ok(())
 }

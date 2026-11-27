@@ -19,6 +19,7 @@ pub mod external_tools;
 pub(crate) mod fs_atomic;
 pub mod material;
 mod mcp;
+pub mod media;
 pub mod permission;
 pub mod policy;
 pub mod prelude;

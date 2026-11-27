@@ -2,6 +2,7 @@ mod claims;
 mod command_status;
 mod compaction;
 mod lifecycle;
+mod media;
 mod multi_agent;
 mod opening;
 mod progress;

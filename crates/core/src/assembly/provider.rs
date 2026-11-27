@@ -10,7 +10,8 @@ use crate::workspace::{Workspace, WorkspaceError};
 use causa::kernel::ToolBatchProcessor;
 use causa::kernel::{Context, ModelGateway};
 use causa::providers::{
-    AnthropicMessagesGateway, OpenAiChatCompletionsGateway, OpenAiResponsesGateway,
+    AnthropicMessagesGateway, MediaKind, MediaResolver, OpenAiChatCompletionsGateway,
+    OpenAiResponsesGateway,
 };
 use causa::runtime::{RetryPolicy, ToolExecutor, ToolExecutorOptions, TurnRunner};
 use std::sync::Arc;
@@ -82,6 +83,8 @@ pub(crate) struct SessionResources {
     pub(crate) shared_approvals: Option<Arc<crate::permission::ApprovalsHub>>,
     /// Additional tools registered on `ToolExecutor` (e.g. collaboration tools).
     pub(crate) extra_tools: Vec<Arc<dyn causa::kernel::Tool>>,
+    /// Session-scoped media vault injected into the main conversation gateway.
+    pub(crate) media_vault: Option<Arc<crate::media::MediaVault>>,
     /// Test-only command sandbox probe result injected into the real assembly
     /// path. Mirrors `CommandRuntime::bind_with_sandbox`: no production code
     /// can choose a backend or a probe result.
@@ -113,6 +116,7 @@ impl SessionResources {
             approval_origin: None,
             shared_approvals: None,
             extra_tools: Vec::new(),
+            media_vault: None,
             #[cfg(test)]
             gateway_override: None,
             #[cfg(test)]
@@ -195,6 +199,12 @@ impl SessionResources {
     #[allow(dead_code)]
     pub(crate) fn with_extra_tools(mut self, tools: Vec<Arc<dyn causa::kernel::Tool>>) -> Self {
         self.extra_tools = tools;
+        self
+    }
+
+    /// Attach the session's [`crate::media::MediaVault`] for the main conversation gateway.
+    pub(crate) fn with_media_vault(mut self, media_vault: Arc<crate::media::MediaVault>) -> Self {
+        self.media_vault = Some(media_vault);
         self
     }
 
@@ -285,6 +295,7 @@ pub(crate) fn assemble(
         approval_origin,
         shared_approvals,
         extra_tools,
+        media_vault,
         #[cfg(test)]
         gateway_override,
         #[cfg(test)]
@@ -394,13 +405,29 @@ pub(crate) fn assemble(
     };
     // Tests may substitute only the protocol gateway, so the retry and
     // counting layers still wrap the fixture.
+    // Compaction summary gateway deliberately omits the MediaResolver so
+    // images remain deterministic text placeholders and are never re-uploaded.
     #[cfg(test)]
-    let innermost_gateway = match gateway_override {
-        Some(gateway) => gateway,
-        None => definition_gateway(definition)?,
+    let (main_innermost_gateway, summary_innermost_gateway) = match gateway_override {
+        Some(gateway) => (gateway.clone(), gateway),
+        None => {
+            let resolver: Option<Arc<dyn MediaResolver>> =
+                media_vault.map(|vault| vault as Arc<dyn MediaResolver>);
+            (
+                definition_gateway(definition, resolver)?,
+                definition_gateway(definition, None)?,
+            )
+        }
     };
     #[cfg(not(test))]
-    let innermost_gateway = definition_gateway(definition)?;
+    let (main_innermost_gateway, summary_innermost_gateway) = {
+        let resolver: Option<Arc<dyn MediaResolver>> =
+            media_vault.map(|vault| vault as Arc<dyn MediaResolver>);
+        (
+            definition_gateway(definition, resolver)?,
+            definition_gateway(definition, None)?,
+        )
+    };
     let usage_hub = Arc::new(match initial_usage {
         Some(usage) => crate::usage::UsageHub::from_session_usage(usage),
         None => crate::usage::UsageHub::new(),
@@ -418,14 +445,14 @@ pub(crate) fn assemble(
         }
     });
     let conversation_retry = wrap_retry_and_count(
-        innermost_gateway.clone(),
+        main_innermost_gateway,
         crate::usage::UsagePurpose::Conversation,
         usage_hub.clone(),
         definition.max_model_attempts,
         Some(preview_reset_hook),
     );
     let summary_gateway = wrap_retry_and_count(
-        innermost_gateway,
+        summary_innermost_gateway,
         crate::usage::UsagePurpose::Compaction,
         usage_hub.clone(),
         definition.max_model_attempts,
@@ -792,6 +819,7 @@ fn wrap_retry_and_count(
 /// Protocol gateway for the definition, using its environment credential.
 fn definition_gateway(
     definition: &SessionDefinition,
+    media_resolver: Option<Arc<dyn MediaResolver>>,
 ) -> Result<Arc<dyn ModelGateway>, AssemblyError> {
     let CredentialRef::Environment(name) = &definition.credential;
     let api_key = std::env::var(name)
@@ -802,6 +830,7 @@ fn definition_gateway(
         definition.protocol_render_options()?,
         api_key,
         definition.endpoint.clone(),
+        media_resolver,
     ))
 }
 
@@ -809,12 +838,22 @@ pub(crate) fn protocol_gateway(
     render_options: RenderOptions,
     api_key: String,
     endpoint: Option<String>,
+    media_resolver: Option<Arc<dyn MediaResolver>>,
 ) -> Arc<dyn ModelGateway> {
     macro_rules! protocol_gateway {
         ($kind:ty, $options:expr) => {{
             let gateway = <$kind>::new(api_key).with_render_options($options);
             let gateway = match endpoint {
                 Some(endpoint) => gateway.with_endpoint(endpoint),
+                None => gateway,
+            };
+            let gateway = match media_resolver {
+                Some(resolver) => gateway
+                    .with_media_resolver(resolver)
+                    .with_max_inline_media_bytes(
+                        MediaKind::Image,
+                        crate::media::GATEWAY_INLINE_IMAGE_LIMIT_BYTES,
+                    ),
                 None => gateway,
             };
             Arc::new(gateway) as Arc<dyn ModelGateway>

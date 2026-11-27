@@ -2473,6 +2473,7 @@ name = "tars-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "causa",
  "flate2",
  "futures-util",

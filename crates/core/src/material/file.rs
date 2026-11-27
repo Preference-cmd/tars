@@ -1,8 +1,9 @@
-use causa::kernel::{BlockId, Context};
+use causa::kernel::{BlockContent, BlockId, ContentPart, Context};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{MaterialReference, references};
 
@@ -17,6 +18,31 @@ pub struct SavedMaterial {
     /// Whether this version can read the file back through its import limit.
     /// A recovery file remains valid data when this is `false`.
     pub importable: bool,
+}
+
+/// Outcome of exporting a material file together with optional sidecar media blobs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExportedMaterials {
+    /// Path to the exported JSON material file.
+    pub path: PathBuf,
+    /// Path to the sidecar `<file_name>.media` directory when media was exported.
+    pub media_dir: Option<PathBuf>,
+    /// Number of unique managed media blobs exported into `media_dir`.
+    pub media_count: usize,
+}
+
+/// Return the sibling sidecar directory path (`<file_name>.media`) for a material file.
+pub fn media_sidecar_dir(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    if let Some(name) = path.file_name() {
+        let mut dir_name = name.to_os_string();
+        dir_name.push(".media");
+        path.with_file_name(dir_name)
+    } else {
+        let mut os = path.as_os_str().to_os_string();
+        os.push(".media");
+        PathBuf::from(os)
+    }
 }
 
 /// A file, Context validation or external-reference failure.
@@ -149,6 +175,239 @@ pub fn load_session_materials(path: impl AsRef<Path>) -> Result<Context, Materia
     let context = record.into_context()?;
     references::validate(&context, None)?;
     Ok(context)
+}
+
+/// Export a new material file without overwriting an existing destination, writing
+/// any referenced `media:sha256:*` blobs to [`media_sidecar_dir`].
+///
+/// When `context` references no `media:sha256:*` assets, no empty `.media`
+/// directory is created. When managed media is present, every referenced blob
+/// must exist in `media_blobs` and pass SHA-256 and magic-byte verification
+/// before `<file>.media/<sha256>.bin` and the JSON material file are written
+/// atomically. External URLs, paths, and invalid references are rejected.
+pub fn save_new_with_media(
+    path: impl AsRef<Path>,
+    context: &Context,
+    media_blobs: &BTreeMap<String, Vec<u8>>,
+) -> Result<ExportedMaterials, MaterialError> {
+    let path = path.as_ref();
+    if std::fs::symlink_metadata(path).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("material file already exists: {}", path.display()),
+        )
+        .into());
+    }
+    references::validate_managed_references(context, &[])?;
+
+    let managed_refs = collect_managed_media_occurrences(context);
+    if managed_refs.is_empty() {
+        write(path, context, false)?;
+        return Ok(ExportedMaterials {
+            path: path.to_path_buf(),
+            media_dir: None,
+            media_count: 0,
+        });
+    }
+
+    let mut verified: Vec<(&str, &str, &[u8])> = Vec::with_capacity(managed_refs.len());
+    for (reference, occurrences) in &managed_refs {
+        let first_block_id = occurrences[0].0;
+        let bytes =
+            media_blobs
+                .get(reference)
+                .ok_or_else(|| MaterialError::ReferenceUnavailable {
+                    block_id: first_block_id,
+                    source: io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("missing managed media blob for {reference}"),
+                    ),
+                })?;
+        let detected = crate::media::verify_managed_blob(reference, bytes).map_err(|err| {
+            MaterialError::ReferenceUnavailable {
+                block_id: first_block_id,
+                source: io::Error::new(io::ErrorKind::InvalidData, err.to_string()),
+            }
+        })?;
+        for (block_id, media_type) in occurrences {
+            if !media_type.eq_ignore_ascii_case(detected) {
+                return Err(MaterialError::ReferenceUnavailable {
+                    block_id: *block_id,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "media_type '{media_type}' does not match verified format '{detected}' for {reference}"
+                        ),
+                    ),
+                });
+            }
+        }
+        let hex = crate::media::parse_managed_media_sha256(reference)
+            .expect("validated managed sha256 reference");
+        verified.push((reference.as_str(), hex, bytes.as_slice()));
+    }
+
+    let sidecar_dir = media_sidecar_dir(path);
+    std::fs::create_dir_all(&sidecar_dir)?;
+    for (_, hex, bytes) in &verified {
+        let blob_path = sidecar_dir.join(format!("{hex}.bin"));
+        crate::fs_atomic::atomic_write_bytes(
+            &blob_path,
+            None,
+            bytes,
+            crate::fs_atomic::ReplaceMode::Overwrite,
+        )?;
+    }
+
+    write(path, context, false)?;
+    Ok(ExportedMaterials {
+        path: path.to_path_buf(),
+        media_dir: Some(sidecar_dir),
+        media_count: verified.len(),
+    })
+}
+
+/// Load a material file and verify any `media:sha256:*` sidecar blobs from [`media_sidecar_dir`].
+///
+/// Validates block identities, managed reference syntax, sidecar presence,
+/// size limits, magic bytes, and SHA-256 digests, failing closed if any
+/// referenced sidecar asset is missing or tampered with.
+pub fn load_with_media(
+    path: impl AsRef<Path>,
+) -> Result<(Context, BTreeMap<String, Vec<u8>>), MaterialError> {
+    let path = path.as_ref();
+    let context = read(path)?;
+    references::validate_managed_references(&context, &[])?;
+
+    let managed_refs = collect_managed_media_occurrences(&context);
+    if managed_refs.is_empty() {
+        return Ok((context, BTreeMap::new()));
+    }
+
+    let sidecar_dir = media_sidecar_dir(path);
+    let mut loaded = BTreeMap::new();
+    for (reference, occurrences) in managed_refs {
+        let first_block_id = occurrences[0].0;
+        let hex = crate::media::parse_managed_media_sha256(&reference)
+            .expect("validated managed sha256 reference");
+        let blob_path = sidecar_dir.join(format!("{hex}.bin"));
+        let bytes = read_sidecar_blob(&blob_path, first_block_id)?;
+        let detected = crate::media::verify_managed_blob(&reference, &bytes).map_err(|err| {
+            MaterialError::ReferenceUnavailable {
+                block_id: first_block_id,
+                source: io::Error::new(io::ErrorKind::InvalidData, err.to_string()),
+            }
+        })?;
+        for (block_id, media_type) in occurrences {
+            if !media_type.eq_ignore_ascii_case(detected) {
+                return Err(MaterialError::ReferenceUnavailable {
+                    block_id,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "media_type '{media_type}' does not match verified format '{detected}' for {reference}"
+                        ),
+                    ),
+                });
+            }
+        }
+        loaded.insert(reference, bytes);
+    }
+
+    Ok((context, loaded))
+}
+
+fn collect_managed_media_occurrences(
+    context: &Context,
+) -> BTreeMap<String, Vec<(BlockId, String)>> {
+    let mut map: BTreeMap<String, Vec<(BlockId, String)>> = BTreeMap::new();
+    for block in context.blocks() {
+        match block.content() {
+            BlockContent::Message { parts, .. } => {
+                for part in parts {
+                    if let ContentPart::Media(media) = part
+                        && crate::media::is_managed_media_ref(&media.reference)
+                    {
+                        map.entry(media.reference.clone())
+                            .or_default()
+                            .push((block.id(), media.media_type.clone()));
+                    }
+                }
+            }
+            BlockContent::ToolResult(result) => {
+                for media in &result.media {
+                    if crate::media::is_managed_media_ref(&media.reference) {
+                        map.entry(media.reference.clone())
+                            .or_default()
+                            .push((block.id(), media.media_type.clone()));
+                    }
+                }
+            }
+            BlockContent::ToolCall(_) | BlockContent::ToolChange(_) => {}
+        }
+    }
+    map
+}
+
+fn read_sidecar_blob(path: &Path, block_id: BlockId) -> Result<Vec<u8>, MaterialError> {
+    let unavailable = |source: io::Error| MaterialError::ReferenceUnavailable { block_id, source };
+    let pre_meta = std::fs::metadata(path).map_err(unavailable)?;
+    if !pre_meta.is_file() {
+        return Err(unavailable(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "sidecar media path is not a regular file: {}",
+                path.display()
+            ),
+        )));
+    }
+    if pre_meta.len() > crate::media::MAX_IMAGE_BYTES as u64 {
+        return Err(unavailable(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "sidecar media blob exceeds {} bytes",
+                crate::media::MAX_IMAGE_BYTES
+            ),
+        )));
+    }
+    let file = File::open(path).map_err(unavailable)?;
+    let meta = file.metadata().map_err(unavailable)?;
+    if !meta.is_file() {
+        return Err(unavailable(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "sidecar media path is not a regular file: {}",
+                path.display()
+            ),
+        )));
+    }
+    if meta.len() > crate::media::MAX_IMAGE_BYTES as u64 {
+        return Err(unavailable(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "sidecar media blob exceeds {} bytes",
+                crate::media::MAX_IMAGE_BYTES
+            ),
+        )));
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(meta.len())
+            .unwrap_or(crate::media::MAX_IMAGE_BYTES)
+            .min(crate::media::MAX_IMAGE_BYTES),
+    );
+    file.take((crate::media::MAX_IMAGE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(unavailable)?;
+    if bytes.len() > crate::media::MAX_IMAGE_BYTES {
+        return Err(unavailable(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "sidecar media blob exceeds {} bytes",
+                crate::media::MAX_IMAGE_BYTES
+            ),
+        )));
+    }
+    Ok(bytes)
 }
 
 // The offline envelope deliberately ignores unknown record fields: newer

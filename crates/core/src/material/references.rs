@@ -72,6 +72,35 @@ pub(crate) fn validate_with_history(
     Ok(())
 }
 
+/// Validate all references in `context` using TARS's managed media rules.
+///
+/// Permits only canonical `media:sha256:<64hex>` (with supported raster MIME)
+/// and `artifact:<uuid>` (with a recognized [`causa::providers::MediaKind`] for
+/// media, or indexed/spilled tool output artifacts). Rejects all external URLs,
+/// filesystem paths, and malformed references.
+pub(crate) fn validate_managed_references(
+    context: &Context,
+    history: &[crate::compact::HistoryRecordEntry],
+) -> Result<(), MaterialError> {
+    let mut validator = |reference: MaterialReference<'_>| -> io::Result<()> {
+        match reference {
+            MaterialReference::Media(media) => crate::media::validate_managed_media_ref(media)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err)),
+            MaterialReference::Artifact(artifact) => {
+                if is_spilled_artifact(&artifact.id) {
+                    Ok(())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("unmanaged artifact reference '{}'", artifact.id),
+                    ))
+                }
+            }
+        }
+    };
+    validate_with_history(context, Some(history), Some(&mut validator))
+}
+
 /// Whether `id` is `<record id>/<block id>` with the record in `history`.
 pub(crate) fn indexed(history: &[crate::compact::HistoryRecordEntry], id: &str) -> bool {
     crate::compact::history::parse_artifact_id(id)
