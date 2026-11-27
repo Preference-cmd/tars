@@ -159,8 +159,7 @@ impl App {
                         reason.extend(text.chars().filter(|c| !c.is_control()));
                     }
                 } else if entry.approval_queue.is_empty() {
-                    input::paste(&mut entry.editor, text, true);
-                    entry.reset_history_cursor();
+                    self.paste_into_composer(text);
                 }
             }
             return;
@@ -417,7 +416,7 @@ impl App {
                     && self
                         .entries
                         .get(self.selected)
-                        .is_none_or(|e| !e.has_draft())))
+                        .is_none_or(|e| !e.has_text_draft())))
         {
             self.show_commands();
             return;
@@ -654,6 +653,74 @@ fn scroll_approval(entry: &mut super::Entry, code: KeyCode) {
         KeyCode::PageDown => entry.approval_scroll.saturating_add(5).min(max),
         _ => return,
     };
+}
+
+impl App {
+    fn paste_into_composer(&mut self, text: &str) {
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            return;
+        };
+        if entry.viewed_agent_id.is_none()
+            && let Some(tokens) = crate::input::image::parse_pasted_path_tokens(text)
+        {
+            let workspace_root = entry
+                .session
+                .as_ref()
+                .and_then(|session| session.definition().workspace_root);
+            let mut prepared = Vec::with_capacity(tokens.len());
+            let mut all_images = true;
+            for token in &tokens {
+                let Some(resolved) =
+                    crate::input::image::resolve_local_path(token, workspace_root.as_deref())
+                else {
+                    all_images = false;
+                    break;
+                };
+                match tars_core::media::prepare_image_from_path(&resolved) {
+                    Ok(image) => prepared.push(image),
+                    Err(_) => {
+                        all_images = false;
+                        break;
+                    }
+                }
+            }
+            if all_images && !prepared.is_empty() {
+                if entry.busy.is_some() {
+                    entry.notice =
+                        "Wait for the current session operation before attaching images".into();
+                    return;
+                }
+                let max = tars_core::media::MAX_IMAGES_PER_MESSAGE;
+                if entry.pending_images.len() + prepared.len() > max {
+                    entry.notice = format!(
+                        "Cannot attach {} image(s): exceeds max {max} per message ({} pending)",
+                        prepared.len(),
+                        entry.pending_images.len()
+                    );
+                    return;
+                }
+                let added = prepared.len();
+                let summary = if added == 1 {
+                    let img = &prepared[0];
+                    let name = img.name.as_deref().unwrap_or("image");
+                    let escaped_name = tars_core::permission::escape_untrusted_text(name);
+                    let size = crate::input::image::format_human_size(img.size_bytes);
+                    format!("{escaped_name} ({}, {size})", img.media_type)
+                } else {
+                    format!("{added} images")
+                };
+                entry.pending_images.extend(prepared);
+                entry.notice = format!(
+                    "Attached {summary} — {} pending",
+                    entry.pending_images.len()
+                );
+                self.refresh_viewport_height();
+                return;
+            }
+        }
+        input::paste(&mut entry.editor, text, true);
+        entry.reset_history_cursor();
+    }
 }
 
 fn approval_max_scroll(entry: &super::Entry) -> usize {

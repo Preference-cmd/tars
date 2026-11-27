@@ -13,8 +13,11 @@ use tars_core::{
 mod complete;
 pub(crate) mod editor;
 mod graphemes;
+pub(crate) mod image;
 mod onboarding;
-pub(crate) use complete::{CompleteResult, complete_editor, set_editor_text};
+pub(crate) use complete::{
+    CompleteResult, complete_editor, set_editor_text, slash_command_takes_args,
+};
 pub(crate) use graphemes::edit;
 pub(crate) use onboarding::{ONBOARDING_FIELD_NAMES, OnboardingForm};
 

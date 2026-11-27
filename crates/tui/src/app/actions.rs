@@ -98,6 +98,7 @@ impl App {
         entry.workspace_agents_trust = None;
         entry.material_version = None;
         entry.requested_material_version = None;
+        entry.superseded_material_version = None;
         entry.material_retry_after = None;
         entry.repair_job = None;
         entry.clear_history();
@@ -126,6 +127,32 @@ impl App {
         let Some(entry) = self.entries.get_mut(self.selected) else {
             return;
         };
+        let text = entry.editor.lines().join("\n");
+        if !text.contains('\n') {
+            let trimmed = text.trim();
+            if trimmed == "/image"
+                || trimmed.starts_with("/image ")
+                || trimmed.starts_with("/image\t")
+            {
+                if entry.viewed_agent_id.is_some() {
+                    entry.notice =
+                        "Viewing child agent (read-only); run /agents main to attach images".into();
+                    return;
+                }
+                if entry.busy.is_some() {
+                    entry.notice = "Input retained; wait for the current session operation".into();
+                    return;
+                }
+                let arg = trimmed.strip_prefix("/image").unwrap_or("").trim();
+                if self.image_command(arg)
+                    && let Some(entry) = self.entries.get_mut(self.selected)
+                {
+                    entry.editor = input::editor();
+                    entry.reset_history_cursor();
+                }
+                return;
+            }
+        }
         if entry.session.is_none() {
             return;
         }
@@ -137,8 +164,9 @@ impl App {
             entry.notice = "Input retained; wait for the current session operation".into();
             return;
         }
-        let text = entry.editor.lines().join("\n");
-        if text.trim().is_empty() {
+        let has_text = !text.trim().is_empty();
+        let has_images = !entry.pending_images.is_empty();
+        if !has_text && !has_images {
             return;
         }
         if entry.is_turn_running() {
@@ -149,21 +177,48 @@ impl App {
                 );
                 return;
             }
-            entry.queued_prompts.push_back(text.clone());
+            let images = std::mem::take(&mut entry.pending_images);
+            let image_count = images.len();
+            entry
+                .queued_prompts
+                .push_back(super::state::QueuedPrompt::new(text.clone(), images));
             entry.editor = input::editor();
-            entry.push_input_history(&text);
-            let count = entry.queued_prompts.len();
-            entry.notice = if entry.queue_paused {
-                format!("Queued message ({count} waiting, paused); /queue to manage")
+            if has_text {
+                entry.push_input_history(&text);
             } else {
-                format!("Queued message ({count} waiting); /queue to manage")
+                entry.reset_history_cursor();
+            }
+            let count = entry.queued_prompts.len();
+            let image_suffix = if image_count > 0 && !has_text {
+                format!(" with {image_count} image(s)")
+            } else if image_count > 0 {
+                format!(" (+{image_count} image(s))")
+            } else {
+                String::new()
             };
+            entry.notice = if entry.queue_paused {
+                format!("Queued message{image_suffix} ({count} waiting, paused); /queue to manage")
+            } else {
+                format!("Queued message{image_suffix} ({count} waiting); /queue to manage")
+            };
+            self.refresh_viewport_height();
             return;
         }
-        if self.submit_text_at(self.selected, text, true).is_ok()
-            && let Some(entry) = self.entries.get_mut(self.selected)
-        {
-            entry.queue_paused = false;
+        let prompt =
+            super::state::QueuedPrompt::new(text, std::mem::take(&mut entry.pending_images));
+        match self.submit_prompt_at(self.selected, prompt, true) {
+            Ok(()) => {
+                if let Some(entry) = self.entries.get_mut(self.selected) {
+                    entry.queue_paused = false;
+                }
+                self.refresh_viewport_height();
+            }
+            Err((_, returned)) => {
+                if let Some(entry) = self.entries.get_mut(self.selected) {
+                    entry.pending_images = returned.images;
+                }
+                self.refresh_viewport_height();
+            }
         }
     }
 
@@ -177,51 +232,99 @@ impl App {
         text: String,
         push_history: bool,
     ) -> Result<(), tars_core::application::ApplicationError> {
+        match self.submit_prompt_at(index, super::state::QueuedPrompt::from(text), push_history) {
+            Ok(()) => Ok(()),
+            Err((Some(reason), _)) => Err(reason),
+            Err((None, _)) => Ok(()),
+        }
+    }
+
+    pub(super) fn submit_prompt_at(
+        &mut self,
+        index: usize,
+        prompt: super::state::QueuedPrompt,
+        push_history: bool,
+    ) -> Result<
+        (),
+        (
+            Option<tars_core::application::ApplicationError>,
+            super::state::QueuedPrompt,
+        ),
+    > {
         if !self.capacity() {
-            return Ok(());
+            return Err((None, prompt));
         }
         let Some(entry) = self.entries.get_mut(index) else {
-            return Ok(());
+            return Err((None, prompt));
         };
         let Some(session) = entry.session.clone() else {
-            return Ok(());
+            return Err((None, prompt));
         };
         if entry.viewed_agent_id.is_some() {
             entry.notice = "Viewing child agent (read-only); run /agents main to send input".into();
-            return Ok(());
+            return Err((None, prompt));
         }
         if entry.busy.is_some() {
             entry.notice = "Input retained; wait for the current session operation".into();
-            return Ok(());
+            return Err((None, prompt));
         }
-        if text.trim().is_empty() {
-            return Ok(());
+        let has_text = !prompt.text.trim().is_empty();
+        if !has_text && prompt.images.is_empty() {
+            return Err((None, prompt));
         }
-        let history_entry = text.clone();
-        let request = SubmitRequest {
-            request_key: new_block_id().0.to_string(),
-            blocks: vec![tars_core::application::text_input(text)],
-        };
+        let history_entry = prompt.text.clone();
         let progress = session.subscribe_progress();
-        match session.submit(request) {
-            Err(rejected) => {
+        let submit_result = if prompt.images.is_empty() {
+            let request = SubmitRequest {
+                request_key: new_block_id().0.to_string(),
+                blocks: vec![tars_core::application::text_input(prompt.text.clone())],
+            };
+            session.submit(request).map_err(|rejected| rejected.reason)
+        } else {
+            let text_opt = has_text.then_some(prompt.text.as_str());
+            session.submit_with_images(new_block_id().0.to_string(), text_opt, &prompt.images)
+        };
+        match submit_result {
+            Err(reason) => {
                 if push_history {
-                    let hint = if matches!(
-                        rejected.reason,
-                        tars_core::application::ApplicationError::Repair(_)
-                    ) {
-                        " · F7 / /repair"
-                    } else {
-                        ""
-                    };
-                    entry.notice = format!("Input retained: {}{hint}", rejected.reason);
+                    let hint =
+                        if matches!(reason, tars_core::application::ApplicationError::Repair(_)) {
+                            " · F7 / /repair"
+                        } else {
+                            ""
+                        };
+                    entry.notice = format!("Input retained: {reason}{hint}");
                 }
-                Err(rejected.reason)
+                Err((Some(reason), prompt))
             }
             Ok(receipt) => {
                 if push_history {
                     entry.editor = input::editor();
-                    entry.push_input_history(&history_entry);
+                    entry.pending_images.clear();
+                    if has_text {
+                        entry.push_input_history(&history_entry);
+                    } else {
+                        entry.reset_history_cursor();
+                    }
+                }
+                let media_refs: Vec<causa::kernel::MediaRef> = prompt
+                    .images
+                    .iter()
+                    .map(tars_core::media::PreparedImage::media_ref)
+                    .collect();
+                let echo_text = has_text.then_some(prompt.text.as_str());
+                if entry.refreshing {
+                    entry.superseded_material_version = entry.requested_material_version.clone();
+                }
+                entry.transcript = Arc::new(
+                    entry
+                        .transcript
+                        .with_appended_user_echo(echo_text, &media_refs),
+                );
+                if entry.transcript.text.len() <= 64 * 1024 && self.view_width > 0 {
+                    entry.rows = Some(Rows::wrap(entry.transcript.clone(), self.view_width));
+                } else {
+                    entry.rows = None;
                 }
                 entry.turn_in_flight = true;
                 entry.work = Some(receipt.work.clone());
@@ -567,6 +670,8 @@ impl App {
                     entry.notice = notice;
                 } else if entry.notice.starts_with("Commands: ")
                     || entry.notice.starts_with("Paths: ")
+                    || entry.notice.starts_with("Image: ")
+                    || entry.notice.starts_with("Subcommands: ")
                     || entry.notice.starts_with("No matching ")
                     || entry.notice.starts_with("No workspace ")
                     || entry.notice.starts_with("Invalid workspace ")
@@ -1227,12 +1332,15 @@ impl App {
             let Some(next) = self.entries[index].queued_prompts.pop_front() else {
                 continue;
             };
-            match self.submit_text_at(index, next.clone(), false) {
+            match self.submit_prompt_at(index, next, false) {
                 Ok(()) => {
                     self.dirty = true;
                 }
-                Err(error) => {
-                    self.entries[index].queued_prompts.push_front(next);
+                Err((None, returned)) => {
+                    self.entries[index].queued_prompts.push_front(returned);
+                }
+                Err((Some(error), returned)) => {
+                    self.entries[index].queued_prompts.push_front(returned);
                     if !matches!(
                         error,
                         tars_core::application::ApplicationError::Saving

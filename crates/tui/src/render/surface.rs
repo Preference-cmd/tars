@@ -15,6 +15,14 @@ pub(crate) const MUTED: Color = Color::DarkGray;
 pub(crate) fn transcript_width(width: u16) -> u16 {
     width.saturating_sub(4).max(1)
 }
+fn attachment_bar_height(app: &App) -> u16 {
+    u16::from(
+        app.entries
+            .get(app.selected)
+            .is_some_and(|e| !e.pending_images.is_empty()),
+    )
+}
+
 fn input_height(app: &App, width: u16, height: u16) -> u16 {
     let cells = usize::from(width.saturating_sub(6).max(1));
     let rows = app.entries.get(app.selected).map_or(1, |entry| {
@@ -26,7 +34,8 @@ fn input_height(app: &App, width: u16, height: u16) -> u16 {
             .sum::<usize>()
             .clamp(1, 6) as u16
     });
-    (rows + 2).min(height.saturating_sub(9).max(3))
+    let extra_bars = queue_bar_height(app) + attachment_bar_height(app);
+    (rows + 2).min(height.saturating_sub(9 + extra_bars).max(3))
 }
 fn queue_bar_height(app: &App) -> u16 {
     u16::from(
@@ -34,6 +43,57 @@ fn queue_bar_height(app: &App) -> u16 {
             .get(app.selected)
             .is_some_and(|e| !e.queued_prompts.is_empty()),
     )
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let preview: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{preview}…")
+    } else {
+        preview
+    }
+}
+
+fn truncate_display_width(text: &str, max_width: usize) -> String {
+    if text.width() <= max_width {
+        return text.to_owned();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width == 1 {
+        return "…".to_owned();
+    }
+    let limit = max_width - 1;
+    let mut cols = 0usize;
+    let mut end = 0usize;
+    for (offset, grapheme) in text.grapheme_indices(true) {
+        let w = grapheme.width();
+        if cols + w > limit {
+            break;
+        }
+        cols += w;
+        end = offset + grapheme.len();
+    }
+    format!("{}…", &text[..end])
+}
+
+pub(crate) fn format_attachment_bar(
+    images: &[tars_core::media::PreparedImage],
+    max_width: usize,
+) -> String {
+    let mut joined = String::new();
+    for (idx, img) in images.iter().enumerate() {
+        if idx > 0 {
+            joined.push(' ');
+        }
+        let name = img.name.as_deref().unwrap_or("image");
+        let escaped = tars_core::permission::escape_untrusted_text(name);
+        let size = crate::input::image::format_human_size(img.size_bytes);
+        joined.push_str(&format!("[{}: {escaped} ({size})]", idx + 1));
+    }
+    truncate_display_width(&joined, max_width)
 }
 
 pub(crate) fn format_queue_preview(text: &str, max_chars: usize) -> String {
@@ -45,20 +105,43 @@ pub(crate) fn format_queue_preview(text: &str, max_chars: usize) -> String {
         })
         .collect();
     let escaped = tars_core::permission::escape_untrusted_text(collapsed.trim());
-    let mut chars = escaped.chars();
-    let preview: String = chars.by_ref().take(max_chars).collect();
-    if chars.next().is_some() {
-        format!("{preview}…")
-    } else {
-        preview
+    truncate_chars(&escaped, max_chars)
+}
+
+pub(crate) fn format_queued_prompt_preview(
+    prompt: &crate::app::QueuedPrompt,
+    max_chars: usize,
+) -> String {
+    let badge = match prompt.images.len() {
+        0 => String::new(),
+        1 => "[1 image]".to_owned(),
+        n => format!("[{n} images]"),
+    };
+    if prompt.text.trim().is_empty() {
+        return if badge.is_empty() {
+            String::new()
+        } else {
+            truncate_chars(&badge, max_chars)
+        };
     }
+    if badge.is_empty() {
+        return format_queue_preview(&prompt.text, max_chars);
+    }
+    let badge_prefix = format!("{badge} ");
+    let badge_chars = badge_prefix.chars().count();
+    if max_chars <= badge_chars {
+        return truncate_chars(&badge, max_chars);
+    }
+    let text_preview = format_queue_preview(&prompt.text, max_chars - badge_chars);
+    format!("{badge_prefix}{text_preview}")
 }
 
 pub(crate) fn conversation_height(height: u16, width: u16, app: &App) -> usize {
     let queue_rows = queue_bar_height(app);
+    let attachment_rows = attachment_bar_height(app);
     usize::from(
         height
-            .saturating_sub(3 + queue_rows + input_height(app, width, height) + 5)
+            .saturating_sub(3 + attachment_rows + queue_rows + input_height(app, width, height) + 5)
             .max(1),
     )
 }
@@ -98,9 +181,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     }
     let body = inset(area);
     let queue_rows = queue_bar_height(app);
+    let attachment_rows = attachment_bar_height(app);
     let regions = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(1),
+        Constraint::Length(attachment_rows),
         Constraint::Length(input_height(app, area.width, area.height)),
         Constraint::Length(5 + queue_rows),
     ])
@@ -198,11 +283,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             entry.unwrap(),
             Rect {
                 y: regions[1].y,
-                height: regions[1].height + regions[2].height,
+                height: regions[1].height + regions[2].height + regions[3].height,
                 ..body
             },
         );
-        footer(frame, app, regions[3]);
+        footer(frame, app, regions[4]);
         return;
     }
     if app.panel.is_none() && entry.is_some_and(|e| e.workspace_agents_trust.is_some()) {
@@ -212,11 +297,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             entry.unwrap(),
             Rect {
                 y: regions[1].y,
-                height: regions[1].height + regions[2].height,
+                height: regions[1].height + regions[2].height + regions[3].height,
                 ..body
             },
         );
-        footer(frame, app, regions[3]);
+        footer(frame, app, regions[4]);
         return;
     }
     if app.panel.is_none() && entry.is_some_and(|e| !e.approval_queue.is_empty()) {
@@ -226,11 +311,11 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             entry.unwrap(),
             Rect {
                 y: regions[1].y,
-                height: regions[1].height + regions[2].height,
+                height: regions[1].height + regions[2].height + regions[3].height,
                 ..body
             },
         );
-        footer(frame, app, regions[3]);
+        footer(frame, app, regions[4]);
         return;
     }
     if let Some(entry) = entry {
@@ -368,11 +453,25 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     } else {
         welcome(frame, regions[1], false);
     }
+    if attachment_rows > 0
+        && let Some(entry) = entry
+    {
+        const PREFIX: &str = "Images: ";
+        let avail = usize::from(regions[2].width).saturating_sub(PREFIX.len());
+        let bar = format_attachment_bar(&entry.pending_images, avail);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(PREFIX, Style::default().fg(ACCENT)),
+                Span::styled(bar, Style::default().fg(MUTED)),
+            ])),
+            regions[2],
+        );
+    }
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(Style::default().fg(MUTED));
-    let inner = block.inner(regions[2]);
-    frame.render_widget(block, regions[2]);
+    let inner = block.inner(regions[3]);
+    frame.render_widget(block, regions[3]);
     frame.render_widget(
         Paragraph::new("❯").style(Style::default().fg(ACCENT)),
         inner,
@@ -384,12 +483,16 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
     };
     if let Some(entry) = entry {
         frame.render_widget(&entry.editor, editor_area);
-        if !entry.has_draft() && app.panel.is_none() {
+        if !entry.has_text_draft() && app.panel.is_none() {
             frame.render_widget(
                 Paragraph::new(if entry.viewed_agent_id.is_some() {
                     "Read-only child agent view · /agents to return to main"
                 } else if entry.session.is_some() {
-                    "Ask something…"
+                    if entry.pending_images.is_empty() {
+                        "Ask something…"
+                    } else {
+                        "Add a message or press Enter to send image(s)…"
+                    }
                 } else {
                     "/open this session, or /new"
                 })
@@ -403,7 +506,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             editor_area,
         );
     }
-    footer(frame, app, regions[3]);
+    footer(frame, app, regions[4]);
     if let Some(panel) = &app.panel {
         super::panels::draw(
             frame,
@@ -411,7 +514,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             panel,
             Rect {
                 y: regions[1].y,
-                height: regions[1].height + regions[2].height,
+                height: regions[1].height + regions[2].height + regions[3].height,
                 ..body
             },
         );
@@ -523,7 +626,7 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         "↑↓ / PageUp PageDown scroll · Esc back"
     } else if app.panel.is_some() {
         "Type to filter · ↑↓ select · Enter choose · Esc back"
-    } else if entry.is_some_and(|e| e.has_draft()) {
+    } else if entry.is_some_and(|e| e.has_text_draft()) {
         "Enter send · Ctrl-J newline · F1 commands · Esc interrupt"
     } else {
         "Enter send · Ctrl-J newline · / commands · Esc interrupt"
@@ -539,7 +642,6 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .split(area);
         if let Some(e) = entry {
             let count = e.queued_prompts.len();
-            let front = e.queued_prompts.front().map(String::as_str).unwrap_or("");
             let (prefix, suffix) = if e.queue_paused {
                 (
                     format!("Queued ({count}, paused): "),
@@ -551,7 +653,11 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             let avail = usize::from(sections[0].width)
                 .saturating_sub(prefix.len() + suffix.len() + 1)
                 .clamp(8, 48);
-            let preview = format_queue_preview(front, avail);
+            let preview = e
+                .queued_prompts
+                .front()
+                .map(|front| format_queued_prompt_preview(front, avail))
+                .unwrap_or_default();
             let queue_line = format!("{prefix}{preview}{suffix}");
             frame.render_widget(
                 Paragraph::new(queue_line).style(Style::default().fg(if e.queue_paused {

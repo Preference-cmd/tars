@@ -48,6 +48,7 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("sessions", "Find and open a saved or active session"),
     ("agents", "List session agents and switch transcript view"),
     ("queue", "Inspect, pop, or clear queued prompts"),
+    ("image", "Attach, list, remove, or clear pending images"),
     ("rename", "Rename or clear the current session title"),
     ("fork", "Fork the current idle session into a new session"),
     (
@@ -221,6 +222,11 @@ impl App {
                 let arg = clean.strip_prefix("queue").unwrap_or("").trim();
                 self.queue_command(arg);
             }
+            "image" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("image").unwrap_or("").trim();
+                self.image_command(arg);
+            }
             "rename" => {
                 let clean = query.trim_start_matches('/').trim();
                 let arg = clean.strip_prefix("rename").unwrap_or("").trim();
@@ -290,8 +296,9 @@ impl App {
                 lines: ["Enter / Ctrl-S   Send input (or queue while a turn is running)", "Ctrl-J / Alt-Enter   New line",
                     "Ctrl-G / /edit   Edit draft in external $VISUAL or $EDITOR",
                     "↑ / ↓   Prompt history (at top/bottom line)",
-                    "Tab   Complete /command or @workspace/path",
+                    "Tab   Complete /command, /image <path>, or @workspace/path",
                     "Shift-Tab   Cycle mode (ask -> accept-edits -> read-only)",
+                    "/image [<path> | remove <n> | clear]   Attach, list, or remove pending images",
                     "/queue [list | pop | clear]   Inspect, pop to editor, or clear queued prompts",
                     "/rename <title> | --clear   Set or clear the current session title",
                     "/fork [title]   Fork current idle session into a new independent session",
@@ -442,7 +449,7 @@ impl App {
                 });
                 lines.push(String::new());
                 for (idx, prompt) in entry.queued_prompts.iter().enumerate() {
-                    let preview = crate::render::format_queue_preview(prompt, 160);
+                    let preview = crate::render::format_queued_prompt_preview(prompt, 160);
                     lines.push(format!("{}. {preview}", idx + 1));
                 }
             }
@@ -465,15 +472,34 @@ impl App {
                 return;
             }
             if let Some(next) = entry.queued_prompts.pop_front() {
-                input::set_editor_text(&mut entry.editor, &next, false);
+                if entry.pending_images.len() + next.images.len()
+                    > tars_core::media::MAX_IMAGES_PER_MESSAGE
+                {
+                    entry.queued_prompts.push_front(next);
+                    entry.notice = format!(
+                        "Cannot pop queued prompt: exceeds max {} images per message",
+                        tars_core::media::MAX_IMAGES_PER_MESSAGE
+                    );
+                    self.dirty = true;
+                    return;
+                }
+                let restored_images = next.images.len();
+                input::set_editor_text(&mut entry.editor, &next.text, false);
+                entry.pending_images.extend(next.images);
                 entry.reset_history_cursor();
                 if entry.queued_prompts.is_empty() {
                     entry.queue_paused = false;
                 }
+                let img_suffix = if restored_images > 0 {
+                    format!(" with {restored_images} image(s)")
+                } else {
+                    String::new()
+                };
                 entry.notice = format!(
-                    "Popped queued prompt into editor ({} remaining)",
+                    "Popped queued prompt{img_suffix} into editor ({} remaining)",
                     entry.queued_prompts.len()
                 );
+                self.refresh_viewport_height();
             } else {
                 entry.notice = "Queue is empty".into();
             }
@@ -494,6 +520,162 @@ impl App {
         }
         entry.notice = "Usage: /queue [list | pop | clear]".into();
         self.dirty = true;
+    }
+
+    pub(super) fn image_command(&mut self, arg: &str) -> bool {
+        let Some(entry) = self.entries.get_mut(self.selected) else {
+            self.notice = "Open or select a session first".into();
+            return false;
+        };
+
+        let trimmed = arg.trim();
+        if trimmed.is_empty() {
+            let count = entry.pending_images.len();
+            let mut lines = Vec::new();
+            if count == 0 {
+                let msg = "No pending images attached (use /image <path> or paste an image path).";
+                entry.notice = msg.into();
+                lines.push(msg.into());
+            } else {
+                for (idx, img) in entry.pending_images.iter().enumerate() {
+                    let name = img.name.as_deref().unwrap_or("image");
+                    let escaped_name = tars_core::permission::escape_untrusted_text(name);
+                    let size = crate::input::image::format_human_size(img.size_bytes);
+                    lines.push(format!(
+                        "{}. {escaped_name} ({}, {size})",
+                        idx + 1,
+                        img.media_type
+                    ));
+                }
+            }
+            lines.push(String::new());
+            lines.push("/image <path>      Attach a local image".into());
+            lines.push("/image remove <n>  Remove pending image #n".into());
+            lines.push("/image clear       Clear all pending images".into());
+            self.panel = Some(Panel::Info {
+                title: format!("Pending images ({count})"),
+                kind: InfoKind::Plain,
+                lines,
+                scroll: 0,
+            });
+            self.dirty = true;
+            return true;
+        }
+
+        if entry.viewed_agent_id.is_some() {
+            entry.notice =
+                "Viewing child agent (read-only); run /agents main to manage images".into();
+            self.dirty = true;
+            return false;
+        }
+        if entry.busy.is_some() {
+            entry.notice = "Wait for the current session operation before managing images".into();
+            self.dirty = true;
+            return false;
+        }
+
+        if trimmed.eq_ignore_ascii_case("clear") {
+            let count = entry.pending_images.len();
+            entry.pending_images.clear();
+            entry.notice = if count == 0 {
+                "No pending images to clear".into()
+            } else {
+                format!("Cleared {count} pending image(s)")
+            };
+            self.refresh_viewport_height();
+            self.dirty = true;
+            return true;
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        if let Some(sub) = parts.next()
+            && sub.eq_ignore_ascii_case("remove")
+        {
+            let index_arg = parts.next();
+            let extra = parts.next();
+            let one_based = index_arg.and_then(|raw| raw.parse::<usize>().ok());
+            let removed = match (one_based, extra) {
+                (Some(n), None) if n >= 1 => {
+                    if n <= entry.pending_images.len() {
+                        let img = entry.pending_images.remove(n - 1);
+                        let label = img.name.as_deref().unwrap_or("image");
+                        entry.notice = format!(
+                            "Removed pending image #{n} ({}) ({} remaining)",
+                            tars_core::permission::escape_untrusted_text(label),
+                            entry.pending_images.len()
+                        );
+                        self.refresh_viewport_height();
+                        true
+                    } else {
+                        entry.notice = format!(
+                            "No pending image #{n} ({} attached)",
+                            entry.pending_images.len()
+                        );
+                        false
+                    }
+                }
+                _ => {
+                    entry.notice = "Usage: /image remove <n> (1-based index)".into();
+                    false
+                }
+            };
+            self.dirty = true;
+            return removed;
+        }
+
+        if entry.pending_images.len() >= tars_core::media::MAX_IMAGES_PER_MESSAGE {
+            entry.notice = format!(
+                "Cannot attach image: max {} images per message",
+                tars_core::media::MAX_IMAGES_PER_MESSAGE
+            );
+            self.dirty = true;
+            return false;
+        }
+
+        let workspace_root = entry
+            .session
+            .as_ref()
+            .and_then(|session| session.definition().workspace_root);
+        let Some(parsed) = crate::input::image::parse_single_image_path(trimmed) else {
+            entry.notice = "Usage: /image [<path> | remove <n> | clear]".into();
+            self.dirty = true;
+            return false;
+        };
+        let Some(resolved) =
+            crate::input::image::resolve_local_path(&parsed, workspace_root.as_deref())
+        else {
+            entry.notice = format!(
+                "Invalid image path: {}",
+                tars_core::permission::escape_untrusted_text(&parsed)
+            );
+            self.dirty = true;
+            return false;
+        };
+
+        match tars_core::media::prepare_image_from_path(&resolved) {
+            Ok(prepared) => {
+                let name = prepared.name.as_deref().unwrap_or("image");
+                let escaped_name = tars_core::permission::escape_untrusted_text(name);
+                let size = crate::input::image::format_human_size(prepared.size_bytes);
+                let media_type = prepared.media_type;
+                entry.pending_images.push(prepared);
+                entry.notice = format!(
+                    "Attached {escaped_name} ({media_type}, {size}) — {} pending",
+                    entry.pending_images.len()
+                );
+                self.refresh_viewport_height();
+                self.dirty = true;
+                true
+            }
+            Err(error) => {
+                entry.notice = format!(
+                    "Failed to attach image: {}",
+                    tars_core::permission::escape_untrusted_text(&error.to_string())
+                );
+                self.dirty = true;
+                false
+            }
+        }
     }
 
     fn rules_command(&mut self, arg: &str) {
@@ -1038,6 +1220,62 @@ impl App {
         };
         *selected = (*selected).min(matches.len().saturating_sub(1));
         match key.code {
+            KeyCode::Tab
+                if commands && key.kind == KeyEventKind::Press && key.modifiers.is_empty() =>
+            {
+                let workspace_root = self
+                    .entries
+                    .get(self.selected)
+                    .and_then(|entry| entry.session.as_ref())
+                    .and_then(|session| session.definition().workspace_root);
+                let clean = query.trim_start_matches('/');
+                if !clean.chars().any(char::is_whitespace) {
+                    let lower = clean.to_lowercase();
+                    let cmd_matches: Vec<&str> = COMMANDS
+                        .iter()
+                        .filter(|(name, _)| name.starts_with(&lower))
+                        .map(|(name, _)| *name)
+                        .collect();
+                    if let [cmd] = cmd_matches.as_slice() {
+                        *query = if input::slash_command_takes_args(cmd) {
+                            format!("{cmd} ")
+                        } else {
+                            (*cmd).to_owned()
+                        };
+                        *selected = 0;
+                    }
+                } else if let Some(arg_prefix) =
+                    crate::input::image::strip_image_command_prefix(clean)
+                {
+                    match crate::input::image::complete_image_arg(
+                        arg_prefix,
+                        workspace_root.as_deref(),
+                    ) {
+                        crate::input::image::ImageArgCompletion::Modified {
+                            replacement,
+                            notice,
+                        } => {
+                            *query = format!("image {replacement}");
+                            *selected = 0;
+                            if let Some(msg) = notice {
+                                if let Some(entry) = self.entries.get_mut(self.selected) {
+                                    entry.notice = msg;
+                                } else {
+                                    self.notice = msg;
+                                }
+                            }
+                        }
+                        crate::input::image::ImageArgCompletion::Notice(msg) => {
+                            if let Some(entry) = self.entries.get_mut(self.selected) {
+                                entry.notice = msg;
+                            } else {
+                                self.notice = msg;
+                            }
+                        }
+                        crate::input::image::ImageArgCompletion::None => {}
+                    }
+                }
+            }
             KeyCode::Up => *selected = selected.saturating_sub(1),
             KeyCode::Down => *selected = (*selected + 1).min(matches.len().saturating_sub(1)),
             KeyCode::Enter if key.kind == KeyEventKind::Press => {

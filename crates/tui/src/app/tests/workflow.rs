@@ -138,7 +138,11 @@ async fn wf05_running_turn_queues_fifo_renders_escaped_preview_and_auto_dequeues
     assert!(!app.entries[0].has_draft());
 
     assert_eq!(
-        app.entries[0].queued_prompts.iter().collect::<Vec<_>>(),
+        app.entries[0]
+            .queued_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>(),
         vec!["second\n\tprompt", "third prompt"]
     );
     assert_eq!(
@@ -167,7 +171,11 @@ async fn wf05_running_turn_queues_fifo_renders_escaped_preview_and_auto_dequeues
     server.release.add_permits(1);
     until(&mut app, |_| server.requests.lock().unwrap().len() == 2).await;
     assert_eq!(
-        app.entries[0].queued_prompts.iter().collect::<Vec<_>>(),
+        app.entries[0]
+            .queued_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>(),
         vec!["third prompt"]
     );
 
@@ -280,7 +288,10 @@ async fn wf05_cancel_failed_save_blocked_and_repair_pause_queue_without_auto_sub
 
         assert!(app.entries[0].queue_paused);
         assert_eq!(
-            app.entries[0].queued_prompts.front().map(String::as_str),
+            app.entries[0]
+                .queued_prompts
+                .front()
+                .map(|p| p.text.as_str()),
             Some("must pause on cancel")
         );
         assert_eq!(server.requests.lock().unwrap().len(), 1);
@@ -487,7 +498,11 @@ async fn wf06_queue_commands_session_isolation_and_close_quit_confirmation() {
     command(&mut app, "queue pop");
     assert_eq!(app.entries[0].editor.lines(), &["s0-queued-1"]);
     assert_eq!(
-        app.entries[0].queued_prompts.iter().collect::<Vec<_>>(),
+        app.entries[0]
+            .queued_prompts
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>(),
         vec!["s0-queued-2"]
     );
 

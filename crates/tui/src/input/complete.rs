@@ -54,6 +54,13 @@ pub(crate) fn complete_editor(
         return complete_slash_command(editor, &line, cursor_byte);
     }
 
+    if line_count == 1
+        && before_cursor.starts_with('/')
+        && let Some(arg_prefix) = super::image::strip_image_command_prefix(before_cursor)
+    {
+        return complete_image_in_editor(editor, &line, cursor_byte, arg_prefix, workspace_root);
+    }
+
     let token_start = before_cursor
         .char_indices()
         .rev()
@@ -73,6 +80,13 @@ pub(crate) fn complete_editor(
     }
 
     CompleteResult::None
+}
+
+pub(crate) fn slash_command_takes_args(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "mode" | "auto_compact" | "agents" | "rules" | "queue" | "rename" | "fork" | "image"
+    )
 }
 
 fn complete_slash_command(
@@ -100,11 +114,7 @@ fn complete_slash_command(
             escape_untrusted_text(prefix)
         )),
         [cmd] => {
-            let takes_args = matches!(
-                *cmd,
-                "mode" | "auto_compact" | "agents" | "rules" | "queue" | "rename" | "fork"
-            );
-            let replacement = if takes_args {
+            let replacement = if slash_command_takes_args(cmd) {
                 format!("/{cmd} ")
             } else {
                 format!("/{cmd}")
@@ -129,6 +139,31 @@ fn complete_slash_command(
                 CompleteResult::Notice(notice)
             }
         }
+    }
+}
+
+fn complete_image_in_editor(
+    editor: &mut TextArea<'static>,
+    line: &str,
+    cursor_byte: usize,
+    arg_prefix: &str,
+    workspace_root: Option<&Path>,
+) -> CompleteResult {
+    let command_prefix_len = cursor_byte - arg_prefix.len();
+    let command_prefix = &line[..command_prefix_len];
+    match super::image::complete_image_arg(arg_prefix, workspace_root) {
+        super::image::ImageArgCompletion::None => CompleteResult::None,
+        super::image::ImageArgCompletion::Modified {
+            replacement,
+            notice,
+        } => {
+            let completed = format!("{command_prefix}{replacement}");
+            let new_line = format!("{completed}{}", &line[cursor_byte..]);
+            let target_col = completed.chars().count();
+            replace_line_and_move_cursor(editor, 0, new_line, target_col);
+            CompleteResult::Modified { notice }
+        }
+        super::image::ImageArgCompletion::Notice(notice) => CompleteResult::Notice(notice),
     }
 }
 

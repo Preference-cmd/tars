@@ -14,7 +14,9 @@ mod state;
 pub(crate) use clock::Clock;
 pub(crate) use commands::{COMMANDS, InfoKind, Panel, matching_commands};
 pub(crate) use startup::Startup;
-pub(crate) use state::{App, Confirmation, Entry, WorkspaceTrustLine, WorkspaceTrustLineKind};
+pub(crate) use state::{
+    App, Confirmation, Entry, QueuedPrompt, WorkspaceTrustLine, WorkspaceTrustLineKind,
+};
 
 #[cfg(test)]
 mod tests;

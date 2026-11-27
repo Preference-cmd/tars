@@ -496,6 +496,11 @@ impl App {
                     }
                     match result {
                         Ok(view) => {
+                            if entry.superseded_material_version.as_ref() == Some(&view.version) {
+                                entry.superseded_material_version = None;
+                                return;
+                            }
+                            entry.superseded_material_version = None;
                             // A read started before `/compact` would show the old
                             // materials; the compaction result reloads them.
                             if entry.busy == Some("compacting") {
@@ -886,6 +891,7 @@ impl App {
                             entry.turn_in_flight = false;
                             entry.queued_prompts.clear();
                             entry.queue_paused = false;
+                            entry.pending_images.clear();
                             entry.execution = "No work in this instance".into();
                             entry.clear_progress();
                             entry.clear_history();

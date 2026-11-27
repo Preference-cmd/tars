@@ -310,6 +310,46 @@ pub(super) struct ScrollAnchor {
     pub(super) rows: Vec<String>,
 }
 
+/// A prompt queued for automatic submission once the active turn completes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QueuedPrompt {
+    /// Text body of the prompt (may be empty for image-only prompts).
+    pub text: String,
+    /// Verified raster images attached to this prompt.
+    pub images: Vec<tars_core::media::PreparedImage>,
+}
+
+impl QueuedPrompt {
+    /// Create a queued prompt with text and/or attached images.
+    pub(crate) fn new(
+        text: impl Into<String>,
+        images: Vec<tars_core::media::PreparedImage>,
+    ) -> Self {
+        Self {
+            text: text.into(),
+            images,
+        }
+    }
+}
+
+impl From<String> for QueuedPrompt {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            images: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for QueuedPrompt {
+    fn from(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            images: Vec::new(),
+        }
+    }
+}
+
 pub(crate) struct Entry {
     pub(super) key: Key,
     pub title: Option<String>,
@@ -322,8 +362,9 @@ pub(crate) struct Entry {
     pub busy: Option<&'static str>,
     pub work: Option<WorkRef>,
     pub(crate) turn_in_flight: bool,
-    pub(crate) queued_prompts: VecDeque<String>,
+    pub(crate) queued_prompts: VecDeque<QueuedPrompt>,
     pub(crate) queue_paused: bool,
+    pub(crate) pending_images: Vec<tars_core::media::PreparedImage>,
     pub execution: String,
     pub status: String,
     pub notice: String,
@@ -350,6 +391,7 @@ pub(crate) struct Entry {
     pub scroll: Option<usize>,
     pub(super) material_version: Option<MaterialVersion>,
     pub(super) requested_material_version: Option<MaterialVersion>,
+    pub(super) superseded_material_version: Option<MaterialVersion>,
     pub(super) material_retry_after: Option<tokio::time::Instant>,
     pub(super) repair_job: Option<causa::kernel::BlockId>,
     #[cfg(test)]
@@ -386,6 +428,7 @@ impl Entry {
             turn_in_flight: false,
             queued_prompts: VecDeque::new(),
             queue_paused: false,
+            pending_images: Vec::new(),
             execution: "No work in this instance".into(),
             status: "Stored; F3 to open".into(),
             notice: String::new(),
@@ -409,6 +452,7 @@ impl Entry {
             scroll: None,
             material_version: None,
             requested_material_version: None,
+            superseded_material_version: None,
             material_retry_after: None,
             repair_job: None,
             #[cfg(test)]
@@ -458,8 +502,11 @@ impl Entry {
             .and_then(|s| s.definition().code_execution)
             .or(self.code_execution)
     }
-    pub fn has_draft(&self) -> bool {
+    pub(crate) fn has_text_draft(&self) -> bool {
         self.editor.lines().iter().any(|line| !line.is_empty())
+    }
+    pub fn has_draft(&self) -> bool {
+        self.has_text_draft() || !self.pending_images.is_empty()
     }
 
     pub(crate) fn is_turn_running(&self) -> bool {
@@ -662,6 +709,15 @@ impl App {
             && self.confirmation.is_none();
         let minimum_height = if approval_visible { 19 } else { 12 };
         self.too_small = width < 30 || self.view_height < minimum_height;
+    }
+    pub(super) fn refresh_viewport_height(&mut self) {
+        if self.view_height > 0 {
+            self.viewport_height = crate::render::conversation_height(
+                self.view_height,
+                self.view_width.saturating_add(4),
+                self,
+            );
+        }
     }
     pub(super) fn capacity(&mut self) -> bool {
         if self.jobs.len() >= MAX_JOBS {

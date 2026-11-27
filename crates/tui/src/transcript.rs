@@ -184,6 +184,54 @@ impl Transcript {
         Self::build(blocks, false, false)
     }
 
+    /// Append an accepted user submission to the live transcript while the turn runs.
+    ///
+    /// Replaced by the authoritative `Transcript::from_materials` snapshot once the
+    /// turn's material read lands.
+    pub(crate) fn with_appended_user_echo(
+        &self,
+        text: Option<&str>,
+        media: &[causa::kernel::MediaRef],
+    ) -> Self {
+        let mut next_text = self.text.clone();
+        if !next_text.is_empty() && !next_text.ends_with("\n\n") {
+            if !next_text.ends_with('\n') {
+                next_text.push('\n');
+            }
+            next_text.push('\n');
+        }
+        let mut next_segments = self.segments.clone();
+        next_text.push_str("❯ You\n");
+        next_segments.push(TranscriptSegment::UserHeader);
+        let mut body = String::new();
+        if let Some(t) = text.filter(|v| !v.trim().is_empty()) {
+            next_text.push_str(t);
+            body.push_str(t);
+        }
+        for item in media {
+            let badge = format_media_badge(item);
+            if !body.is_empty() && !body.ends_with('\n') {
+                next_text.push('\n');
+                body.push('\n');
+            }
+            next_text.push_str(&badge);
+            body.push_str(&badge);
+        }
+        next_text.push_str("\n\n");
+        if !body.is_empty() {
+            next_segments.push(TranscriptSegment::PlainBody(display(&body)));
+        }
+        Self {
+            text: tars_core::permission::escape_untrusted_text(&next_text).replace('\t', "    "),
+            segments: next_segments,
+            tool_details: self.tool_details.clone(),
+            tool_detail_meta: self.tool_detail_meta.clone(),
+            tool_artifacts: self.tool_artifacts.clone(),
+            summary: self.summary.clone(),
+            history_range: self.history_range.clone(),
+        }
+    }
+
     fn build(blocks: &[ContextBlock], collapse_summary: bool, collapse_prelude: bool) -> Self {
         let mut text = String::new();
         let mut segments = Vec::new();
@@ -369,22 +417,33 @@ impl Transcript {
                     let is_markdown = *role == causa::kernel::Role::Assistant || is_summary;
                     if is_markdown {
                         let mut md_buf = String::new();
+                        let mut last_was_media = false;
                         for part in parts {
                             match part {
                                 ContentPart::Text(value) => {
+                                    if last_was_media
+                                        && !value.0.starts_with('\n')
+                                        && !text.ends_with('\n')
+                                    {
+                                        text.push('\n');
+                                    }
+                                    last_was_media = false;
                                     text.push_str(&value.0);
                                     md_buf.push_str(&value.0);
                                 }
-                                ContentPart::Media(_) => {
-                                    text.push_str("[media reference]");
+                                ContentPart::Media(media) => {
+                                    let badge = format_media_badge(media);
+                                    if !text.is_empty() && !text.ends_with('\n') {
+                                        text.push('\n');
+                                    }
+                                    text.push_str(&badge);
                                     if !md_buf.is_empty() {
                                         segments.push(TranscriptSegment::MarkdownBody(display(
                                             &std::mem::take(&mut md_buf),
                                         )));
                                     }
-                                    segments.push(TranscriptSegment::PlainBody(
-                                        "[media reference]".into(),
-                                    ));
+                                    segments.push(TranscriptSegment::PlainBody(badge));
+                                    last_was_media = true;
                                 }
                                 ContentPart::Sealed(_) => {}
                             }
@@ -394,15 +453,27 @@ impl Transcript {
                         }
                     } else {
                         let mut plain_buf = String::new();
+                        let mut last_was_media = false;
                         for part in parts {
                             match part {
                                 ContentPart::Text(value) => {
+                                    if last_was_media && !value.0.starts_with('\n') {
+                                        text.push('\n');
+                                        plain_buf.push('\n');
+                                    }
+                                    last_was_media = false;
                                     text.push_str(&value.0);
                                     plain_buf.push_str(&value.0);
                                 }
-                                ContentPart::Media(_) => {
-                                    text.push_str("[media reference]");
-                                    plain_buf.push_str("[media reference]");
+                                ContentPart::Media(media) => {
+                                    let badge = format_media_badge(media);
+                                    if !plain_buf.is_empty() && !plain_buf.ends_with('\n') {
+                                        text.push('\n');
+                                        plain_buf.push('\n');
+                                    }
+                                    text.push_str(&badge);
+                                    plain_buf.push_str(&badge);
+                                    last_was_media = true;
                                 }
                                 ContentPart::Sealed(_) => {}
                             }
@@ -433,6 +504,13 @@ impl Transcript {
                 BlockContent::ToolResult(result) => {
                     let preview_summary = tool_result_summary(&result.output.content);
                     let preview = format_tool_result_payload(result);
+                    let media_section = if result.media.is_empty() {
+                        String::new()
+                    } else {
+                        let badges: Vec<String> =
+                            result.media.iter().map(format_media_badge).collect();
+                        format!("\n{}", badges.join("\n"))
+                    };
                     if let Some(artifact) = &result.output.artifact {
                         let artifact_id = display_single_line(&artifact.id);
                         let kind_label = if artifact.id.starts_with("artifact:") {
@@ -441,7 +519,7 @@ impl Transcript {
                             "cleared preview"
                         };
                         let body = format!(
-                            "Tool result · {:?} · {} · {kind_label} ({artifact_id})\n{}\n/tools expands full output",
+                            "Tool result · {:?} · {} · {kind_label} ({artifact_id})\n{}{media_section}\n/tools expands full output",
                             result.status, result.call_block_id.0, preview_summary
                         );
                         text.push_str(&body);
@@ -464,7 +542,7 @@ impl Transcript {
                         }));
                     } else {
                         let body = format!(
-                            "Tool result · {:?} · {}\n{}\n/tools expands actual material",
+                            "Tool result · {:?} · {}\n{}{media_section}\n/tools expands actual material",
                             result.status, result.call_block_id.0, preview_summary
                         );
                         text.push_str(&body);
@@ -532,6 +610,33 @@ pub(crate) fn display(value: &str) -> String {
 /// Escape untrusted text and collapse line breaks into spaces for single-line headers/labels.
 pub(crate) fn display_single_line(value: &str) -> String {
     display(value).replace('\n', " ")
+}
+
+fn short_media_reference(raw: &str) -> String {
+    let clean = display_single_line(raw);
+    if clean.starts_with("data:") {
+        return "data:<redacted>".to_owned();
+    }
+    if let Some(hex) = raw.strip_prefix(tars_core::media::MEDIA_REF_PREFIX) {
+        let clean_hex = display_single_line(hex);
+        return format!("media:sha256:{}", truncate_chars(&clean_hex, 12));
+    }
+    truncate_chars(&clean, 48)
+}
+
+/// Render a sanitized, single-line media badge without raw bytes or terminal escapes.
+pub(crate) fn format_media_badge(media: &causa::kernel::MediaRef) -> String {
+    let media_type = truncate_chars(&display_single_line(&media.media_type), 48);
+    let reference = short_media_reference(&media.reference);
+    match media
+        .name
+        .as_deref()
+        .map(|name| truncate_chars(&display_single_line(name), 64))
+        .filter(|name| !name.trim().is_empty())
+    {
+        Some(name) => format!("[media {media_type} {name} ({reference})]"),
+        None => format!("[media {media_type} ({reference})]"),
+    }
 }
 
 fn summary(value: &str) -> String {
@@ -1791,13 +1896,13 @@ mod tests {
         );
         let context = Context::from_blocks(vec![assistant]).unwrap();
         let transcript = Arc::new(Transcript::from_materials(&context, &[]));
-        assert!(transcript.text.contains("[media reference]"));
+        assert!(transcript.text.contains("[media image/png (img-1)]"));
         assert_eq!(
             transcript.segments,
             vec![
                 TranscriptSegment::RoleHeader("● assistant".into()),
                 TranscriptSegment::MarkdownBody("# Chart\n\nSee image:".into()),
-                TranscriptSegment::PlainBody("[media reference]".into()),
+                TranscriptSegment::PlainBody("[media image/png (img-1)]".into()),
                 TranscriptSegment::MarkdownBody("And **summary**.".into()),
             ]
         );
@@ -1805,7 +1910,7 @@ mod tests {
         let row_texts: Vec<String> = (0..rows.len()).map(|i| rows.row_text(i).unwrap()).collect();
         assert!(row_texts.iter().any(|l| l == "Chart"));
         assert!(row_texts.iter().any(|l| l == "See image:"));
-        assert!(row_texts.iter().any(|l| l == "[media reference]"));
+        assert!(row_texts.iter().any(|l| l == "[media image/png (img-1)]"));
         assert!(rows.lines.iter().any(|l| {
             l.spans
                 .iter()
@@ -1960,5 +2065,169 @@ mod tests {
                 .iter()
                 .any(|s| s.content == "+new_line" && s.style.fg == Some(Color::Green))
         }));
+    }
+
+    #[test]
+    fn mm08_transcript_and_history_view_render_media_badges_and_sanitize_controls() {
+        use super::Rows;
+        use crate::app::history::HistoryView;
+        use causa::kernel::{
+            BlockMeta, ContentPart, MediaRef, TextPayload, ToolCallPayload, ToolOutput,
+            ToolResultPayload, ToolResultStatus,
+        };
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use tars_core::compact::{
+            HistoryRecord, HistoryRecordEntry, HistoryTrigger, RangeReplacement, RewriteKind,
+        };
+
+        let valid_sha = "a".repeat(64);
+        let valid_ref = format!("{}{valid_sha}", tars_core::media::MEDIA_REF_PREFIX);
+
+        let user_text_and_img = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::Message {
+                role: Role::User,
+                parts: vec![
+                    ContentPart::Text(TextPayload::new("inspect this")),
+                    ContentPart::Media(
+                        MediaRef::new("image/png", &valid_ref).with_name("shot.png"),
+                    ),
+                ],
+            },
+            BlockMeta::from_source("user"),
+        );
+        let user_image_only = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::Message {
+                role: Role::User,
+                parts: vec![ContentPart::Media(
+                    MediaRef::new(
+                        "image/jpeg\x1b[31m\nspoof",
+                        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
+                    )
+                    .with_name("bad\u{202e}\x1b[2J\r\nname.jpg"),
+                )],
+            },
+            BlockMeta::from_source("user"),
+        );
+
+        let call_id = causa::runtime::new_block_id();
+        let tool_call = ContextBlock::new(
+            call_id,
+            BlockContent::ToolCall(ToolCallPayload::new("mcp_shot", serde_json::json!({}))),
+            BlockMeta::default(),
+        );
+        let tool_res = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(
+                ToolResultPayload::new(
+                    call_id,
+                    ToolResultStatus::Succeeded,
+                    ToolOutput::new(serde_json::json!({ "ok": true })),
+                )
+                .with_media(vec![
+                    MediaRef::new(
+                        "image/webp",
+                        "artifact:01933b4c-7f12-7000-8000-000000000001",
+                    )
+                    .with_name("mcp\x1b[33m\nsnap.webp"),
+                ]),
+            ),
+            BlockMeta::default(),
+        );
+
+        let context = Context::from_blocks(vec![
+            user_text_and_img.clone(),
+            user_image_only.clone(),
+            tool_call.clone(),
+            tool_res.clone(),
+        ])
+        .unwrap();
+        let transcript = Arc::new(Transcript::from_materials(&context, &[]));
+        assert!(
+            transcript
+                .text
+                .contains("inspect this\n[media image/png shot.png (media:sha256:aaaaaaaaaaaa…)]"),
+            "{}",
+            transcript.text
+        );
+        assert!(
+            transcript
+                .text
+                .contains("[media image/jpeg\\x1b[31m spoof bad\\u{202e}\\x1b[2J\\r name.jpg (data:<redacted>)]"),
+            "{}",
+            transcript.text
+        );
+        assert!(
+            transcript.text.contains(
+                "[media image/webp mcp\\x1b[33m snap.webp (artifact:01933b4c-7f12-7000-8000-000000000001)]"
+            ),
+            "{}",
+            transcript.text
+        );
+        assert!(!transcript.text.contains('\x1b'));
+        assert!(!transcript.text.contains('\r'));
+        assert!(!transcript.text.contains('\u{202e}'));
+        assert!(!transcript.text.contains("iVBORw0KGgo"));
+
+        let rows = Rows::wrap(transcript, 100);
+        let joined: String = (0..rows.len())
+            .map(|i| rows.row_text(i).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("[media image/png shot.png (media:sha256:aaaaaaaaaaaa…)]"));
+        assert!(joined.contains("data:<redacted>"));
+        assert!(joined.contains("artifact:01933b4c-7f12-7000-8000-000000000001"));
+
+        // Verify HistoryView expansion renders the exact same sanitized badges for archived media.
+        let brief = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::text(Role::User, "summary brief"),
+            BlockMeta::from_source(tars_core::compact::SUMMARY_SOURCE),
+        );
+        let rec_id = "0190a000-0000-7000-8000-000000000099".to_owned();
+        let record = HistoryRecord {
+            format: "tars-history-v1.2".into(),
+            conversation_id: "conv".into(),
+            record_id: rec_id.clone(),
+            created_at_ms: 1,
+            trigger: HistoryTrigger::Manual,
+            kind: RewriteKind::Summarize,
+            estimate_before: 1000,
+            estimate_after: 100,
+            replacements: vec![RangeReplacement {
+                range: 0..4,
+                originals: vec![user_text_and_img, user_image_only, tool_call, tool_res],
+                inserted_ids: vec![brief.id()],
+            }],
+        };
+        let index = vec![HistoryRecordEntry {
+            record_id: rec_id,
+            created_at_ms: 1,
+            trigger: HistoryTrigger::Manual,
+            kind: RewriteKind::Summarize,
+            removed_block_count: 4,
+            inserted_block_ids: vec![brief.id()],
+        }];
+        let mut history_view = HistoryView::new();
+        history_view.refresh(index, vec![brief], &HashSet::new(), &[Arc::new(record)]);
+        let archived = history_view.display().unwrap();
+        assert!(
+            archived
+                .text
+                .contains("[media image/png shot.png (media:sha256:aaaaaaaaaaaa…)]"),
+            "{}",
+            archived.text
+        );
+        assert!(
+            archived.text.contains(
+                "[media image/webp mcp\\x1b[33m snap.webp (artifact:01933b4c-7f12-7000-8000-000000000001)]"
+            ),
+            "{}",
+            archived.text
+        );
+        assert!(!archived.text.contains('\x1b'));
+        assert!(!archived.text.contains("iVBORw0KGgo"));
     }
 }
