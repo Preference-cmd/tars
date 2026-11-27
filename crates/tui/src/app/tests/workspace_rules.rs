@@ -546,7 +546,7 @@ async fn rc07_rc08_rc10_tui_command_options_session_workspace_rules_and_slash_ru
             prefix: vec!["git".into(), "push".into()],
         }),
     });
-    app.entries[0].tools.apply(&asked_call);
+    app.entries[0].tools.apply(&asked_call, app.clock.now());
     assert!(
         app.entries[0]
             .tools

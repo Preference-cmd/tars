@@ -2,6 +2,7 @@
 use super::state::{App, Entry, Key};
 use crate::preview::Preview;
 use std::sync::Arc;
+use std::time::Instant;
 use tars_core::compact::{CompactionAbandon, CompactionProgress};
 use tars_core::session::{ProgressUpdate, WorkProgress};
 use tokio::sync::broadcast::{self, error::TryRecvError};
@@ -33,7 +34,7 @@ impl Entry {
         self.progress = None;
         self.preview = Preview::default();
     }
-    fn apply_progress(&mut self, event: &WorkProgress) {
+    fn apply_progress(&mut self, event: &WorkProgress, now: Instant) {
         if self.work.as_ref() != Some(&event.work)
             || event.invocation_id.turn_id != event.work.turn_id
         {
@@ -41,7 +42,7 @@ impl Entry {
         }
         if let ProgressUpdate::Tool(call) = &event.update {
             if call.invocation_id == event.invocation_id {
-                self.tools.apply(call);
+                self.tools.apply(call, now);
             }
             return;
         }
@@ -182,7 +183,7 @@ impl Entry {
         if self.viewed_agent_id.is_some() {
             self.committed_rows()
         } else {
-            self.committed_rows() + self.preview.line_count() + self.tools.lines().len()
+            self.committed_rows() + self.preview.line_count() + self.tools.line_count()
         }
     }
 }
@@ -192,6 +193,7 @@ impl App {
         if count == 0 {
             return;
         }
+        let now = self.clock.now();
         let mut remaining = MAX_TICK_UPDATES;
         for distance in 0..count {
             let index = (self.progress_cursor + distance) % count;
@@ -208,7 +210,7 @@ impl App {
                 match feed.receiver.try_recv() {
                     Ok(event) => {
                         remaining -= 1;
-                        entry.apply_progress(&event);
+                        entry.apply_progress(&event, now);
                         self.dirty = true;
                     }
                     Err(TryRecvError::Lagged(lost)) => {

@@ -12,7 +12,7 @@ use ratatui::{
 /// time so oversized blocks never stall the background cache or UI.
 pub(crate) const MAX_HIGHLIGHT_BYTES: usize = 64 * 1024;
 
-const MUTED: Color = Color::DarkGray;
+use crate::render::theme::MUTED;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Language {

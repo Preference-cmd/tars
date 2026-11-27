@@ -1,4 +1,4 @@
-use super::surface::{ACCENT, MUTED};
+use super::theme::{ACCENT, MUTED};
 use crate::{
     app::{App, COMMANDS, Panel, matching_commands},
     input::{FIELD_NAMES, ONBOARDING_FIELD_NAMES},

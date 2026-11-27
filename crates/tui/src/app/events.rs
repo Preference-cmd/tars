@@ -453,6 +453,8 @@ impl App {
             self.export();
         } else if input::control(key, 'g') {
             self.request_external_edit();
+        } else if input::control(key, 'o') {
+            self.show_tools();
         } else if input::control(key, 'd') {
             self.confirmation = Some(Confirmation::Discard);
         } else if input::control(key, 'w') {
@@ -460,7 +462,7 @@ impl App {
         } else if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
                 key.code,
-                KeyCode::Char('q' | 's' | 'c' | 'r' | 'e' | 'g' | 'd' | 'w')
+                KeyCode::Char('q' | 's' | 'c' | 'r' | 'e' | 'g' | 'o' | 'd' | 'w')
             )
         {
             // Repeated command keys never fall through into text editing.

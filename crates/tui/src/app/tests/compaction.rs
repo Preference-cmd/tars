@@ -700,11 +700,7 @@ async fn automatic_compaction_inside_work_with_tool_round_protects_u_with_no_rea
     let live_text = conversation_text_without_header(&app.entries[0]);
     assert_eq!(count_occurrences(&live_text, "MARKER_EARLIER_CONTEXT"), 1);
     assert_eq!(count_occurrences(&live_text, "MARKER_USER_REQUEST_U"), 1);
-    assert_eq!(
-        count_occurrences(&live_text, "Tool recall · recorded declaration"),
-        1
-    );
-    assert_eq!(count_occurrences(&live_text, "Tool result · Succeeded"), 1);
+    assert_eq!(count_occurrences(&live_text, "▸ recall"), 1);
     assert_eq!(count_occurrences(&live_text, "MARKER_ANSWER_DONE"), 1);
 
     // Reopen in a fresh instance, scroll up to top, assert exact match.
@@ -1381,18 +1377,42 @@ async fn test_mc07_tui_micro_compact_zero_reads_on_open_tools_on_demand_and_scro
     assert_eq!(app2.entries[idx].history.earlier(), 0);
     assert!(!app2.entries[idx].history.has_earlier());
     assert!(app2.entries[idx].history_rows.is_none());
-    for call_id in &call_ids {
+    for (idx_call, call_id) in call_ids.iter().enumerate() {
+        assert!(
+            !app2.entries[idx]
+                .transcript
+                .text
+                .contains(&call_id.0.to_string()),
+            "raw UUID {} must not appear in main transcript",
+            call_id.0
+        );
         assert_eq!(
             app2.entries[idx]
                 .transcript
                 .text
-                .matches(&call_id.0.to_string())
+                .matches(&format!("▸ Read  src/mc07_{idx_call}.rs"))
                 .count(),
-            2,
-            "declaration + result for {} appear once in current transcript (never in history pane)",
+            1,
+            "paired card for src/mc07_{idx_call}.rs appears once in current transcript",
+        );
+        assert!(
+            app2.entries[idx]
+                .transcript
+                .tool_details
+                .iter()
+                .any(|d| d.contains(&call_id.0.to_string())),
+            "UUID {} must remain in /tools details",
             call_id.0
         );
     }
+    assert_eq!(
+        app2.entries[idx]
+            .transcript
+            .text
+            .matches("cleared preview")
+            .count(),
+        4
+    );
 
     // Press F6 (/tools): expands micro-compacted tool results on demand via <record_id>/<block_id>.
     app2.event(key(KeyCode::F(6)));

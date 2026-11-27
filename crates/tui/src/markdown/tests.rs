@@ -1,13 +1,11 @@
 use super::{
     MAX_HIGHLIGHT_BYTES, highlight_code, highlight_diff_line, render_markdown, wrap_styled_line,
 };
+use crate::render::theme::{ACCENT, MUTED};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-
-const ACCENT: Color = Color::Rgb(215, 147, 114);
-const MUTED: Color = Color::DarkGray;
 
 fn plain_lines(lines: &[Line<'_>]) -> Vec<String> {
     lines

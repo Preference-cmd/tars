@@ -135,10 +135,13 @@ fn bounded_tool_observations_are_identity_scoped_lagged_and_terminal_corrected()
     notstarted.phase = ToolPhase::NotStarted;
     notstarted.status = Some(ToolResultStatus::UnknownOutcome);
     notstarted.operation_not_started = true;
-    app.entries[0].tools.reconcile(&ToolProgressSnapshot {
-        calls: vec![unknown, notstarted],
-        truncated: false,
-    });
+    app.entries[0].tools.reconcile(
+        &ToolProgressSnapshot {
+            calls: vec![unknown, notstarted],
+            truncated: false,
+        },
+        app.clock.now(),
+    );
     assert!(screen(&app).contains("Execution result unknown"));
     assert!(screen(&app).contains("Not executed"));
     let mut stale = event(second.clone()).as_ref().clone();
@@ -204,7 +207,7 @@ async fn three_real_protocols_read_actual_workspace_and_tool_details_are_on_dema
         })
         .await;
         let current = screen(&app);
-        assert!(current.contains("Tool read_file"), "{current}");
+        assert!(current.contains("✓ Read"), "{current}");
         assert!(
             app.entries[0]
                 .tools

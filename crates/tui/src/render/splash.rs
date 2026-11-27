@@ -3,7 +3,8 @@
 //! Every row and the action line come from the startup state, so the splash
 //! only lays out text the state machine already owns.
 
-use super::surface::{ACCENT, MUTED, inset};
+use super::surface::inset;
+use super::theme::{ACCENT, MUTED};
 use crate::app::Startup;
 use ratatui::{
     Frame,

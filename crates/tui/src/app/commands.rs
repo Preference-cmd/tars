@@ -387,7 +387,7 @@ impl App {
                     "/summary   Show the current context summary in full",
                     "Enter / y allow · n deny (optional reason)   Confirmation panel",
                     "Esc / Ctrl-C   Interrupt work", "/ or F1   Commands; Esc returns",
-                    "F2 new · F3 open · F4 next · F5 refresh", "F6 / /tools   Expand complete recorded tool results", "F7 / /repair   Preview and apply material repair", "PageUp / PageDown   Read conversation",
+                    "F2 new · F3 open · F4 next · F5 refresh", "Ctrl-O / F6 / /tools   Expand complete recorded tool results", "F7 / /repair   Preview and apply material repair", "PageUp / PageDown   Read conversation",
                     "Ctrl-Z undo · Ctrl-Y redo", "Ctrl-W close · Ctrl-Q save and quit",
                     "Ctrl-R retry save · Ctrl-E export", "Ctrl-D discard with confirmation",
                     "/export-md [path]   Export current conversation to a Markdown file", "",

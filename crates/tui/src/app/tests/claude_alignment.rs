@@ -799,3 +799,234 @@ async fn cc03_model_panel_direct_switch_tab_completion_and_definition_immutabili
     );
     assert_eq!(app.entries.len(), 5);
 }
+
+#[test]
+fn cc04_theme_uses_cyan_accent_and_ctrl_o_opens_tools_with_repeat_guard() {
+    use crate::app::{InfoKind, state::Entry};
+    use crate::render::theme;
+    use causa::kernel::{
+        BlockContent, BlockMeta, Context, ContextBlock, ToolCallPayload, ToolOutput,
+        ToolResultPayload, ToolResultStatus,
+    };
+    use crossterm::event::{KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::style::Color;
+    use std::sync::Arc;
+
+    assert_eq!(theme::ACCENT, Color::Cyan);
+    assert_eq!(theme::MUTED, Color::DarkGray);
+    assert_eq!(theme::OK, Color::Green);
+    assert_eq!(theme::ERR, Color::Red);
+    assert_eq!(theme::WARN, Color::Yellow);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path());
+    let call_id = causa::runtime::new_block_id();
+    let ctx = Context::from_blocks(vec![
+        ContextBlock::new(
+            call_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "read_file",
+                serde_json::json!({"path": "src/main.rs"}),
+            )),
+            BlockMeta::default(),
+        ),
+        ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(
+                    serde_json::json!({"path": "src/main.rs", "text": "fn main() {}\n"}),
+                ),
+            )),
+            BlockMeta::default(),
+        ),
+    ])
+    .unwrap();
+    let mut entry = Entry::new("ctrl-o-sess".into(), "model".into());
+    let transcript = Arc::new(crate::transcript::Transcript::from_materials(&ctx, &[]));
+    entry.rows = Some(crate::transcript::Rows::wrap(transcript.clone(), 80));
+    entry.transcript = transcript;
+    app.entries.push(entry);
+
+    let main_screen = screen(&app);
+    assert!(
+        main_screen.contains("▸ Read  src/main.rs · 1 line"),
+        "{main_screen}"
+    );
+    assert!(
+        !main_screen.contains(&call_id.0.to_string()),
+        "{main_screen}"
+    );
+
+    // Holding Ctrl+O (Repeat) must never insert 'o' into the composer.
+    app.event(Event::Key(KeyEvent::new_with_kind(
+        KeyCode::Char('o'),
+        KeyModifiers::CONTROL,
+        KeyEventKind::Repeat,
+    )));
+    assert_eq!(app.entries[0].editor.lines(), &[""]);
+    assert!(app.panel.is_none());
+
+    // Pressing Ctrl+O opens `/tools` with full UUID and raw JSON.
+    app.event(super::support::ctrl('o'));
+    assert!(matches!(
+        &app.panel,
+        Some(Panel::Info {
+            kind: InfoKind::Tools(_),
+            ..
+        })
+    ));
+    let tools_screen = screen(&app);
+    assert!(
+        tools_screen.contains(&call_id.0.to_string()),
+        "{tools_screen}"
+    );
+    assert!(tools_screen.contains("fn main() {}"), "{tools_screen}");
+    app.event(key(KeyCode::Esc));
+
+    // `/help` documents Ctrl-O / F6.
+    run_command(&mut app, "help");
+    let help_screen = screen(&app);
+    assert!(
+        help_screen.contains("Ctrl-O / F6 / /tools"),
+        "{help_screen}"
+    );
+}
+
+#[test]
+fn cc05_live_tool_view_spinner_clock_elapsed_freeze_and_colors() {
+    use crate::app::tool_progress::ToolView;
+    use crate::render::theme;
+    use causa::kernel::{InvocationId, RoundId, ToolResultStatus, TurnId};
+    use std::time::{Duration, Instant};
+    use tars_core::permission::{
+        PermissionDecision, PermissionDecisionKind, PermissionMode, RuleScope, RuleSource,
+    };
+    use tars_core::session::{ToolPhase, ToolProgress, ToolProgressSnapshot};
+
+    let t0 = Instant::now();
+    let inv = InvocationId {
+        turn_id: TurnId::new("t1"),
+        round_id: RoundId(0),
+    };
+    let read_id = causa::runtime::new_block_id();
+    let bash_id = causa::runtime::new_block_id();
+    let mut view = ToolView::default();
+
+    let mut read_call = ToolProgress {
+        invocation_id: inv.clone(),
+        call_block_id: read_id,
+        tool_name: "read_file".into(),
+        arguments_summary: "{\"path\":\"src/lib.rs\",\"start_line\":1,\"max_lines\":10}".into(),
+        phase: ToolPhase::Waiting,
+        status: None,
+        operation_not_started: false,
+        permission_decision: None,
+    };
+    view.apply(&read_call, t0);
+
+    let t1 = t0 + Duration::from_millis(1200);
+    let lines_f0 = view.styled_lines(t1, 0);
+    let lines_f1 = view.styled_lines(t1, 1);
+    assert_eq!(
+        lines_f0[0].spans[0].content,
+        format!("{} ", theme::SPINNER_FRAMES[0])
+    );
+    assert_eq!(lines_f0[0].spans[0].style.fg, Some(theme::ACCENT));
+    assert_eq!(
+        lines_f1[0].spans[0].content,
+        format!("{} ", theme::SPINNER_FRAMES[1])
+    );
+    let text_f0: String = lines_f0[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(text_f0.contains("Read  src/lib.rs:1-10"), "{text_f0}");
+    assert!(text_f0.contains("Waiting"), "{text_f0}");
+    assert!(text_f0.contains("1.2s"), "{text_f0}");
+    assert!(!text_f0.contains(&read_id.0.to_string()), "{text_f0}");
+
+    // Transitioning to Running preserves started_at (`t0`).
+    read_call.phase = ToolPhase::Running;
+    view.apply(&read_call, t1);
+    let t2 = t0 + Duration::from_millis(2500);
+    let running_text: String = view.styled_lines(t2, 12)[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        running_text.starts_with(theme::SPINNER_FRAMES[2]),
+        "{running_text}"
+    );
+    assert!(running_text.contains("Running · 2.5s"), "{running_text}");
+
+    // Committed freezes elapsed time at `t2` even when queried later at `t3`.
+    read_call.phase = ToolPhase::Committed;
+    read_call.status = Some(ToolResultStatus::Succeeded);
+    view.apply(&read_call, t2);
+    let t3 = t2 + Duration::from_secs(5);
+    let committed_lines = view.styled_lines(t3, 0);
+    assert_eq!(
+        committed_lines[0].spans[0].content,
+        format!("{} ", theme::TOOL_DONE_GLYPH)
+    );
+    assert_eq!(committed_lines[0].spans[0].style.fg, Some(theme::OK));
+    let committed_text: String = committed_lines[0]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(
+        committed_text.contains("2.5s"),
+        "elapsed should freeze on commit: {committed_text}"
+    );
+    assert!(!committed_text.contains("7.5s"), "{committed_text}");
+
+    // Failed tool with provenance renders ERR glyph/color + friendly Bash title.
+    let bash_call = ToolProgress {
+        invocation_id: inv,
+        call_block_id: bash_id,
+        tool_name: "run_command".into(),
+        arguments_summary: "{\"command\":\"cargo test\"}".into(),
+        phase: ToolPhase::Committed,
+        status: Some(ToolResultStatus::Failed),
+        operation_not_started: false,
+        permission_decision: Some(PermissionDecision {
+            mode: PermissionMode::Ask,
+            revision: 1,
+            kind: PermissionDecisionKind::AskedAndAllowed,
+            rule: Some(RuleSource {
+                scope: RuleScope::Session,
+                prefix: vec!["cargo".into()],
+            }),
+        }),
+    };
+    view.reconcile(
+        &ToolProgressSnapshot {
+            calls: vec![read_call, bash_call],
+            truncated: false,
+        },
+        t3,
+    );
+    let final_lines = view.styled_lines(t3 + Duration::from_secs(3), 0);
+    assert_eq!(final_lines.len(), 2);
+    assert_eq!(
+        final_lines[1].spans[0].content,
+        format!("{} ", theme::TOOL_ERR_GLYPH)
+    );
+    assert_eq!(final_lines[1].spans[0].style.fg, Some(theme::ERR));
+    let bash_text: String = final_lines[1]
+        .spans
+        .iter()
+        .map(|s| s.content.as_ref())
+        .collect();
+    assert!(bash_text.contains("Bash  cargo test"), "{bash_text}");
+    assert!(
+        bash_text.contains("asked by session rule `cargo`"),
+        "{bash_text}"
+    );
+    assert!(!bash_text.contains(&bash_id.0.to_string()), "{bash_text}");
+}

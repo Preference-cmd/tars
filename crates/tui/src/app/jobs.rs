@@ -554,12 +554,13 @@ impl App {
             }
             Message::Finished(key, work, result) => {
                 let mut should_try_dequeue = false;
+                let now = self.clock.now();
                 if let Some(entry) = self.entry_mut(&key)
                     && entry.work.as_ref() == Some(&work)
                 {
                     entry.turn_in_flight = false;
                     if let Ok((_, tools)) = &result {
-                        entry.tools.reconcile(tools);
+                        entry.tools.reconcile(tools, now);
                     }
                     entry.clear_progress();
                     entry.approval_queue.clear();

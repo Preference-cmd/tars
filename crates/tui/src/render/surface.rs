@@ -1,3 +1,4 @@
+use super::theme::{ACCENT, MUTED};
 use crate::app::{App, Confirmation};
 use ratatui::{
     Frame,
@@ -8,9 +9,6 @@ use ratatui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-
-pub(crate) const ACCENT: Color = Color::Rgb(215, 147, 114);
-pub(crate) const MUTED: Color = Color::DarkGray;
 
 pub(crate) fn transcript_width(width: u16) -> u16 {
     width.saturating_sub(4).max(1)
@@ -378,7 +376,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             }
         }
         let show_live_root = entry.viewed_agent_id.is_none();
-        let tool_lines = entry.tools.lines();
+        let tool_lines = entry.tools.styled_lines(app.clock.now(), 0);
         for index in start..entry.conversation_len() {
             if lines.len() >= height {
                 break;
@@ -400,8 +398,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                     lines.push(line.clone());
                 }
             } else if show_live_root && index >= committed + entry.preview.line_count() {
-                if let Some(text) = tool_lines.get(index - committed - entry.preview.line_count()) {
-                    lines.push(Line::styled(text.clone(), Style::default().fg(MUTED)));
+                if let Some(line) = tool_lines.get(index - committed - entry.preview.line_count()) {
+                    lines.push(line.clone());
                 }
             } else if show_live_root {
                 let offset = index - committed;

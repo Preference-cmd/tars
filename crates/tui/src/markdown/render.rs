@@ -10,9 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::highlight::{highlight_code, sanitize_single_line, sanitize_text};
-
-const ACCENT: Color = Color::Rgb(215, 147, 114);
-const MUTED: Color = Color::DarkGray;
+use crate::render::theme::{ACCENT, MUTED};
 
 #[derive(Clone)]
 enum PrefixFrame {

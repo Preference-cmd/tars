@@ -38,6 +38,76 @@ pub(crate) struct SpilledToolDetail {
     pub preview: FormattedToolJson,
 }
 
+/// Maximum number of inline diff lines shown directly inside a main-transcript tool card.
+pub(crate) const MAX_INLINE_DIFF_LINES: usize = 12;
+
+/// Semantic tone for a committed transcript tool card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolCardTone {
+    Ok,
+    Err,
+    Warn,
+    Unpaired,
+}
+
+/// Visual tone for an indented left-rail line inside a tool card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ToolRailTone {
+    Muted,
+    Warn,
+    Err,
+}
+
+/// Indented left-rail line rendered beneath a tool card header.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ToolRailLine {
+    Note { text: String, tone: ToolRailTone },
+    Diff(String),
+}
+
+/// Structured tool card rendered in the main conversation transcript.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ToolCardData {
+    pub tone: ToolCardTone,
+    pub glyph: &'static str,
+    pub title: String,
+    pub target: Option<String>,
+    pub summary: Option<String>,
+    pub rail_lines: Vec<ToolRailLine>,
+}
+
+impl ToolCardData {
+    fn header_plain(&self) -> String {
+        let mut header = format!("{} {}", self.glyph, self.title);
+        if let Some(target) = &self.target
+            && !target.is_empty()
+        {
+            header.push_str("  ");
+            header.push_str(target);
+        }
+        if let Some(summary) = &self.summary
+            && !summary.is_empty()
+        {
+            header.push_str(" · ");
+            header.push_str(summary);
+        }
+        header
+    }
+
+    fn plain_lines(&self) -> Vec<String> {
+        let mut lines = Vec::with_capacity(1 + self.rail_lines.len());
+        lines.push(self.header_plain());
+        for rail in &self.rail_lines {
+            let body = match rail {
+                ToolRailLine::Note { text, .. } => text.clone(),
+                ToolRailLine::Diff(line) => display_single_line(line),
+            };
+            lines.push(format!("{}{body}", crate::render::theme::RAIL_PREFIX));
+        }
+        lines
+    }
+}
+
 /// Logical transcript segment controlling whether Markdown parsing applies.
 ///
 /// Only assistant-authored message bodies (including expanded context summary
@@ -51,6 +121,7 @@ pub(crate) enum TranscriptSegment {
     MutedNotice(String),
     MarkdownBody(String),
     PlainBody(String),
+    ToolCard(ToolCardData),
 }
 
 #[derive(Default)]
@@ -239,6 +310,17 @@ impl Transcript {
         let mut tool_detail_meta = Vec::new();
         let mut tool_artifacts = Vec::new();
         let mut summary_text: Option<String> = None;
+        let mut result_by_call_id: std::collections::HashMap<causa::kernel::BlockId, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (idx, candidate) in blocks.iter().enumerate() {
+            if let BlockContent::ToolResult(res) = candidate.content() {
+                result_by_call_id
+                    .entry(res.call_block_id)
+                    .or_default()
+                    .push(idx);
+            }
+        }
+        let mut consumed_results = vec![false; blocks.len()];
         let mut index = 0;
         while index < blocks.len() {
             let block = &blocks[index];
@@ -357,6 +439,52 @@ impl Transcript {
                     index += 1;
                     continue;
                 }
+            }
+            if let BlockContent::ToolCall(call) = block.content() {
+                record_tool_call_detail(
+                    block.id(),
+                    call,
+                    &mut tool_details,
+                    &mut tool_detail_meta,
+                    &mut tool_artifacts,
+                );
+                let paired_result = result_by_call_id
+                    .get(&block.id())
+                    .and_then(|indices| {
+                        indices
+                            .iter()
+                            .copied()
+                            .find(|&res_idx| res_idx > index && !consumed_results[res_idx])
+                    })
+                    .and_then(|res_idx| {
+                        if let BlockContent::ToolResult(res) = blocks[res_idx].content() {
+                            consumed_results[res_idx] = true;
+                            Some(res)
+                        } else {
+                            None
+                        }
+                    });
+                let card = build_tool_card(Some(call), paired_result);
+                push_tool_card(&mut text, &mut segments, card);
+                index += 1;
+                continue;
+            }
+            if let BlockContent::ToolResult(result) = block.content() {
+                record_tool_result_detail(
+                    result,
+                    &mut tool_details,
+                    &mut tool_detail_meta,
+                    &mut tool_artifacts,
+                );
+                if consumed_results[index] {
+                    index += 1;
+                    continue;
+                }
+                consumed_results[index] = true;
+                let card = build_tool_card(None, Some(result));
+                push_tool_card(&mut text, &mut segments, card);
+                index += 1;
+                continue;
             }
             match block.meta().source.as_deref() {
                 Some("user") => {
@@ -483,83 +611,9 @@ impl Transcript {
                         }
                     }
                 }
-                BlockContent::ToolCall(call) => {
-                    let tool_name = display_single_line(&call.tool_name);
-                    let body = format!(
-                        "Tool {tool_name} · recorded declaration · {}\n/tools expands actual material",
-                        block.id().0
-                    );
-                    text.push_str(&body);
-                    segments.push(TranscriptSegment::PlainBody(body));
-                    let mut builder = ToolDetailBuilder::new();
-                    builder.push_header(&format!("Declaration {} · {tool_name}", block.id().0));
-                    builder.push_plain(&display(
-                        &serde_json::to_string_pretty(&call.arguments).unwrap_or_default(),
-                    ));
-                    let (detail_text, detail_meta) = builder.finish();
-                    tool_details.push(detail_text);
-                    tool_detail_meta.push(detail_meta);
-                    tool_artifacts.push(None);
-                }
-                BlockContent::ToolResult(result) => {
-                    let preview_summary = tool_result_summary(&result.output.content);
-                    let preview = format_tool_result_payload(result);
-                    let media_section = if result.media.is_empty() {
-                        String::new()
-                    } else {
-                        let badges: Vec<String> =
-                            result.media.iter().map(format_media_badge).collect();
-                        format!("\n{}", badges.join("\n"))
-                    };
-                    if let Some(artifact) = &result.output.artifact {
-                        let artifact_id = display_single_line(&artifact.id);
-                        let kind_label = if artifact.id.starts_with("artifact:") {
-                            "spilled preview"
-                        } else {
-                            "cleared preview"
-                        };
-                        let body = format!(
-                            "Tool result · {:?} · {} · {kind_label} ({artifact_id})\n{}{media_section}\n/tools expands full output",
-                            result.status, result.call_block_id.0, preview_summary
-                        );
-                        text.push_str(&body);
-                        segments.push(TranscriptSegment::PlainBody(body));
-                        let mut builder = ToolDetailBuilder::new();
-                        builder.push_header(&format!(
-                            "Result for {} · {:?} · {artifact_id}",
-                            result.call_block_id.0, result.status
-                        ));
-                        builder.push_formatted_json(&preview);
-                        let (detail_text, detail_meta) = builder.finish();
-                        tool_details.push(detail_text);
-                        tool_detail_meta.push(detail_meta);
-                        tool_artifacts.push(Some(SpilledToolDetail {
-                            call_block_id: result.call_block_id,
-                            status: result.status.clone(),
-                            artifact_id: artifact.id.clone(),
-                            size_bytes: artifact.size_bytes,
-                            preview,
-                        }));
-                    } else {
-                        let body = format!(
-                            "Tool result · {:?} · {}\n{}{media_section}\n/tools expands actual material",
-                            result.status, result.call_block_id.0, preview_summary
-                        );
-                        text.push_str(&body);
-                        segments.push(TranscriptSegment::PlainBody(body));
-                        let mut builder = ToolDetailBuilder::new();
-                        builder.push_header(&format!(
-                            "Result for {} · {:?}",
-                            result.call_block_id.0, result.status
-                        ));
-                        builder.push_formatted_json(&preview);
-                        let (detail_text, detail_meta) = builder.finish();
-                        tool_details.push(detail_text);
-                        tool_detail_meta.push(detail_meta);
-                        tool_artifacts.push(None);
-                    }
-                }
-                BlockContent::ToolChange(_) => {}
+                BlockContent::ToolCall(_)
+                | BlockContent::ToolResult(_)
+                | BlockContent::ToolChange(_) => {}
             }
             text.push_str("\n\n");
             index += 1;
@@ -577,6 +631,661 @@ impl Transcript {
             summary: summary_text,
             history_range: 0..0,
         }
+    }
+}
+
+fn record_tool_call_detail(
+    block_id: causa::kernel::BlockId,
+    call: &causa::kernel::ToolCallPayload,
+    tool_details: &mut Vec<String>,
+    tool_detail_meta: &mut Vec<ToolDetailMeta>,
+    tool_artifacts: &mut Vec<Option<SpilledToolDetail>>,
+) {
+    let tool_name = display_single_line(&call.tool_name);
+    let mut builder = ToolDetailBuilder::new();
+    builder.push_header(&format!("Declaration {} · {tool_name}", block_id.0));
+    builder.push_plain(&display(
+        &serde_json::to_string_pretty(&call.arguments).unwrap_or_default(),
+    ));
+    let (detail_text, detail_meta) = builder.finish();
+    tool_details.push(detail_text);
+    tool_detail_meta.push(detail_meta);
+    tool_artifacts.push(None);
+}
+
+fn record_tool_result_detail(
+    result: &causa::kernel::ToolResultPayload,
+    tool_details: &mut Vec<String>,
+    tool_detail_meta: &mut Vec<ToolDetailMeta>,
+    tool_artifacts: &mut Vec<Option<SpilledToolDetail>>,
+) {
+    let preview = format_tool_result_payload(result);
+    if let Some(artifact) = &result.output.artifact {
+        let artifact_id = display_single_line(&artifact.id);
+        let mut builder = ToolDetailBuilder::new();
+        builder.push_header(&format!(
+            "Result for {} · {:?} · {artifact_id}",
+            result.call_block_id.0, result.status
+        ));
+        builder.push_formatted_json(&preview);
+        let (detail_text, detail_meta) = builder.finish();
+        tool_details.push(detail_text);
+        tool_detail_meta.push(detail_meta);
+        tool_artifacts.push(Some(SpilledToolDetail {
+            call_block_id: result.call_block_id,
+            status: result.status.clone(),
+            artifact_id: artifact.id.clone(),
+            size_bytes: artifact.size_bytes,
+            preview,
+        }));
+    } else {
+        let mut builder = ToolDetailBuilder::new();
+        builder.push_header(&format!(
+            "Result for {} · {:?}",
+            result.call_block_id.0, result.status
+        ));
+        builder.push_formatted_json(&preview);
+        let (detail_text, detail_meta) = builder.finish();
+        tool_details.push(detail_text);
+        tool_detail_meta.push(detail_meta);
+        tool_artifacts.push(None);
+    }
+}
+
+fn push_tool_card(text: &mut String, segments: &mut Vec<TranscriptSegment>, card: ToolCardData) {
+    for line in card.plain_lines() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&line);
+    }
+    text.push_str("\n\n");
+    segments.push(TranscriptSegment::ToolCard(card));
+}
+
+fn arg_str(args: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    args.and_then(|v| v.get(key))
+        .and_then(|v| v.as_str())
+        .map(display_single_line)
+        .filter(|s| !s.trim().is_empty())
+}
+
+fn arg_u64(args: Option<&serde_json::Value>, key: &str) -> Option<u64> {
+    args.and_then(|v| v.get(key)).and_then(|v| v.as_u64())
+}
+
+fn generic_arg_target(
+    args: Option<&serde_json::Value>,
+    raw_args_fallback: Option<&str>,
+) -> Option<String> {
+    const PRIORITY_KEYS: &[&str] = &[
+        "path", "query", "command", "name", "id", "agent", "url", "pattern", "text", "prompt",
+    ];
+    if let Some(obj) = args.and_then(|v| v.as_object()) {
+        for key in PRIORITY_KEYS {
+            if let Some(val) = obj.get(*key)
+                && let Some(formatted) = format_scalar_arg(key, val, false)
+            {
+                return Some(formatted);
+            }
+        }
+        for (key, val) in obj {
+            if let Some(formatted) = format_scalar_arg(key, val, true) {
+                return Some(formatted);
+            }
+        }
+    }
+    raw_args_fallback
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty() && *raw != "{}")
+        .map(|raw| truncate_chars(&display_single_line(raw), 64))
+}
+
+fn format_scalar_arg(
+    key: &str,
+    val: &serde_json::Value,
+    include_key_for_string: bool,
+) -> Option<String> {
+    match val {
+        serde_json::Value::String(s) if !s.trim().is_empty() => {
+            let clean = display_single_line(s.trim());
+            if include_key_for_string {
+                Some(truncate_chars(&format!("{key}={clean}"), 64))
+            } else {
+                Some(truncate_chars(&clean, 64))
+            }
+        }
+        serde_json::Value::Number(n) => Some(format!("{key}={n}")),
+        serde_json::Value::Bool(b) => Some(format!("{key}={b}")),
+        _ => None,
+    }
+}
+
+/// Map a tool name and arguments into a user-friendly title and concise target.
+pub(crate) fn friendly_tool_title_and_target(
+    tool_name: &str,
+    args: Option<&serde_json::Value>,
+    raw_args_fallback: Option<&str>,
+    result_end_line: Option<u64>,
+) -> (String, Option<String>) {
+    let title = match tool_name {
+        "read_file" => "Read",
+        "edit_file" => "Edit",
+        "write_file" => "Write",
+        "list_directory" => "List",
+        "find_files" => "Find",
+        "search_text" => "Search",
+        "run_command" => "Bash",
+        "run_code" => "Code",
+        other => {
+            return (
+                display_single_line(other),
+                generic_arg_target(args, raw_args_fallback),
+            );
+        }
+    };
+    let target = match tool_name {
+        "read_file" => arg_str(args, "path").map(|path| {
+            let start = arg_u64(args, "start_line");
+            let max_lines = arg_u64(args, "max_lines");
+            match (start, max_lines, result_end_line) {
+                (Some(s), _, Some(e)) => format!("{path}:{s}-{e}"),
+                (Some(s), Some(m), None) => format!("{path}:{s}-{}", s + m.saturating_sub(1)),
+                (Some(s), None, None) => format!("{path}:{s}-"),
+                (None, Some(m), Some(e)) => format!("{path}:1-{}", e.min(m)),
+                (None, Some(m), None) => format!("{path}:1-{m}"),
+                (None, None, _) => path,
+            }
+        }),
+        "edit_file" | "write_file" | "list_directory" => arg_str(args, "path"),
+        "find_files" => {
+            let pattern = arg_str(args, "pattern");
+            let raw_path = arg_str(args, "path");
+            let scoped_path = raw_path.as_deref().filter(|p| *p != ".");
+            match (pattern, scoped_path) {
+                (Some(pat), Some(p)) => Some(truncate_chars(&format!("{pat} in {p}"), 72)),
+                (Some(pat), None) => Some(truncate_chars(&pat, 72)),
+                (None, Some(_)) => raw_path,
+                (None, None) => raw_path,
+            }
+        }
+        "search_text" => {
+            let query = arg_str(args, "query");
+            let path = arg_str(args, "path").filter(|p| p != ".");
+            match (query, path) {
+                (Some(q), Some(p)) => Some(truncate_chars(&format!("{q} in {p}"), 72)),
+                (Some(q), None) => Some(truncate_chars(&q, 72)),
+                (None, Some(p)) => Some(p),
+                (None, None) => None,
+            }
+        }
+        "run_command" => arg_str(args, "command").map(|cmd| truncate_chars(&cmd, 72)),
+        "run_code" => arg_str(args, "code").map(|code| truncate_chars(code.trim(), 56)),
+        _ => None,
+    };
+    let target = target.or_else(|| {
+        raw_args_fallback
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty() && *raw != "{}")
+            .map(|raw| truncate_chars(&display_single_line(raw), 64))
+    });
+    (title.to_owned(), target)
+}
+
+fn count_lines_display(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count()
+    }
+}
+
+fn pluralize(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
+fn summarize_tool_result(
+    tool_name: Option<&str>,
+    result: &causa::kernel::ToolResultPayload,
+) -> (ToolCardTone, &'static str, Option<String>, Option<String>) {
+    use crate::render::theme;
+    use causa::kernel::ToolResultStatus;
+
+    let artifact_label = result.output.artifact.as_ref().map(|artifact| {
+        if artifact.id.starts_with("artifact:") {
+            "spilled preview"
+        } else {
+            "cleared preview"
+        }
+    });
+    let is_truncated = result
+        .output
+        .content
+        .get("truncated")
+        .and_then(|v| v.as_bool())
+        == Some(true);
+
+    let (tone, glyph, base_summary, error_rail) = match result.status {
+        ToolResultStatus::Succeeded => {
+            let base = if let Some(s) = result.output.content.as_str() {
+                truncate_chars(&display_single_line(s), 120)
+            } else {
+                match tool_name {
+                    Some("read_file") => {
+                        if let Some(text) =
+                            result.output.content.get("text").and_then(|v| v.as_str())
+                        {
+                            pluralize(count_lines_display(text), "line", "lines")
+                        } else if let (Some(s), Some(e)) = (
+                            result
+                                .output
+                                .content
+                                .get("start_line")
+                                .and_then(|v| v.as_u64()),
+                            result
+                                .output
+                                .content
+                                .get("end_line")
+                                .and_then(|v| v.as_u64()),
+                        ) {
+                            let n = usize::try_from(e.saturating_sub(s) + 1).unwrap_or(0);
+                            pluralize(n, "line", "lines")
+                        } else {
+                            "ok".to_owned()
+                        }
+                    }
+                    Some("edit_file") => {
+                        if let (Some(a), Some(r)) = (
+                            result
+                                .output
+                                .content
+                                .get("lines_added")
+                                .and_then(|v| v.as_u64()),
+                            result
+                                .output
+                                .content
+                                .get("lines_removed")
+                                .and_then(|v| v.as_u64()),
+                        ) {
+                            format!("+{a} -{r}")
+                        } else if let Some((_, diff)) = extract_diff_target(&result.output.content)
+                        {
+                            let (a, r) = count_diff_changes(diff);
+                            format!("+{a} -{r}")
+                        } else {
+                            "updated".to_owned()
+                        }
+                    }
+                    Some("write_file") => {
+                        let action = result
+                            .output
+                            .content
+                            .get("action")
+                            .and_then(|v| v.as_str())
+                            .map(display_single_line)
+                            .filter(|s| !s.trim().is_empty());
+                        let added = result
+                            .output
+                            .content
+                            .get("lines_added")
+                            .and_then(|v| v.as_u64());
+                        let removed = result
+                            .output
+                            .content
+                            .get("lines_removed")
+                            .and_then(|v| v.as_u64());
+                        match (action.as_deref(), added, removed) {
+                            (Some("created"), Some(a), _) => format!("created · +{a}"),
+                            (Some(act), Some(a), Some(r)) => format!("{act} · +{a} -{r}"),
+                            (None, Some(a), Some(r)) => format!("+{a} -{r}"),
+                            (Some(act), _, _) => act.to_owned(),
+                            _ => "ok".to_owned(),
+                        }
+                    }
+                    Some("list_directory") => result
+                        .output
+                        .content
+                        .get("entries")
+                        .and_then(|v| v.as_array())
+                        .map(|entries| pluralize(entries.len(), "entry", "entries"))
+                        .unwrap_or_else(|| "ok".to_owned()),
+                    Some("find_files") => result
+                        .output
+                        .content
+                        .get("files")
+                        .and_then(|v| v.as_array())
+                        .map(|files| pluralize(files.len(), "file", "files"))
+                        .unwrap_or_else(|| "ok".to_owned()),
+                    Some("search_text") => result
+                        .output
+                        .content
+                        .get("matches")
+                        .and_then(|v| v.as_array())
+                        .map(|matches| pluralize(matches.len(), "match", "matches"))
+                        .unwrap_or_else(|| "ok".to_owned()),
+                    Some("run_command") => {
+                        let exit_code = result
+                            .output
+                            .content
+                            .get("exit_code")
+                            .and_then(|v| v.as_i64());
+                        let output_lines = result
+                            .output
+                            .content
+                            .get("output")
+                            .and_then(|v| v.as_str())
+                            .map(count_lines_display)
+                            .filter(|n| *n > 0);
+                        match (exit_code, output_lines) {
+                            (Some(code), Some(n)) => {
+                                format!("exit {code} · {}", pluralize(n, "line", "lines"))
+                            }
+                            (Some(code), None) => format!("exit {code}"),
+                            (None, Some(n)) => pluralize(n, "line", "lines"),
+                            (None, None) => "ok".to_owned(),
+                        }
+                    }
+                    _ => {
+                        if result.output.content.get("stats").is_some() {
+                            tool_result_summary(&result.output.content)
+                        } else if result.output.content.as_object().is_some_and(|o| {
+                            o.len() == 1 && o.get("ok") == Some(&serde_json::json!(true))
+                        }) {
+                            "ok".to_owned()
+                        } else {
+                            tool_result_summary(&result.output.content)
+                        }
+                    }
+                }
+            };
+            (ToolCardTone::Ok, theme::TOOL_OK_GLYPH, base, None)
+        }
+        ToolResultStatus::UnknownOutcome => (
+            ToolCardTone::Warn,
+            theme::TOOL_WARN_GLYPH,
+            "Execution result unknown".to_owned(),
+            None,
+        ),
+        ToolResultStatus::Failed
+        | ToolResultStatus::Rejected
+        | ToolResultStatus::Cancelled
+        | ToolResultStatus::TimedOut => {
+            let verb = match result.status {
+                ToolResultStatus::Rejected => "denied",
+                ToolResultStatus::Cancelled => "cancelled",
+                ToolResultStatus::TimedOut => "timed out",
+                ToolResultStatus::Failed => "failed",
+                ToolResultStatus::Succeeded | ToolResultStatus::UnknownOutcome => unreachable!(),
+            };
+            let exit_code = result
+                .output
+                .content
+                .get("exit_code")
+                .and_then(|v| v.as_i64());
+            let base = if let Some(code) = exit_code {
+                format!("exit {code} · {verb}")
+            } else {
+                verb.to_owned()
+            };
+            let err_msg = result
+                .output
+                .content
+                .get("error")
+                .and_then(|v| v.as_str())
+                .map(display_single_line)
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    result
+                        .output
+                        .content
+                        .get("output")
+                        .and_then(|v| v.as_str())
+                        .map(display_single_line)
+                        .filter(|s| !s.trim().is_empty())
+                })
+                .or_else(|| {
+                    result
+                        .output
+                        .content
+                        .as_str()
+                        .map(display_single_line)
+                        .filter(|s| !s.trim().is_empty())
+                });
+            let label = if result.status == ToolResultStatus::Rejected {
+                "Denied"
+            } else {
+                "Error"
+            };
+            let rail = err_msg.map(|msg| format!("{label}: {}", truncate_chars(&msg, 160)));
+            (ToolCardTone::Err, theme::TOOL_ERR_GLYPH, base, rail)
+        }
+    };
+
+    let full_summary = match (base_summary.is_empty(), artifact_label, is_truncated) {
+        (true, Some(kind), _) => Some(format!("{kind} (Ctrl+O)")),
+        (false, Some(kind), _) if base_summary == "ok" => Some(format!("{kind} (Ctrl+O)")),
+        (false, Some(kind), _) => Some(format!("{base_summary} · {kind} (Ctrl+O)")),
+        (true, None, true) => Some("truncated (Ctrl+O)".to_owned()),
+        (false, None, true) => Some(format!("{base_summary} · truncated (Ctrl+O)")),
+        (true, None, false) => None,
+        (false, None, false) => Some(base_summary),
+    };
+
+    (tone, glyph, full_summary, error_rail)
+}
+
+fn count_diff_changes(diff: &str) -> (usize, usize) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for line in diff.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            added += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            removed += 1;
+        }
+    }
+    (added, removed)
+}
+
+fn normalize_diff_lines(raw: &str) -> Vec<String> {
+    let stripped = raw
+        .strip_suffix("\r\n")
+        .or_else(|| raw.strip_suffix('\n'))
+        .unwrap_or(raw);
+    if stripped.is_empty() {
+        return Vec::new();
+    }
+    stripped
+        .replace("\r\n", "\n")
+        .split('\n')
+        .map(str::to_owned)
+        .collect()
+}
+
+fn synthesize_edit_diff_lines(old_text: &str, new_text: &str) -> Vec<String> {
+    let old_lines = normalize_diff_lines(old_text);
+    let new_lines = normalize_diff_lines(new_text);
+    let min_len = old_lines.len().min(new_lines.len());
+    let mut lead = 0usize;
+    while lead < min_len && old_lines[lead] == new_lines[lead] {
+        lead += 1;
+    }
+    let mut tail = 0usize;
+    while tail < (min_len - lead)
+        && old_lines[old_lines.len() - 1 - tail] == new_lines[new_lines.len() - 1 - tail]
+    {
+        tail += 1;
+    }
+    let old_end = old_lines.len() - tail;
+    let new_end = new_lines.len() - tail;
+    if lead == old_end && lead == new_end {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let ctx_before_start = lead.saturating_sub(2);
+    for line in &old_lines[ctx_before_start..lead] {
+        out.push(format!(" {line}"));
+    }
+    for line in &old_lines[lead..old_end] {
+        out.push(format!("-{line}"));
+    }
+    for line in &new_lines[lead..new_end] {
+        out.push(format!("+{line}"));
+    }
+    let ctx_after_end = (old_end + 2).min(old_lines.len());
+    for line in &old_lines[old_end..ctx_after_end] {
+        out.push(format!(" {line}"));
+    }
+    out
+}
+
+fn collect_inline_diff_lines(
+    call: Option<&causa::kernel::ToolCallPayload>,
+    result: &causa::kernel::ToolResultPayload,
+) -> Vec<String> {
+    if result.status != causa::kernel::ToolResultStatus::Succeeded {
+        return Vec::new();
+    }
+    // Path 1: explicit `"diff"` field in result output payload.
+    if let Some((_, diff)) = extract_diff_target(&result.output.content) {
+        return normalize_diff_lines(diff);
+    }
+    let Some(call) = call else {
+        return Vec::new();
+    };
+    // Path 2: synthesize compact line diff from `edit_file` `edits` arguments.
+    if call.tool_name == "edit_file"
+        && let Some(edits) = call.arguments.get("edits").and_then(|v| v.as_array())
+    {
+        let mut out = Vec::new();
+        for edit in edits {
+            let Some(old_text) = edit.get("old_text").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(new_text) = edit.get("new_text").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            out.extend(synthesize_edit_diff_lines(old_text, new_text));
+        }
+        return out;
+    }
+    // Path 3: synthesize `+` preview lines from newly created `write_file` content.
+    if call.tool_name == "write_file"
+        && result.output.content.get("action").and_then(|v| v.as_str()) == Some("created")
+        && let Some(content) = call.arguments.get("content").and_then(|v| v.as_str())
+    {
+        return normalize_diff_lines(content)
+            .into_iter()
+            .map(|line| format!("+{line}"))
+            .collect();
+    }
+    Vec::new()
+}
+
+fn push_diff_and_media_rails(
+    rail_lines: &mut Vec<ToolRailLine>,
+    diff_lines: Vec<String>,
+    media: &[causa::kernel::MediaRef],
+) {
+    let total_diff = diff_lines.len();
+    if total_diff > 0 {
+        for line in diff_lines.into_iter().take(MAX_INLINE_DIFF_LINES) {
+            rail_lines.push(ToolRailLine::Diff(line));
+        }
+        if total_diff > MAX_INLINE_DIFF_LINES {
+            rail_lines.push(ToolRailLine::Note {
+                text: format!(
+                    "… +{} more lines (Ctrl+O to expand)",
+                    total_diff - MAX_INLINE_DIFF_LINES
+                ),
+                tone: ToolRailTone::Muted,
+            });
+        }
+    }
+    for item in media {
+        rail_lines.push(ToolRailLine::Note {
+            text: format_media_badge(item),
+            tone: ToolRailTone::Muted,
+        });
+    }
+}
+
+fn build_tool_card(
+    call: Option<&causa::kernel::ToolCallPayload>,
+    result: Option<&causa::kernel::ToolResultPayload>,
+) -> ToolCardData {
+    use crate::render::theme;
+
+    match (call, result) {
+        (Some(call), Some(result)) => {
+            let result_end_line = result
+                .output
+                .content
+                .get("end_line")
+                .and_then(|v| v.as_u64());
+            let (title, target) = friendly_tool_title_and_target(
+                &call.tool_name,
+                Some(&call.arguments),
+                None,
+                result_end_line,
+            );
+            let (tone, glyph, summary, error_rail) =
+                summarize_tool_result(Some(&call.tool_name), result);
+            let mut rail_lines = Vec::new();
+            if let Some(err_note) = error_rail {
+                rail_lines.push(ToolRailLine::Note {
+                    text: err_note,
+                    tone: ToolRailTone::Err,
+                });
+            }
+            let diff_lines = collect_inline_diff_lines(Some(call), result);
+            push_diff_and_media_rails(&mut rail_lines, diff_lines, &result.media);
+            ToolCardData {
+                tone,
+                glyph,
+                title,
+                target,
+                summary,
+                rail_lines,
+            }
+        }
+        (Some(call), None) => {
+            let (title, target) =
+                friendly_tool_title_and_target(&call.tool_name, Some(&call.arguments), None, None);
+            ToolCardData {
+                tone: ToolCardTone::Unpaired,
+                glyph: theme::TOOL_UNPAIRED_GLYPH,
+                title,
+                target,
+                summary: None,
+                rail_lines: vec![ToolRailLine::Note {
+                    text: "Awaiting result / unpaired".to_owned(),
+                    tone: ToolRailTone::Warn,
+                }],
+            }
+        }
+        (None, Some(result)) => {
+            let target = arg_str(Some(&result.output.content), "path");
+            let (tone, glyph, summary, error_rail) = summarize_tool_result(None, result);
+            let mut rail_lines = Vec::new();
+            if let Some(err_note) = error_rail {
+                rail_lines.push(ToolRailLine::Note {
+                    text: err_note,
+                    tone: ToolRailTone::Err,
+                });
+            }
+            let diff_lines = collect_inline_diff_lines(None, result);
+            push_diff_and_media_rails(&mut rail_lines, diff_lines, &result.media);
+            ToolCardData {
+                tone,
+                glyph,
+                title: "Result".to_owned(),
+                target,
+                summary,
+                rail_lines,
+            }
+        }
+        (None, None) => unreachable!("tool card requires at least a call or a result"),
     }
 }
 
@@ -1175,9 +1884,92 @@ fn wrap_segments(segments: &[TranscriptSegment], width: u16) -> Vec<Line<'static
                     push_blank_separator(&mut out);
                 }
             }
+            TranscriptSegment::ToolCard(card) => {
+                wrap_tool_card(card, max_width, &mut out);
+                let next_is_tool_card =
+                    matches!(segments.get(idx + 1), Some(TranscriptSegment::ToolCard(_)));
+                if !next_is_tool_card || !card.rail_lines.is_empty() {
+                    push_blank_separator(&mut out);
+                }
+            }
         }
     }
     out
+}
+
+fn wrap_tool_card(card: &ToolCardData, max_width: usize, out: &mut Vec<Line<'static>>) {
+    use crate::render::theme;
+
+    let (glyph_color, summary_color) = match card.tone {
+        ToolCardTone::Ok => (theme::OK, theme::MUTED),
+        ToolCardTone::Err => (theme::ERR, theme::ERR),
+        ToolCardTone::Warn => (theme::WARN, theme::WARN),
+        ToolCardTone::Unpaired => (theme::WARN, theme::MUTED),
+    };
+    let mut header_spans = vec![
+        Span::styled(format!("{} ", card.glyph), Style::default().fg(glyph_color)),
+        Span::styled(
+            card.title.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if let Some(target) = &card.target
+        && !target.is_empty()
+    {
+        header_spans.push(Span::raw(format!("  {target}")));
+    }
+    if let Some(summary) = &card.summary
+        && !summary.is_empty()
+    {
+        header_spans.push(Span::styled(
+            format!(" · {summary}"),
+            Style::default().fg(summary_color),
+        ));
+    }
+    out.extend(crate::markdown::wrap_styled_line(
+        Line::from(header_spans),
+        max_width,
+        &[],
+    ));
+
+    let rail_span = Span::styled(theme::RAIL_PREFIX, Style::default().fg(theme::MUTED));
+    for rail in &card.rail_lines {
+        match rail {
+            ToolRailLine::Note { text, tone } => {
+                let text_color = match tone {
+                    ToolRailTone::Muted => theme::MUTED,
+                    ToolRailTone::Warn => theme::WARN,
+                    ToolRailTone::Err => theme::ERR,
+                };
+                let line = Line::from(vec![
+                    rail_span.clone(),
+                    Span::styled(text.clone(), Style::default().fg(text_color)),
+                ]);
+                out.extend(crate::markdown::wrap_styled_line(
+                    line,
+                    max_width,
+                    std::slice::from_ref(&rail_span),
+                ));
+            }
+            ToolRailLine::Diff(raw_line) => {
+                let escaped = display_single_line(raw_line);
+                let mut highlighted = crate::markdown::highlight_diff_line(&escaped);
+                for span in &mut highlighted.spans {
+                    if span.style == Style::default() {
+                        span.style = Style::default().fg(theme::MUTED);
+                    }
+                }
+                let mut spans = Vec::with_capacity(1 + highlighted.spans.len());
+                spans.push(rail_span.clone());
+                spans.extend(highlighted.spans);
+                out.extend(crate::markdown::wrap_styled_line(
+                    Line::from(spans),
+                    max_width,
+                    std::slice::from_ref(&rail_span),
+                ));
+            }
+        }
+    }
 }
 
 fn is_blank_line(line: &Line<'_>) -> bool {
@@ -2229,5 +3021,685 @@ mod tests {
         );
         assert!(!archived.text.contains('\x1b'));
         assert!(!archived.text.contains("iVBORw0KGgo"));
+    }
+
+    #[test]
+    fn cc04_batched_tool_pairing_orders_cards_without_uuids_and_preserves_full_tools_panel() {
+        use super::{Rows, TranscriptSegment};
+        use crate::render::theme;
+        use causa::kernel::{
+            BlockMeta, ToolCallPayload, ToolOutput, ToolResultPayload, ToolResultStatus,
+        };
+        use ratatui::style::Modifier;
+        use std::sync::Arc;
+
+        let call_a_id = causa::runtime::new_block_id();
+        let call_b_id = causa::runtime::new_block_id();
+        let unpaired_id = causa::runtime::new_block_id();
+        let orphan_call_id = causa::runtime::new_block_id();
+
+        let call_a = ContextBlock::new(
+            call_a_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "read_file",
+                serde_json::json!({"path": "src/lib.rs", "start_line": 10, "max_lines": 20}),
+            )),
+            BlockMeta::default(),
+        );
+        let call_b = ContextBlock::new(
+            call_b_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "run_command",
+                serde_json::json!({"command": "cargo test --bad"}),
+            )),
+            BlockMeta::default(),
+        );
+        let res_a = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_a_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "path": "src/lib.rs",
+                    "start_line": 10,
+                    "end_line": 29,
+                    "text": "line 10\nline 11\n",
+                })),
+            )),
+            BlockMeta::default(),
+        );
+        let res_b = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_b_id,
+                ToolResultStatus::Failed,
+                ToolOutput::new(serde_json::json!({
+                    "exit_code": 2,
+                    "error": "unknown flag --bad",
+                })),
+            )),
+            BlockMeta::default(),
+        );
+        let unpaired_call = ContextBlock::new(
+            unpaired_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "write_file",
+                serde_json::json!({"path": "unpaired.rs", "content": "fn main() {}"}),
+            )),
+            BlockMeta::default(),
+        );
+        let orphan_res = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                orphan_call_id,
+                ToolResultStatus::UnknownOutcome,
+                ToolOutput::new(serde_json::json!({"path": "orphan.txt"})),
+            )),
+            BlockMeta::default(),
+        );
+
+        let context = Context::from_blocks(vec![
+            orphan_res,
+            call_a,
+            call_b,
+            res_a,
+            res_b,
+            unpaired_call,
+        ])
+        .unwrap();
+        let transcript = Arc::new(Transcript::from_materials(&context, &[]));
+
+        // Main transcript must contain zero raw UUIDs.
+        for id in [orphan_call_id, call_a_id, call_b_id, unpaired_id] {
+            assert!(
+                !transcript.text.contains(&id.0.to_string()),
+                "UUID {} leaked into transcript.text: {}",
+                id.0,
+                transcript.text
+            );
+        }
+
+        // `/tools` details keep all 6 blocks in exact order with full UUIDs.
+        assert_eq!(transcript.tool_details.len(), 6);
+        assert!(transcript.tool_details[0].contains(&orphan_call_id.0.to_string()));
+        assert!(transcript.tool_details[1].contains(&call_a_id.0.to_string()));
+        assert!(transcript.tool_details[2].contains(&call_b_id.0.to_string()));
+        assert!(transcript.tool_details[3].contains(&call_a_id.0.to_string()));
+        assert!(transcript.tool_details[4].contains(&call_b_id.0.to_string()));
+        assert!(transcript.tool_details[5].contains(&unpaired_id.0.to_string()));
+
+        // Batched pairing emits exactly 4 ToolCard segments in call order (plus leading orphan).
+        let cards: Vec<_> = transcript
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                TranscriptSegment::ToolCard(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 4);
+        assert_eq!(cards[0].title, "Result");
+        assert_eq!(cards[1].title, "Read");
+        assert_eq!(cards[2].title, "Bash");
+        assert_eq!(cards[3].title, "Write");
+
+        let rows = Rows::wrap(transcript.clone(), 100);
+        let row_texts: Vec<String> = (0..rows.len()).map(|i| rows.row_text(i).unwrap()).collect();
+        assert!(
+            row_texts
+                .iter()
+                .any(|l| l == "▸ Read  src/lib.rs:10-29 · 2 lines"),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts
+                .iter()
+                .any(|l| l == "✗ Bash  cargo test --bad · exit 2 · failed"),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts
+                .iter()
+                .any(|l| l == "  │ Error: unknown flag --bad"),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts.iter().any(|l| l == "○ Write  unpaired.rs"),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts
+                .iter()
+                .any(|l| l == "  │ Awaiting result / unpaired"),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts
+                .iter()
+                .any(|l| l == "? Result  orphan.txt · Execution result unknown"),
+            "{row_texts:?}"
+        );
+
+        // Verify glyph & rail styling in Rows.
+        assert!(rows.lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == "▸ " && s.style.fg == Some(theme::OK))
+                && l.spans
+                    .iter()
+                    .any(|s| s.content == "Read" && s.style.add_modifier.contains(Modifier::BOLD))
+        }));
+        assert!(rows.lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == "✗ " && s.style.fg == Some(theme::ERR))
+        }));
+        assert!(rows.lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == "○ " && s.style.fg == Some(theme::WARN))
+        }));
+        assert!(rows.lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.content == theme::RAIL_PREFIX && s.style.fg == Some(theme::MUTED))
+        }));
+    }
+
+    #[test]
+    fn cc05_inline_diff_paths_truncation_sanitization_and_zero_disk_reads() {
+        use super::{MAX_INLINE_DIFF_LINES, Rows};
+        use crate::render::theme;
+        use causa::kernel::{
+            BlockMeta, ToolCallPayload, ToolOutput, ToolResultPayload, ToolResultStatus,
+        };
+        use std::sync::Arc;
+
+        // Path 1: explicit `"diff"` with ANSI/BiDi/tab controls in path & diff lines.
+        let c1 = causa::runtime::new_block_id();
+        let call_1 = ContextBlock::new(
+            c1,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "edit_file",
+                serde_json::json!({"path": "src/evil\x1b[31m\u{202e}.rs"}),
+            )),
+            BlockMeta::default(),
+        );
+        let res_1 = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                c1,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "path": "src/evil\x1b[31m\u{202e}.rs",
+                    "lines_added": 1,
+                    "lines_removed": 1,
+                    "diff": "@@ -1,3 +1,3 @@\n context\tline\n-old\x1b[31m\n+new\u{202e}\n",
+                })),
+            )),
+            BlockMeta::default(),
+        );
+
+        // Path 2: `edit_file` without `"diff"` field -> synthesized from `edits`.
+        let c2 = causa::runtime::new_block_id();
+        let call_2 = ContextBlock::new(
+            c2,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "edit_file",
+                serde_json::json!({
+                    "path": "/nonexistent/synth.rs",
+                    "edits": [{
+                        "old_text": "ctx1\nctx2\nctx3\nold_val\nctx4",
+                        "new_text": "ctx1\nctx2\nctx3\nnew_val\nctx4",
+                    }]
+                }),
+            )),
+            BlockMeta::default(),
+        );
+        let res_2 = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                c2,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "path": "/nonexistent/synth.rs",
+                    "action": "updated",
+                    "lines_added": 1,
+                    "lines_removed": 1,
+                })),
+            )),
+            BlockMeta::default(),
+        );
+
+        // Path 3: `write_file` `created` with > MAX_INLINE_DIFF_LINES (16 lines -> 12 + notice).
+        let c3 = causa::runtime::new_block_id();
+        let created_body = (1..=16)
+            .map(|i| format!("line_{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let call_3 = ContextBlock::new(
+            c3,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "write_file",
+                serde_json::json!({"path": "/nonexistent/new_file.rs", "content": created_body}),
+            )),
+            BlockMeta::default(),
+        );
+        let res_3 = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                c3,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "path": "/nonexistent/new_file.rs",
+                    "action": "created",
+                    "lines_added": 16,
+                    "lines_removed": 0,
+                })),
+            )),
+            BlockMeta::default(),
+        );
+
+        // Counterexample: `write_file` `updated` without `"diff"` never touches disk and emits no fake diff.
+        let c4 = causa::runtime::new_block_id();
+        let call_4 = ContextBlock::new(
+            c4,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "write_file",
+                serde_json::json!({"path": "/nonexistent/never_read.rs", "content": "overwritten"}),
+            )),
+            BlockMeta::default(),
+        );
+        let res_4 = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                c4,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "path": "/nonexistent/never_read.rs",
+                    "action": "updated",
+                    "lines_added": 2,
+                    "lines_removed": 1,
+                })),
+            )),
+            BlockMeta::default(),
+        );
+
+        let context = Context::from_blocks(vec![
+            call_1, res_1, call_2, res_2, call_3, res_3, call_4, res_4,
+        ])
+        .unwrap();
+        let transcript = Arc::new(Transcript::from_materials(&context, &[]));
+        assert!(!transcript.text.contains('\x1b'));
+        assert!(!transcript.text.contains('\u{202e}'));
+        assert!(!transcript.text.contains('\t'));
+
+        let rows = Rows::wrap(transcript, 120);
+        let row_texts: Vec<String> = (0..rows.len()).map(|i| rows.row_text(i).unwrap()).collect();
+
+        // Path 1 escaping + highlighting order: prefix is MUTED, @@ is ACCENT, context is MUTED, - is ERR, + is OK.
+        assert!(
+            row_texts.iter().any(|l| l == "  │  context    line"),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts.iter().any(|l| l == "  │ -old\\x1b[31m"),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts.iter().any(|l| l == "  │ +new\\u{202e}"),
+            "{row_texts:?}"
+        );
+        let hunk_row = rows
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content == "@@ -1,3 +1,3 @@"))
+            .expect("hunk row");
+        assert_eq!(hunk_row.spans[0].content, theme::RAIL_PREFIX);
+        assert_eq!(hunk_row.spans[0].style.fg, Some(theme::MUTED));
+        assert_eq!(hunk_row.spans[1].style.fg, Some(theme::ACCENT));
+
+        let (ctx_row, _) = rows
+            .lines
+            .iter()
+            .zip(&row_texts)
+            .find(|(_, text)| *text == "  │  context    line")
+            .expect("context row");
+        assert_eq!(ctx_row.spans[0].style.fg, Some(theme::MUTED));
+        assert!(
+            ctx_row.spans[1..]
+                .iter()
+                .all(|s| s.style.fg == Some(theme::MUTED))
+        );
+
+        let minus_row = rows
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content == "-old\\x1b[31m"))
+            .expect("minus row");
+        assert_eq!(minus_row.spans[1].style.fg, Some(theme::ERR));
+
+        let plus_row = rows
+            .lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content == "+new\\u{202e}"))
+            .expect("plus row");
+        assert_eq!(plus_row.spans[1].style.fg, Some(theme::OK));
+
+        // Path 2 synthesized diff keeps max 2 leading context lines (`ctx2`, `ctx3`, not `ctx1`).
+        assert!(
+            !row_texts.iter().any(|l| l.contains("ctx1")),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts.iter().any(|l| l == "  │ -old_val"),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts.iter().any(|l| l == "  │ +new_val"),
+            "{row_texts:?}"
+        );
+
+        // Path 3 caps at MAX_INLINE_DIFF_LINES (12) and appends overflow notice.
+        assert_eq!(MAX_INLINE_DIFF_LINES, 12);
+        assert!(
+            row_texts.iter().any(|l| l == "  │ +line_12"),
+            "{row_texts:?}"
+        );
+        assert!(
+            !row_texts.iter().any(|l| l == "  │ +line_13"),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts
+                .iter()
+                .any(|l| l == "  │ … +4 more lines (Ctrl+O to expand)"),
+            "{row_texts:?}"
+        );
+
+        // Path 4 updated write_file without diff renders summary header only.
+        assert!(
+            row_texts
+                .iter()
+                .any(|l| l == "▸ Write  /nonexistent/never_read.rs · updated · +2 -1"),
+            "{row_texts:?}"
+        );
+        assert!(!row_texts.iter().any(|l| l.contains("+overwritten")));
+    }
+
+    #[test]
+    fn cc04_spilled_and_cleared_preview_markers_preserved() {
+        use causa::kernel::{
+            ArtifactKind, ArtifactRef, BlockMeta, ToolCallPayload, ToolOutput, ToolResultPayload,
+            ToolResultStatus,
+        };
+
+        let c_spilled = causa::runtime::new_block_id();
+        let c_cleared = causa::runtime::new_block_id();
+        let mut spilled_out =
+            ToolOutput::new(serde_json::json!({"exit_code": 0, "output": "head"}));
+        spilled_out.artifact = Some(ArtifactRef::new(
+            "artifact:abc",
+            9000,
+            ArtifactKind::FullOutput,
+            true,
+        ));
+        let mut cleared_out = ToolOutput::new(serde_json::Value::String(
+            "[cleared tool_result: read_file]".into(),
+        ));
+        cleared_out.artifact = Some(ArtifactRef::new(
+            "rec-1/block-1",
+            5000,
+            ArtifactKind::FullOutput,
+            true,
+        ));
+        let blocks = vec![
+            ContextBlock::new(
+                c_spilled,
+                BlockContent::ToolCall(ToolCallPayload::new(
+                    "run_command",
+                    serde_json::json!({"command": "cat big.log"}),
+                )),
+                BlockMeta::default(),
+            ),
+            ContextBlock::new(
+                causa::runtime::new_block_id(),
+                BlockContent::ToolResult(ToolResultPayload::new(
+                    c_spilled,
+                    ToolResultStatus::Succeeded,
+                    spilled_out,
+                )),
+                BlockMeta::default(),
+            ),
+            ContextBlock::new(
+                c_cleared,
+                BlockContent::ToolCall(ToolCallPayload::new(
+                    "read_file",
+                    serde_json::json!({"path": "old.rs"}),
+                )),
+                BlockMeta::default(),
+            ),
+            ContextBlock::new(
+                causa::runtime::new_block_id(),
+                BlockContent::ToolResult(ToolResultPayload::new(
+                    c_cleared,
+                    ToolResultStatus::Succeeded,
+                    cleared_out,
+                )),
+                BlockMeta::default(),
+            ),
+        ];
+        let ctx = Context::from_blocks(blocks).unwrap();
+        let tr = Transcript::from_materials(&ctx, &[]);
+        assert!(tr.text.contains("spilled preview (Ctrl+O)"), "{}", tr.text);
+        assert!(tr.text.contains("cleared preview (Ctrl+O)"), "{}", tr.text);
+        assert!(
+            tr.text.contains("[cleared tool_result: read_file]"),
+            "{}",
+            tr.text
+        );
+        assert!(tr.tool_artifacts[1].is_some());
+        assert!(tr.tool_artifacts[3].is_some());
+    }
+
+    #[test]
+    fn cc04_write_file_untrusted_action_sanitizes_all_rendered_spans() {
+        use super::Rows;
+        use causa::kernel::{
+            BlockMeta, ToolCallPayload, ToolOutput, ToolResultPayload, ToolResultStatus,
+        };
+        use std::sync::Arc;
+
+        let call_id = causa::runtime::new_block_id();
+        let blocks = vec![
+            ContextBlock::new(
+                call_id,
+                BlockContent::ToolCall(ToolCallPayload::new(
+                    "write_file",
+                    serde_json::json!({"path": "out\x1b[31m\u{202e}.txt"}),
+                )),
+                BlockMeta::default(),
+            ),
+            ContextBlock::new(
+                causa::runtime::new_block_id(),
+                BlockContent::ToolResult(ToolResultPayload::new(
+                    call_id,
+                    ToolResultStatus::Succeeded,
+                    ToolOutput::new(serde_json::json!({
+                        "path": "out\x1b[31m\u{202e}.txt",
+                        "action": "created\x1b[31m\u{202e}\n\t",
+                        "lines_added": 2,
+                        "lines_removed": 0,
+                    })),
+                )),
+                BlockMeta::default(),
+            ),
+        ];
+        let ctx = Context::from_blocks(blocks).unwrap();
+        let tr = Arc::new(Transcript::from_materials(&ctx, &[]));
+        let rows = Rows::wrap(tr.clone(), 120);
+
+        let forbidden = [
+            '\x1b', '\r', '\0', '\x07', '\x08', '\x0c', '\x7f', '\t', '\n', '\u{061c}', '\u{200e}',
+            '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}',
+            '\u{2067}', '\u{2068}', '\u{2069}', '\u{2028}', '\u{2029}',
+        ];
+        assert!(!rows.lines.is_empty());
+        for (row_idx, line) in rows.lines.iter().enumerate() {
+            let row_text = rows.row_text(row_idx).unwrap();
+            let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(row_text, joined);
+            for span in &line.spans {
+                for &ch in &forbidden {
+                    assert!(
+                        !span.content.contains(ch),
+                        "row {row_idx} span {:?} leaked forbidden char {ch:?}",
+                        span.content
+                    );
+                }
+            }
+        }
+        assert!(tr.text.contains("created\\x1b[31m\\u{202e}"), "{}", tr.text);
+    }
+
+    #[test]
+    fn cc04_out_of_order_result_before_call_never_emits_duplicate_result_card() {
+        use super::{Rows, TranscriptSegment};
+        use causa::kernel::{
+            BlockMeta, ToolCallPayload, ToolOutput, ToolResultPayload, ToolResultStatus,
+        };
+        use std::sync::Arc;
+
+        let call_id = causa::runtime::new_block_id();
+        let result_first = ContextBlock::new(
+            causa::runtime::new_block_id(),
+            BlockContent::ToolResult(ToolResultPayload::new(
+                call_id,
+                ToolResultStatus::Succeeded,
+                ToolOutput::new(serde_json::json!({
+                    "path": "src/out_of_order.rs",
+                    "text": "line1\nline2\n",
+                })),
+            )),
+            BlockMeta::default(),
+        );
+        let call_second = ContextBlock::new(
+            call_id,
+            BlockContent::ToolCall(ToolCallPayload::new(
+                "read_file",
+                serde_json::json!({"path": "src/out_of_order.rs"}),
+            )),
+            BlockMeta::default(),
+        );
+
+        let ctx = Context::from_blocks(vec![result_first, call_second]).unwrap();
+        let tr = Arc::new(Transcript::from_materials(&ctx, &[]));
+        assert_eq!(tr.tool_details.len(), 2);
+
+        let cards: Vec<_> = tr
+            .segments
+            .iter()
+            .filter_map(|s| match s {
+                TranscriptSegment::ToolCard(card) => Some(card),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].title, "Result");
+        assert_eq!(cards[1].title, "Read");
+        assert_eq!(cards[1].summary, None);
+
+        let rows = Rows::wrap(tr.clone(), 100);
+        let row_texts: Vec<String> = (0..rows.len()).map(|i| rows.row_text(i).unwrap()).collect();
+        assert_eq!(
+            row_texts
+                .iter()
+                .filter(|l| l.contains("src/out_of_order.rs"))
+                .count(),
+            2
+        );
+        assert!(
+            row_texts
+                .iter()
+                .any(|l| l.starts_with("▸ Result  src/out_of_order.rs · ")),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts.iter().any(|l| l == "○ Read  src/out_of_order.rs"),
+            "{row_texts:?}"
+        );
+        assert!(
+            row_texts
+                .iter()
+                .any(|l| l == "  │ Awaiting result / unpaired"),
+            "{row_texts:?}"
+        );
+    }
+
+    #[test]
+    fn cc05_narrow_width_tool_card_wrap_with_cjk_and_emoji_preserves_row_text() {
+        use super::Rows;
+        use causa::kernel::{
+            BlockMeta, ToolCallPayload, ToolOutput, ToolResultPayload, ToolResultStatus,
+        };
+        use std::sync::Arc;
+
+        let call_id = causa::runtime::new_block_id();
+        let blocks = vec![
+            ContextBlock::new(
+                call_id,
+                BlockContent::ToolCall(ToolCallPayload::new(
+                    "edit_file",
+                    serde_json::json!({
+                        "path": "文档/测试🚀.rs",
+                        "edits": [{
+                            "old_text": "旧代码😀",
+                            "new_text": "新代码👩‍💻",
+                        }],
+                    }),
+                )),
+                BlockMeta::default(),
+            ),
+            ContextBlock::new(
+                causa::runtime::new_block_id(),
+                BlockContent::ToolResult(ToolResultPayload::new(
+                    call_id,
+                    ToolResultStatus::Succeeded,
+                    ToolOutput::new(serde_json::json!({
+                        "path": "文档/测试🚀.rs",
+                        "action": "updated",
+                        "lines_added": 1,
+                        "lines_removed": 1,
+                    })),
+                )),
+                BlockMeta::default(),
+            ),
+        ];
+        let ctx = Context::from_blocks(blocks).unwrap();
+        let tr = Arc::new(Transcript::from_materials(&ctx, &[]));
+
+        for width in 1u16..=4 {
+            let rows = Rows::wrap(tr.clone(), width);
+            assert!(!rows.is_empty());
+            let mut combined = String::new();
+            for i in 0..rows.len() {
+                let row_text = rows.row_text(i).unwrap();
+                let line = rows.line(i).unwrap();
+                let from_spans: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                assert_eq!(row_text, from_spans);
+                if width >= 2 {
+                    assert!(
+                        line.width() <= usize::from(width),
+                        "width {width} exceeded by row {i}: {row_text:?} (width={})",
+                        line.width()
+                    );
+                }
+                combined.push_str(&row_text);
+            }
+            assert!(combined.contains("文档"), "width {width}: {combined}");
+            assert!(combined.contains("🚀"), "width {width}: {combined}");
+            assert!(combined.contains("旧代码"), "width {width}: {combined}");
+            assert!(combined.contains("新代码"), "width {width}: {combined}");
+        }
     }
 }

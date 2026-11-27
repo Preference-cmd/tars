@@ -214,7 +214,7 @@ fn ptc07_tui_status_and_transcript_render_run_code_summary_and_progress() {
     app.poll_progress();
 
     let main_screen = screen(&app);
-    assert!(main_screen.contains("Tool run_code"), "{main_screen}");
+    assert!(main_screen.contains("✓ Code"), "{main_screen}");
     assert!(
         main_screen.contains("subcalls=7 · max_in_flight=3 · 42ms"),
         "{main_screen}"

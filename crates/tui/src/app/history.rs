@@ -1230,8 +1230,16 @@ mod tests {
         let second = view3.next_read(true).unwrap();
         assert_eq!(second.record, mc_id);
         view3.insert_loaded(mc_record);
+        assert!(
+            view3.pieces.iter().any(|p| matches!(
+                p,
+                Piece::Rows(tr) if tr.tool_details.iter().any(|d| d.contains("ORIGINAL_MICRO_TEXT"))
+            )),
+            "expanded Piece::Rows must retain original tool_details"
+        );
         let shown3 = text(&mut view3);
-        assert!(shown3.contains("ORIGINAL_MICRO_TEXT"), "{shown3}");
+        assert!(shown3.contains("▸ Read  src/live.rs · 1 line"), "{shown3}");
+        assert!(!shown3.contains("[cleared tool_result"), "{shown3}");
         assert_eq!(shown3.matches("Compacted (").count(), 1);
     }
 
@@ -1388,9 +1396,23 @@ mod tests {
         view.insert_loaded(mc_record);
         assert_eq!(view.earlier(), 0);
         assert!(!view.has_earlier());
+        assert!(
+            view.pieces.iter().any(|p| matches!(
+                p,
+                Piece::Rows(tr) if tr.tool_details.iter().any(|d| d.contains("ORIGINAL_PARTIAL_A"))
+            )),
+            "expanded Piece::Rows must retain original A"
+        );
+        assert!(
+            !view.pieces.iter().any(|p| matches!(
+                p,
+                Piece::Rows(tr) if tr.tool_details.iter().any(|d| d.contains("ORIGINAL_PARTIAL_B"))
+            )),
+            "expanded Piece::Rows must not contain live B"
+        );
         let shown = text(&mut view);
-        assert!(shown.contains("ORIGINAL_PARTIAL_A"), "{shown}");
-        assert!(!shown.contains("ORIGINAL_PARTIAL_B"), "{shown}");
+        assert!(shown.contains("▸ Read  src/a.rs · 1 line"), "{shown}");
+        assert!(!shown.contains("src/b.rs"), "{shown}");
         assert!(!shown.contains("[cleared tool_result: b]"), "{shown}");
     }
 }
