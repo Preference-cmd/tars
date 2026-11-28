@@ -141,6 +141,7 @@ struct Fixture {
     endpoint: String,
     requests: mpsc::Receiver<String>,
     responses: mpsc::Sender<(u16, Value)>,
+    answered: mpsc::Receiver<()>,
 }
 impl Fixture {
     fn new(count: usize) -> Self {
@@ -148,6 +149,7 @@ impl Fixture {
         let endpoint = format!("http://{}/fixture", listener.local_addr().unwrap());
         let (request_tx, requests) = mpsc::channel();
         let (responses, response_rx) = mpsc::channel::<(u16, Value)>();
+        let (answered_tx, answered) = mpsc::channel();
         std::thread::spawn(move || {
             for _ in 0..count {
                 let mut socket = sse::accept_post(&listener).unwrap();
@@ -164,12 +166,16 @@ impl Fixture {
                     "HTTP/1.1 {status} Fixture\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
+                let _ = socket.flush();
+                drop(socket);
+                let _ = answered_tx.send(());
             }
         });
         Self {
             endpoint,
             requests,
             responses,
+            answered,
         }
     }
     fn request(&self) -> String {
@@ -177,6 +183,10 @@ impl Fixture {
     }
     fn answer(&self, text: &str) {
         self.responses.send((200, json!({"choices":[{"message":{"role":"assistant","content":text},"finish_reason":"stop"}]}))).unwrap();
+    }
+    #[cfg(unix)]
+    fn wait_answered(&self) {
+        self.answered.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 }
 fn read_request(socket: &mut TcpStream) -> String {
@@ -795,6 +805,11 @@ fn second_sigint_abandons_a_blocked_save_and_exports_importable_recovery() {
     let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
     conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
     fixture.answer("blocked but returned answer");
+    fixture.wait_answered();
+    // Allow the child to parse the completed HTTP response and enter the blocked
+    // SQLite commit before sending the first SIGINT, so SIGINT tests blocked-save
+    // handling rather than cancelling the in-flight model turn.
+    std::thread::sleep(Duration::from_millis(250));
     interrupt_until_prompt(&child, &stderr);
     assert!(
         child.try_wait().unwrap().is_none(),
@@ -855,6 +870,8 @@ fn one_sigint_during_a_blocked_save_waits_and_normal_completion_creates_no_recov
     let conn = rusqlite::Connection::open(store.join("tars.db")).unwrap();
     conn.execute_batch("BEGIN IMMEDIATE;").unwrap();
     fixture.answer("normally saved answer");
+    fixture.wait_answered();
+    std::thread::sleep(Duration::from_millis(250));
     interrupt_until_prompt(&child, &stderr);
     assert!(
         child.try_wait().unwrap().is_none(),
