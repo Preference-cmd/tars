@@ -276,6 +276,8 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
                         state.error = Some(other);
                         state.fault = state.error.clone();
                         state.close_in_flight = state.closing == Some(ClosePolicy::DiscardLocal);
+                        drop(state);
+                        drop(_writer_guard);
                         entry.changed();
                         return;
                     }
@@ -319,6 +321,7 @@ pub(super) async fn save(host: &Arc<HostInner>, entry: &Arc<Entry>) {
             coord.publish_lifecycle(Lifecycle::Open);
         }
     }
+    drop(_writer_guard);
     entry.changed();
 }
 

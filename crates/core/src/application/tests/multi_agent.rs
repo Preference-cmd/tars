@@ -862,9 +862,11 @@ async fn idle_wakeup_debounce_coalesce_and_max_auto_wakeups_limit() {
     let mut r_s2 = spawn_req(&root_id, "sib2", "p2");
     r_s2.coalesce_key = Some("shared-key".into());
 
-    session.spawn_agent(r_s1).await.unwrap();
+    // Spawn the gated sibling first and wait until it is running so `sib1` is
+    // guaranteed to see an active sibling when it finishes and enter debounce.
     session.spawn_agent(r_s2).await.unwrap();
     sib2_entered.notified().await;
+    session.spawn_agent(r_s1).await.unwrap();
     // Let sib1 finish first, wait until sib1 is done while sib2 is still active, then release sib2 shortly after.
     until(|| session.active_finite_background_tasks() == 1).await;
     tokio::time::sleep(Duration::from_millis(20)).await;
