@@ -1,6 +1,6 @@
 # TARS
 
-TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI commands (`-p`/`--print`, `run`, `session`, `auth`, `trust`, `tools`, `doctor`, `completions`). TARS is in early-stage development (`v0.1.0` prebuilt macOS/Linux binaries available via GitHub Releases, or build from source via Cargo).
+TARS is an open-source, local-first AI agent written in Rust and built on [`causa`](https://crates.io/crates/causa) (`0.3`, via crates.io). Causa supplies the context and material contracts plus multi-protocol model execution across `openai-chat`, `openai-responses`, and `anthropic`, while TARS provides persistent sessions, workspace tools, sandboxing, compaction, and a single `tars` binary covering both an interactive terminal interface and scriptable CLI commands (`-p`/`--print`, `run`, `session`, `auth`, `trust`, `tools`, `doctor`, `completions`). TARS is in early-stage development (`v0.2.0` prebuilt macOS/Linux binaries available via GitHub Releases, or build from source via Cargo).
 
 ## Key features
 
@@ -16,16 +16,16 @@ TARS is an open-source, local-first AI agent written in Rust and built on [`caus
 
 ### Install prebuilt binary (macOS & Linux)
 
-Install the `v0.1.0` release binary with the POSIX installer:
+Install the `v0.2.0` release binary with the POSIX installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Preference-cmd/tars/v0.1.0/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Preference-cmd/tars/v0.2.0/install.sh | sh
 ```
 
 To pin a version or install into a custom directory (pass flags after `sh -s --`):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Preference-cmd/tars/v0.1.0/install.sh | sh -s -- --version v0.1.0 --install-dir ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/Preference-cmd/tars/v0.2.0/install.sh | sh -s -- --version v0.2.0 --install-dir ~/.local/bin
 ```
 
 `install.sh` installs by default into `~/.local/bin` (ensure it is on your `PATH`), performs idempotent atomic upgrades, enforces mandatory `SHA256SUMS.txt` verification and archive path-traversal checks, and never modifies shell rc files (`~/.zshrc`, `~/.bashrc`, `~/.profile`).
@@ -43,7 +43,7 @@ shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 # Linux
 sha256sum -c SHA256SUMS.txt --ignore-missing
 # GitHub CLI SLSA provenance attestation
-gh attestation verify tars-v0.1.0-<target>.tar.gz --repo Preference-cmd/tars
+gh attestation verify tars-v0.2.0-<target>.tar.gz --repo Preference-cmd/tars
 ```
 
 ### Build from source
