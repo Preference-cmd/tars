@@ -1,10 +1,9 @@
-use super::support::{Server, app, ctrl, key, until};
+use super::support::{Server, app, create_with_definition, ctrl, fixture_definition, key, until};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::wire;
-use crate::{input::Form, render};
+use crate::render;
 use crossterm::event::KeyCode;
 use ratatui::{Terminal, backend::TestBackend};
-use ratatui_textarea::TextArea;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use serde_json::json;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -23,34 +22,16 @@ fn screen(app: &crate::app::App) -> String {
         .collect()
 }
 
-fn create_form(endpoint: &str, workspace: &std::path::Path, tools: &str) -> Form {
-    Form {
-        fields: [
-            "openai-chat",
-            "fixture-model",
-            endpoint,
-            "env:PATH",
-            "120",
-            &workspace.display().to_string(),
-            tools,
-            "ask",
-            "",
-            "on",
-            "off",
-        ]
-        .into_iter()
-        .map(|v| TextArea::from([v]))
-        .collect(),
-        selected: 1,
-        error: String::new(),
-        limits: (256, 10, 64),
-        generation: (None, None, Default::default()),
-        max_model_attempts: None,
-        render_options: Default::default(),
-        tool_limits: Default::default(),
-        write_limits: None,
-        ..Form::default()
-    }
+async fn create_session(
+    app: &mut crate::app::App,
+    endpoint: &str,
+    workspace: &std::path::Path,
+    tools: &str,
+) {
+    let mut def = fixture_definition("openai-chat", endpoint);
+    def.workspace_root = Some(workspace.to_path_buf());
+    def.tools = tars_core::config::parse_tools(tools).expect("tools must parse");
+    create_with_definition(app, def).await;
 }
 
 #[tokio::test]
@@ -72,9 +53,7 @@ decision = \"allow\"
     let mut app = app(dir.path());
 
     // 1. Create session with initial untrusted workspace allow rule -> popup opens.
-    app.form = Some(create_form(&server.endpoint, &workspace, ""));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &server.endpoint, &workspace, "").await;
     let id = app.entries[app.selected].id().to_owned();
 
     assert!(app.entries[app.selected].workspace_rules_trust.is_some());
@@ -241,9 +220,7 @@ async fn tui_trust_confirmation_activates_allow_rules_for_run_command() {
     );
 
     let mut app = app(dir.path());
-    app.form = Some(create_form(&fixture.endpoint, &workspace, "run_command"));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &fixture.endpoint, &workspace, "run_command").await;
     assert!(app.entries[app.selected].workspace_rules_trust.is_some());
 
     // Confirm trust after guard window.
@@ -376,9 +353,7 @@ async fn rc07_rc08_rc10_tui_command_options_session_workspace_rules_and_slash_ru
         .with_user_rules_path(Some(user_rules_path.clone()));
     app.user_rules_path = Some(user_rules_path.clone());
 
-    app.form = Some(create_form(&fixture.endpoint, &workspace, "run_command"));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &fixture.endpoint, &workspace, "run_command").await;
     let session_id = app.entries[app.selected].id().to_owned();
 
     // Decline workspace trust initially so we verify 3-option untrusted behavior (`w` hidden & ignored).
@@ -633,9 +608,7 @@ async fn rc07_rc10_tui_four_option_workspace_append_and_outside_sandbox_render()
         .with_user_rules_path(Some(user_rules_path.clone()));
     app.user_rules_path = Some(user_rules_path.clone());
 
-    app.form = Some(create_form(&fixture.endpoint, &workspace, "run_command"));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &fixture.endpoint, &workspace, "run_command").await;
     assert!(app.entries[0].workspace_rules_trust.is_none());
 
     // Turn 1: 4 options shown, press `w` to save to `.tars/permissions.toml`

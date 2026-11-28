@@ -1,16 +1,17 @@
-use super::support::{Server, advance_past_approval_window, app, ctrl, key, until};
+use super::support::{
+    Server, advance_past_approval_window, app, create_with_definition, ctrl, fixture_definition,
+    key, until,
+};
 #[cfg(unix)]
 use crate::app::state::CONFIRM_GUARD_WINDOW;
 use crate::{
     app::{App, Panel, jobs::Message, state::PendingApproval},
-    input::Form,
     options, render,
     transcript::Transcript,
 };
 use causa::kernel::{BlockContent, BlockMeta, Context, ContextBlock, Role};
 use crossterm::event::KeyCode;
 use ratatui::{Terminal, backend::TestBackend};
-use ratatui_textarea::TextArea;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -45,37 +46,10 @@ fn command(app: &mut App, text: &str) {
     app.event(key(KeyCode::Enter));
 }
 
-fn create_form(endpoint: &str, workspace: Option<&std::path::Path>) -> Form {
-    let ws = workspace
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    Form {
-        fields: [
-            "openai-chat",
-            "fixture-model",
-            endpoint,
-            "env:PATH",
-            "120",
-            &ws,
-            "",
-            "ask",
-            "",
-            "on",
-            "off",
-        ]
-        .into_iter()
-        .map(|v| TextArea::from([v]))
-        .collect(),
-        selected: 1,
-        error: String::new(),
-        limits: (256, 10, 64),
-        generation: (None, None, Default::default()),
-        max_model_attempts: None,
-        render_options: Default::default(),
-        tool_limits: Default::default(),
-        write_limits: None,
-        ..Form::default()
-    }
+async fn create_session(app: &mut App, endpoint: &str, workspace: Option<&std::path::Path>) {
+    let mut def = fixture_definition("openai-chat", endpoint);
+    def.workspace_root = workspace.map(std::path::Path::to_path_buf);
+    create_with_definition(app, def).await;
 }
 
 #[tokio::test]
@@ -84,9 +58,7 @@ async fn session_event_bg_count_reactive_wakeup_cancel_and_lagged_self_heal() {
     let server = Server::new().await;
     let mut app = app(dir.path());
 
-    app.form = Some(create_form(&server.endpoint, None));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &server.endpoint, None).await;
     let id = app.entries[app.selected].id().to_owned();
     let session = app.entries[app.selected].session.clone().unwrap();
 
@@ -241,9 +213,7 @@ async fn agents_panel_readonly_child_view_input_interception_and_stale_discard()
     app.view_height = 32;
     app.viewport_height = render::conversation_height(32, 120, &app);
 
-    app.form = Some(create_form(&server.endpoint, None));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &server.endpoint, None).await;
     let id = app.entries[app.selected].id().to_owned();
     let session = app.entries[app.selected].session.clone().unwrap();
 
@@ -507,9 +477,7 @@ async fn child_agent_approval_prefix_escapes_controls_and_responds() {
     app.view_width = render::transcript_width(120);
     app.view_height = 32;
 
-    app.form = Some(create_form(&server.endpoint, None));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &server.endpoint, None).await;
 
     // Open `/status` panel first so we can verify the `self_waiting` footer hint while obscured.
     command(&mut app, "status");
@@ -617,9 +585,7 @@ async fn workspace_agents_trust_popup_guard_decline_confirm_and_rules_priority()
 
     // 1. Open with both untrusted rules AND untrusted workspace agents:
     //    rules prompt takes priority first, then agents prompt after rules are handled.
-    app.form = Some(create_form(&server.endpoint, Some(&workspace)));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &server.endpoint, Some(&workspace)).await;
 
     assert!(app.entries[app.selected].workspace_rules_trust.is_some());
     assert!(app.entries[app.selected].workspace_agents_trust.is_some());
@@ -800,9 +766,7 @@ async fn agents_panel_x_cancels_running_child_and_reports_idle_safely() {
     let server = Server::new().await;
     let mut app = app(dir.path());
 
-    app.form = Some(create_form(&server.endpoint, None));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &server.endpoint, None).await;
     let id = app.entries[app.selected].id().to_owned();
     let session = app.entries[app.selected].session.clone().unwrap();
 
@@ -882,9 +846,7 @@ async fn agents_panel_x_on_idle_main_after_completed_turn_reports_idle() {
     server.release.add_permits(1);
     let mut app = app(dir.path());
 
-    app.form = Some(create_form(&server.endpoint, None));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &server.endpoint, None).await;
     let session = app.entries[app.selected].session.clone().unwrap();
 
     // Complete one root turn so `entry.work` stays populated with the finished WorkRef.

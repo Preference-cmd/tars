@@ -6,7 +6,6 @@ use causa::kernel::{
 };
 use crossterm::event::KeyCode;
 use ratatui::{Terminal, backend::TestBackend};
-use ratatui_textarea::TextArea;
 use serde_json::json;
 use std::sync::Arc;
 use tars_core::definition::CodeExecutionSettings;
@@ -33,8 +32,8 @@ fn command(app: &mut crate::app::App, text: &str) {
     app.event(key(KeyCode::Enter));
 }
 
-#[test]
-fn ptc07_tui_cli_flags_and_form_code_execution_resolution() {
+#[tokio::test]
+async fn ptc07_tui_cli_flags_and_code_execution_resolution() {
     let dir = tempfile::tempdir().unwrap();
     let cfg_path = dir.path().join("config.toml");
     std::fs::write(
@@ -46,6 +45,7 @@ default_profile = "work"
 [profiles.work]
 provider = "openai-chat"
 model = "fixture-model"
+api_key_env = "PATH"
 [profiles.work.code_execution]
 enabled = false
 timeout_secs = 55
@@ -106,10 +106,12 @@ max_subcalls = 99
 
     let mut app = crate::app::App::new(opts);
     app.event(key(KeyCode::F(2)));
-    let form = app.form.as_mut().unwrap();
-    assert_eq!(form.fields.len(), 11);
-    assert_eq!(form.fields[10].lines().join(""), "on");
-    let def_on = form.definition().unwrap();
+    until(&mut app, |a| {
+        a.entries.len() == 1 && a.entries[0].session.is_some()
+    })
+    .await;
+    assert_eq!(app.entries.len(), 1);
+    let def_on = app.entries[0].session.as_ref().unwrap().definition();
     assert_eq!(
         def_on.code_execution,
         Some(CodeExecutionSettings {
@@ -119,12 +121,19 @@ max_subcalls = 99
         })
     );
 
-    // 4. Form field validation and turning off.
-    form.fields[10] = TextArea::from(["off"]);
-    assert_eq!(form.definition().unwrap().code_execution, None);
-
-    form.fields[10] = TextArea::from(["bogus"]);
-    assert_eq!(form.definition().unwrap_err(), "Code execution: on | off");
+    // 4. Disabling code_execution via DefinitionOverrides turns it off.
+    let def_off = app
+        .options
+        .config
+        .definition(
+            app.options.profile.as_deref(),
+            tars_core::config::DefinitionOverrides {
+                code_execution_enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(def_off.code_execution, None);
 }
 
 #[test]

@@ -1,41 +1,17 @@
-use super::support::{Server, app, ctrl, key, until};
-use crate::{input::Form, render};
+use super::support::{Server, app, create_with_definition, ctrl, fixture_definition, key, until};
+use crate::render;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use ratatui_textarea::TextArea;
 use tars_core::application::ClosePolicy;
 use tars_core::permission::PermissionMode;
 
-fn create_form(endpoint: &str, workspace: Option<&std::path::Path>) -> Form {
-    let ws = workspace
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    Form {
-        fields: [
-            "openai-chat",
-            "fixture-model",
-            endpoint,
-            "env:PATH",
-            "120",
-            &ws,
-            "",
-            "ask",
-            "",
-            "on",
-            "off",
-        ]
-        .into_iter()
-        .map(|v| TextArea::from([v]))
-        .collect(),
-        selected: 1,
-        error: String::new(),
-        limits: (256, 10, 64),
-        generation: (None, None, Default::default()),
-        max_model_attempts: None,
-        render_options: Default::default(),
-        tool_limits: Default::default(),
-        write_limits: None,
-        ..Form::default()
-    }
+async fn create_session(
+    app: &mut crate::app::App,
+    endpoint: &str,
+    workspace: Option<&std::path::Path>,
+) {
+    let mut def = fixture_definition("openai-chat", endpoint);
+    def.workspace_root = workspace.map(std::path::Path::to_path_buf);
+    create_with_definition(app, def).await;
 }
 
 #[tokio::test]
@@ -46,9 +22,7 @@ async fn prompt_history_navigates_preserves_draft_dedups_and_respects_multiline_
     let mut app = app(dir.path());
     app.view_width = render::transcript_width(100);
 
-    app.form = Some(create_form(&server.endpoint, None));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &server.endpoint, None).await;
 
     // Submit three prompts (two consecutive identical "second" prompts should deduplicate).
     for prompt in ["first prompt", "second", "second", "line A\nline B"] {
@@ -134,9 +108,7 @@ async fn tab_completion_completes_slash_commands_and_at_paths_without_stealing_s
 
     let server = Server::new().await;
     let mut app = app(dir.path());
-    app.form = Some(create_form(&server.endpoint, Some(&ws_root)));
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[a.selected].session.is_some()).await;
+    create_session(&mut app, &server.endpoint, Some(&ws_root)).await;
 
     // 1. Slash command unique match with args ("/ag" -> "/agents ").
     app.event(Event::Paste("/ag".into()));

@@ -27,7 +27,6 @@ fn is_obscured(app: &App) -> bool {
     app.panel
         .as_ref()
         .is_some_and(|p| !matches!(p, crate::app::Panel::Commands { .. }))
-        || app.form.is_some()
         || app.folder_trust.is_some()
         || app.confirmation.is_some()
         || app.entries.get(app.selected).is_some_and(|e| {
@@ -638,11 +637,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             || entry.workspace_agents_trust.is_some()
             || !entry.approval_queue.is_empty()
     });
-    let approval_visible = pending
-        && app.panel.is_none()
-        && app.form.is_none()
-        && app.folder_trust.is_none()
-        && app.confirmation.is_none();
+    let approval_visible =
+        pending && app.panel.is_none() && app.folder_trust.is_none() && app.confirmation.is_none();
     let minimum_height = if approval_visible { 19 } else { 12 };
     if app.too_small || area.width < 30 || area.height < minimum_height {
         let message = if approval_visible {
@@ -680,18 +676,6 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         super::panels::confirm(
             frame,
             confirmation,
-            Rect {
-                y: regions[1].y,
-                height: overlay_height,
-                ..body
-            },
-        );
-        return;
-    }
-    if app.form.is_some() {
-        super::panels::form(
-            frame,
-            app,
             Rect {
                 y: regions[1].y,
                 height: overlay_height,
@@ -1384,24 +1368,22 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect, show_queue: bool) {
             )
         });
 
-    let self_waiting = if (app.panel.is_some()
-        || app.form.is_some()
-        || app.folder_trust.is_some()
-        || app.confirmation.is_some())
-        && entry.is_some_and(|e| !e.approval_queue.is_empty())
-    {
-        entry.and_then(|e| {
-            e.approval_queue.front().map(|req| {
-                let prefix = approval_agent_prefix(&req.origin, e.id());
-                format!(
-                    "{prefix}{} is waiting for confirmation · Esc to return",
-                    tars_core::permission::escape_untrusted_text(&req.tool_name)
-                )
+    let self_waiting =
+        if (app.panel.is_some() || app.folder_trust.is_some() || app.confirmation.is_some())
+            && entry.is_some_and(|e| !e.approval_queue.is_empty())
+        {
+            entry.and_then(|e| {
+                e.approval_queue.front().map(|req| {
+                    let prefix = approval_agent_prefix(&req.origin, e.id());
+                    format!(
+                        "{prefix}{} is waiting for confirmation · Esc to return",
+                        tars_core::permission::escape_untrusted_text(&req.tool_name)
+                    )
+                })
             })
-        })
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     let waiting_hint = self_waiting.or(other_waiting);
 

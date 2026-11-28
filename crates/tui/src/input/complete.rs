@@ -132,21 +132,21 @@ pub(crate) fn strip_model_command_prefix(input: &str) -> Option<&str> {
     first.is_whitespace().then(|| rest.trim_start())
 }
 
-pub(crate) fn complete_model_arg(arg_prefix: &str, profile_names: &[String]) -> ModelArgCompletion {
+pub(crate) fn complete_model_arg(arg_prefix: &str, candidates: &[String]) -> ModelArgCompletion {
     if arg_prefix.chars().any(char::is_whitespace) {
         return ModelArgCompletion::None;
     }
-    if profile_names.is_empty() {
+    if candidates.is_empty() {
         return ModelArgCompletion::Notice("No model profiles configured".into());
     }
-    let mut matches: Vec<&str> = profile_names
+    let mut matches: Vec<&str> = candidates
         .iter()
         .map(String::as_str)
         .filter(|name| name.starts_with(arg_prefix))
         .collect();
     if matches.is_empty() && !arg_prefix.is_empty() {
         let lower = arg_prefix.to_ascii_lowercase();
-        matches = profile_names
+        matches = candidates
             .iter()
             .map(String::as_str)
             .filter(|name| name.to_ascii_lowercase().starts_with(&lower))
@@ -154,7 +154,7 @@ pub(crate) fn complete_model_arg(arg_prefix: &str, profile_names: &[String]) -> 
     }
     match matches.as_slice() {
         [] => ModelArgCompletion::Notice(format!(
-            "No matching profile for '{}'",
+            "No matching model or profile for '{}'",
             escape_untrusted_text(arg_prefix)
         )),
         [single] => ModelArgCompletion::Modified {
@@ -164,7 +164,7 @@ pub(crate) fn complete_model_arg(arg_prefix: &str, profile_names: &[String]) -> 
         many => {
             let lcp = longest_common_prefix(many);
             let notice = format_candidate_notice(
-                "Profiles",
+                "Models",
                 many.iter().map(|name| escape_untrusted_text(name)),
             );
             if lcp.len() > arg_prefix.len() {

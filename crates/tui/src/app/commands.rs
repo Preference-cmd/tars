@@ -3,6 +3,15 @@ use crate::input;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use tars_core::application::ClosePolicy;
 
+/// One flattened `(profile, model)` option shown in [`Panel::Models`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelChoice {
+    pub(crate) profile_name: String,
+    pub(crate) model_id: String,
+    pub(crate) provider: tars_core::definition::Provider,
+    pub(crate) is_default_in_profile: bool,
+}
+
 /// Presentation mode for [`Panel::Info`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum InfoKind {
@@ -50,16 +59,19 @@ pub(super) const DOCTOR_PANEL_TITLE: &str = "Doctor · environment & configurati
 pub(crate) const TRUST_PANEL_TITLE: &str = "Workspace trust";
 
 pub(crate) const COMMANDS: &[(&str, &str)] = &[
-    ("new", "Create a session with model settings"),
+    (
+        "new",
+        "Start a fresh session keeping current model and settings",
+    ),
     (
         "clear",
-        "Start a fresh session with current model preset and workspace",
+        "Start a fresh session keeping current model and settings",
     ),
     (
         "resume",
         "Resume a saved session by ID/prefix or open session picker",
     ),
-    ("model", "Switch model profile in a new session"),
+    ("model", "Switch model or profile in a new session"),
     (
         "provider",
         "Add or update a model provider preset and API key",
@@ -171,23 +183,49 @@ impl App {
         });
         matches
     }
-    pub(crate) fn matching_model_profiles(
-        &self,
-        query: &str,
-    ) -> Vec<tars_core::agents::ModelProfile> {
+    pub(crate) fn matching_model_choices(&self, query: &str) -> Vec<ModelChoice> {
         let needle = query.trim().to_lowercase();
-        self.options
-            .config
-            .model_profiles()
-            .into_values()
-            .filter(|profile| {
-                needle.is_empty()
+        let mut out = Vec::new();
+        for profile in self.options.config.model_profiles().into_values() {
+            for (idx, model_id) in profile.available_models().into_iter().enumerate() {
+                let combined = format!("{}:{model_id}", profile.name).to_lowercase();
+                let matches = needle.is_empty()
                     || profile.name.to_lowercase().contains(&needle)
-                    || profile.model.to_lowercase().contains(&needle)
+                    || model_id.to_lowercase().contains(&needle)
                     || profile.provider.as_str().contains(&needle)
-            })
-            .collect()
+                    || combined.contains(&needle);
+                if matches {
+                    out.push(ModelChoice {
+                        profile_name: profile.name.clone(),
+                        model_id,
+                        provider: profile.provider,
+                        is_default_in_profile: idx == 0,
+                    });
+                }
+            }
+        }
+        out
     }
+
+    pub(crate) fn is_model_choice_active(&self, choice: &ModelChoice) -> bool {
+        let active_entry = self.entries.get(self.selected);
+        let active_model = active_entry
+            .map(super::state::Entry::model)
+            .or_else(|| self.options.preset.as_ref().map(|p| p.model.as_str()));
+        let active_provider = active_entry
+            .and_then(|e| e.session.as_ref().map(|s| s.definition().provider))
+            .or_else(|| self.options.preset.as_ref().map(|p| p.provider));
+        match self.options.profile.as_deref() {
+            Some(active_name) => {
+                active_name == choice.profile_name && active_model == Some(choice.model_id.as_str())
+            }
+            None => {
+                active_model == Some(choice.model_id.as_str())
+                    && active_provider.is_none_or(|provider| provider == choice.provider)
+            }
+        }
+    }
+
     pub(super) fn show_commands(&mut self) {
         self.panel = Some(Panel::Commands {
             query: String::new(),
@@ -195,8 +233,7 @@ impl App {
         });
     }
     pub(super) fn request_quit(&mut self) {
-        let has_drafts = self.form.is_some()
-            || (self.entries.is_empty() && self.scratch_has_text_draft())
+        let has_drafts = (self.entries.is_empty() && self.scratch_has_text_draft())
             || self.entries.iter().any(super::state::Entry::has_draft);
         let has_queue = self.entries.iter().any(|e| !e.queued_prompts.is_empty());
         if has_drafts || has_queue {
@@ -226,8 +263,7 @@ impl App {
     }
     pub(super) fn command(&mut self, index: usize, query: &str) {
         match COMMANDS[index].0 {
-            "new" => self.open_new_session_form(),
-            "clear" => self.clear_command(),
+            "new" | "clear" => self.create_new_session(),
             "resume" => {
                 let clean = query.trim_start_matches('/').trim();
                 let arg = clean.strip_prefix("resume").unwrap_or("").trim();
@@ -237,35 +273,7 @@ impl App {
             "model" => {
                 let clean = query.trim_start_matches('/').trim();
                 let arg = clean.strip_prefix("model").unwrap_or("").trim();
-                if arg.is_empty() {
-                    let profiles = self.matching_model_profiles("");
-                    if profiles.is_empty() {
-                        if self.options.no_config {
-                            self.notice =
-                                "No model profiles configured (--no-config); use /new".into();
-                        } else {
-                            self.open_provider_wizard();
-                        }
-                    } else {
-                        let selected = self
-                            .options
-                            .profile
-                            .as_deref()
-                            .and_then(|active| profiles.iter().position(|p| p.name == active))
-                            .or_else(|| {
-                                self.entries.get(self.selected).and_then(|entry| {
-                                    profiles.iter().position(|p| p.model == entry.model())
-                                })
-                            })
-                            .unwrap_or(0);
-                        self.panel = Some(Panel::Models {
-                            query: String::new(),
-                            selected,
-                        });
-                    }
-                } else {
-                    self.switch_model_profile(arg);
-                }
+                self.model_command(arg);
             }
             "sessions" => {
                 self.pending_resume_selector = None;
@@ -534,6 +542,103 @@ impl App {
             "discard" => self.confirmation = Some(Confirmation::Discard),
             "quit" => self.request_quit(),
             _ => unreachable!("commands are a closed local set"),
+        }
+    }
+
+    fn model_command(&mut self, arg: &str) {
+        let trimmed = arg.trim();
+        if trimmed.is_empty() {
+            let choices = self.matching_model_choices("");
+            if choices.is_empty() {
+                if self.options.no_config {
+                    self.notice =
+                        "No model profiles configured (--no-config); omit --no-config or pass --config FILE"
+                            .into();
+                } else {
+                    self.open_provider_wizard();
+                }
+            } else {
+                let selected = choices
+                    .iter()
+                    .position(|choice| self.is_model_choice_active(choice))
+                    .unwrap_or(0);
+                self.panel = Some(Panel::Models {
+                    query: String::new(),
+                    selected,
+                });
+            }
+            return;
+        }
+
+        let profiles = self.options.config.model_profiles();
+        if profiles.contains_key(trimmed) {
+            self.switch_profile_model(trimmed, None);
+            return;
+        }
+
+        if let Some((lhs, rhs)) = trimmed.split_once(':')
+            && let Some(profile) = profiles.get(lhs)
+        {
+            if rhs.is_empty() || rhs.chars().any(char::is_control) {
+                self.notice = "Model identifier must not be blank".into();
+                return;
+            }
+            let available = profile.available_models();
+            if available.iter().any(|m| m == rhs) {
+                self.switch_profile_model(lhs, Some(rhs));
+            } else {
+                let available_list = available
+                    .iter()
+                    .map(|m| crate::transcript::display_single_line(m))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.notice = format!(
+                    "Model '{}' not configured on profile '{}' (available: {}; use /provider to add models)",
+                    crate::transcript::display_single_line(rhs),
+                    crate::transcript::display_single_line(lhs),
+                    available_list,
+                );
+            }
+            return;
+        }
+
+        let mut matches: Vec<(String, String)> = Vec::new();
+        for profile in profiles.values() {
+            for model in profile.available_models() {
+                if model == trimmed {
+                    matches.push((profile.name.clone(), model));
+                }
+            }
+        }
+        match matches.as_slice() {
+            [(profile, model)] => self.switch_profile_model(profile, Some(model)),
+            many if !many.is_empty() => {
+                let candidates = many
+                    .iter()
+                    .map(|(profile, model)| {
+                        format!(
+                            "{}:{}",
+                            crate::transcript::display_single_line(profile),
+                            crate::transcript::display_single_line(model)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.notice = format!(
+                    "Model '{}' matches multiple profiles ({candidates}); use /model <profile>:<model>",
+                    crate::transcript::display_single_line(trimmed),
+                );
+                self.panel = Some(Panel::Models {
+                    query: trimmed.to_owned(),
+                    selected: 0,
+                });
+            }
+            _ => {
+                self.notice = format!(
+                    "Model or profile '{}' not found; use /model or /provider",
+                    crate::transcript::display_single_line(trimmed),
+                );
+            }
         }
     }
 
@@ -1308,25 +1413,22 @@ impl App {
             Panel::Commands { query, selected } => (query, selected, true),
             Panel::Sessions { query, selected } => (query, selected, false),
             Panel::Models { query, selected } => {
-                let profiles = self.matching_model_profiles(query);
-                let total = profiles.len() + 2;
+                let choices = self.matching_model_choices(query);
+                let total = choices.len() + 1;
                 *selected = (*selected).min(total.saturating_sub(1));
                 match key.code {
                     KeyCode::Up => *selected = selected.saturating_sub(1),
                     KeyCode::Down => *selected = (*selected + 1).min(total.saturating_sub(1)),
                     KeyCode::Enter if key.kind == KeyEventKind::Press => {
-                        if let Some(profile) = profiles.get(*selected) {
-                            let name = profile.name.clone();
+                        if let Some(choice) = choices.get(*selected) {
+                            let profile = choice.profile_name.clone();
+                            let model = choice.model_id.clone();
                             self.panel = None;
-                            self.switch_model_profile(&name);
+                            self.switch_profile_model(&profile, Some(&model));
                             return;
                         }
                         self.panel = None;
-                        if *selected == profiles.len() {
-                            self.open_new_session_form();
-                        } else {
-                            self.open_provider_wizard();
-                        }
+                        self.open_provider_wizard();
                         return;
                     }
                     KeyCode::Backspace => {
@@ -1429,9 +1531,8 @@ impl App {
                         crate::input::image::ImageArgCompletion::None => {}
                     }
                 } else if let Some(arg_prefix) = input::strip_model_command_prefix(clean) {
-                    let profile_names: Vec<String> =
-                        self.options.config.model_profiles().into_keys().collect();
-                    match input::complete_model_arg(arg_prefix, &profile_names) {
+                    let candidates = self.model_completion_candidates();
+                    match input::complete_model_arg(arg_prefix, &candidates) {
                         input::ModelArgCompletion::Modified {
                             replacement,
                             notice,

@@ -534,10 +534,11 @@ async fn cc03_clear_creates_fresh_session_and_preserves_history_and_errors_witho
 
     // Without preset (`--no-config`), `/clear` refuses cleanly.
     let mut no_preset = app(dir.path());
+    no_preset.options.no_config = true;
     run_command(&mut no_preset, "clear");
     assert_eq!(
         no_preset.notice,
-        "No default model preset configured; use /new"
+        "No active session or model preset under --no-config; omit --no-config or pass --config FILE"
     );
     assert!(no_preset.entries.is_empty());
 
@@ -693,7 +694,7 @@ async fn cc03_model_panel_direct_switch_tab_completion_and_definition_immutabili
     assert!(no_config_profiles.panel.is_none());
     assert_eq!(
         no_config_profiles.notice,
-        "No model profiles configured (--no-config); use /new"
+        "No model profiles configured (--no-config); omit --no-config or pass --config FILE"
     );
 
     let cfg_path = write_profiles_config(dir.path(), &ws, false);
@@ -717,23 +718,26 @@ async fn cc03_model_panel_direct_switch_tab_completion_and_definition_immutabili
     assert_eq!(app.entries[0].editor.lines(), &["/model fast"]);
     app.entries[0].editor = crate::input::editor();
 
-    // `/model` opens `Panel::Models` showing profiles, active marker, and Custom settings item.
+    // `/model` opens `Panel::Models` showing profiles, active marker, and `+ Add / configure model provider (/provider)`.
     run_command(&mut app, "model");
     assert!(matches!(app.panel, Some(Panel::Models { .. })));
     let view = screen(&app);
     assert!(view.contains("Models  /"), "{view}");
-    assert!(view.contains("default"), "{view}");
+    assert!(view.contains("default · default-model"), "{view}");
     assert!(view.contains("[active]"), "{view}");
-    assert!(view.contains("fast"), "{view}");
-    assert!(view.contains("fast-model"), "{view}");
-    assert!(view.contains("Custom settings (/new)..."), "{view}");
+    assert!(view.contains("fast · fast-model"), "{view}");
+    assert!(
+        view.contains("+ Add / configure model provider (/provider)"),
+        "{view}"
+    );
+    assert!(!view.contains("Custom settings (/new)..."));
 
-    // Filtering narrows the list; selecting "Custom settings (/new)..." opens Form.
+    // Filtering narrows the list; selecting `+ Add / configure model provider (/provider)` opens Panel::Provider.
     app.event(Event::Paste("zzz-none".into()));
     app.event(key(KeyCode::Enter));
-    assert!(app.panel.is_none());
-    assert!(app.form.is_some());
+    assert!(matches!(app.panel, Some(Panel::Provider(_))));
     app.event(key(KeyCode::Esc));
+    assert!(app.panel.is_none());
 
     // Re-open `/model`, filter to `fast`, press Enter -> creates NEW session with `fast` profile!
     run_command(&mut app, "model");
@@ -787,12 +791,18 @@ async fn cc03_model_panel_direct_switch_tab_completion_and_definition_immutabili
     assert_eq!(switched_default_def.tools, default_tools_for_sandbox(true));
     assert!(app.options.preset.as_ref().unwrap().tools.is_empty());
 
-    // Flip sandbox availability before `/clear` to prove `/clear` re-derives dynamic tools
-    // instead of reusing baked-in tools from `options.preset`.
+    // While entry 3 is open, `/clear` clones its SessionDefinition directly.
+    // Close entry 3 first so `/clear` falls back to `options.preset` and re-derives
+    // dynamic tools when sandbox availability flips.
     app.sandbox = Some(crate::app::startup::SandboxCheck {
         available: false,
         detail: "sandbox off".into(),
     });
+    app.close(3, ClosePolicy::Save);
+    until(&mut app, |a| {
+        a.entries[3].session.is_none() && a.jobs.is_empty()
+    })
+    .await;
     run_command(&mut app, "clear");
     until(&mut app, |a| {
         a.entries.len() == 5 && a.entries[4].session.is_some()
@@ -805,7 +815,8 @@ async fn cc03_model_panel_direct_switch_tab_completion_and_definition_immutabili
 
     run_command(&mut app, "model unknown-profile");
     assert!(
-        app.notice.contains("Profile 'unknown-profile' not found"),
+        app.notice
+            .contains("Model or profile 'unknown-profile' not found"),
         "{}",
         app.notice
     );
@@ -2140,13 +2151,17 @@ fn empty_entries_scratch_editor_accepts_typing_paste_completion_and_commands() {
     assert!(!app.scratch_has_text_draft());
     assert_eq!(app.notice, "Open or select a session first");
 
-    // 5. Typing `/new` into scratch_editor and pressing Enter opens the form and clears.
+    // 5. Typing `/new` into scratch_editor when unconfigured opens `/provider` and clears.
     app.event(Event::Paste("/new".into()));
     app.event(key(KeyCode::Enter));
-    assert!(app.form.is_some());
+    assert!(matches!(app.panel, Some(Panel::Provider(_))));
+    assert_eq!(
+        app.notice,
+        "No model provider configured yet; add one with /provider"
+    );
     assert!(!app.scratch_has_text_draft());
     app.event(key(KeyCode::Esc));
-    assert!(app.form.is_none());
+    assert!(app.panel.is_none());
 
     // 6. Unopened session entry: `/help` dispatches, plain text sets helpful notice.
     app.entries
@@ -2424,4 +2439,215 @@ async fn scratch_draft_never_triggers_ghost_quit_confirmation_after_session_adde
     )));
     assert!(app2.confirmation.is_none());
     assert!(app2.quitting);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn d2_d3_multimodel_picker_colon_disambiguation_and_inplace_new() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let cfg_path = dir.path().join("config.toml");
+    std::fs::write(
+        &cfg_path,
+        format!(
+            r#"
+version = 1
+store = "store"
+default_profile = "openai"
+
+[profiles.openai]
+provider = "openai-responses"
+model = "gpt-5.4"
+models = ["gpt-5.4", "shared-model"]
+api_key_env = "PATH"
+workspace_root = {:?}
+tools = ["read_file"]
+permission_mode = "accept-edits"
+prompt_cache = false
+
+[profiles.openai.code_execution]
+enabled = true
+timeout_secs = 42
+
+[profiles.openrouter]
+provider = "openai-chat"
+model = "anthropic/claude-sonnet-4.6"
+models = ["anthropic/claude-sonnet-4.6", "shared-model"]
+endpoint = "https://openrouter.ai/api/v1/chat/completions"
+api_key_env = "PATH"
+
+[profiles.ollama]
+provider = "openai-chat"
+model = "llama3.2:latest"
+models = ["llama3.2:latest", "qwen3:8b"]
+endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+api_key_env = "PATH"
+"#,
+            ws
+        ),
+    )
+    .unwrap();
+
+    let mut app = app_from_args(&[
+        "--config",
+        cfg_path.to_str().unwrap(),
+        "--workspace",
+        ws.to_str().unwrap(),
+    ]);
+    app.list();
+    until(&mut app, |a| {
+        !a.listing && a.entries.len() == 1 && a.entries[0].session.is_some()
+    })
+    .await;
+    let orig_def = app.entries[0].session.as_ref().unwrap().definition();
+    assert_eq!(orig_def.model, "gpt-5.4");
+    assert_eq!(
+        orig_def.permission_mode,
+        Some(tars_core::permission::PermissionMode::AcceptEdits)
+    );
+    assert!(!orig_def.prompt_cache);
+    assert_eq!(orig_def.code_execution.unwrap().timeout_secs, 42);
+
+    // 1. `/model` flattens all available_models() across profiles and marks only active (profile, model).
+    run_command(&mut app, "model");
+    let models_view = screen(&app);
+    assert!(
+        models_view.contains("openai · gpt-5.4  [active]"),
+        "{models_view}"
+    );
+    assert!(
+        models_view.contains("openai · shared-model"),
+        "{models_view}"
+    );
+    assert!(
+        models_view.contains("openrouter · shared-model"),
+        "{models_view}"
+    );
+    assert!(models_view.contains("ollama · qwen3:8b"), "{models_view}");
+    assert!(!models_view.contains("Custom settings (/new)..."));
+    app.event(key(KeyCode::Esc));
+
+    // 2. `/model qwen3:8b` treats `qwen3:8b` as model ID (because `qwen3` is not a profile name) and switches to `ollama`!
+    run_command(&mut app, "model qwen3:8b");
+    until(&mut app, |a| {
+        a.entries.len() == 2 && a.entries[1].session.is_some()
+    })
+    .await;
+    assert_eq!(app.selected, 1);
+    assert_eq!(app.entries[1].model(), "qwen3:8b");
+    assert_eq!(app.options.profile.as_deref(), Some("ollama"));
+    assert_eq!(app.options.preset.as_ref().unwrap().model, "qwen3:8b");
+    // Original session #0 definition remains strictly immutable.
+    assert_eq!(
+        app.entries[0].session.as_ref().unwrap().definition(),
+        orig_def
+    );
+
+    // 3. Subsequent `/new` inherits the switched model `qwen3:8b` and settings!
+    run_command(&mut app, "new");
+    until(&mut app, |a| {
+        a.entries.len() == 3 && a.entries[2].session.is_some()
+    })
+    .await;
+    assert_eq!(app.entries[2].model(), "qwen3:8b");
+    assert!(
+        app.notice.contains("Started fresh session"),
+        "{}",
+        app.notice
+    );
+
+    // 3b. Closing the switched session (so `entry.session.is_none()`) and running `/new`
+    //     still preserves non-default `qwen3:8b` via `resolve_preset_definition` instead of reverting to `llama3.2:latest`.
+    app.close(2, ClosePolicy::Save);
+    until(&mut app, |a| {
+        a.entries[2].session.is_none() && a.jobs.is_empty()
+    })
+    .await;
+    run_command(&mut app, "new");
+    until(&mut app, |a| {
+        a.entries.len() == 4 && a.entries[3].session.is_some()
+    })
+    .await;
+    assert_eq!(app.entries[3].model(), "qwen3:8b");
+    assert_eq!(
+        app.entries[3].session.as_ref().unwrap().definition().model,
+        "qwen3:8b"
+    );
+
+    // 4. Ambiguous `/model shared-model` opens Panel::Models pre-filtered with disambiguation notice.
+    run_command(&mut app, "model shared-model");
+    assert!(
+        app.notice.contains("Use /model <profile>:<model>")
+            || app.notice.contains("use /model <profile>:<model>"),
+        "{}",
+        app.notice
+    );
+    assert!(matches!(
+        &app.panel,
+        Some(Panel::Models { query, .. }) if query == "shared-model"
+    ));
+    app.event(key(KeyCode::Esc));
+
+    // 5. Explicit `/model openai:shared-model` switches unambiguously and updates preset.
+    run_command(&mut app, "model openai:shared-model");
+    until(&mut app, |a| {
+        a.entries.len() == 5 && a.entries[4].session.is_some()
+    })
+    .await;
+    let switched_def = app.entries[4].session.as_ref().unwrap().definition();
+    assert_eq!(switched_def.model, "shared-model");
+    assert_eq!(
+        switched_def.permission_mode,
+        Some(tars_core::permission::PermissionMode::AcceptEdits)
+    );
+    assert!(!switched_def.prompt_cache);
+    assert_eq!(switched_def.code_execution.unwrap().timeout_secs, 42);
+    assert_eq!(app.options.profile.as_deref(), Some("openai"));
+    assert_eq!(app.options.preset.as_ref().unwrap().model, "shared-model");
+
+    // 6. Unknown model on valid profile reports configured models clearly.
+    run_command(&mut app, "model openai:no-such-model");
+    assert!(
+        app.notice.contains("not configured on profile 'openai'"),
+        "{}",
+        app.notice
+    );
+    assert_eq!(app.entries.len(), 5);
+
+    // 7. `F2` and `/clear` preserve open session's full SessionDefinition in a fresh session.
+    app.event(key(KeyCode::F(2)));
+    until(&mut app, |a| {
+        a.entries.len() == 6 && a.entries[5].session.is_some()
+    })
+    .await;
+    let f2_def = app.entries[5].session.as_ref().unwrap().definition();
+    assert_eq!(f2_def, switched_def);
+    assert_ne!(app.entries[5].id(), app.entries[4].id());
+
+    // 8. Tab completion suggests profile:model as well as profile names and model IDs.
+    app.event(Event::Paste("/model openai:".into()));
+    app.event(key(KeyCode::Tab));
+    assert_eq!(app.entries[5].editor.lines(), &["/model openai:"]);
+    assert!(
+        app.entries[5].notice.contains("openai:gpt-5.4"),
+        "{}",
+        app.entries[5].notice
+    );
+    app.event(Event::Paste("gpt-".into()));
+    app.event(key(KeyCode::Tab));
+    assert_eq!(app.entries[5].editor.lines(), &["/model openai:gpt-5.4"]);
+
+    // 9. `--no-config` with no active session or preset refuses `/new` and `F2` cleanly.
+    let mut no_cfg = app_from_args(&[
+        "--no-config",
+        "--store",
+        dir.path().join("s2").to_str().unwrap(),
+    ]);
+    no_cfg.event(key(KeyCode::F(2)));
+    assert!(no_cfg.entries.is_empty());
+    assert!(no_cfg.panel.is_none());
+    assert_eq!(
+        no_cfg.notice,
+        "No active session or model preset under --no-config; omit --no-config or pass --config FILE"
+    );
 }

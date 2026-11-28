@@ -140,8 +140,13 @@ pub(super) enum Message {
     FolderTrustSaved(std::path::PathBuf, Result<std::path::PathBuf, String>),
     /// `/trust` status lines finished loading.
     TrustStatusLoaded(Vec<String>),
-    /// Read-only `credentials.toml` entry names refreshed for `/new` and `/provider`.
+    /// Read-only `credentials.toml` entry names refreshed for `/provider`.
     CredentialNamesLoaded(super::provider::CredentialStoreCache),
+    /// Endpoint `/models` discovery finished for `/provider` Step 3.
+    ProviderModelsFetched {
+        generation: u64,
+        result: Result<Vec<tars_core::config::DiscoveredModel>, String>,
+    },
     /// Persisting provider preset & API key from `/provider` finished.
     ProviderSaved(Result<super::provider::ProviderSavedState, String>),
     JobPanicked(Option<Key>, JobKind, String),
@@ -184,6 +189,8 @@ pub(super) enum JobKind {
     LoadTrustStatus,
     /// Read-only `credentials.toml` name list refresh.
     LoadCredentialNames,
+    /// Fetching `/models` from a provider endpoint for `/provider` Step 3.
+    FetchProviderModels,
     /// Writing `credentials.toml` and `config.toml` from `/provider`.
     SaveProvider,
 }
@@ -388,7 +395,6 @@ impl App {
 
                         let can_route_list = !self.quitting
                             && self.confirmation.is_none()
-                            && self.form.is_none()
                             && self.folder_trust.is_none();
 
                         if !can_route_list {
@@ -490,7 +496,6 @@ impl App {
                                         if self.options.check_folder_trust
                                             && self.panel.is_none()
                                             && self.folder_trust.is_none()
-                                            && self.form.is_none()
                                             && self.confirmation.is_none()
                                             && !self.quitting
                                             && let Some(workspace) = self.startup_workspace_root()
@@ -965,7 +970,6 @@ impl App {
             Message::FolderTrustChecked(workspace, check) => {
                 if self.quitting
                     || self.confirmation.is_some()
-                    || self.form.is_some()
                     || self.panel.is_some()
                     || self.folder_trust.is_some()
                 {
@@ -1001,11 +1005,7 @@ impl App {
                     self.refresh_size_flags();
                     self.update_approval_guard();
                     self.update_workspace_trust_guard();
-                    if !self.quitting
-                        && self.confirmation.is_none()
-                        && self.form.is_none()
-                        && self.panel.is_none()
-                    {
+                    if !self.quitting && self.confirmation.is_none() && self.panel.is_none() {
                         self.finish_startup_after_trust(None);
                     }
                 }
@@ -1036,6 +1036,9 @@ impl App {
             }
             Message::CredentialNamesLoaded(cache) => {
                 self.credential_store_cache = cache;
+            }
+            Message::ProviderModelsFetched { generation, result } => {
+                self.provider_models_fetched(generation, result);
             }
             Message::ProviderSaved(result) => {
                 self.provider_saved(result);
@@ -1297,6 +1300,17 @@ impl App {
                     self.credential_store_cache = super::provider::CredentialStoreCache::Error;
                     return;
                 }
+                if kind == JobKind::FetchProviderModels {
+                    if let Some(super::commands::Panel::Provider(wizard)) = self.panel.as_mut()
+                        && wizard.step == super::provider::ProviderWizardStep::SelectModels
+                    {
+                        wizard.model_fetch_status =
+                            super::provider::ModelFetchStatus::Failed(message);
+                    } else {
+                        self.notice = message;
+                    }
+                    return;
+                }
                 if kind == JobKind::SaveProvider {
                     if let Some(super::commands::Panel::Provider(wizard)) = self.panel.as_mut() {
                         wizard.saving = false;
@@ -1330,6 +1344,7 @@ impl App {
                         | JobKind::TrustWorkspaceFolder
                         | JobKind::LoadTrustStatus
                         | JobKind::LoadCredentialNames
+                        | JobKind::FetchProviderModels
                         | JobKind::SaveProvider => {
                             unreachable!("handled before the entry lookup")
                         }

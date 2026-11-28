@@ -58,17 +58,13 @@ fn grapheme_wrapping_never_splits_combining_marks_or_zwj_sequences() {
     assert!((0..rows.len()).any(|i| rows.row_text(i).as_deref() == Some("👩‍💻")));
 }
 #[test]
-fn paste_controls_and_form_validation_keep_actions_explicit() {
+fn paste_controls_keep_actions_explicit() {
     let mut editor = input::editor();
     input::paste(&mut editor, "a\x1b[31m\x13b\t\nc", true);
     assert_eq!(editor.lines().join("\n"), "a[31mb\t\nc");
-    let mut form = input::Form::default();
-    assert!(form.definition().is_err());
-    input::paste(&mut form.fields[1], "my-model\r\n", false);
-    assert_eq!(form.definition().unwrap().model, "my-model");
     let dir = tempfile::tempdir().unwrap();
     let mut app = app(dir.path());
-    app.form = Some(form);
+    app.event(Event::Paste("unsaved scratch".into()));
     app.event(ctrl('q'));
     assert!(app.confirmation.is_some());
 }
@@ -88,8 +84,8 @@ fn textarea_grapheme_editing_probe() {
     assert_eq!(editor.lines(), &[String::new()]);
 }
 
-#[test]
-fn shared_toml_populates_tui_form_and_explicit_store_wins() {
+#[tokio::test]
+async fn shared_toml_populates_tui_session_and_explicit_store_wins() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "version = 1\nstore = 'data'\ndefault_profile = 'local'\n[profiles.local]\nprovider = 'anthropic'\nmodel = 'shared-model'\napi_key_env = 'SHARED_KEY'\ncapacity = 7\n").unwrap();
@@ -99,14 +95,23 @@ fn shared_toml_populates_tui_form_and_explicit_store_wins() {
             .unwrap();
     assert_eq!(options.store, dir.path().join("data"));
     let mut app = crate::app::App::new(options);
-    app.event(key(KeyCode::F(2)));
-    let definition = app.form.as_ref().unwrap().definition().unwrap();
+    let definition = app
+        .options
+        .preset
+        .as_ref()
+        .expect("shared TOML preset populated");
     assert_eq!(definition.model, "shared-model");
     assert_eq!(definition.retained_work_capacity, 7);
     assert_eq!(
         definition.provider,
         tars_core::definition::Provider::Anthropic
     );
+    app.event(key(KeyCode::F(2)));
+    until(&mut app, |a| {
+        a.entries.len() == 1 && a.entries[0].busy.is_none()
+    })
+    .await;
+    assert_eq!(app.entries[0].model(), "shared-model");
     let explicit = dir.path().join("override");
     let options = crate::options::parse(
         [
@@ -122,37 +127,48 @@ fn shared_toml_populates_tui_form_and_explicit_store_wins() {
     assert_eq!(options.store, explicit);
 }
 
-#[test]
-fn workspace_form_uses_shared_resolver_and_preserves_profile_limits() {
+#[tokio::test]
+async fn workspace_session_uses_shared_resolver_and_preserves_profile_limits() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("workspace")).unwrap();
     let path = dir.path().join("config.toml");
-    std::fs::write(&path,"version = 1\nstore = 'data'\ndefault_profile = 'local'\n[profiles.local]\nprovider = 'openai-chat'\nmodel = 'workspace-model'\nworkspace_root = 'workspace'\ntools = ['read_file','search_text']\n[profiles.local.tool_limits]\nmax_search_matches = 7\n").unwrap();
+    std::fs::write(&path,"version = 1\nstore = 'data'\ndefault_profile = 'local'\n[profiles.local]\nprovider = 'openai-chat'\nmodel = 'workspace-model'\napi_key_env = 'PATH'\nworkspace_root = 'workspace'\ntools = ['read_file','search_text']\n[profiles.local.tool_limits]\nmax_search_matches = 7\n").unwrap();
     let options =
         crate::options::parse(["--config".into(), path.to_string_lossy().into_owned()].into_iter())
             .unwrap()
             .unwrap();
-    let mut form = input::Form::new(
-        options.config.clone(),
-        options.profile.clone(),
-        options.preset.as_ref(),
-    );
-    assert_eq!(form.fields.len(), 11);
-    let frozen = form.definition().unwrap();
+    let config = options.config.clone();
+    let mut app = crate::app::App::new(options);
+    app.event(key(KeyCode::F(2)));
+    until(&mut app, |a| {
+        a.entries.len() == 1 && a.entries[0].session.is_some()
+    })
+    .await;
+    let frozen = app.entries[0].session.as_ref().unwrap().definition();
     assert_eq!(
         frozen.workspace_root,
         Some(dir.path().join("workspace").canonicalize().unwrap())
     );
     assert_eq!(frozen.tools.len(), 2);
     assert_eq!(frozen.tool_limits.max_search_matches, 7);
-    form.fields[6] = ratatui_textarea::TextArea::from([""]);
-    assert!(form.definition().unwrap().tools.is_empty());
-    form.fields[6] = ratatui_textarea::TextArea::from(["shell"]);
-    assert!(form.definition().is_err());
+    assert!(
+        config
+            .definition(
+                None,
+                tars_core::config::DefinitionOverrides {
+                    tools: Some(tars_core::config::parse_tools("").unwrap()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .tools
+            .is_empty()
+    );
+    assert!(tars_core::config::parse_tools("shell").is_err());
 }
 
 #[test]
-fn clearing_visible_endpoint_and_workspace_fields_overrides_the_profile() {
+fn clearing_endpoint_and_workspace_overrides_works_via_definition_overrides() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("workspace")).unwrap();
     let path = dir.path().join("config.toml");
@@ -166,51 +182,42 @@ fn clearing_visible_endpoint_and_workspace_fields_overrides_the_profile() {
     .unwrap();
     let endpoint = "http://127.0.0.1:9/v1/chat/completions";
     let workspace = dir.path().join("workspace").canonicalize().unwrap();
-    // Both resolution paths are covered: the default profile with no explicit
-    // name, and the same profile selected by name.
     for profile in [None, Some("local")] {
         let mut args = vec!["--config".to_owned(), path.to_string_lossy().into_owned()];
         if let Some(name) = profile {
             args.extend(["--profile".to_owned(), name.to_owned()]);
         }
         let options = crate::options::parse(args.into_iter()).unwrap().unwrap();
-        let mut app = crate::app::App::new(options);
-        app.event(key(KeyCode::F(2)));
-        let form = app.form.as_mut().unwrap();
-        assert_eq!(form.fields[2].lines().join(""), endpoint);
-        assert_eq!(
-            form.fields[5].lines().join(""),
-            workspace.display().to_string()
-        );
-        assert_eq!(form.fields[6].lines().join(""), "read_file");
+        let preset = options.preset.as_ref().unwrap();
+        assert_eq!(preset.endpoint.as_deref(), Some(endpoint));
+        assert_eq!(preset.workspace_root.as_ref(), Some(&workspace));
+        assert_eq!(preset.tools.len(), 1);
 
-        // Clearing the endpoint must not restore the profile's endpoint.
-        form.fields[2] = ratatui_textarea::TextArea::from([""]);
-        let without_endpoint = form.definition().unwrap();
-        assert_eq!(without_endpoint.endpoint, None);
+        let mut without_endpoint = preset.clone();
+        without_endpoint.endpoint = None;
+        without_endpoint.validate().unwrap();
         assert_eq!(without_endpoint.workspace_root, Some(workspace.clone()));
         assert_eq!(without_endpoint.tools.len(), 1);
 
-        // Clearing the workspace while tools stay selected is refused.
-        form.fields[5] = ratatui_textarea::TextArea::from([""]);
-        let error = form.definition().unwrap_err();
+        let mut missing_ws = without_endpoint.clone();
+        missing_ws.workspace_root = None;
+        let error = missing_ws.validate().unwrap_err().to_string();
         assert!(
             error.contains("workspace root is required when tools are enabled"),
             "{error}"
         );
 
-        // Clearing both fields and the tool selection yields an explicit no-root,
-        // no-endpoint definition instead of the profile's values.
-        form.fields[6] = ratatui_textarea::TextArea::from([""]);
-        let cleared = form.definition().unwrap();
+        let mut cleared = missing_ws;
+        cleared.tools.clear();
+        cleared.validate().unwrap();
         assert_eq!(cleared.endpoint, None);
         assert_eq!(cleared.workspace_root, None);
         assert!(cleared.tools.is_empty());
     }
 }
 
-#[test]
-fn wm11_tui_form_resolves_mcp_ids_through_shared_config() {
+#[tokio::test]
+async fn wm11_tui_resolves_mcp_ids_through_shared_config() {
     let dir = tempfile::tempdir().unwrap();
     let toml_path = dir.path().join("config.toml");
     let json_path = dir.path().join("mcp.json");
@@ -222,6 +229,7 @@ default_profile = 'local'
 [profiles.local]
 provider = 'openai-chat'
 model = 'mcp-form-model'
+api_key_env = 'PATH'
 mcp = ['git']
 "#,
     )
@@ -248,38 +256,65 @@ mcp = ['git']
     )
     .unwrap()
     .unwrap();
-    let mut form = input::Form::new(
-        options.config.clone(),
-        options.profile.clone(),
-        options.preset.as_ref(),
-    );
-    assert_eq!(form.fields.len(), 11);
-    assert_eq!(
-        input::FIELD_NAMES[8],
-        "MCP servers (comma-separated ids from mcp.json)"
-    );
-    assert_eq!(form.fields[8].lines().join(""), "git");
-    assert_eq!(form.definition().unwrap().mcp_servers.len(), 1);
-    assert_eq!(form.definition().unwrap().mcp_servers[0].id, "git");
+    let config = options.config.clone();
+    let profile = options.profile.clone();
+    let mut app = crate::app::App::new(options);
+    app.event(key(KeyCode::F(2)));
+    until(&mut app, |a| {
+        a.entries.len() == 1 && a.entries[0].session.is_some()
+    })
+    .await;
+    let def = app.entries[0].session.as_ref().unwrap().definition();
+    assert_eq!(def.mcp_servers.len(), 1);
+    assert_eq!(def.mcp_servers[0].id, "git");
 
-    form.fields[8] = ratatui_textarea::TextArea::from(["git,docs"]);
-    let selected = form.definition().unwrap();
+    let selected = config
+        .definition(
+            profile.as_deref(),
+            tars_core::config::DefinitionOverrides {
+                mcp: Some(tars_core::config::parse_mcp("git,docs").unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
     assert_eq!(selected.mcp_servers.len(), 2);
     assert_eq!(selected.mcp_servers[1].id, "docs");
 
-    form.fields[8] = ratatui_textarea::TextArea::from([""]);
-    assert!(form.definition().unwrap().mcp_servers.is_empty());
+    let cleared = config
+        .definition(
+            profile.as_deref(),
+            tars_core::config::DefinitionOverrides {
+                mcp: Some(tars_core::config::parse_mcp("").unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(cleared.mcp_servers.is_empty());
 
-    form.fields[8] = ratatui_textarea::TextArea::from(["absent"]);
-    assert!(form.definition().unwrap_err().contains("absent"));
-    form.fields[8] = ratatui_textarea::TextArea::from(["Git"]);
-    assert!(form.definition().is_err());
+    let absent_err = config
+        .definition(
+            profile.as_deref(),
+            tars_core::config::DefinitionOverrides {
+                mcp: Some(tars_core::config::parse_mcp("absent").unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(absent_err.contains("absent"));
+    assert!(tars_core::config::parse_mcp("Git").is_err());
 
-    // Without a preset the same configuration still resolves an entered id.
-    let mut fresh = input::Form::new(options.config.clone(), options.profile.clone(), None);
-    fresh.fields[1] = ratatui_textarea::TextArea::from(["fixture-model"]);
-    fresh.fields[8] = ratatui_textarea::TextArea::from(["git"]);
-    assert_eq!(fresh.definition().unwrap().mcp_servers[0].id, "git");
+    let fresh = config
+        .definition(
+            None,
+            tars_core::config::DefinitionOverrides {
+                model: Some("fixture-model".into()),
+                mcp: Some(tars_core::config::parse_mcp("git").unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(fresh.mcp_servers[0].id, "git");
 }
 
 #[test]

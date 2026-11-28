@@ -76,25 +76,71 @@ impl App {
         Ok((id, model))
     }
 
-    pub(super) fn open_new_session_form(&mut self) {
-        let workspace_root = self
-            .options
-            .preset
-            .as_ref()
-            .and_then(|p| p.workspace_root.clone())
-            .or_else(|| self.active_or_cli_workspace())
-            .or_else(|| std::env::current_dir().ok());
-        let default_tools = self.default_workspace_tools();
-        self.form = Some(
-            input::Form::new(
-                self.options.config.clone(),
-                self.options.profile.clone(),
-                self.options.preset.as_ref(),
-            )
-            .with_code_execution(self.options.code_execution_enabled)
-            .with_workspace_defaults(workspace_root, &default_tools),
-        );
-        self.refresh_cached_credential_names();
+    pub(super) fn create_new_session(&mut self) {
+        if self.quitting
+            || self.confirmation.is_some()
+            || self.folder_trust.is_some()
+            || !self.capacity()
+        {
+            return;
+        }
+        let definition = if let Some(session) = self
+            .entries
+            .get(self.selected)
+            .and_then(|entry| entry.session.as_ref())
+        {
+            session.definition().clone()
+        } else if let Some(preset) = self.options.preset.clone() {
+            let workspace_root = self
+                .active_or_cli_workspace()
+                .or_else(|| preset.workspace_root.clone())
+                .or_else(|| std::env::current_dir().ok());
+            let tools = if preset.tools.is_empty() && workspace_root.is_some() {
+                Some(self.default_workspace_tools())
+            } else {
+                None
+            };
+            match self.resolve_preset_definition(
+                self.options.profile.as_deref(),
+                &preset,
+                workspace_root,
+                tools,
+            ) {
+                Ok(definition) => definition,
+                Err(error) => {
+                    self.notice = format!(
+                        "Could not start fresh session: {} · Run /doctor or /provider",
+                        crate::transcript::display_single_line(&error)
+                    );
+                    return;
+                }
+            }
+        } else if !self.options.no_config {
+            self.notice = "No model provider configured yet; add one with /provider".into();
+            self.open_provider_wizard();
+            return;
+        } else {
+            self.notice =
+                "No active session or model preset under --no-config; omit --no-config or pass --config FILE"
+                    .into();
+            return;
+        };
+
+        match self.prepare_and_open_definition(definition) {
+            Ok((id, model)) => {
+                let short_id = id.get(..8).unwrap_or(&id);
+                self.notice = format!(
+                    "Started fresh session {short_id} ({})",
+                    crate::transcript::display_single_line(&model)
+                );
+            }
+            Err(error) => {
+                self.notice = format!(
+                    "Could not start fresh session: {} · Run /doctor or /provider",
+                    crate::transcript::display_single_line(&error)
+                );
+            }
+        }
     }
 
     pub(super) fn resolve_preset_definition(
@@ -110,6 +156,7 @@ impl App {
                 .definition(
                     profile,
                     tars_core::config::DefinitionOverrides {
+                        model: (!preset.model.trim().is_empty()).then(|| preset.model.clone()),
                         workspace_root,
                         tools,
                         code_execution_enabled: self.options.code_execution_enabled,
@@ -131,7 +178,6 @@ impl App {
         if self.quitting
             || self.confirmation.is_some()
             || self.folder_trust.is_some()
-            || self.form.is_some()
             || self.panel.is_some()
             || !self.capacity()
         {
@@ -181,57 +227,6 @@ impl App {
         }
     }
 
-    pub(super) fn clear_command(&mut self) {
-        if self.quitting
-            || self.confirmation.is_some()
-            || self.folder_trust.is_some()
-            || self.form.is_some()
-            || !self.capacity()
-        {
-            return;
-        }
-        let Some(preset) = self.options.preset.clone() else {
-            self.notice = "No default model preset configured; use /new".into();
-            return;
-        };
-        let workspace_root = self
-            .active_or_cli_workspace()
-            .or_else(|| preset.workspace_root.clone())
-            .or_else(|| std::env::current_dir().ok());
-        let tools = if preset.tools.is_empty() && workspace_root.is_some() {
-            Some(self.default_workspace_tools())
-        } else {
-            None
-        };
-        let definition = match self.resolve_preset_definition(
-            self.options.profile.as_deref(),
-            &preset,
-            workspace_root,
-            tools,
-        ) {
-            Ok(definition) => definition,
-            Err(error) => {
-                self.notice = format!(
-                    "Could not start fresh session: {} · Run /doctor or /new",
-                    crate::transcript::display_single_line(&error)
-                );
-                return;
-            }
-        };
-        match self.prepare_and_open_definition(definition) {
-            Ok((id, _)) => {
-                let short_id = id.get(..8).unwrap_or(&id);
-                self.notice = format!("Started fresh session {short_id}");
-            }
-            Err(error) => {
-                self.notice = format!(
-                    "Could not start fresh session: {} · Run /doctor or /new",
-                    crate::transcript::display_single_line(&error)
-                );
-            }
-        }
-    }
-
     pub(super) fn resume_command(&mut self, arg: &str) {
         let trimmed = arg.trim();
         if trimmed.is_empty() {
@@ -255,11 +250,10 @@ impl App {
         self.list();
     }
 
-    pub(super) fn switch_model_profile(&mut self, profile_name: &str) {
+    pub(super) fn switch_profile_model(&mut self, profile_name: &str, model_id: Option<&str>) {
         if self.quitting
             || self.confirmation.is_some()
             || self.folder_trust.is_some()
-            || self.form.is_some()
             || !self.capacity()
         {
             return;
@@ -267,15 +261,26 @@ impl App {
         let trimmed = profile_name.trim();
         if trimmed.is_empty() || !self.options.config.model_profiles().contains_key(trimmed) {
             self.notice = format!(
-                "Profile '{}' not found (or no profiles in config.toml); use /new",
+                "Profile '{}' not found (or no profiles in config.toml); use /provider",
                 crate::transcript::display_single_line(trimmed)
             );
+            return;
+        }
+        let explicit_model = model_id
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_owned);
+        if let Some(m) = &explicit_model
+            && m.chars().any(char::is_control)
+        {
+            self.notice = "Model identifier must not contain control characters".into();
             return;
         }
         let active_or_cli_ws = self.active_or_cli_workspace();
         let base_def = match self.options.config.definition(
             Some(trimmed),
             tars_core::config::DefinitionOverrides {
+                model: explicit_model.clone(),
                 workspace_root: active_or_cli_ws.clone(),
                 code_execution_enabled: self.options.code_execution_enabled,
                 ..Default::default()
@@ -284,7 +289,7 @@ impl App {
             Ok(definition) => definition,
             Err(error) => {
                 self.notice = format!(
-                    "Could not switch to profile {}: {} · Run /doctor or /new",
+                    "Could not switch to profile {}: {} · Run /doctor or /provider",
                     crate::transcript::display_single_line(trimmed),
                     crate::transcript::display_single_line(&error.to_string())
                 );
@@ -300,6 +305,7 @@ impl App {
             match self.options.config.definition(
                 Some(trimmed),
                 tars_core::config::DefinitionOverrides {
+                    model: explicit_model.clone(),
                     workspace_root,
                     tools,
                     code_execution_enabled: self.options.code_execution_enabled,
@@ -309,7 +315,7 @@ impl App {
                 Ok(definition) => definition,
                 Err(error) => {
                     self.notice = format!(
-                        "Could not switch to profile {}: {} · Run /doctor or /new",
+                        "Could not switch to profile {}: {} · Run /doctor or /provider",
                         crate::transcript::display_single_line(trimmed),
                         crate::transcript::display_single_line(&error.to_string())
                     );
@@ -321,24 +327,18 @@ impl App {
         };
         match self.prepare_and_open_definition(definition.clone()) {
             Ok((id, model)) => {
-                let profile_preset = match (
-                    self.options.config.preset(Some(trimmed)),
-                    self.options.code_execution_enabled,
-                ) {
-                    (Ok(Some(_)), Some(_)) => self
-                        .options
-                        .config
-                        .definition(
-                            Some(trimmed),
-                            tars_core::config::DefinitionOverrides {
-                                code_execution_enabled: self.options.code_execution_enabled,
-                                ..Default::default()
-                            },
-                        )
-                        .ok(),
-                    (Ok(preset), _) => preset,
-                    (Err(_), _) => None,
-                };
+                let profile_preset = self
+                    .options
+                    .config
+                    .definition(
+                        Some(trimmed),
+                        tars_core::config::DefinitionOverrides {
+                            model: explicit_model,
+                            code_execution_enabled: self.options.code_execution_enabled,
+                            ..Default::default()
+                        },
+                    )
+                    .ok();
                 self.options.profile = Some(trimmed.to_owned());
                 self.options.preset = profile_preset.or(Some(definition));
                 let short_id = id.get(..8).unwrap_or(&id);
@@ -350,7 +350,7 @@ impl App {
             }
             Err(error) => {
                 self.notice = format!(
-                    "Could not switch to profile {}: {} · Run /doctor or /new",
+                    "Could not switch to profile {}: {} · Run /doctor or /provider",
                     crate::transcript::display_single_line(trimmed),
                     crate::transcript::display_single_line(&error)
                 );
@@ -368,28 +368,6 @@ impl App {
         self.spawn_job(None, super::jobs::JobKind::List, async move {
             Message::Listed(generation, host.list().await)
         });
-    }
-    pub(super) fn create(&mut self) {
-        if !self.capacity() {
-            return;
-        }
-        let Some(form) = self.form.as_mut() else {
-            return;
-        };
-        let definition = match form.definition() {
-            Ok(definition) => definition,
-            Err(error) => {
-                form.error = error;
-                return;
-            }
-        };
-        if let Err(error) = self.prepare_and_open_definition(definition) {
-            if let Some(form) = self.form.as_mut() {
-                form.error = error;
-            }
-            return;
-        }
-        self.form = None;
     }
     pub(super) fn open(&mut self) {
         if !self.capacity() {
@@ -1080,8 +1058,35 @@ impl App {
         }
     }
 
+    pub(super) fn model_completion_candidates(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let profiles = self.options.config.model_profiles();
+        for name in profiles.keys() {
+            if seen.insert(name.clone()) {
+                out.push(name.clone());
+            }
+        }
+        for profile in profiles.values() {
+            for model in profile.available_models() {
+                let qualified = format!("{}:{model}", profile.name);
+                if seen.insert(qualified.clone()) {
+                    out.push(qualified);
+                }
+            }
+        }
+        for profile in profiles.values() {
+            for model in profile.available_models() {
+                if seen.insert(model.clone()) {
+                    out.push(model);
+                }
+            }
+        }
+        out
+    }
+
     pub(super) fn complete_input(&mut self) {
-        let profile_names: Vec<String> = self.options.config.model_profiles().into_keys().collect();
+        let candidates = self.model_completion_candidates();
         if let Some(entry) = self.entries.get_mut(self.selected) {
             if entry.viewed_agent_id.is_some() {
                 return;
@@ -1090,11 +1095,8 @@ impl App {
                 .session
                 .as_ref()
                 .and_then(|session| session.definition().workspace_root);
-            let result = input::complete_editor(
-                &mut entry.editor,
-                workspace_root.as_deref(),
-                &profile_names,
-            );
+            let result =
+                input::complete_editor(&mut entry.editor, workspace_root.as_deref(), &candidates);
             if matches!(result, input::CompleteResult::Modified { .. }) {
                 entry.reset_history_cursor();
             }
@@ -1104,7 +1106,7 @@ impl App {
         let result = input::complete_editor(
             &mut self.scratch_editor,
             self.options.workspace.as_deref(),
-            &profile_names,
+            &candidates,
         );
         apply_completion_result(&mut self.notice, result);
     }
@@ -1991,7 +1993,6 @@ impl App {
         if self.quitting
             || self.confirmation.is_some()
             || self.panel.is_some()
-            || self.form.is_some()
             || self.folder_trust.is_some()
             || self.jobs.len() >= super::state::MAX_JOBS
         {
@@ -2255,7 +2256,6 @@ impl App {
             || self.quitting
             || self.confirmation.is_some()
             || self.panel.is_some()
-            || self.form.is_some()
             || self.folder_trust.is_some()
         {
             return;
@@ -2649,6 +2649,7 @@ fn is_completion_notice(notice: &str) -> bool {
     notice.starts_with("Commands: ")
         || notice.starts_with("Paths: ")
         || notice.starts_with("Profiles: ")
+        || notice.starts_with("Models: ")
         || notice.starts_with("Image: ")
         || notice.starts_with("Copy: ")
         || notice.starts_with("Subcommands: ")

@@ -1,10 +1,13 @@
-use super::support::{Server, app, app_with_folder_trust, create, ctrl, key, until};
+use super::support::{
+    Server, app, app_with_folder_trust, create, create_with_definition, ctrl, fixture_definition,
+    key, until,
+};
 use crate::{
     app::{
         App, COMMANDS, CONFIRM_GUARD_WINDOW, Clock, Panel, TRUST_PANEL_TITLE, jobs::Message,
         matching_commands,
     },
-    input::{FolderTrustWizard, Form},
+    input::FolderTrustWizard,
     options::{self, Options, StartupAction},
     render,
 };
@@ -576,37 +579,10 @@ async fn ft10_welcome_card_trust_badge_f4_switching_and_slash_trust() {
     .await;
 
     // Create entry 0 (ws_trusted), entry 1 (ws_other), entry 2 (unbound).
-    for ws_arg in [ws_trusted.to_str().unwrap(), ws_other.to_str().unwrap(), ""] {
-        multi.form = Some(Form {
-            fields: [
-                "openai-chat",
-                "fixture-model",
-                server.endpoint.as_str(),
-                "env:PATH",
-                "120",
-                ws_arg,
-                "",
-                "ask",
-                "",
-                "on",
-                "off",
-            ]
-            .into_iter()
-            .map(|v| TextArea::from([v]))
-            .collect(),
-            ..Form::default()
-        });
-        let expected_len = multi.entries.len() + 1;
-        multi.event(ctrl('s'));
-        assert!(
-            multi.form.is_none(),
-            "form error: {:?}",
-            multi.form.as_ref().map(|f| &f.error)
-        );
-        until(&mut multi, |a| {
-            a.entries.len() == expected_len && a.entries[expected_len - 1].session.is_some()
-        })
-        .await;
+    for ws_arg in [Some(&ws_trusted), Some(&ws_other), None] {
+        let mut def = fixture_definition("openai-chat", server.endpoint.as_str());
+        def.workspace_root = ws_arg.cloned();
+        create_with_definition(&mut multi, def).await;
     }
     // Dismiss trust prompts on entry 0 so welcome card renders cleanly.
     multi.event(key(KeyCode::F(4)));
@@ -731,30 +707,10 @@ async fn ux06_doctor_menu_tab_complete_async_report_and_early_close() {
     app.clock = Clock::manual(std::time::Instant::now());
 
     // Open a session with workspace so workspace checks appear too.
-    app.form = Some(Form {
-        fields: [
-            "openai-chat",
-            "fixture-model",
-            "http://127.0.0.1:9/chat/completions",
-            "env:PATH",
-            "120",
-            ws.to_str().unwrap(),
-            "read_file,find_files",
-            "ask",
-            "",
-            "on",
-            "off",
-        ]
-        .into_iter()
-        .map(|v| TextArea::from([v]))
-        .collect(),
-        ..Form::default()
-    });
-    app.event(ctrl('s'));
-    until(&mut app, |a| {
-        a.entries.len() == 1 && a.entries[0].session.is_some()
-    })
-    .await;
+    let mut def = fixture_definition("openai-chat", "http://127.0.0.1:9/chat/completions");
+    def.workspace_root = Some(ws.clone());
+    def.tools = tars_core::config::parse_tools("read_file,find_files").unwrap();
+    create_with_definition(&mut app, def).await;
 
     // Tab completion completes `/doc` -> `/doctor`.
     app.event(Event::Paste("/doc".into()));
@@ -907,30 +863,11 @@ async fn ux07_init_guardrails_and_writable_vs_readonly_submission() {
     );
 
     // 3. Tab completion `/in` -> `/init`, plus busy & child-agent guardrails on a writable workspace session.
-    app.form = Some(Form {
-        fields: [
-            "openai-chat",
-            "fixture-model",
-            server.endpoint.as_str(),
-            "env:PATH",
-            "120",
-            ws.to_str().unwrap(),
-            "list_directory,read_file,write_file,edit_file",
-            "ask",
-            "",
-            "on",
-            "off",
-        ]
-        .into_iter()
-        .map(|v| TextArea::from([v]))
-        .collect(),
-        ..Form::default()
-    });
-    app.event(ctrl('s'));
-    until(&mut app, |a| {
-        a.entries.len() == 2 && a.entries[1].session.is_some()
-    })
-    .await;
+    let mut def = fixture_definition("openai-chat", server.endpoint.as_str());
+    def.workspace_root = Some(ws.clone());
+    def.tools =
+        tars_core::config::parse_tools("list_directory,read_file,write_file,edit_file").unwrap();
+    create_with_definition(&mut app, def).await;
     assert_eq!(app.selected, 1);
 
     app.event(Event::Paste("/in".into()));
@@ -962,30 +899,10 @@ async fn ux07_init_guardrails_and_writable_vs_readonly_submission() {
     assert_eq!(app.entries[1].editor.lines(), &["keep my draft"]);
 
     // 5. Read-only workspace session submits read-only draft prompt.
-    app.form = Some(Form {
-        fields: [
-            "openai-chat",
-            "fixture-model",
-            server.endpoint.as_str(),
-            "env:PATH",
-            "120",
-            ws.to_str().unwrap(),
-            "list_directory,read_file",
-            "ask",
-            "",
-            "on",
-            "off",
-        ]
-        .into_iter()
-        .map(|v| TextArea::from([v]))
-        .collect(),
-        ..Form::default()
-    });
-    app.event(ctrl('s'));
-    until(&mut app, |a| {
-        a.entries.len() == 3 && a.entries[2].session.is_some()
-    })
-    .await;
+    let mut ro_def = fixture_definition("openai-chat", server.endpoint.as_str());
+    ro_def.workspace_root = Some(ws.clone());
+    ro_def.tools = tars_core::config::parse_tools("list_directory,read_file").unwrap();
+    create_with_definition(&mut app, ro_def).await;
     assert_eq!(app.selected, 2);
 
     run_slash_command(&mut app, "init");

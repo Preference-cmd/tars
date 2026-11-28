@@ -1,12 +1,7 @@
-use super::theme::{ACCENT, MUTED};
-use crate::{
-    app::{
-        App, COMMANDS, Panel, matching_commands,
-        provider::{
-            CredentialStoreCache, ProviderFieldKind, ProviderWizardState, ProviderWizardStep,
-        },
-    },
-    input::{FIELD_NAMES, Form},
+use super::theme::{ACCENT, MUTED, SPINNER_FRAMES};
+use crate::app::{
+    App, COMMANDS, Panel, matching_commands,
+    provider::{ModelFetchStatus, ProviderFieldKind, ProviderWizardState, ProviderWizardStep},
 };
 use ratatui::{
     Frame,
@@ -310,49 +305,36 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
                 ])),
                 rows[0],
             );
-            let profiles = app.matching_model_profiles(query);
-            let mut items: Vec<ListItem<'_>> = profiles
+            let choices = app.matching_model_choices(query);
+            let mut items: Vec<ListItem<'_>> = choices
                 .iter()
-                .map(|profile| {
-                    let is_active = match app.options.profile.as_deref() {
-                        Some(active_name) => active_name == profile.name,
-                        None => app
-                            .entries
-                            .get(app.selected)
-                            .map(|e| e.model() == profile.model)
-                            .unwrap_or_else(|| {
-                                app.options.preset.as_ref().is_some_and(|p| {
-                                    p.model == profile.model && p.provider == profile.provider
-                                })
-                            }),
-                    };
-                    let escaped_name = crate::transcript::display_single_line(&profile.name);
-                    let escaped_model = crate::transcript::display_single_line(&profile.model);
+                .map(|choice| {
+                    let is_active = app.is_model_choice_active(choice);
+                    let escaped_name = crate::transcript::display_single_line(&choice.profile_name);
+                    let escaped_model = crate::transcript::display_single_line(&choice.model_id);
                     let title = if is_active {
-                        format!("{escaped_name}  [active]")
+                        format!("{escaped_name} · {escaped_model}  [active]")
                     } else {
-                        escaped_name
+                        format!("{escaped_name} · {escaped_model}")
+                    };
+                    let default_tag = if choice.is_default_in_profile {
+                        " · default"
+                    } else {
+                        ""
                     };
                     ListItem::new(vec![
                         Line::from(title),
                         Line::styled(
-                            format!("  {} · {escaped_model}", profile.provider.as_str()),
+                            format!("  {}{default_tag}", choice.provider.as_str()),
                             Style::default().fg(MUTED),
                         ),
                     ])
                 })
                 .collect();
             items.push(ListItem::new(vec![
-                Line::from("Custom settings (/new)..."),
+                Line::from("+ Add / configure model provider (/provider)"),
                 Line::styled(
-                    "  Open full session creation form",
-                    Style::default().fg(MUTED),
-                ),
-            ]));
-            items.push(ListItem::new(vec![
-                Line::from("+ Add model provider (/provider)"),
-                Line::styled(
-                    "  Configure a provider preset and API key",
+                    "  Configure a provider preset, API key, and models",
                     Style::default().fg(MUTED),
                 ),
             ]));
@@ -468,98 +450,6 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
         Paragraph::new("↑↓ select · Enter open · Ctrl-D/Del delete · Esc back")
             .style(Style::default().fg(MUTED)),
         rows[2],
-    );
-}
-
-pub(super) fn form(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let form = app.form.as_ref().unwrap();
-    let command = form.command_summary();
-    let command_rows = u16::from(command.is_some());
-    let compact = area.height < 2 + 3 * form.fields.len() as u16 + 4 + command_rows;
-    let shown: Vec<_> = if compact {
-        vec![form.selected]
-    } else {
-        (0..form.fields.len()).collect()
-    };
-    let mut sizes = vec![Constraint::Length(2)];
-    sizes.extend(std::iter::repeat_n(Constraint::Length(3), shown.len()));
-    if command.is_some() {
-        sizes.push(Constraint::Length(1));
-    }
-    sizes.push(Constraint::Min(1));
-    sizes.push(Constraint::Length(if compact { 2 } else { 3 }));
-    let rows = Layout::vertical(sizes).split(area);
-    frame.render_widget(
-        Paragraph::new(format!(
-            "New session  ·  {} / {}",
-            form.selected + 1,
-            form.fields.len()
-        ))
-        .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-        rows[0],
-    );
-    for (row, &index) in shown.iter().enumerate() {
-        let field = &form.fields[index];
-        let raw_value = field.lines().join("");
-        let title = if index == 3 {
-            Line::from(vec![
-                Span::raw(FIELD_NAMES[index]),
-                credential_status_badge(&raw_value, &app.credential_store_cache),
-            ])
-        } else {
-            Line::from(FIELD_NAMES[index])
-        };
-        let block = Block::default()
-            .borders(Borders::BOTTOM)
-            .title(title)
-            .border_style(Style::default().fg(if index == form.selected {
-                ACCENT
-            } else {
-                MUTED
-            }));
-        let inner = block.inner(rows[row + 1]);
-        frame.render_widget(block, rows[row + 1]);
-        if Form::is_selector_field(index) {
-            let selector_text = format!("◀ {} ▶", raw_value.trim());
-            let style = if index == form.selected {
-                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            frame.render_widget(Paragraph::new(selector_text).style(style), inner);
-        } else if index == form.selected {
-            frame.render_widget(field, inner);
-        } else {
-            frame.render_widget(Paragraph::new(raw_value), inner);
-        }
-    }
-    if let Some(command) = &command {
-        frame.render_widget(
-            Paragraph::new(command.as_str()).style(Style::default().fg(MUTED)),
-            rows[shown.len() + 1],
-        );
-    }
-    let error_row = shown.len() + 1 + usize::from(command.is_some());
-    frame.render_widget(
-        Paragraph::new(form.error.as_str())
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(Color::Yellow)),
-        rows[error_row],
-    );
-    let hint = if app.confirmation.is_some() {
-        "Discard this form and unsent drafts, save sessions and quit? y / n"
-    } else {
-        "Tab / Shift-Tab field · ←/→/Space choose · Ctrl-S create · Esc back\nSettings apply to this new session only."
-    };
-    frame.render_widget(
-        Paragraph::new(hint)
-            .wrap(Wrap { trim: false })
-            .style(Style::default().fg(if app.confirmation.is_some() {
-                Color::Yellow
-            } else {
-                MUTED
-            })),
-        rows[error_row + 1],
     );
 }
 
@@ -1097,43 +987,6 @@ fn render_workspace_trust_prompt(
     frame.render_widget(Paragraph::new(hint).style(hint_style), regions[2]);
 }
 
-fn valid_env_var_name(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    bytes
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
-        && bytes.all(|c| c.is_ascii_alphanumeric() || c == b'_')
-}
-
-fn credential_status_badge(raw: &str, cache: &CredentialStoreCache) -> Span<'static> {
-    let trimmed = raw.trim();
-    if let Some(env_var) = trimmed.strip_prefix("env:") {
-        let var = env_var.trim();
-        let is_set =
-            valid_env_var_name(var) && std::env::var_os(var).is_some_and(|val| !val.is_empty());
-        return if is_set {
-            Span::styled("  ✓ [env set]", Style::default().fg(Color::Green))
-        } else {
-            Span::styled("  ✗ [env unset]", Style::default().fg(Color::Yellow))
-        };
-    }
-    if !tars_core::definition::valid_credential_name(trimmed) {
-        return Span::styled("  ✗ [invalid]", Style::default().fg(Color::Yellow));
-    }
-    match cache {
-        CredentialStoreCache::Error => {
-            Span::styled("  ✗ [store error]", Style::default().fg(Color::Yellow))
-        }
-        CredentialStoreCache::Loaded(names) if names.iter().any(|n| n == trimmed) => {
-            Span::styled("  ✓ [stored]", Style::default().fg(Color::Green))
-        }
-        CredentialStoreCache::Loaded(_) | CredentialStoreCache::Unavailable => {
-            Span::styled("  ✗ [missing]", Style::default().fg(Color::Yellow))
-        }
-        CredentialStoreCache::Unknown => Span::styled("  [checking…]", Style::default().fg(MUTED)),
-    }
-}
-
 fn provider_wizard(frame: &mut Frame<'_>, app: &App, wizard: &ProviderWizardState, area: Rect) {
     let compact = area.height < 16 || area.width < 46;
     match wizard.step {
@@ -1145,7 +998,7 @@ fn provider_wizard(frame: &mut Frame<'_>, app: &App, wizard: &ProviderWizardStat
             ])
             .split(area);
             frame.render_widget(
-                Paragraph::new("Add model provider (1/2 · select preset)")
+                Paragraph::new("Add model provider (1/3 · select preset)")
                     .style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
                 rows[0],
             );
@@ -1184,7 +1037,7 @@ fn provider_wizard(frame: &mut Frame<'_>, app: &App, wizard: &ProviderWizardStat
                 ListItem::new(vec![
                     Line::from("Custom provider"),
                     Line::styled(
-                        "  Configure protocol, endpoint URL, model, and API key",
+                        "  Configure protocol, endpoint URL, API key, and models",
                         Style::default().fg(MUTED),
                     ),
                 ])
@@ -1243,9 +1096,9 @@ fn provider_wizard(frame: &mut Frame<'_>, app: &App, wizard: &ProviderWizardStat
             let rows = Layout::vertical(sizes).split(area);
 
             let title = if wizard.is_custom {
-                "Configure custom provider (2/2)".to_owned()
+                "Configure custom provider (2/3)".to_owned()
             } else {
-                format!("Configure {} (2/2)", wizard.preset_label)
+                format!("Configure {} (2/3)", wizard.preset_label)
             };
             frame.render_widget(
                 Paragraph::new(title)
@@ -1273,9 +1126,7 @@ fn provider_wizard(frame: &mut Frame<'_>, app: &App, wizard: &ProviderWizardStat
                 row_cursor += 1;
             }
 
-            let stored_already = app
-                .credential_store_cache
-                .contains(wizard.profile_name.trim());
+            let existing_cred = wizard.effective_existing_credential(&app.options.config);
             for &idx in &shown {
                 let kind = fields[idx];
                 let active = idx == active_idx;
@@ -1292,14 +1143,38 @@ fn provider_wizard(frame: &mut Frame<'_>, app: &App, wizard: &ProviderWizardStat
                         "Profile / credential name".to_owned(),
                         wizard.profile_name.clone(),
                     ),
-                    ProviderFieldKind::Model => ("Model".to_owned(), wizard.model.clone()),
                     ProviderFieldKind::ApiKey => {
                         let suffix = if wizard.ollama_default_hint {
-                            " [local default · replace if your server requires auth]"
-                        } else if wizard.api_key.is_empty() && stored_already {
-                            " [stored · leave blank to keep]"
+                            " [local default · replace if your server requires auth]".to_owned()
+                        } else if wizard.api_key.is_empty() {
+                            match &existing_cred {
+                                Some(tars_core::definition::CredentialRef::Store(name))
+                                    if app.credential_store_cache.contains(name) =>
+                                {
+                                    " [stored · leave blank to keep]".to_owned()
+                                }
+                                Some(tars_core::definition::CredentialRef::Store(name)) => {
+                                    format!(
+                                        " [missing stored credential '{}']",
+                                        crate::transcript::display_single_line(name)
+                                    )
+                                }
+                                Some(tars_core::definition::CredentialRef::Environment(var)) => {
+                                    format!(
+                                        " [env:{} · enter key to migrate]",
+                                        crate::transcript::display_single_line(var)
+                                    )
+                                }
+                                None if app
+                                    .credential_store_cache
+                                    .contains(wizard.profile_name.trim()) =>
+                                {
+                                    " [stored · leave blank to keep]".to_owned()
+                                }
+                                None => String::new(),
+                            }
                         } else {
-                            ""
+                            String::new()
                         };
                         (format!("API Key{suffix}"), wizard.masked_api_key())
                     }
@@ -1341,17 +1216,187 @@ fn provider_wizard(frame: &mut Frame<'_>, app: &App, wizard: &ProviderWizardStat
             let hint = if wizard.saving {
                 "Saving configuration and 0600 credentials..."
             } else if compact {
-                "Tab field · Enter save · Esc back"
+                "Tab field · Enter next · Ctrl-S save · Esc back"
             } else if wizard.is_custom {
-                "Tab / ↑↓ field · ←/→/Space protocol · Enter / Ctrl-S save · Esc back"
+                "Tab / ↑↓ field · ←/→/Space protocol · Enter next · Ctrl-S save · Esc back"
             } else {
-                "Tab / ↑↓ field · Enter / Ctrl-S save · Esc back"
+                "Tab / ↑↓ field · Enter next · Ctrl-S save · Esc back"
             };
             frame.render_widget(
                 Paragraph::new(hint)
                     .wrap(Wrap { trim: false })
                     .style(Style::default().fg(MUTED)),
                 rows[row_cursor + 1],
+            );
+        }
+        ProviderWizardStep::SelectModels => {
+            let ultra_compact = area.height < 10;
+            let header_rows = if ultra_compact { 2u16 } else { 3u16 };
+            let error_rows = if wizard.error.is_empty()
+                && !matches!(wizard.model_fetch_status, ModelFetchStatus::Failed(_))
+            {
+                0u16
+            } else if ultra_compact {
+                1u16
+            } else {
+                2u16
+            };
+            let hint_rows = if compact || ultra_compact { 1u16 } else { 2u16 };
+            let rows = Layout::vertical([
+                Constraint::Length(header_rows),
+                Constraint::Min(1),
+                Constraint::Length(error_rows),
+                Constraint::Length(hint_rows),
+            ])
+            .split(area);
+
+            let profile_label = crate::transcript::display_single_line(&wizard.profile_name);
+            let spinner = SPINNER_FRAMES[(app.spinner_tick as usize) % SPINNER_FRAMES.len()];
+            let status_span = match &wizard.model_fetch_status {
+                ModelFetchStatus::Idle => Span::styled(
+                    format!(" · {} selected", wizard.selected_models.len()),
+                    Style::default().fg(MUTED),
+                ),
+                ModelFetchStatus::Fetching => Span::styled(
+                    format!(" · {spinner} Fetching models…"),
+                    Style::default().fg(ACCENT),
+                ),
+                ModelFetchStatus::Loaded => Span::styled(
+                    format!(
+                        " · {} found · {} selected",
+                        wizard.fetched_models.len(),
+                        wizard.selected_models.len()
+                    ),
+                    Style::default().fg(MUTED),
+                ),
+                ModelFetchStatus::Failed(_) => Span::styled(
+                    " · /models unavailable (manual fallback)",
+                    Style::default().fg(Color::Yellow),
+                ),
+            };
+            let query_escaped = crate::transcript::display_single_line(&wizard.model_query);
+            let mut header_lines = vec![Line::from(vec![
+                Span::styled(
+                    format!("Select models · {profile_label} (3/3)"),
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                status_span,
+            ])];
+            header_lines.push(Line::from(vec![
+                Span::styled("Filter: /", Style::default().fg(MUTED)),
+                Span::raw(format!("{query_escaped}▏")),
+            ]));
+            frame.render_widget(Paragraph::new(header_lines), rows[0]);
+
+            let candidates = wizard.visible_model_candidates();
+            if candidates.is_empty() {
+                let empty_msg = match &wizard.model_fetch_status {
+                    ModelFetchStatus::Fetching => {
+                        format!("{spinner} Fetching models… (or type a model ID)")
+                    }
+                    _ => "No matching models. Type a model ID to use it, or Ctrl-R to retry."
+                        .to_owned(),
+                };
+                frame.render_widget(
+                    Paragraph::new(empty_msg)
+                        .wrap(Wrap { trim: false })
+                        .style(Style::default().fg(MUTED)),
+                    rows[1],
+                );
+            } else {
+                let max_item_width = usize::from(rows[1].width).saturating_sub(2);
+                let items: Vec<ListItem<'_>> = candidates
+                    .iter()
+                    .map(|candidate| {
+                        let escaped_id = crate::transcript::display_single_line(&candidate.id);
+                        if candidate.is_custom_entry {
+                            let spans = super::surface::truncate_spans_display_width(
+                                vec![Span::styled(
+                                    format!("+ Use custom model \"{escaped_id}\""),
+                                    Style::default().fg(ACCENT),
+                                )],
+                                max_item_width,
+                            );
+                            return ListItem::new(Line::from(spans));
+                        }
+                        let checked = wizard.selected_models.iter().any(|m| m == &candidate.id);
+                        let mark = if checked { "[x]" } else { "[ ]" };
+                        let is_default = wizard
+                            .selected_models
+                            .first()
+                            .is_some_and(|m| m == &candidate.id);
+                        let default_badge = if is_default { " (default)" } else { "" };
+                        let mut spans =
+                            vec![Span::raw(format!("{mark} {escaped_id}{default_badge}"))];
+                        if !compact {
+                            let display = candidate
+                                .display_name
+                                .as_deref()
+                                .map(crate::transcript::display_single_line)
+                                .filter(|name| !name.is_empty() && name != &escaped_id);
+                            let owner = candidate
+                                .owned_by
+                                .as_deref()
+                                .map(crate::transcript::display_single_line)
+                                .filter(|own| !own.is_empty());
+                            let meta = match (display, owner) {
+                                (Some(d), Some(o)) => Some(format!("  {d} · {o}")),
+                                (Some(d), None) => Some(format!("  {d}")),
+                                (None, Some(o)) => Some(format!("  {o}")),
+                                (None, None) => None,
+                            };
+                            if let Some(meta) = meta {
+                                spans.push(Span::styled(meta, Style::default().fg(MUTED)));
+                            }
+                        }
+                        ListItem::new(Line::from(super::surface::truncate_spans_display_width(
+                            spans,
+                            max_item_width,
+                        )))
+                    })
+                    .collect();
+                let mut state = ListState::default()
+                    .with_selected(Some(wizard.model_cursor.min(items.len() - 1)));
+                frame.render_stateful_widget(
+                    List::new(items)
+                        .highlight_symbol("❯ ")
+                        .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                    rows[1],
+                    &mut state,
+                );
+            }
+
+            if error_rows > 0 {
+                let err_text = if !wizard.error.is_empty() {
+                    crate::transcript::display_single_line(&wizard.error)
+                } else if let ModelFetchStatus::Failed(err) = &wizard.model_fetch_status {
+                    format!(
+                        "Model discovery failed: {} (type model ID or Ctrl-R to retry)",
+                        crate::transcript::display_single_line(err)
+                    )
+                } else {
+                    String::new()
+                };
+                frame.render_widget(
+                    Paragraph::new(err_text)
+                        .wrap(Wrap { trim: false })
+                        .style(Style::default().fg(Color::Yellow)),
+                    rows[2],
+                );
+            }
+
+            let hint = if wizard.saving {
+                "Saving configuration and 0600 credentials..."
+            } else if compact {
+                "↑↓ · Space [x] · Enter save · Ctrl-R retry · Esc back"
+            } else {
+                "↑↓ select · Space toggle [x] · Type to filter/custom · Ctrl-R retry · Enter confirm · Esc back"
+            };
+            frame.render_widget(
+                Paragraph::new(hint)
+                    .wrap(Wrap { trim: false })
+                    .style(Style::default().fg(MUTED)),
+                rows[3],
             );
         }
     }

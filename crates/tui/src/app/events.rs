@@ -153,11 +153,7 @@ impl App {
                 }
                 return;
             }
-            if let Some(form) = &mut self.form {
-                if !input::Form::is_selector_field(form.selected) {
-                    input::paste(&mut form.fields[form.selected], text, false);
-                }
-            } else if self.folder_trust.is_some() {
+            if self.folder_trust.is_some() {
                 return;
             } else if let Some(entry) = self.entries.get_mut(self.selected) {
                 if entry.workspace_rules_trust.is_some() || entry.workspace_agents_trust.is_some() {
@@ -230,18 +226,6 @@ impl App {
         }
         if self.panel.is_some() {
             self.panel_key(key);
-            self.update_approval_guard();
-            self.update_workspace_trust_guard();
-            return;
-        }
-        if let Some(form) = &mut self.form {
-            if input::control(key, 's') {
-                self.create();
-            } else if key.code == KeyCode::Esc {
-                self.form = None;
-            } else {
-                form.key(key);
-            }
             self.update_approval_guard();
             self.update_workspace_trust_guard();
             return;
@@ -480,7 +464,7 @@ impl App {
         } else {
             match key.code {
                 KeyCode::F(2) if key.kind == KeyEventKind::Press => {
-                    self.open_new_session_form();
+                    self.create_new_session();
                 }
                 KeyCode::F(3) if key.kind == KeyEventKind::Press => self.open(),
                 KeyCode::F(4) if key.kind == KeyEventKind::Press => {

@@ -90,6 +90,7 @@ async fn enter_sends_once_ctrl_j_edits_and_menu_escape_does_not_cancel() {
 async fn compact_layout_keeps_menu_and_confirmation_controls_visible() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app(dir.path());
+    app.event(Event::Paste("draft".into()));
     for (width, height) in [(120, 40), (80, 24), (50, 18), (30, 12)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         app.event(key(KeyCode::F(1)));
@@ -112,7 +113,10 @@ async fn compact_layout_keeps_menu_and_confirmation_controls_visible() {
             .iter()
             .map(|c| c.symbol())
             .collect::<String>();
-        assert!(screen.contains("Model"), "{width}x{height}: {screen}");
+        assert!(
+            screen.contains("Add model provider"),
+            "{width}x{height}: {screen}"
+        );
         app.event(ctrl('q'));
         terminal.draw(|f| render::draw(f, &app)).unwrap();
         let screen = terminal

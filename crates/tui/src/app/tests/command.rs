@@ -1,15 +1,12 @@
 use super::support::app;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::support::{ctrl, key, until};
-use crate::{input::Form, render};
+use super::support::{create_with_definition, fixture_definition, key, until};
+use crate::render;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crossterm::event::KeyCode;
 use ratatui::{Terminal, backend::TestBackend};
-use ratatui_textarea::TextArea;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use serde_json::json;
-use std::sync::Arc;
-use tars_core::config::Config;
 use tars_core::definition::{
     CommandNetwork, CommandSettings, CredentialRef, Provider, SessionDefinition, WorkspaceTool,
 };
@@ -63,49 +60,36 @@ fn preset(command: CommandSettings) -> SessionDefinition {
     }
 }
 
-#[test]
-fn new_session_form_shows_command_settings_read_only() {
+#[tokio::test]
+async fn new_session_preserves_command_settings_from_open_session() {
     let dir = tempfile::tempdir().unwrap();
     let mut app = app(dir.path());
-    app.form = Some(Form::new(
-        Arc::new(Config::default()),
-        None,
-        Some(&preset(CommandSettings {
-            network: CommandNetwork::Open,
-            default_timeout_secs: 90,
-            max_timeout_secs: 300,
-        })),
-    ));
-    let view = screen(&app);
-    assert!(
-        view.contains("Command: network open · timeout 90s (max 300s) · preset"),
-        "{view}"
-    );
-    // The summary is not a field: tab order still covers exactly the inputs.
-    let form = app.form.as_ref().unwrap();
-    assert_eq!(form.fields.len(), crate::input::FIELD_NAMES.len());
-    assert!(Form::default().command_summary().is_none());
-}
-
-#[test]
-fn command_summary_follows_the_tools_field_not_the_preset() {
-    let mut definition = preset(CommandSettings {
+    let custom = CommandSettings {
         network: CommandNetwork::Open,
         default_timeout_secs: 90,
         max_timeout_secs: 300,
-    });
-    definition.tools = vec![WorkspaceTool::ReadFile];
-    let mut form = Form::new(Arc::new(Config::default()), None, Some(&definition));
-    assert!(form.command_summary().is_none());
-    form.fields[6] = TextArea::from(["run_command"]);
+    };
+    let definition = preset(custom);
+    super::support::create_with_definition(&mut app, definition).await;
+    app.event(crossterm::event::Event::Key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::F(2),
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ));
+    super::support::until(&mut app, |a| {
+        a.entries.len() == 2 && a.entries[1].session.is_some()
+    })
+    .await;
     assert_eq!(
-        form.command_summary().unwrap(),
-        "Command: network none · timeout 120s (max 600s) · defaults"
+        app.entries[1]
+            .session
+            .as_ref()
+            .unwrap()
+            .definition()
+            .effective_command_settings(),
+        Some(custom)
     );
-    form.fields[6] = TextArea::from(["read_file"]);
-    assert!(form.command_summary().is_none());
-    form.fields[6] = TextArea::from(["not_a_tool"]);
-    assert!(form.command_summary().is_none());
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -115,30 +99,11 @@ async fn create_command_session(
     workspace: &std::path::Path,
     mode: &str,
 ) {
-    app.form = Some(Form {
-        fields: [
-            "openai-chat",
-            "fixture-model",
-            endpoint,
-            "env:PATH",
-            "120",
-            &workspace.display().to_string(),
-            "run_command",
-            mode,
-            "",
-            "on",
-            "off",
-        ]
-        .into_iter()
-        .map(|value| TextArea::from([value]))
-        .collect(),
-        selected: 1,
-        error: String::new(),
-        limits: (256, 10, 64),
-        ..Form::default()
-    });
-    app.event(ctrl('s'));
-    until(app, |a| a.entries[a.selected].session.is_some()).await;
+    let mut def = fixture_definition("openai-chat", endpoint);
+    def.workspace_root = Some(workspace.to_path_buf());
+    def.tools = vec![WorkspaceTool::RunCommand];
+    def.permission_mode = Some(mode.parse().unwrap());
+    create_with_definition(app, def).await;
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

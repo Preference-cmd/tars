@@ -4,13 +4,14 @@ use super::{
     jobs::{JobKind, Message, blocking},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tars_core::config::{
-    Config, CredentialsStore, PROVIDER_PRESETS, ProfileUpsertInput, default_config_path,
-    upsert_profile_in_config,
+    Config, CredentialsStore, DiscoveredModel, PROVIDER_PRESETS, ProfileUpsertInput,
+    default_config_path, derive_models_url, fetch_available_models, upsert_profile_in_config,
 };
-use tars_core::definition::{Provider, valid_credential_name};
+use tars_core::definition::{CredentialRef, Provider, valid_credential_name};
 
 /// Cached read-only state of `credentials.toml` entry names (never secret values).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,8 +41,10 @@ impl CredentialStoreCache {
 pub(crate) enum ProviderWizardStep {
     /// Step 1: pick one of the 7 built-in presets or Custom.
     SelectPreset,
-    /// Step 2: configure profile name, model, masked API key, and optional endpoint/max_tokens.
+    /// Step 2: configure connection, profile name, masked API key, and optional max_tokens.
     Configure,
+    /// Step 3: discover, filter, and multi-select models from the endpoint `/models` API.
+    SelectModels,
 }
 
 /// Editable/selectable field kind in [`ProviderWizardStep::Configure`].
@@ -50,12 +53,30 @@ pub(crate) enum ProviderFieldKind {
     Protocol,
     Endpoint,
     ProfileName,
-    Model,
     ApiKey,
     MaxTokens,
 }
 
-/// State for the two-step `/provider` preset & API key wizard.
+/// Asynchronous `/models` fetch status in [`ProviderWizardStep::SelectModels`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ModelFetchStatus {
+    #[default]
+    Idle,
+    Fetching,
+    Loaded,
+    Failed(String),
+}
+
+/// One selectable row in Step 3 (`SelectModels`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ModelCandidateRow {
+    pub(crate) id: String,
+    pub(crate) display_name: Option<String>,
+    pub(crate) owned_by: Option<String>,
+    pub(crate) is_custom_entry: bool,
+}
+
+/// State for the three-step `/provider` preset, connection, and model discovery wizard.
 pub(crate) struct ProviderWizardState {
     pub(crate) step: ProviderWizardStep,
     pub(crate) selected_preset: usize,
@@ -63,9 +84,10 @@ pub(crate) struct ProviderWizardState {
     pub(crate) preset_label: String,
     pub(crate) preset_endpoint: Option<String>,
     pub(crate) preset_has_max_tokens: bool,
+    pub(crate) preset_requires_api_key: bool,
     pub(crate) provider: Provider,
     pub(crate) profile_name: String,
-    pub(crate) model: String,
+    pub(crate) initial_profile_name: String,
     pub(crate) endpoint: String,
     pub(crate) api_key: String,
     pub(crate) ollama_default_hint: bool,
@@ -74,6 +96,16 @@ pub(crate) struct ProviderWizardState {
     pub(crate) active_field: usize,
     pub(crate) saving: bool,
     pub(crate) error: String,
+    pub(crate) existing_credential: Option<CredentialRef>,
+    pub(crate) suggested_model: Option<String>,
+    pub(crate) has_existing_models: bool,
+    pub(crate) user_modified_selection: bool,
+    pub(crate) model_fetch_status: ModelFetchStatus,
+    pub(crate) fetched_models: Vec<DiscoveredModel>,
+    pub(crate) model_query: String,
+    pub(crate) model_cursor: usize,
+    pub(crate) selected_models: Vec<String>,
+    pub(crate) fetch_generation: u64,
 }
 
 impl Drop for ProviderWizardState {
@@ -91,9 +123,10 @@ impl ProviderWizardState {
             preset_label: String::new(),
             preset_endpoint: None,
             preset_has_max_tokens: false,
+            preset_requires_api_key: true,
             provider: Provider::OpenAiChat,
             profile_name: String::new(),
-            model: String::new(),
+            initial_profile_name: String::new(),
             endpoint: String::new(),
             api_key: String::new(),
             ollama_default_hint: false,
@@ -102,6 +135,16 @@ impl ProviderWizardState {
             active_field: 0,
             saving: false,
             error: String::new(),
+            existing_credential: None,
+            suggested_model: None,
+            has_existing_models: false,
+            user_modified_selection: false,
+            model_fetch_status: ModelFetchStatus::Idle,
+            fetched_models: Vec::new(),
+            model_query: String::new(),
+            model_cursor: 0,
+            selected_models: Vec::new(),
+            fetch_generation: 0,
         }
     }
 
@@ -110,40 +153,70 @@ impl ProviderWizardState {
         self.ollama_default_hint = false;
     }
 
-    pub(crate) fn enter_step_2(&mut self) {
+    pub(crate) fn enter_step_2(&mut self, config: &Config) {
         self.clear_secret();
         self.error.clear();
         self.saving = false;
-        self.active_field = 0;
         self.auto_max_tokens = false;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        self.model_fetch_status = ModelFetchStatus::Idle;
+        self.fetched_models.clear();
+        self.model_query.clear();
+        self.model_cursor = 0;
+        self.selected_models.clear();
+        self.existing_credential = None;
+        self.suggested_model = None;
+        self.has_existing_models = false;
+        self.user_modified_selection = false;
 
+        let profiles = config.model_profiles();
         if let Some(preset) = PROVIDER_PRESETS.get(self.selected_preset) {
             self.is_custom = false;
             self.preset_label = preset.label.to_owned();
             self.preset_endpoint = preset.endpoint.map(str::to_owned);
             self.preset_has_max_tokens = preset.default_max_tokens.is_some();
+            self.preset_requires_api_key = preset.requires_api_key;
             self.provider = preset.provider;
             self.profile_name = preset.id.to_owned();
-            self.model = preset.suggested_model.to_owned();
-            self.endpoint = preset.endpoint.unwrap_or_default().to_owned();
-            self.max_tokens = preset
-                .default_max_tokens
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            if preset.id == "ollama" {
-                self.api_key = "ollama".to_owned();
-                self.ollama_default_hint = true;
+            self.initial_profile_name = preset.id.to_owned();
+            self.suggested_model =
+                (!preset.suggested_model.is_empty()).then(|| preset.suggested_model.to_owned());
+
+            if let Some(existing) = profiles.get(preset.id) {
+                self.endpoint = existing
+                    .endpoint
+                    .clone()
+                    .unwrap_or_else(|| preset.endpoint.unwrap_or_default().to_owned());
+                self.max_tokens = existing
+                    .max_tokens
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                self.existing_credential = Some(existing.credential.clone());
+                let avail = existing.available_models();
+                self.has_existing_models = !avail.is_empty();
+                self.selected_models = avail;
+            } else {
+                self.endpoint = preset.endpoint.unwrap_or_default().to_owned();
+                self.max_tokens = preset
+                    .default_max_tokens
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                if preset.id == "ollama" {
+                    self.api_key = "ollama".to_owned();
+                    self.ollama_default_hint = true;
+                }
             }
-            // Start focus on API Key (index 2) so users can paste immediately, or Model if ollama.
-            self.active_field = if preset.id == "ollama" { 1 } else { 2 };
+            // Start focus on API Key (index 1) for key-requiring presets, or ProfileName (index 0) for ollama.
+            self.active_field = if preset.requires_api_key { 1 } else { 0 };
         } else {
             self.is_custom = true;
             self.preset_label = "Custom provider".to_owned();
             self.preset_endpoint = None;
             self.preset_has_max_tokens = false;
+            self.preset_requires_api_key = true;
             self.provider = Provider::OpenAiChat;
             self.profile_name = "custom".to_owned();
-            self.model.clear();
+            self.initial_profile_name = "custom".to_owned();
             self.endpoint.clear();
             self.max_tokens.clear();
             self.active_field = 0;
@@ -151,11 +224,57 @@ impl ProviderWizardState {
         self.step = ProviderWizardStep::Configure;
     }
 
+    pub(crate) fn enter_step_3(&mut self) {
+        self.step = ProviderWizardStep::SelectModels;
+        self.error.clear();
+        self.model_query.clear();
+        self.model_cursor = 0;
+        self.fetched_models.clear();
+        self.user_modified_selection = false;
+        self.model_fetch_status = ModelFetchStatus::Fetching;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        if self.selected_models.is_empty()
+            && let Some(suggested) = &self.suggested_model
+        {
+            self.selected_models.push(suggested.clone());
+        }
+    }
+
+    pub(crate) fn back_to_step_2(&mut self) {
+        self.step = ProviderWizardStep::Configure;
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        self.model_fetch_status = ModelFetchStatus::Idle;
+        self.error.clear();
+    }
+
     pub(crate) fn back_to_step_1(&mut self) {
         self.clear_secret();
+        self.fetch_generation = self.fetch_generation.wrapping_add(1);
+        self.model_fetch_status = ModelFetchStatus::Idle;
+        self.fetched_models.clear();
+        self.selected_models.clear();
+        self.existing_credential = None;
+        self.suggested_model = None;
+        self.has_existing_models = false;
+        self.user_modified_selection = false;
+        self.model_query.clear();
+        self.model_cursor = 0;
         self.error.clear();
         self.saving = false;
         self.step = ProviderWizardStep::SelectPreset;
+    }
+
+    pub(crate) fn effective_existing_credential(&self, config: &Config) -> Option<CredentialRef> {
+        let current_name = self.profile_name.trim();
+        if current_name == self.initial_profile_name
+            && let Some(cred) = &self.existing_credential
+        {
+            return Some(cred.clone());
+        }
+        config
+            .model_profiles()
+            .get(current_name)
+            .map(|profile| profile.credential.clone())
     }
 
     pub(crate) fn fields(&self) -> Vec<ProviderFieldKind> {
@@ -164,23 +283,17 @@ impl ProviderWizardState {
                 ProviderFieldKind::Protocol,
                 ProviderFieldKind::Endpoint,
                 ProviderFieldKind::ProfileName,
-                ProviderFieldKind::Model,
                 ProviderFieldKind::ApiKey,
                 ProviderFieldKind::MaxTokens,
             ]
         } else if self.provider == Provider::Anthropic || self.preset_has_max_tokens {
             vec![
                 ProviderFieldKind::ProfileName,
-                ProviderFieldKind::Model,
                 ProviderFieldKind::ApiKey,
                 ProviderFieldKind::MaxTokens,
             ]
         } else {
-            vec![
-                ProviderFieldKind::ProfileName,
-                ProviderFieldKind::Model,
-                ProviderFieldKind::ApiKey,
-            ]
+            vec![ProviderFieldKind::ProfileName, ProviderFieldKind::ApiKey]
         }
     }
 
@@ -227,33 +340,107 @@ impl ProviderWizardState {
     }
 
     pub(crate) fn paste_single_line(&mut self, text: &str) {
-        if self.step != ProviderWizardStep::Configure || self.saving {
-            return;
-        }
-        let Some(field) = self.current_field() else {
-            return;
-        };
-        if field == ProviderFieldKind::Protocol {
+        if self.saving {
             return;
         }
         let sanitized: String = text.chars().filter(|c| !c.is_control()).collect();
         if sanitized.is_empty() {
             return;
         }
-        match field {
-            ProviderFieldKind::Protocol => {}
-            ProviderFieldKind::Endpoint => self.endpoint.push_str(&sanitized),
-            ProviderFieldKind::ProfileName => self.profile_name.push_str(&sanitized),
-            ProviderFieldKind::Model => self.model.push_str(&sanitized),
-            ProviderFieldKind::ApiKey => {
-                self.api_key.push_str(&sanitized);
-                self.ollama_default_hint = false;
+        match self.step {
+            ProviderWizardStep::SelectPreset => {}
+            ProviderWizardStep::Configure => {
+                let Some(field) = self.current_field() else {
+                    return;
+                };
+                if field == ProviderFieldKind::Protocol {
+                    return;
+                }
+                match field {
+                    ProviderFieldKind::Protocol => {}
+                    ProviderFieldKind::Endpoint => self.endpoint.push_str(&sanitized),
+                    ProviderFieldKind::ProfileName => self.profile_name.push_str(&sanitized),
+                    ProviderFieldKind::ApiKey => {
+                        self.api_key.push_str(&sanitized);
+                        self.ollama_default_hint = false;
+                    }
+                    ProviderFieldKind::MaxTokens => {
+                        self.max_tokens.push_str(&sanitized);
+                        self.auto_max_tokens = false;
+                    }
+                }
             }
-            ProviderFieldKind::MaxTokens => {
-                self.max_tokens.push_str(&sanitized);
-                self.auto_max_tokens = false;
+            ProviderWizardStep::SelectModels => {
+                self.model_query.push_str(&sanitized);
+                self.model_cursor = 0;
+                self.error.clear();
             }
         }
+    }
+
+    pub(crate) fn visible_model_candidates(&self) -> Vec<ModelCandidateRow> {
+        let mut base: Vec<ModelCandidateRow> =
+            Vec::with_capacity(self.fetched_models.len() + self.selected_models.len() + 1);
+        let mut seen = HashSet::new();
+        for model in &self.fetched_models {
+            if seen.insert(model.id.clone()) {
+                base.push(ModelCandidateRow {
+                    id: model.id.clone(),
+                    display_name: model.display_name.clone(),
+                    owned_by: model.owned_by.clone(),
+                    is_custom_entry: false,
+                });
+            }
+        }
+        for selected in &self.selected_models {
+            if seen.insert(selected.clone()) {
+                base.push(ModelCandidateRow {
+                    id: selected.clone(),
+                    display_name: None,
+                    owned_by: None,
+                    is_custom_entry: false,
+                });
+            }
+        }
+        if self.fetched_models.is_empty()
+            && let Some(suggested) = &self.suggested_model
+            && seen.insert(suggested.clone())
+        {
+            base.push(ModelCandidateRow {
+                id: suggested.clone(),
+                display_name: None,
+                owned_by: None,
+                is_custom_entry: false,
+            });
+        }
+
+        let trimmed = self.model_query.trim();
+        let query_lower = trimmed.to_lowercase();
+        let mut filtered: Vec<ModelCandidateRow> = base
+            .into_iter()
+            .filter(|row| {
+                query_lower.is_empty()
+                    || row.id.to_lowercase().contains(&query_lower)
+                    || row
+                        .display_name
+                        .as_deref()
+                        .is_some_and(|name| name.to_lowercase().contains(&query_lower))
+            })
+            .collect();
+
+        if !trimmed.is_empty()
+            && !trimmed.chars().any(char::is_whitespace)
+            && !trimmed.chars().any(char::is_control)
+            && !filtered.iter().any(|row| row.id == trimmed)
+        {
+            filtered.push(ModelCandidateRow {
+                id: trimmed.to_owned(),
+                display_name: None,
+                owned_by: None,
+                is_custom_entry: true,
+            });
+        }
+        filtered
     }
 }
 
@@ -277,6 +464,29 @@ impl Drop for SecretBox {
     }
 }
 
+enum FetchSecretSource {
+    Inline(SecretBox),
+    Store {
+        credentials_path: PathBuf,
+        credential_name: String,
+    },
+    Env(String),
+    None,
+}
+
+struct ValidatedConnection {
+    config_path: PathBuf,
+    credentials_path: PathBuf,
+    profile_name: String,
+    provider: Provider,
+    endpoint: Option<String>,
+    max_tokens: Option<u32>,
+    trimmed_key: String,
+    has_store_cred: bool,
+    store_cred_name: String,
+    env_var_name: Option<String>,
+}
+
 /// Result delivered by [`JobKind::SaveProvider`] to [`App::complete`].
 pub(crate) struct ProviderSavedState {
     pub(crate) config_path: PathBuf,
@@ -292,6 +502,100 @@ pub(crate) fn load_credential_cache(path: &Path) -> CredentialStoreCache {
         Ok(None) => CredentialStoreCache::Loaded(Vec::new()),
         Err(_) => CredentialStoreCache::Error,
     }
+}
+
+fn validate_step_2_fields(
+    wizard: &mut ProviderWizardState,
+    config: &Config,
+    existing_names: &CredentialStoreCache,
+    target_config_path: Option<PathBuf>,
+) -> Option<ValidatedConnection> {
+    let Some(config_path) = target_config_path else {
+        wizard.error = "Cannot resolve config.toml path; pass --config FILE".into();
+        return None;
+    };
+    let Some(credentials_path) = tars_core::config::credentials_path_for_config(Some(&config_path))
+    else {
+        wizard.error = "Cannot resolve credentials.toml path".into();
+        return None;
+    };
+
+    let profile_name = wizard.profile_name.trim().to_owned();
+    if !valid_credential_name(&profile_name) {
+        wizard.error =
+            "Profile name must be 1–64 ASCII letters/digits/'_'/'-' starting with letter/digit"
+                .into();
+        return None;
+    }
+
+    let endpoint_trimmed = wizard.endpoint.trim();
+    let endpoint = if endpoint_trimmed.is_empty() {
+        None
+    } else {
+        if endpoint_trimmed.chars().any(char::is_whitespace)
+            || endpoint_trimmed.chars().any(char::is_control)
+            || (!endpoint_trimmed.starts_with("http://")
+                && !endpoint_trimmed.starts_with("https://"))
+            || derive_models_url(wizard.provider, Some(endpoint_trimmed)).is_err()
+        {
+            wizard.error = "Endpoint must be a valid http:// or https:// URL".into();
+            return None;
+        }
+        Some(endpoint_trimmed.to_owned())
+    };
+
+    let max_tokens_trimmed = wizard.max_tokens.trim();
+    let max_tokens = if max_tokens_trimmed.is_empty() {
+        None
+    } else {
+        match max_tokens_trimmed.parse::<u32>().ok().filter(|v| *v > 0) {
+            Some(v) => Some(v),
+            None => {
+                wizard.error = "Max tokens must be a positive integer".into();
+                return None;
+            }
+        }
+    };
+    if wizard.provider == Provider::Anthropic && max_tokens.is_none() {
+        wizard.error = "Anthropic requires max_tokens (e.g. 8192)".into();
+        return None;
+    }
+
+    let trimmed_key = wizard.api_key.trim().to_owned();
+    if trimmed_key.chars().any(char::is_control) {
+        wizard.error = "API key must not contain control characters".into();
+        return None;
+    }
+
+    let existing_cred = wizard.effective_existing_credential(config);
+    let (has_store_cred, store_cred_name, env_var_name) = match &existing_cred {
+        Some(CredentialRef::Store(name)) => (existing_names.contains(name), name.clone(), None),
+        Some(CredentialRef::Environment(var)) => (false, profile_name.clone(), Some(var.clone())),
+        None => (
+            existing_names.contains(&profile_name),
+            profile_name.clone(),
+            None,
+        ),
+    };
+
+    let needs_key = wizard.is_custom || wizard.preset_requires_api_key;
+    if trimmed_key.is_empty() && needs_key && !has_store_cred && env_var_name.is_none() {
+        wizard.error = "API key is required".into();
+        return None;
+    }
+
+    Some(ValidatedConnection {
+        config_path,
+        credentials_path,
+        profile_name,
+        provider: wizard.provider,
+        endpoint,
+        max_tokens,
+        trimmed_key,
+        has_store_cred,
+        store_cred_name,
+        env_var_name,
+    })
 }
 
 impl App {
@@ -313,7 +617,8 @@ impl App {
 
     pub(crate) fn open_provider_wizard(&mut self) {
         if self.options.no_config {
-            self.notice = "Disabled under --no-config; use /new or omit --no-config".into();
+            self.notice =
+                "Disabled under --no-config; omit --no-config or pass --config FILE".into();
             return;
         }
         self.panel = Some(Panel::Provider(Box::new(ProviderWizardState::new())));
@@ -340,6 +645,15 @@ impl App {
                         return;
                     }
                     wizard.back_to_step_1();
+                    self.panel = Some(Panel::Provider(wizard));
+                    return;
+                }
+                ProviderWizardStep::SelectModels => {
+                    if wizard.saving {
+                        self.panel = Some(Panel::Provider(wizard));
+                        return;
+                    }
+                    wizard.back_to_step_2();
                     self.panel = Some(Panel::Provider(wizard));
                     return;
                 }
@@ -370,19 +684,22 @@ impl App {
                     KeyCode::Char('j' | 'J') if no_ctrl_alt => {
                         wizard.selected_preset = (wizard.selected_preset + 1).min(total - 1);
                     }
-                    KeyCode::Enter => {
-                        wizard.enter_step_2();
+                    KeyCode::Enter if no_ctrl_alt => {
+                        wizard.enter_step_2(&self.options.config);
                     }
                     _ => {}
                 }
                 self.panel = Some(Panel::Provider(wizard));
             }
             ProviderWizardStep::Configure => {
-                if super::super::input::control(key, 's')
-                    || (key.code == KeyCode::Enter && no_ctrl_alt)
-                {
+                if super::super::input::control(key, 's') {
                     self.panel = Some(Panel::Provider(wizard));
-                    self.submit_provider_wizard();
+                    self.quick_save_provider_step_2();
+                    return;
+                }
+                if key.code == KeyCode::Enter && no_ctrl_alt {
+                    self.panel = Some(Panel::Provider(wizard));
+                    self.advance_provider_to_step_3();
                     return;
                 }
                 let fields = wizard.fields();
@@ -414,9 +731,6 @@ impl App {
                             ProviderFieldKind::ProfileName => {
                                 wizard.profile_name.pop();
                             }
-                            ProviderFieldKind::Model => {
-                                wizard.model.pop();
-                            }
                             ProviderFieldKind::ApiKey => {
                                 wizard.api_key.pop();
                                 wizard.ollama_default_hint = false;
@@ -436,7 +750,6 @@ impl App {
                             ProviderFieldKind::Protocol => {}
                             ProviderFieldKind::Endpoint => wizard.endpoint.push(c),
                             ProviderFieldKind::ProfileName => wizard.profile_name.push(c),
-                            ProviderFieldKind::Model => wizard.model.push(c),
                             ProviderFieldKind::ApiKey => {
                                 wizard.api_key.push(c);
                                 wizard.ollama_default_hint = false;
@@ -451,19 +764,73 @@ impl App {
                 }
                 self.panel = Some(Panel::Provider(wizard));
             }
+            ProviderWizardStep::SelectModels => {
+                if super::super::input::control(key, 'r') {
+                    self.panel = Some(Panel::Provider(wizard));
+                    self.retry_fetch_provider_models();
+                    return;
+                }
+                if key.code == KeyCode::Enter && no_ctrl_alt {
+                    self.panel = Some(Panel::Provider(wizard));
+                    self.confirm_provider_step_3();
+                    return;
+                }
+                let candidates = wizard.visible_model_candidates();
+                let count = candidates.len();
+                wizard.model_cursor = wizard.model_cursor.min(count.saturating_sub(1));
+                match key.code {
+                    KeyCode::Up => {
+                        wizard.model_cursor = wizard.model_cursor.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        if count > 0 {
+                            wizard.model_cursor = (wizard.model_cursor + 1).min(count - 1);
+                        }
+                    }
+                    KeyCode::Char(' ') if no_ctrl_alt => {
+                        if let Some(candidate) = candidates.get(wizard.model_cursor) {
+                            wizard.user_modified_selection = true;
+                            if wizard.selected_models.iter().any(|m| m == &candidate.id) {
+                                wizard.selected_models.retain(|m| m != &candidate.id);
+                            } else {
+                                wizard.selected_models.push(candidate.id.clone());
+                            }
+                            wizard.error.clear();
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        wizard.model_query.pop();
+                        wizard.model_cursor = 0;
+                        wizard.error.clear();
+                    }
+                    KeyCode::Char(c) if no_ctrl_alt && !c.is_control() && c != ' ' => {
+                        wizard.model_query.push(c);
+                        wizard.model_cursor = 0;
+                        wizard.error.clear();
+                    }
+                    _ => {}
+                }
+                self.panel = Some(Panel::Provider(wizard));
+            }
         }
     }
 
-    pub(super) fn submit_provider_wizard(&mut self) {
+    fn check_not_no_config(&mut self) -> bool {
         if self.options.no_config {
             if let Some(Panel::Provider(wizard)) = self.panel.as_mut() {
                 wizard.clear_secret();
-                wizard.error = "Disabled under --no-config; use /new or omit --no-config".into();
+                wizard.error =
+                    "Disabled under --no-config; omit --no-config or pass --config FILE".into();
             }
-            self.notice = "Disabled under --no-config; use /new or omit --no-config".into();
-            return;
+            self.notice =
+                "Disabled under --no-config; omit --no-config or pass --config FILE".into();
+            return false;
         }
-        if !self.capacity() {
+        true
+    }
+
+    fn advance_provider_to_step_3(&mut self) {
+        if !self.check_not_no_config() {
             return;
         }
         let existing_names = self.credential_store_cache.clone();
@@ -472,93 +839,257 @@ impl App {
             .config_path
             .clone()
             .or_else(default_config_path);
+        let config = Arc::clone(&self.options.config);
         let Some(Panel::Provider(wizard)) = self.panel.as_mut() else {
             return;
         };
         if wizard.saving {
             return;
         }
-        let Some(config_path) = target_config_path else {
-            wizard.error = "Cannot resolve config.toml path; pass --config FILE".into();
-            return;
-        };
-        let Some(credentials_path) =
-            tars_core::config::credentials_path_for_config(Some(&config_path))
+        let Some(validated) =
+            validate_step_2_fields(wizard, &config, &existing_names, target_config_path)
         else {
-            wizard.error = "Cannot resolve credentials.toml path".into();
             return;
         };
+        wizard.enter_step_3();
+        let generation = wizard.fetch_generation;
+        self.spawn_fetch_models(validated, generation);
+    }
 
-        let profile_name = wizard.profile_name.trim().to_owned();
-        if !valid_credential_name(&profile_name) {
-            wizard.error =
-                "Profile name must be 1–64 ASCII letters/digits/'_'/'-' starting with letter/digit"
-                    .into();
+    fn retry_fetch_provider_models(&mut self) {
+        if !self.check_not_no_config() {
             return;
         }
-        let model = wizard.model.trim().to_owned();
-        if model.is_empty() || model.chars().any(char::is_control) {
-            wizard.error = "Model identifier must not be blank".into();
+        let existing_names = self.credential_store_cache.clone();
+        let target_config_path = self
+            .options
+            .config_path
+            .clone()
+            .or_else(default_config_path);
+        let config = Arc::clone(&self.options.config);
+        let Some(Panel::Provider(wizard)) = self.panel.as_mut() else {
+            return;
+        };
+        if wizard.saving {
             return;
         }
+        let Some(validated) =
+            validate_step_2_fields(wizard, &config, &existing_names, target_config_path)
+        else {
+            return;
+        };
+        wizard.error.clear();
+        wizard.model_fetch_status = ModelFetchStatus::Fetching;
+        wizard.fetch_generation = wizard.fetch_generation.wrapping_add(1);
+        let generation = wizard.fetch_generation;
+        self.spawn_fetch_models(validated, generation);
+    }
 
-        let endpoint_trimmed = wizard.endpoint.trim();
-        let endpoint = if endpoint_trimmed.is_empty() {
-            None
-        } else {
-            if endpoint_trimmed.chars().any(char::is_whitespace)
-                || endpoint_trimmed.chars().any(char::is_control)
-                || (!endpoint_trimmed.starts_with("http://")
-                    && !endpoint_trimmed.starts_with("https://"))
+    fn spawn_fetch_models(&mut self, validated: ValidatedConnection, generation: u64) {
+        if tokio::runtime::Handle::try_current().is_err() || !self.capacity() {
+            if let Some(Panel::Provider(wizard)) = self.panel.as_mut()
+                && wizard.fetch_generation == generation
             {
-                wizard.error = "Endpoint must be a valid http:// or https:// URL".into();
+                wizard.model_fetch_status = ModelFetchStatus::Idle;
+            }
+            return;
+        }
+        let secret_source = if !validated.trimmed_key.is_empty() {
+            FetchSecretSource::Inline(SecretBox(validated.trimmed_key))
+        } else if validated.has_store_cred {
+            FetchSecretSource::Store {
+                credentials_path: validated.credentials_path,
+                credential_name: validated.store_cred_name,
+            }
+        } else if let Some(var_name) = validated.env_var_name {
+            FetchSecretSource::Env(var_name)
+        } else {
+            FetchSecretSource::None
+        };
+        let provider = validated.provider;
+        let endpoint = validated.endpoint;
+
+        self.spawn_job(None, JobKind::FetchProviderModels, async move {
+            let resolved_secret: Option<SecretBox> = match secret_source {
+                FetchSecretSource::Inline(secret) => Some(secret),
+                FetchSecretSource::Store {
+                    credentials_path,
+                    credential_name,
+                } => blocking(move || {
+                    CredentialsStore::load_optional(&credentials_path)
+                        .ok()
+                        .flatten()
+                        .and_then(|store| store.get(&credential_name).map(str::to_owned))
+                        .map(SecretBox)
+                })
+                .await
+                .ok()
+                .flatten(),
+                FetchSecretSource::Env(var_name) => std::env::var(&var_name)
+                    .ok()
+                    .filter(|val| !val.trim().is_empty())
+                    .map(SecretBox),
+                FetchSecretSource::None => None,
+            };
+            let result = fetch_available_models(
+                provider,
+                endpoint.as_deref(),
+                resolved_secret.as_ref().map(|s| s.0.as_str()),
+            )
+            .await
+            .map_err(|err| err.to_string());
+            drop(resolved_secret);
+            Message::ProviderModelsFetched { generation, result }
+        });
+    }
+
+    fn quick_save_provider_step_2(&mut self) {
+        if !self.check_not_no_config() {
+            return;
+        }
+        let existing_names = self.credential_store_cache.clone();
+        let target_config_path = self
+            .options
+            .config_path
+            .clone()
+            .or_else(default_config_path);
+        let config = Arc::clone(&self.options.config);
+        let Some(Panel::Provider(wizard)) = self.panel.as_mut() else {
+            return;
+        };
+        if wizard.saving {
+            return;
+        }
+        let Some(validated) =
+            validate_step_2_fields(wizard, &config, &existing_names, target_config_path)
+        else {
+            return;
+        };
+        let quick_models = if !wizard.selected_models.is_empty() {
+            Some(wizard.selected_models.clone())
+        } else {
+            wizard.suggested_model.clone().map(|model| vec![model])
+        };
+        let Some(models_to_save) = quick_models else {
+            wizard.enter_step_3();
+            let generation = wizard.fetch_generation;
+            self.spawn_fetch_models(validated, generation);
+            return;
+        };
+        self.save_provider_wizard(validated, models_to_save);
+    }
+
+    fn confirm_provider_step_3(&mut self) {
+        if !self.check_not_no_config() {
+            return;
+        }
+        let existing_names = self.credential_store_cache.clone();
+        let target_config_path = self
+            .options
+            .config_path
+            .clone()
+            .or_else(default_config_path);
+        let config = Arc::clone(&self.options.config);
+        let Some(Panel::Provider(wizard)) = self.panel.as_mut() else {
+            return;
+        };
+        if wizard.saving {
+            return;
+        }
+        let Some(validated) =
+            validate_step_2_fields(wizard, &config, &existing_names, target_config_path)
+        else {
+            return;
+        };
+        let candidates = wizard.visible_model_candidates();
+        let highlighted = candidates.get(wizard.model_cursor);
+        let custom_selected_without_toggle = !wizard.user_modified_selection
+            && !wizard.has_existing_models
+            && highlighted.is_some_and(|row| row.is_custom_entry);
+
+        let models_to_save: Vec<String> = if custom_selected_without_toggle {
+            vec![highlighted.expect("checked above").id.clone()]
+        } else if !wizard.selected_models.is_empty() {
+            wizard.selected_models.clone()
+        } else if let Some(candidate) = highlighted {
+            vec![candidate.id.clone()]
+        } else {
+            let trimmed_query = wizard.model_query.trim();
+            if !trimmed_query.is_empty()
+                && !trimmed_query.chars().any(char::is_whitespace)
+                && !trimmed_query.chars().any(char::is_control)
+            {
+                vec![trimmed_query.to_owned()]
+            } else {
+                wizard.error = "Select or enter at least one model".into();
                 return;
             }
-            Some(endpoint_trimmed.to_owned())
         };
+        self.save_provider_wizard(validated, models_to_save);
+    }
 
-        let max_tokens_trimmed = wizard.max_tokens.trim();
-        let max_tokens = if max_tokens_trimmed.is_empty() {
-            None
-        } else {
-            match max_tokens_trimmed.parse::<u32>().ok().filter(|v| *v > 0) {
-                Some(v) => Some(v),
-                None => {
-                    wizard.error = "Max tokens must be a positive integer".into();
-                    return;
-                }
+    fn save_provider_wizard(
+        &mut self,
+        validated: ValidatedConnection,
+        models_to_save: Vec<String>,
+    ) {
+        if !self.capacity() {
+            return;
+        }
+        let Some(Panel::Provider(wizard)) = self.panel.as_mut() else {
+            return;
+        };
+        let mut normalized_models = Vec::with_capacity(models_to_save.len());
+        let mut seen = HashSet::with_capacity(models_to_save.len());
+        for raw in models_to_save {
+            let trimmed = raw.trim().to_owned();
+            if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+                wizard.error = "Model identifier must not be blank".into();
+                return;
             }
-        };
-        if wizard.provider == Provider::Anthropic && max_tokens.is_none() {
-            wizard.error = "Anthropic requires max_tokens (e.g. 8192)".into();
+            if seen.insert(trimmed.clone()) {
+                normalized_models.push(trimmed);
+            }
+        }
+        if normalized_models.is_empty() {
+            wizard.error = "Select or enter at least one model".into();
             return;
         }
 
-        let trimmed_key = wizard.api_key.trim().to_owned();
-        if trimmed_key.chars().any(char::is_control) {
-            wizard.error = "API key must not contain control characters".into();
+        let (secret_box, credential_name) = if !validated.trimmed_key.is_empty() {
+            (
+                Some(SecretBox(validated.trimmed_key)),
+                validated.profile_name.clone(),
+            )
+        } else if validated.has_store_cred {
+            (None, validated.store_cred_name)
+        } else if let Some(var) = &validated.env_var_name {
+            wizard.error = format!(
+                "Enter an API key to migrate env:{var} into credentials.toml (Esc to go back)"
+            );
             return;
-        }
-        let has_existing_cred = existing_names.contains(&profile_name);
-        if trimmed_key.is_empty() && !has_existing_cred {
+        } else {
             wizard.error = "API key is required".into();
             return;
-        }
+        };
 
-        let secret_box = (!trimmed_key.is_empty()).then_some(SecretBox(trimmed_key));
         wizard.clear_secret();
         wizard.saving = true;
         wizard.error.clear();
 
+        let primary_model = normalized_models[0].clone();
         let input = ProfileUpsertInput {
-            profile_name: profile_name.clone(),
-            provider: wizard.provider,
-            model,
-            models: Vec::new(),
-            credential: profile_name.clone(),
-            endpoint,
-            max_tokens,
+            profile_name: validated.profile_name.clone(),
+            provider: validated.provider,
+            model: primary_model,
+            models: normalized_models,
+            credential: credential_name,
+            endpoint: validated.endpoint,
+            max_tokens: validated.max_tokens,
         };
+        let config_path = validated.config_path;
+        let credentials_path = validated.credentials_path;
+        let profile_name = validated.profile_name;
 
         self.spawn_job(None, JobKind::SaveProvider, async move {
             let res = blocking(move || -> Result<ProviderSavedState, String> {
@@ -582,6 +1113,44 @@ impl App {
             .and_then(|inner| inner);
             Message::ProviderSaved(res)
         });
+    }
+
+    pub(super) fn provider_models_fetched(
+        &mut self,
+        generation: u64,
+        result: Result<Vec<DiscoveredModel>, String>,
+    ) {
+        let Some(Panel::Provider(wizard)) = self.panel.as_mut() else {
+            return;
+        };
+        if wizard.step != ProviderWizardStep::SelectModels || wizard.fetch_generation != generation
+        {
+            return;
+        }
+        match result {
+            Ok(models) => {
+                wizard.model_fetch_status = ModelFetchStatus::Loaded;
+                wizard.fetched_models = models;
+                if !wizard.has_existing_models
+                    && !wizard.user_modified_selection
+                    && !wizard.fetched_models.is_empty()
+                    && let Some(suggested) = &wizard.suggested_model
+                {
+                    if wizard.fetched_models.iter().any(|m| m.id == *suggested) {
+                        wizard.selected_models = vec![suggested.clone()];
+                    } else {
+                        wizard.selected_models.clear();
+                    }
+                }
+                wizard.model_cursor = 0;
+                wizard.error.clear();
+            }
+            Err(err) => {
+                let escaped = tars_core::permission::escape_untrusted_text(&err);
+                wizard.model_fetch_status = ModelFetchStatus::Failed(escaped);
+                wizard.model_cursor = 0;
+            }
+        }
     }
 
     pub(super) fn provider_saved(&mut self, result: Result<ProviderSavedState, String>) {
@@ -643,7 +1212,6 @@ impl App {
                     && !trust_blocks_autostart
                     && !self.quitting
                     && self.confirmation.is_none()
-                    && self.form.is_none()
                     && let Some(preset) = self.options.preset.clone()
                 {
                     let workspace_root = self

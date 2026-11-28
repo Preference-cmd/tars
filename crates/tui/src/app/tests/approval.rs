@@ -1,9 +1,10 @@
-use super::support::{advance_past_approval_window, app, ctrl, key, until};
+use super::support::{
+    advance_past_approval_window, app, create_with_definition, ctrl, fixture_definition, key, until,
+};
 use super::wire;
-use crate::{input::Form, render};
+use crate::render;
 use crossterm::event::{Event, KeyCode};
 use ratatui::{Terminal, backend::TestBackend, style::Modifier};
-use ratatui_textarea::TextArea;
 use serde_json::{Value, json};
 use tars_core::{
     application::{ClosePolicy, SaveStatus},
@@ -70,35 +71,13 @@ async fn create_test_session(
     workspace: &std::path::Path,
     mode: &str,
 ) {
-    app.form = Some(Form {
-        fields: [
-            "openai-chat",
-            "fixture-model",
-            endpoint,
-            "env:PATH",
-            "120",
-            &workspace.display().to_string(),
-            "list_directory,read_file,search_text,write_file,edit_file",
-            mode,
-            "",
-            "on",
-            "off",
-        ]
-        .into_iter()
-        .map(|v| TextArea::from([v]))
-        .collect(),
-        selected: 1,
-        error: String::new(),
-        limits: (256, 10, 64),
-        generation: (None, None, Default::default()),
-        max_model_attempts: None,
-        render_options: Default::default(),
-        tool_limits: Default::default(),
-        write_limits: None,
-        ..Form::default()
-    });
-    app.event(ctrl('s'));
-    until(app, |a| a.entries[a.selected].session.is_some()).await;
+    let mut def = fixture_definition("openai-chat", endpoint);
+    def.workspace_root = Some(workspace.to_path_buf());
+    def.tools =
+        tars_core::config::parse_tools("list_directory,read_file,search_text,write_file,edit_file")
+            .unwrap();
+    def.permission_mode = Some(mode.parse::<PermissionMode>().unwrap());
+    create_with_definition(app, def).await;
 }
 
 #[tokio::test]
@@ -1041,61 +1020,50 @@ async fn wm17_permission_mode_persistence() {
     );
 }
 
-#[test]
-fn wm17_new_session_form_permission_mode_and_write_limits() {
-    let mut preset_form = Form::default();
-    preset_form.fields[1] = TextArea::from(["fixture-model"]);
-    let mut preset = preset_form.definition().unwrap();
-    preset.permission_mode = Some(PermissionMode::AcceptEdits);
-    preset.write_limits = Some(WriteToolLimits {
-        max_edit_file_bytes: 8192,
-        max_write_bytes: 4096,
-        max_edit_segments: 10,
-    });
+#[tokio::test]
+async fn wm17_permission_mode_and_write_limits_preserved_on_new() {
+    use tars_core::config::{Config, DefinitionOverrides};
 
-    let form = Form::new(
-        std::sync::Arc::new(tars_core::config::Config::default()),
-        None,
-        Some(&preset),
-    );
-    assert_eq!(form.fields.len(), 11);
-    assert_eq!(form.fields[7].lines().join(""), "accept-edits");
-    assert_eq!(form.write_limits.as_ref().unwrap().max_write_bytes, 4096);
-
-    let def = form.definition().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = Config::default();
+    let def = cfg
+        .definition(
+            None,
+            DefinitionOverrides {
+                provider: Some(tars_core::definition::Provider::OpenAiChat),
+                model: Some("fixture-model".into()),
+                api_key_env: Some("PATH".into()),
+                permission_mode: Some(PermissionMode::AcceptEdits),
+                write_limits: Some(WriteToolLimits {
+                    max_edit_file_bytes: 8192,
+                    max_write_bytes: 4096,
+                    max_edit_segments: 10,
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    def.validate().unwrap();
     assert_eq!(def.permission_mode, Some(PermissionMode::AcceptEdits));
     assert_eq!(def.write_limits.as_ref().unwrap().max_write_bytes, 4096);
 
-    let mut form2 = Form::new(
-        std::sync::Arc::new(tars_core::config::Config::default()),
-        None,
-        Some(&preset),
+    let mut app = app(dir.path());
+    create_with_definition(&mut app, def).await;
+    app.event(key(KeyCode::F(2)));
+    until(&mut app, |a| {
+        a.entries.len() == 2 && a.entries[1].session.is_some()
+    })
+    .await;
+    let inherited = app.entries[1].session.as_ref().unwrap().definition();
+    assert_eq!(inherited.permission_mode, Some(PermissionMode::AcceptEdits));
+    assert_eq!(
+        inherited.write_limits.as_ref().unwrap().max_write_bytes,
+        4096
     );
-    form2.fields[7] = TextArea::from(["read-only"]);
-    let def2 = form2.definition().unwrap();
-    assert_eq!(def2.permission_mode, Some(PermissionMode::ReadOnly));
 
-    let mut form3 = Form::new(
-        std::sync::Arc::new(tars_core::config::Config::default()),
-        None,
-        Some(&preset),
-    );
-    form3.fields[7] = TextArea::from(["bogus"]);
-    let err = form3.definition().unwrap_err();
-    assert!(err.contains("read-only"));
-    assert!(err.contains("ask"));
-    assert!(err.contains("accept-edits"));
-    assert!(err.contains("full-access"));
-
-    // An empty mode is an error too, not a silent `ask`
-    let mut form4 = Form::new(
-        std::sync::Arc::new(tars_core::config::Config::default()),
-        None,
-        Some(&preset),
-    );
-    form4.fields[7] = TextArea::from([""]);
-    let err = form4.definition().unwrap_err();
-    assert!(err.contains("accept-edits"));
+    assert!("read-only".parse::<PermissionMode>().is_ok());
+    assert!("bogus".parse::<PermissionMode>().is_err());
+    assert!("".parse::<PermissionMode>().is_err());
 }
 
 #[tokio::test]

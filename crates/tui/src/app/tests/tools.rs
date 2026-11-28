@@ -1,10 +1,9 @@
-use super::support::{app, ctrl, key, until};
+use super::support::{app, create_with_definition, ctrl, fixture_definition, key, until};
 use super::wire;
-use crate::{app::state::Entry, input::Form, render};
+use crate::{app::state::Entry, render};
 use causa::kernel::{InvocationId, RoundId, ToolResultStatus, TurnId};
 use crossterm::event::{Event, KeyCode};
 use ratatui::{Terminal, backend::TestBackend};
-use ratatui_textarea::TextArea;
 use std::sync::Arc;
 use tars_core::session::{
     ProgressUpdate, ToolPhase, ToolProgress, ToolProgressSnapshot, WorkProgress, WorkRef,
@@ -173,32 +172,10 @@ async fn three_real_protocols_read_actual_workspace_and_tool_details_are_on_dema
         .unwrap();
         let fixture = wire::Fixture::new(provider, true);
         let mut app = app(dir.path());
-        app.form = Some(Form {
-            fields: [
-                provider.to_owned(),
-                "fixture-model".into(),
-                fixture.endpoint.clone(),
-                "env:PATH".into(),
-                "120".into(),
-                workspace.display().to_string(),
-                "list_directory,read_file,search_text".into(),
-                "ask".into(),
-                "".into(),
-                "on".into(),
-                "off".into(),
-            ]
-            .into_iter()
-            .map(|value| TextArea::from([value]))
-            .collect(),
-            generation: (
-                (provider == "anthropic").then_some(1024),
-                None,
-                Default::default(),
-            ),
-            ..Form::default()
-        });
-        app.event(ctrl('s'));
-        until(&mut app, |a| a.entries[0].session.is_some()).await;
+        let mut def = fixture_definition(provider, &fixture.endpoint);
+        def.workspace_root = Some(workspace.clone());
+        def.tools = tars_core::config::parse_tools("list_directory,read_file,search_text").unwrap();
+        create_with_definition(&mut app, def).await;
         assert!(fixture.requests.lock().unwrap().is_empty());
         app.event(Event::Paste("Find recovery path".into()));
         app.event(key(KeyCode::Enter));
@@ -283,27 +260,10 @@ async fn save_blocked_after_real_tools_exports_and_retries_original_material_wit
     std::fs::write(workspace.join("recovery.rs"), format!("header\n{marker}\n")).unwrap();
     let fixture = wire::Fixture::new("openai-responses", true);
     let mut app = app(dir.path());
-    app.form = Some(Form {
-        fields: [
-            "openai-responses".into(),
-            "fixture-model".into(),
-            fixture.endpoint.clone(),
-            "env:PATH".into(),
-            "120".into(),
-            workspace.display().to_string(),
-            "read_file,search_text".into(),
-            "ask".into(),
-            "".into(),
-            "on".into(),
-            "off".into(),
-        ]
-        .into_iter()
-        .map(|value| TextArea::from([value]))
-        .collect(),
-        ..Form::default()
-    });
-    app.event(ctrl('s'));
-    until(&mut app, |a| a.entries[0].session.is_some()).await;
+    let mut def = fixture_definition("openai-responses", &fixture.endpoint);
+    def.workspace_root = Some(workspace.clone());
+    def.tools = tars_core::config::parse_tools("read_file,search_text").unwrap();
+    create_with_definition(&mut app, def).await;
     app.event(Event::Paste("Find recovery path".into()));
     app.event(key(KeyCode::Enter));
     until(&mut app, |_| fixture.requests.lock().unwrap().len() == 3).await;
@@ -410,27 +370,10 @@ async fn test_be17_tui_opens_with_zero_artifact_reads_and_tools_expands_on_deman
     );
 
     let mut app1 = app(dir.path());
-    app1.form = Some(Form {
-        fields: [
-            provider.to_owned(),
-            "fixture-model".into(),
-            fixture.endpoint.clone(),
-            "env:PATH".into(),
-            "120".into(),
-            workspace.display().to_string(),
-            "list_directory".into(),
-            "ask".into(),
-            "".into(),
-            "on".into(),
-            "off".into(),
-        ]
-        .into_iter()
-        .map(|value| TextArea::from([value]))
-        .collect(),
-        ..Form::default()
-    });
-    app1.event(ctrl('s'));
-    until(&mut app1, |a| a.entries[0].session.is_some()).await;
+    let mut def = fixture_definition(provider, &fixture.endpoint);
+    def.workspace_root = Some(workspace.clone());
+    def.tools = tars_core::config::parse_tools("list_directory").unwrap();
+    create_with_definition(&mut app1, def).await;
     let session_id = app1.entries[0].id().to_owned();
 
     app1.event(Event::Paste("list many".into()));

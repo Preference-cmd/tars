@@ -1,5 +1,5 @@
-use super::support::{app, until};
-use crate::{app::state::Entry, input::Form, render};
+use super::support::{app, fixture_definition, until};
+use crate::{app::state::Entry, render};
 use causa::kernel::Context;
 use ratatui::{Terminal, backend::TestBackend};
 use std::time::Instant;
@@ -19,9 +19,8 @@ async fn tui_resource_probe() {
         .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut app = app(dir.path());
-    let mut form = Form::default();
-    form.fields[1].insert_str("probe-model");
-    let mut definition = form.definition().unwrap();
+    let mut definition = fixture_definition("openai-chat", "");
+    definition.model = "probe-model".into();
     definition.credential = CredentialRef::Environment("PATH".into());
     let text = "中文 👩‍💻 e\u{301} text for long terminal materials.\n";
     let start = Instant::now();

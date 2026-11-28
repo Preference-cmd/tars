@@ -1,16 +1,17 @@
-use super::support::{Server, app, app_with_folder_trust, create, ctrl, key, until};
+use super::support::{
+    Server, app, app_with_folder_trust, create, create_with_definition, ctrl, fixture_definition,
+    key, until,
+};
 use crate::{
     app::{
         App, CONFIRM_GUARD_WINDOW, CTRL_C_EXIT_GRACE_WINDOW, Confirmation, InfoKind, Panel,
         startup::{SandboxCheck, StartupBackend, ToolCheck},
         state::PendingApproval,
     },
-    input::Form,
     render,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
-use ratatui_textarea::TextArea;
 use std::{
     future::Future,
     path::Path,
@@ -388,12 +389,15 @@ async fn ft06_idle_surfaces_new_form_repair_guard_and_too_small_ctrl_c() {
         until(&mut app, |a| a.done).await;
     }
 
-    // 3. `/new` Form open: Ctrl+C clears panel (if any) but preserves Form so request_quit opens Confirmation::Quit.
+    // 3. Scratch draft open with Panel::Provider: Ctrl+C clears panel (and wipes secret) and opens Confirmation::Quit.
     {
         let mut app = app(dir.path());
-        app.form = Some(Form::default());
+        app.event(Event::Paste("unsent draft".into()));
+        app.open_provider_wizard();
+        app.event(key(KeyCode::Enter));
+        app.event(Event::Paste("sk-secret-to-wipe".into()));
         app.event(ctrl('c'));
-        assert!(app.form.is_some());
+        assert!(app.panel.is_none());
         assert!(!app.quitting);
         assert!(matches!(
             app.confirmation,
@@ -402,10 +406,10 @@ async fn ft06_idle_surfaces_new_form_repair_guard_and_too_small_ctrl_c() {
                 ..
             })
         ));
-        // Esc closes Confirmation::Quit and keeps Form intact.
+        // Esc closes Confirmation::Quit and keeps scratch draft intact.
         app.event(key(KeyCode::Esc));
         assert!(app.confirmation.is_none());
-        assert!(app.form.is_some());
+        assert!(app.scratch_has_text_draft());
         // Second sequence of Ctrl+C + Ctrl+C confirms quit.
         app.event(ctrl('c'));
         assert!(matches!(app.confirmation, Some(Confirmation::Quit { .. })));
@@ -505,31 +509,9 @@ async fn ft07_pending_approval_and_workspace_trust_ctrl_c_priorities() {
     let canonical_ws = ws.canonicalize().unwrap();
     let dir_trust = tempfile::tempdir().unwrap();
     let mut app_trust = super::support::app(dir_trust.path());
-    app_trust.form = Some(Form {
-        fields: [
-            "openai-chat",
-            "fixture-model",
-            &server.endpoint,
-            "env:PATH",
-            "120",
-            &canonical_ws.display().to_string(),
-            "",
-            "ask",
-            "",
-            "on",
-            "off",
-        ]
-        .into_iter()
-        .map(|v| TextArea::from([v]))
-        .collect(),
-        selected: 1,
-        error: String::new(),
-        limits: (256, 10, 64),
-        generation: (None, None, Default::default()),
-        ..Form::default()
-    });
-    app_trust.event(ctrl('s'));
-    until(&mut app_trust, |a| a.entries[0].session.is_some()).await;
+    let mut def_trust = fixture_definition("openai-chat", &server.endpoint);
+    def_trust.workspace_root = Some(canonical_ws);
+    create_with_definition(&mut app_trust, def_trust).await;
     assert!(app_trust.entries[0].workspace_rules_trust.is_some());
     assert!(app_trust.entries[0].workspace_agents_trust.is_some());
 
@@ -627,8 +609,8 @@ async fn ft07_active_work_priority_completed_turn_exit_and_1500ms_grace_window()
     until(&mut app2, |_| server2.requests.lock().unwrap().len() == 1).await;
     assert!(app2.entry_has_active_work());
 
-    // Open /new form + too_small while turn is running: active work still wins priority over form/panel/idle.
-    app2.form = Some(Form::default());
+    // Open Panel::Provider + too_small while turn is running: active work still wins priority over panel/idle.
+    app2.open_provider_wizard();
     app2.too_small = true;
     app2.event(ctrl('c'));
     assert!(!app2.quitting);
@@ -639,7 +621,7 @@ async fn ft07_active_work_priority_completed_turn_exit_and_1500ms_grace_window()
     );
     assert!(app2.last_ctrl_c_cancel_at.is_some());
     assert!(!app2.ctrl_c_exit_armed);
-    app2.form = None;
+    app2.panel = None;
     app2.too_small = false;
 
     until(&mut app2, |a| {
@@ -696,29 +678,22 @@ async fn ft06_ctrl_repeat_never_inserts_char_or_double_confirms_and_esc_never_ex
     assert_eq!(app.scratch_editor.lines(), &[""]);
     assert!(!app.quitting);
 
-    // 2. Form::key directly and via App::event swallows Ctrl Repeat events.
-    let mut form = Form::default();
-    let before_field = form.fields[form.selected].lines().join("");
-    let Event::Key(repeat_key) = ctrl_repeat('c') else {
-        unreachable!()
-    };
-    form.key(repeat_key);
-    assert_eq!(form.fields[form.selected].lines().join(""), before_field);
-
-    app.form = Some(Form::default());
+    // 2. Panel::Provider Step 2 swallows Ctrl Repeat events; Esc returns to Step 1 then closes without quitting.
+    app.open_provider_wizard();
+    app.event(key(KeyCode::Enter));
     app.event(ctrl_repeat('c'));
     assert!(!app.quitting);
     assert!(app.confirmation.is_none());
-    assert_eq!(
-        app.form.as_ref().unwrap().fields[app.form.as_ref().unwrap().selected]
-            .lines()
-            .join(""),
-        ""
-    );
+    if let Some(Panel::Provider(wizard)) = &app.panel {
+        assert!(wizard.api_key.is_empty());
+    } else {
+        panic!("expected Panel::Provider");
+    }
 
-    // Esc closes Form, never exits App.
+    // Esc returns to Step 1 then closes Panel::Provider, never exits App.
     app.event(key(KeyCode::Esc));
-    assert!(app.form.is_none());
+    app.event(key(KeyCode::Esc));
+    assert!(app.panel.is_none());
     assert!(!app.quitting);
 
     // 3. Panel search inputs never receive 'c' on Ctrl+C Repeat.

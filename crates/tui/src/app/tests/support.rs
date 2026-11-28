@@ -1,11 +1,9 @@
 use super::super::App;
 use crate::{
     app::Clock,
-    input::Form,
     options::{Options, StartupAction},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use ratatui_textarea::TextArea;
 use serde_json::Value;
 use std::{
     sync::{Arc, Mutex},
@@ -81,41 +79,64 @@ pub(super) async fn until(app: &mut App, predicate: impl Fn(&App) -> bool) {
     .await
     .expect("TUI predicate must settle");
 }
+pub(super) fn fixture_definition(
+    provider: &str,
+    endpoint: &str,
+) -> tars_core::definition::SessionDefinition {
+    use tars_core::config::{Config, DefinitionOverrides};
+    use tars_core::definition::Provider;
+    use tars_core::permission::PermissionMode;
+
+    let provider_kind = match provider {
+        "openai-chat" => Provider::OpenAiChat,
+        "openai-responses" => Provider::OpenAiResponses,
+        "anthropic" => Provider::Anthropic,
+        other => panic!("unsupported fixture provider: {other}"),
+    };
+    let def = Config::default()
+        .definition(
+            None,
+            DefinitionOverrides {
+                provider: Some(provider_kind),
+                model: Some("fixture-model".into()),
+                endpoint: (!endpoint.is_empty()).then(|| endpoint.to_owned()),
+                api_key_env: Some("PATH".into()),
+                timeout_secs: Some(120),
+                capacity: Some(256),
+                max_model_rounds: Some(10),
+                max_tool_calls: Some(64),
+                prompt_cache: Some(true),
+                max_tokens: (provider == "anthropic").then_some(1024),
+                permission_mode: Some(PermissionMode::Ask),
+                code_execution_enabled: Some(false),
+                ..Default::default()
+            },
+        )
+        .expect("fixture definition must resolve");
+    def.validate().expect("fixture definition must validate");
+    def
+}
+
+pub(super) async fn create_with_definition(
+    app: &mut App,
+    mut definition: tars_core::definition::SessionDefinition,
+) {
+    if let Some(ws) = definition.workspace_root.take() {
+        definition.workspace_root = Some(std::fs::canonicalize(&ws).unwrap_or(ws));
+    }
+    app.prepare_and_open_definition(definition)
+        .expect("prepare_and_open_definition must succeed");
+    until(app, |a| a.entries[a.selected].session.is_some()).await;
+}
+
 pub(super) async fn create(app: &mut App, endpoint: &str) {
     create_provider(app, "openai-chat", endpoint).await;
 }
+
 pub(super) async fn create_provider(app: &mut App, provider: &str, endpoint: &str) {
     // PATH supplies a nonsecret fixture token without mutating process-global
     // environment (unsafe in edition 2024). The endpoint is local only.
-    app.form = Some(Form {
-        fields: [
-            provider,
-            "fixture-model",
-            endpoint,
-            "env:PATH",
-            "120",
-            "",
-            "",
-            "ask",
-            "",
-            "on",
-            "off",
-        ]
-        .into_iter()
-        .map(|v| TextArea::from([v]))
-        .collect(),
-        selected: 1,
-        error: String::new(),
-        limits: (256, 10, 64),
-        generation: (
-            (provider == "anthropic").then_some(1024),
-            None,
-            Default::default(),
-        ),
-        ..Form::default()
-    });
-    app.event(ctrl('s'));
-    until(app, |a| a.entries[a.selected].session.is_some()).await;
+    create_with_definition(app, fixture_definition(provider, endpoint)).await;
 }
 pub(super) struct Server {
     pub endpoint: String,

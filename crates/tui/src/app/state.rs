@@ -1,7 +1,7 @@
 use super::Clock;
 use super::jobs::Message;
 use crate::{
-    input::{self, FolderTrustWizard, Form},
+    input::{self, FolderTrustWizard},
     options::Options,
     transcript::{Rows, Transcript},
 };
@@ -634,7 +634,6 @@ pub(crate) struct App {
     pub options: Options,
     pub entries: Vec<Entry>,
     pub selected: usize,
-    pub form: Option<Form>,
     pub folder_trust: Option<FolderTrustWizard>,
     pub(crate) trusted_workspace: Option<PathBuf>,
     pub(crate) trusted_workspace_raw: Option<PathBuf>,
@@ -731,7 +730,6 @@ impl App {
             options,
             entries: Vec::new(),
             selected: 0,
-            form: None,
             folder_trust: None,
             trusted_workspace: None,
             trusted_workspace_raw: None,
@@ -839,7 +837,6 @@ impl App {
         });
         let approval_visible = pending
             && self.panel.is_none()
-            && self.form.is_none()
             && self.folder_trust.is_none()
             && self.confirmation.is_none();
         let minimum_height = if approval_visible { 19 } else { 12 };
@@ -865,7 +862,6 @@ impl App {
     /// The approval actually on screen, or `None` when it is obscured.
     pub(crate) fn current_visible_approval(&self) -> Option<VisibleApproval> {
         if self.panel.is_some()
-            || self.form.is_some()
             || self.folder_trust.is_some()
             || self.confirmation.is_some()
             || self.quitting
@@ -915,7 +911,6 @@ impl App {
     /// The workspace rules or agents trust prompt actually on screen, or `None` when obscured.
     pub(super) fn current_visible_workspace_trust(&self) -> Option<VisibleWorkspaceTrust> {
         if self.panel.is_some()
-            || self.form.is_some()
             || self.folder_trust.is_some()
             || self.confirmation.is_some()
             || self.quitting

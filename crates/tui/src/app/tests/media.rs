@@ -1,13 +1,13 @@
-use super::support::{Server, app, create, ctrl, key, until};
+use super::support::{
+    Server, app, create, create_with_definition, ctrl, fixture_definition, key, until,
+};
 use crate::{
     app::{Confirmation, Panel, QueuedPrompt, state::MAX_QUEUED_PROMPTS},
-    input::Form,
     render,
 };
 use causa::kernel::{BlockContent, BlockMeta, Context, ContextBlock, ToolCallPayload};
 use crossterm::event::{Event, KeyCode};
 use ratatui::{Terminal, backend::TestBackend};
-use ratatui_textarea::TextArea;
 use std::path::Path;
 use tars_core::{
     application::{ClosePolicy, PreparedCreate, SaveStatus},
@@ -58,31 +58,9 @@ fn command(app: &mut crate::app::App, text: &str) {
 }
 
 async fn create_with_workspace(app: &mut crate::app::App, endpoint: &str, workspace: &Path) {
-    let ws = workspace.display().to_string();
-    app.form = Some(Form {
-        fields: [
-            "openai-chat",
-            "fixture-model",
-            endpoint,
-            "env:PATH",
-            "120",
-            &ws,
-            "",
-            "ask",
-            "",
-            "on",
-            "off",
-        ]
-        .into_iter()
-        .map(|v| TextArea::from([v]))
-        .collect(),
-        selected: 1,
-        error: String::new(),
-        limits: (256, 10, 64),
-        ..Form::default()
-    });
-    app.event(ctrl('s'));
-    until(app, |a| a.entries[a.selected].session.is_some()).await;
+    let mut def = fixture_definition("openai-chat", endpoint);
+    def.workspace_root = Some(workspace.to_path_buf());
+    create_with_definition(app, def).await;
 }
 
 async fn wait_idle_saved(app: &mut crate::app::App, index: usize) {
