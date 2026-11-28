@@ -19,6 +19,9 @@ default_profile = "default"
 [profiles.default]
 provider = "openai-chat"
 model = "replace-with-your-model-id"
+# Optional list of additional models sharing this profile's provider, endpoint, and credential.
+# `model` remains the default model; all listed models appear in TUI `/model` (`profile:model`).
+# models = ["replace-with-your-model-id", "secondary-model-id"]
 # Credential entry in 0600 credentials.toml (run `tars auth set default` or `/provider`).
 # Omitting both `credential` and `api_key_env` defaults to the profile name ("default").
 # For headless/CI environments, use `api_key_env = "OPENAI_API_KEY"` instead (mutually exclusive with `credential`).
