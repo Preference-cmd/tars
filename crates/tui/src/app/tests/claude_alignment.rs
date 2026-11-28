@@ -1503,6 +1503,7 @@ async fn cc07_scroll_protection_unread_badge_and_tail_resume() {
     assert!(!screen(&app).contains("↓ New output"));
 
     // Scroll up again and submit a new prompt -> resets scroll and unread.
+    let requests_before = server.requests.lock().unwrap().len();
     app.event(key(KeyCode::PageUp));
     app.entries[0].has_unread_output = true;
     app.entries[0].editor.insert_str("next turn");
@@ -1510,7 +1511,12 @@ async fn cc07_scroll_protection_unread_badge_and_tail_resume() {
     assert_eq!(app.entries[0].scroll, None);
     assert!(!app.entries[0].has_unread_output);
     server.release.add_permits(1);
-    until(&mut app, |a| a.entries[0].execution == "Completed").await;
+    until(&mut app, |a| {
+        server.requests.lock().unwrap().len() > requests_before
+            && a.entries[0].execution == "Completed"
+            && !a.entries[0].is_turn_running()
+    })
+    .await;
 
     // Initial baseline Message::Materials (material_version == None) does not falsely mark unread.
     let session = app.entries[0].session.clone().unwrap();
