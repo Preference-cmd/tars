@@ -7,9 +7,9 @@ mod graphemes;
 pub(crate) mod image;
 mod onboarding;
 pub(crate) use complete::{
-    CompleteResult, ModelArgCompletion, complete_copy_arg, complete_editor, complete_model_arg,
-    set_editor_text, slash_command_takes_args, strip_copy_command_prefix,
-    strip_model_command_prefix,
+    CompleteResult, ModelArgCompletion, char_col_to_byte, complete_copy_arg, complete_editor,
+    complete_model_arg, replace_range_in_editor, set_editor_text, slash_command_takes_args,
+    strip_copy_command_prefix, strip_model_command_prefix,
 };
 pub(crate) use graphemes::edit;
 pub(crate) use onboarding::FolderTrustWizard;

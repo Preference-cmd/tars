@@ -143,6 +143,7 @@ fn test_be23_tui_sessions_rendering_shows_title_time_and_model_line() {
     app.panel = Some(Panel::Sessions {
         query: String::new(),
         selected: 0,
+        current_workspace_only: false,
     });
 
     let rendered = screen(&app);

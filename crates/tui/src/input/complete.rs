@@ -104,6 +104,7 @@ pub(crate) fn slash_command_takes_args(cmd: &str) -> bool {
             | "resume"
             | "model"
             | "copy"
+            | "find"
             | "auto_compact"
             | "agents"
             | "rules"
@@ -465,10 +466,33 @@ fn longest_common_prefix(items: &[&str]) -> String {
     first[..prefix_end].to_owned()
 }
 
-fn char_col_to_byte(line: &str, col: usize) -> usize {
+pub(crate) fn char_col_to_byte(line: &str, col: usize) -> usize {
     line.char_indices()
         .nth(col)
         .map_or(line.len(), |(idx, _)| idx)
+}
+
+pub(crate) fn replace_range_in_editor(
+    editor: &mut TextArea<'static>,
+    row: usize,
+    start_byte: usize,
+    end_byte: usize,
+    replacement: &str,
+) -> bool {
+    let Some(line) = editor.lines().get(row).cloned() else {
+        return false;
+    };
+    if start_byte > end_byte
+        || end_byte > line.len()
+        || !line.is_char_boundary(start_byte)
+        || !line.is_char_boundary(end_byte)
+    {
+        return false;
+    }
+    let new_line = format!("{}{replacement}{}", &line[..start_byte], &line[end_byte..]);
+    let target_col = line[..start_byte].chars().count() + replacement.chars().count();
+    replace_line_and_move_cursor(editor, row, new_line, target_col);
+    true
 }
 
 fn replace_line_and_move_cursor(

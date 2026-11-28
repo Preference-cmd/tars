@@ -321,6 +321,7 @@ async fn ft06_idle_surfaces_new_form_repair_guard_and_too_small_ctrl_c() {
         || Panel::Sessions {
             query: String::new(),
             selected: 0,
+            current_workspace_only: false,
         },
         || Panel::Models {
             query: String::new(),

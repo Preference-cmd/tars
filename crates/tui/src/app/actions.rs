@@ -37,7 +37,7 @@ impl App {
             .unwrap_or_else(tars_core::config::default_tools_for_current_platform)
     }
 
-    pub(super) fn active_or_cli_workspace(&self) -> Option<PathBuf> {
+    pub(crate) fn active_or_cli_workspace(&self) -> Option<PathBuf> {
         self.entries
             .get(self.selected)
             .and_then(|entry| {
@@ -69,6 +69,7 @@ impl App {
         self.entries.push(entry);
         self.scratch_editor = input::editor();
         self.selected = self.entries.len() - 1;
+        self.clear_session_overlays();
         self.refresh_size_flags();
         self.open();
         self.update_approval_guard();
@@ -228,6 +229,7 @@ impl App {
     }
 
     pub(super) fn resume_command(&mut self, arg: &str) {
+        self.clear_session_overlays();
         let trimmed = arg.trim();
         if trimmed.is_empty() {
             self.pending_resume_selector = None;
@@ -240,6 +242,7 @@ impl App {
             self.panel = Some(super::commands::Panel::Sessions {
                 query: String::new(),
                 selected,
+                current_workspace_only: false,
             });
             return;
         }
@@ -423,6 +426,7 @@ impl App {
         });
     }
     pub(super) fn submit(&mut self) {
+        self.at_popup = None;
         if !self.capacity() {
             return;
         }
@@ -672,6 +676,9 @@ impl App {
                     };
                     Message::Finished(key, receipt.work, result)
                 });
+                if index == self.selected && self.find.is_some() {
+                    self.recompute_find_matches(false);
+                }
                 Ok(())
             }
         }
@@ -1085,6 +1092,216 @@ impl App {
         out
     }
 
+    pub(super) fn active_at_completion_workspace(&self) -> Option<PathBuf> {
+        if let Some(entry) = self.entries.get(self.selected) {
+            entry
+                .session
+                .as_ref()
+                .and_then(|session| session.definition().workspace_root)
+        } else {
+            self.options.workspace.clone()
+        }
+    }
+
+    pub(super) fn sync_at_popup(&mut self) {
+        let blocked = self.quitting
+            || self.startup.is_some()
+            || self.panel.is_some()
+            || self.confirmation.is_some()
+            || self.folder_trust.is_some()
+            || self.find.as_ref().is_some_and(|f| f.editing)
+            || self.entries.get(self.selected).is_some_and(|entry| {
+                entry.workspace_rules_trust.is_some()
+                    || entry.workspace_agents_trust.is_some()
+                    || !entry.approval_queue.is_empty()
+                    || entry.viewed_agent_id.is_some()
+            });
+        if blocked {
+            self.at_popup = None;
+            return;
+        }
+        let Some(ws_root) = self.active_at_completion_workspace() else {
+            self.at_popup = None;
+            return;
+        };
+        let editor = self.active_editor();
+        let cursor = editor.cursor();
+        let Some(line) = editor.lines().get(cursor.0) else {
+            self.at_popup = None;
+            return;
+        };
+        let cursor_byte = input::char_col_to_byte(line, cursor.1);
+        let before_cursor = &line[..cursor_byte];
+        let token_start = before_cursor
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map_or(0, |(idx, c)| idx + c.len_utf8());
+        let token = &before_cursor[token_start..];
+        let Some(prefix) = token.strip_prefix('@') else {
+            self.at_popup = None;
+            return;
+        };
+        let prev_selected = self
+            .at_popup
+            .as_ref()
+            .filter(|popup| popup.query == prefix)
+            .map_or(0, |popup| popup.selected);
+        let candidates = tars_core::workspace::search_workspace_paths(&ws_root, prefix, 32);
+        let selected = if candidates.is_empty() {
+            0
+        } else {
+            prev_selected.min(candidates.len() - 1)
+        };
+        self.at_popup = Some(super::state::AtPopupState {
+            query: prefix.to_owned(),
+            candidates,
+            selected,
+            line_idx: cursor.0,
+            token_start,
+            cursor_byte,
+        });
+    }
+
+    pub(super) fn accept_at_popup_candidate(&mut self) -> bool {
+        let Some(popup) = self.at_popup.take() else {
+            return false;
+        };
+        let Some(candidate) = popup
+            .candidates
+            .get(popup.selected.min(popup.candidates.len().saturating_sub(1)))
+            .cloned()
+        else {
+            return false;
+        };
+        let suffix = if candidate.is_dir { "/" } else { " " };
+        let replacement = format!("@{}{suffix}", candidate.relative_path);
+        let replaced = input::replace_range_in_editor(
+            self.active_editor_mut(),
+            popup.line_idx,
+            popup.token_start,
+            popup.cursor_byte,
+            &replacement,
+        );
+        if replaced {
+            if let Some(entry) = self.entries.get_mut(self.selected) {
+                entry.reset_history_cursor();
+            }
+            if candidate.is_dir {
+                self.sync_at_popup();
+            }
+        }
+        replaced
+    }
+
+    pub(super) fn open_find(&mut self, query: Option<&str>) {
+        self.at_popup = None;
+        match query {
+            None => {
+                if let Some(find) = &mut self.find {
+                    find.editing = true;
+                } else {
+                    self.find = Some(super::state::FindState {
+                        query: String::new(),
+                        editing: true,
+                        matches: Vec::new(),
+                        current: 0,
+                    });
+                    self.refresh_viewport_height();
+                }
+            }
+            Some(arg) => {
+                let had_find = self.find.is_some();
+                self.find = Some(super::state::FindState {
+                    query: arg.to_owned(),
+                    editing: false,
+                    matches: Vec::new(),
+                    current: 0,
+                });
+                if !had_find {
+                    self.refresh_viewport_height();
+                }
+                self.recompute_find_matches(true);
+                if let Some(find) = &mut self.find
+                    && find.matches.is_empty()
+                {
+                    find.editing = true;
+                }
+            }
+        }
+    }
+
+    pub(super) fn close_find(&mut self) {
+        if self.find.take().is_some() {
+            self.refresh_viewport_height();
+        }
+    }
+
+    pub(super) fn recompute_find_matches(&mut self, reset_and_scroll: bool) {
+        let Some(find) = &mut self.find else {
+            return;
+        };
+        let mut matches = Vec::new();
+        if !find.query.is_empty()
+            && let Some(entry) = self.entries.get(self.selected)
+        {
+            let needle = find.query.to_lowercase();
+            let history_len = entry.history_rows.as_ref().map_or(0, Rows::len);
+            let current_len = entry.rows.as_ref().map_or(0, Rows::len);
+            for index in 0..(history_len + current_len) {
+                let row_text = if index < history_len {
+                    entry
+                        .history_rows
+                        .as_ref()
+                        .and_then(|rows| rows.row_text(index))
+                } else {
+                    entry
+                        .rows
+                        .as_ref()
+                        .and_then(|rows| rows.row_text(index - history_len))
+                };
+                if row_text.is_some_and(|text| text.to_lowercase().contains(&needle)) {
+                    matches.push(index);
+                }
+            }
+        }
+        find.matches = matches;
+        if find.matches.is_empty() {
+            find.current = 0;
+            return;
+        }
+        if reset_and_scroll {
+            find.current = 0;
+            let match_row = find.matches[0];
+            let viewport_height = self.viewport_height;
+            if let Some(entry) = self.entries.get_mut(self.selected) {
+                scroll_match_into_view(entry, viewport_height, match_row);
+            }
+        } else {
+            find.current = find.current.min(find.matches.len() - 1);
+        }
+    }
+
+    pub(super) fn step_find_match(&mut self, forward: bool) {
+        let Some(find) = &mut self.find else {
+            return;
+        };
+        if find.matches.is_empty() {
+            return;
+        }
+        let len = find.matches.len();
+        find.current = if forward {
+            (find.current + 1) % len
+        } else {
+            find.current.checked_sub(1).unwrap_or(len - 1)
+        };
+        let match_row = find.matches[find.current];
+        let viewport_height = self.viewport_height;
+        if let Some(entry) = self.entries.get_mut(self.selected) {
+            scroll_match_into_view(entry, viewport_height, match_row);
+        }
+    }
+
     pub(super) fn complete_input(&mut self) {
         let candidates = self.model_completion_candidates();
         if let Some(entry) = self.entries.get_mut(self.selected) {
@@ -1135,6 +1352,9 @@ impl App {
         self.spawn_job(Some(key.clone()), super::jobs::JobKind::Close, async move {
             Message::Closed(key, host.close(&status.target, policy).await)
         });
+        if index == self.selected {
+            self.clear_session_overlays();
+        }
     }
     pub(super) fn retry(&mut self) {
         if !self.capacity() {
@@ -1508,6 +1728,7 @@ impl App {
             entry.clear_history();
             entry.notice = "Switched to main (entry) agent".into();
             self.dirty = true;
+            self.clear_session_overlays();
             return;
         }
         let Some(snap) = session.agent_snapshot(target_agent_id) else {
@@ -1532,6 +1753,7 @@ impl App {
             tars_core::permission::escape_untrusted_text(&snap.name)
         );
         self.dirty = true;
+        self.clear_session_overlays();
     }
 
     pub(super) fn switch_agent_by_selector(&mut self, selector: &str) {
@@ -2306,6 +2528,7 @@ impl App {
                 } else {
                     "Updated draft from external editor".into()
                 };
+                self.sync_at_popup();
             }
             Err(error) => {
                 entry.notice = error;
@@ -2671,6 +2894,31 @@ fn apply_completion_result(target: &mut String, result: input::CompleteResult) {
         input::CompleteResult::Notice(notice) => {
             *target = notice;
         }
+    }
+}
+
+fn scroll_match_into_view(entry: &mut Entry, viewport_height: usize, match_row: usize) {
+    let height = viewport_height.max(1);
+    let viewport = entry.viewport(height);
+    let visible_rows = height.saturating_sub(viewport.reserved).max(1);
+    let view_end = viewport.start.saturating_add(visible_rows);
+    if match_row < viewport.start || match_row >= view_end {
+        let target = match_row.saturating_sub(visible_rows / 3).min(viewport.end);
+        entry.scroll = (target < viewport.end).then_some(target);
+        if entry.scroll.is_none() {
+            entry.has_unread_output = false;
+        }
+        entry.scroll_anchor = None;
+    }
+}
+
+pub(crate) fn workspaces_match(a: &std::path::Path, b: &std::path::Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
     }
 }
 

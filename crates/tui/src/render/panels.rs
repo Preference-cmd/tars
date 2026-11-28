@@ -1,6 +1,6 @@
-use super::theme::{ACCENT, MUTED, SPINNER_FRAMES};
+use super::theme::{ACCENT, ERR, MUTED, SPINNER_FRAMES};
 use crate::app::{
-    App, COMMANDS, Panel, matching_commands,
+    App, AtPopupState, COMMANDS, Panel, matching_commands,
     provider::{ModelFetchStatus, ProviderFieldKind, ProviderWizardState, ProviderWizardStep},
 };
 use ratatui::{
@@ -75,9 +75,61 @@ pub(super) fn commands_popup(
     );
 }
 
+pub(super) fn at_popup(frame: &mut Frame<'_>, popup: &AtPopupState, show_header: bool, area: Rect) {
+    frame.render_widget(Clear, area);
+    let list_area = if show_header && area.height >= 2 {
+        let title = if area.width < 58 {
+            " Files "
+        } else {
+            " Files · ↑↓ select · Tab/Enter insert · Esc close "
+        };
+        let block = Block::default()
+            .borders(Borders::TOP)
+            .border_style(Style::default().fg(MUTED))
+            .title(Span::styled(title, Style::default().fg(MUTED)));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        inner
+    } else {
+        area
+    };
+    if popup.candidates.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No matching workspace files")
+                .wrap(Wrap { trim: false })
+                .style(Style::default().fg(MUTED)),
+            list_area,
+        );
+        return;
+    }
+    let max_item_width = usize::from(list_area.width).saturating_sub(2);
+    let items: Vec<_> = popup
+        .candidates
+        .iter()
+        .map(|candidate| {
+            let escaped = crate::transcript::display_single_line(&candidate.relative_path);
+            let span = if candidate.is_dir {
+                Span::styled(format!("{escaped}/"), Style::default().fg(ACCENT))
+            } else {
+                Span::raw(escaped)
+            };
+            let spans = super::surface::truncate_spans_display_width(vec![span], max_item_width);
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(popup.selected.min(items.len() - 1)));
+    frame.render_stateful_widget(
+        List::new(items)
+            .highlight_symbol("❯ ")
+            .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        list_area,
+        &mut state,
+    );
+}
+
 pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) {
     frame.render_widget(Clear, area);
-    let (query, selected) = match panel {
+    let (query, selected, current_workspace_only) = match panel {
         Panel::ModeSelect { selected } => {
             let regions = Layout::vertical([
                 Constraint::Length(2),
@@ -287,7 +339,11 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
         Panel::Commands { .. } => {
             unreachable!("Panel::Commands is rendered as a floating popup in surface::draw")
         }
-        Panel::Sessions { query, selected } => (query, *selected),
+        Panel::Sessions {
+            query,
+            selected,
+            current_workspace_only,
+        } => (query, *selected, *current_workspace_only),
         Panel::Models { query, selected } => {
             let rows = Layout::vertical([
                 Constraint::Length(2),
@@ -387,18 +443,29 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
         Constraint::Length(1),
     ])
     .split(area);
+    let has_ref_ws = app.active_or_cli_workspace().is_some();
+    let filter_active = current_workspace_only && has_ref_ws;
+    let badge = if filter_active {
+        "  [this workspace]"
+    } else {
+        "  [all workspaces]"
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
                 "Sessions  /",
                 Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(query),
+            Span::raw(crate::transcript::display_single_line(query)),
+            Span::styled(
+                badge,
+                Style::default().fg(if filter_active { ACCENT } else { MUTED }),
+            ),
         ])),
         rows[0],
     );
     let items: Vec<_> = app
-        .matching_sessions(query)
+        .matching_sessions_filtered(query, current_workspace_only)
         .iter()
         .map(|&index| {
             let entry = &app.entries[index];
@@ -407,19 +474,24 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
             } else {
                 ""
             };
-            let model = entry.model();
+            let short_id = entry.id().get(..8).unwrap_or(entry.id());
+            let model = crate::transcript::display_single_line(entry.model());
             let time_str = tars_core::format_timestamp_utc(entry.updated_at_ms());
+            let ws_label = entry.effective_workspace_root().map_or_else(
+                || "(no workspace)".to_owned(),
+                |ws| super::surface::format_workspace_label(&ws, 36),
+            );
             let first_line = match entry.title() {
                 Some(title) => format!(
-                    "{}  ·  {time_str}",
+                    "{}  ·  {short_id}  ·  {time_str}",
                     tars_core::permission::escape_untrusted_text(&title)
                 ),
-                None => format!("{model}  ·  {time_str}"),
+                None => format!("{model}  ·  {short_id}  ·  {time_str}"),
             };
             ListItem::new(vec![
                 Line::from(first_line),
                 Line::styled(
-                    format!("{model}{waiting}"),
+                    format!("{model}  ·  {ws_label}{waiting}"),
                     Style::default().fg(if waiting.is_empty() {
                         MUTED
                     } else {
@@ -430,8 +502,13 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
         })
         .collect();
     if items.is_empty() {
+        let empty_msg = if filter_active {
+            "No sessions in this workspace. Press Tab to show all workspaces or /new to create one."
+        } else {
+            "No matching sessions. /new creates one."
+        };
         frame.render_widget(
-            Paragraph::new("No matching sessions. /new creates one.")
+            Paragraph::new(empty_msg)
                 .wrap(Wrap { trim: false })
                 .style(Style::default().fg(MUTED)),
             rows[1],
@@ -447,8 +524,10 @@ pub(super) fn draw(frame: &mut Frame<'_>, app: &App, panel: &Panel, area: Rect) 
         );
     }
     frame.render_widget(
-        Paragraph::new("↑↓ select · Enter open · Ctrl-D/Del delete · Esc back")
-            .style(Style::default().fg(MUTED)),
+        Paragraph::new(
+            "↑↓ select · Enter open · Tab toggle workspace filter · Ctrl-D/Del delete · Esc back",
+        )
+        .style(Style::default().fg(MUTED)),
         rows[2],
     );
 }
@@ -624,11 +703,53 @@ pub(super) fn confirm(frame: &mut Frame<'_>, confirmation: &crate::app::Confirma
     );
 }
 
+fn inline_card_block(title: &str, outside_sandbox: bool, max_width: u16) -> Block<'static> {
+    let color = if outside_sandbox { ERR } else { ACCENT };
+    let title_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+    let max_title = usize::from(max_width.saturating_sub(4)).max(1);
+    let fitted = super::surface::truncate_spans_display_width(
+        vec![Span::styled(title.to_owned(), title_style)],
+        max_title,
+    );
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(color))
+        .title(Line::from(fitted))
+}
+
+fn wrapped_hint_rows(hint: &str, width: u16) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    let w = usize::from(width.max(1));
+    hint.lines()
+        .map(|line| line.width().div_ceil(w).max(1))
+        .sum::<usize>()
+        .max(1) as u16
+}
+
 pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Entry, area: Rect) {
     frame.render_widget(Clear, area);
     let Some(req) = entry.approval_queue.front() else {
         return;
     };
+    let is_outside_sandbox = matches!(
+        &req.subject,
+        tars_core::permission::ApprovalSubject::Command {
+            target: tars_core::permission::CommandTarget::Outside { .. },
+            ..
+        }
+    );
+    let card_title = if is_outside_sandbox {
+        " OUTSIDE SANDBOX · Approval "
+    } else {
+        " Approval "
+    };
+    let outer_block = inline_card_block(card_title, is_outside_sandbox, area.width);
+    let inner = outer_block.inner(area);
+    frame.render_widget(outer_block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
     let title_line = match &req.subject {
         tars_core::permission::ApprovalSubject::FileWrite { path, action, .. } => {
             let action_str = match action {
@@ -680,9 +801,12 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
         .and_then(|s| s.permission_mode())
         .map(|(m, _)| m);
 
+    let title_color = if is_outside_sandbox { ERR } else { ACCENT };
     let mut header_lines = vec![Line::styled(
         title_line,
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(title_color)
+            .add_modifier(Modifier::BOLD),
     )];
     if let Some(m) = current_mode.filter(|m| *m != req.mode) {
         header_lines.push(Line::styled(
@@ -709,27 +833,66 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
         header_lines.push(Line::styled(msg, Style::default().fg(MUTED)));
     }
 
-    let header_len = header_lines.len() as u16;
-    let reason_height = if entry.approval_reason.is_some() {
-        2
+    let compact = inner.width < 48;
+    let hint = if entry.approval_reason.is_some() {
+        if compact {
+            "Enter deny · Esc cancel"
+        } else {
+            "Enter confirm deny · Esc cancel"
+        }
     } else {
-        0
+        match &req.subject {
+            tars_core::permission::ApprovalSubject::Command {
+                suggested_prefixes,
+                can_save_workspace_rule,
+                ..
+            } if !suggested_prefixes.is_empty() && *can_save_workspace_rule => {
+                if compact {
+                    "1/y 2/s 3/w · n · Esc"
+                } else {
+                    "1/y/Enter allow once · 2/s allow for session · 3/w always in workspace · n deny\nEsc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
+                }
+            }
+            tars_core::permission::ApprovalSubject::Command {
+                suggested_prefixes, ..
+            } if !suggested_prefixes.is_empty() => {
+                if compact {
+                    "1/y 2/s · n · Esc"
+                } else {
+                    "1/y/Enter allow once · 2/s allow for session · n deny\nEsc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
+                }
+            }
+            _ => {
+                if compact {
+                    "y/Enter · n · Esc"
+                } else {
+                    "Enter / y allow · n deny · Esc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
+                }
+            }
+        }
     };
+
+    let hint_height =
+        wrapped_hint_rows(hint, inner.width).min(inner.height.saturating_sub(2).max(1));
+    let reason_height = u16::from(entry.approval_reason.is_some())
+        .min(inner.height.saturating_sub(hint_height + 1));
+    let max_header = inner
+        .height
+        .saturating_sub(hint_height + reason_height + 1)
+        .max(1);
+    let header_len = (header_lines.len() as u16).min(max_header);
+
     let regions = Layout::vertical([
-        Constraint::Length(header_len + 1),
+        Constraint::Length(header_len),
         Constraint::Min(1),
         Constraint::Length(reason_height),
-        Constraint::Length(3),
+        Constraint::Length(hint_height),
     ])
-    .split(area);
+    .split(inner);
 
     frame.render_widget(Paragraph::new(header_lines), regions[0]);
 
-    let body_height = usize::from(regions[1].height.saturating_sub(2));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(MUTED));
-
+    let body_height = usize::from(regions[1].height);
     match &req.subject {
         tars_core::permission::ApprovalSubject::FileWrite { diff, .. } => {
             let escaped_diff = tars_core::permission::escape_untrusted_text(diff);
@@ -754,7 +917,7 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
                     Line::styled(line, style)
                 })
                 .collect();
-            frame.render_widget(Paragraph::new(visible_diff).block(diff_block()), regions[1]);
+            frame.render_widget(Paragraph::new(visible_diff), regions[1]);
         }
         tars_core::permission::ApprovalSubject::Command { .. } => {
             let body =
@@ -770,7 +933,7 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
                     let style = if line.starts_with("NOT in the sandbox")
                         || (line.starts_with("Rule ") && line.contains("outside_sandbox = true"))
                     {
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                        Style::default().fg(ERR).add_modifier(Modifier::BOLD)
                     } else if line.starts_with("Rule prefix") {
                         Style::default()
                             .fg(Color::Cyan)
@@ -783,7 +946,7 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
                     Line::styled(line.as_str(), style)
                 })
                 .collect();
-            frame.render_widget(Paragraph::new(visible).block(block), regions[1]);
+            frame.render_widget(Paragraph::new(visible), regions[1]);
         }
         tars_core::permission::ApprovalSubject::McpCall { arguments, .. } => {
             let escaped_args = tars_core::permission::escape_untrusted_text(arguments);
@@ -797,14 +960,22 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
                 .take(body_height)
                 .map(|&line| Line::from(line))
                 .collect();
-            frame.render_widget(Paragraph::new(visible_args).block(block), regions[1]);
+            frame.render_widget(Paragraph::new(visible_args), regions[1]);
         }
     }
 
-    if let Some(reason) = &entry.approval_reason {
+    if reason_height > 0
+        && let Some(reason) = &entry.approval_reason
+    {
+        let prefix = if compact {
+            "Reason: "
+        } else {
+            "Reason for the model (optional, Enter to skip): "
+        };
+        let reason_line = format!("{prefix}{reason}");
         frame.render_widget(
             Paragraph::new(vec![Line::styled(
-                format!("Reason for the model (optional, Enter to skip): {reason}"),
+                reason_line,
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -813,27 +984,6 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
         );
     }
 
-    let hint = if entry.approval_reason.is_some() {
-        "Enter confirm deny · Esc cancel"
-    } else {
-        match &req.subject {
-            tars_core::permission::ApprovalSubject::Command {
-                suggested_prefixes,
-                can_save_workspace_rule,
-                ..
-            } if !suggested_prefixes.is_empty() && *can_save_workspace_rule => {
-                "1/y/Enter allow once · 2/s allow for session · 3/w always in workspace · n deny\nEsc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
-            }
-            tars_core::permission::ApprovalSubject::Command {
-                suggested_prefixes, ..
-            } if !suggested_prefixes.is_empty() => {
-                "1/y/Enter allow once · 2/s allow for session · n deny\nEsc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
-            }
-            _ => {
-                "Enter / y allow · n deny · Esc cancel turn · Shift-Tab mode · ↑↓ PgUp PgDn scroll"
-            }
-        }
-    };
     let hint_style = if app.is_approval_guarded() {
         Style::default().fg(MUTED).add_modifier(Modifier::DIM)
     } else {
@@ -847,12 +997,6 @@ pub(super) fn approval(frame: &mut Frame<'_>, app: &App, entry: &crate::app::Ent
     );
 }
 
-fn diff_block() -> Block<'static> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(MUTED))
-}
-
 pub(super) fn workspace_rules_trust(
     frame: &mut Frame<'_>,
     app: &App,
@@ -863,10 +1007,22 @@ pub(super) fn workspace_rules_trust(
     let Some(prompt) = entry.workspace_rules_trust.as_ref() else {
         return;
     };
+    let compact = area.width.saturating_sub(2) < 48;
+    let card_title = if prompt.has_outside_sandbox {
+        " OUTSIDE SANDBOX · Workspace Rules "
+    } else {
+        " Workspace Rules "
+    };
     let mut header_lines = vec![
         Line::styled(
             "Trust workspace command allow rules?",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(if prompt.has_outside_sandbox {
+                    ERR
+                } else {
+                    ACCENT
+                })
+                .add_modifier(Modifier::BOLD),
         ),
         Line::styled(
             format!(
@@ -879,18 +1035,27 @@ pub(super) fn workspace_rules_trust(
         ),
     ];
     if prompt.has_outside_sandbox {
+        let warning = if compact {
+            "WARNING: [OUTSIDE SANDBOX]"
+        } else {
+            "WARNING: [OUTSIDE SANDBOX] rules allow execution outside the sandbox without prompting."
+        };
         header_lines.push(Line::styled(
-            "WARNING: [OUTSIDE SANDBOX] rules allow execution outside the sandbox without prompting.",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            warning,
+            Style::default().fg(ERR).add_modifier(Modifier::BOLD),
         ));
     }
-    header_lines.push(Line::from(
-        "Pending allow rules (currently ignored; deny/ask rules are already active):",
-    ));
+    if !compact {
+        header_lines.push(Line::from(
+            "Pending allow rules (currently ignored; deny/ask rules are already active):",
+        ));
+    }
     render_workspace_trust_prompt(
         frame,
         app,
         area,
+        card_title,
+        prompt.has_outside_sandbox,
         header_lines,
         &prompt.body_lines,
         prompt.scroll,
@@ -907,7 +1072,8 @@ pub(super) fn workspace_agents_trust(
     let Some(prompt) = entry.workspace_agents_trust.as_ref() else {
         return;
     };
-    let header_lines = vec![
+    let compact = area.width.saturating_sub(2) < 48;
+    let mut header_lines = vec![
         Line::styled(
             "Trust workspace agent presets?",
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -921,39 +1087,65 @@ pub(super) fn workspace_agents_trust(
             ),
             Style::default().fg(MUTED),
         ),
-        Line::from("Pending workspace presets from .tars/agents/*.md (currently excluded):"),
     ];
+    if !compact {
+        header_lines.push(Line::from(
+            "Pending workspace presets from .tars/agents/*.md (currently excluded):",
+        ));
+    }
     render_workspace_trust_prompt(
         frame,
         app,
         area,
+        " Workspace Agents ",
+        false,
         header_lines,
         &prompt.body_lines,
         prompt.scroll,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_workspace_trust_prompt(
     frame: &mut Frame<'_>,
     app: &App,
     area: Rect,
+    card_title: &str,
+    outside_sandbox: bool,
     header_lines: Vec<Line<'_>>,
     body_lines: &[crate::app::WorkspaceTrustLine],
     scroll: usize,
 ) {
     use crate::app::WorkspaceTrustLineKind;
 
-    let header_len = header_lines.len() as u16;
+    let outer_block = inline_card_block(card_title, outside_sandbox, area.width);
+    let inner = outer_block.inner(area);
+    frame.render_widget(outer_block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let compact = inner.width < 48;
+    let hint = if compact {
+        "y/Enter · n/Esc · ↑↓"
+    } else {
+        "Enter / y trust · n / Esc / Ctrl-C decline · ↑↓ PgUp PgDn scroll"
+    };
+    let hint_height =
+        wrapped_hint_rows(hint, inner.width).min(inner.height.saturating_sub(2).max(1));
+    let max_header = inner.height.saturating_sub(hint_height + 1).max(1);
+    let header_len = (header_lines.len() as u16).min(max_header);
+
     let regions = Layout::vertical([
-        Constraint::Length(header_len + 1),
+        Constraint::Length(header_len),
         Constraint::Min(1),
-        Constraint::Length(2),
+        Constraint::Length(hint_height),
     ])
-    .split(area);
+    .split(inner);
 
     frame.render_widget(Paragraph::new(header_lines), regions[0]);
 
-    let body_height = usize::from(regions[1].height.saturating_sub(2));
+    let body_height = usize::from(regions[1].height);
     let scroll = scroll.min(body_lines.len().saturating_sub(body_height));
     let visible: Vec<Line> = body_lines
         .iter()
@@ -964,7 +1156,7 @@ fn render_workspace_trust_prompt(
                 WorkspaceTrustLineKind::Plain => Style::default(),
                 WorkspaceTrustLineKind::Rule => Style::default().fg(Color::Cyan),
                 WorkspaceTrustLineKind::RuleOutsideSandbox => {
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                    Style::default().fg(ERR).add_modifier(Modifier::BOLD)
                 }
                 WorkspaceTrustLineKind::Heading => Style::default()
                     .fg(Color::Yellow)
@@ -976,15 +1168,19 @@ fn render_workspace_trust_prompt(
             Line::styled(line.text.as_str(), style)
         })
         .collect();
-    frame.render_widget(Paragraph::new(visible).block(diff_block()), regions[1]);
+    frame.render_widget(Paragraph::new(visible), regions[1]);
 
-    let hint = "Enter / y trust · n / Esc / Ctrl-C decline · ↑↓ PgUp PgDn scroll";
     let hint_style = if app.is_workspace_trust_guarded() {
         Style::default().fg(MUTED).add_modifier(Modifier::DIM)
     } else {
         Style::default().fg(MUTED).remove_modifier(Modifier::DIM)
     };
-    frame.render_widget(Paragraph::new(hint).style(hint_style), regions[2]);
+    frame.render_widget(
+        Paragraph::new(hint)
+            .wrap(Wrap { trim: false })
+            .style(hint_style),
+        regions[2],
+    );
 }
 
 fn provider_wizard(frame: &mut Frame<'_>, app: &App, wizard: &ProviderWizardState, area: Rect) {

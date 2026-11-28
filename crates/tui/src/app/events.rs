@@ -141,7 +141,9 @@ impl App {
             if let Some(panel) = &mut self.panel {
                 match panel {
                     super::commands::Panel::Commands { query, selected }
-                    | super::commands::Panel::Sessions { query, selected }
+                    | super::commands::Panel::Sessions {
+                        query, selected, ..
+                    }
                     | super::commands::Panel::Models { query, selected } => {
                         query.extend(text.chars().filter(|c| !c.is_control()));
                         *selected = 0;
@@ -155,7 +157,8 @@ impl App {
             }
             if self.folder_trust.is_some() {
                 return;
-            } else if let Some(entry) = self.entries.get_mut(self.selected) {
+            }
+            if let Some(entry) = self.entries.get_mut(self.selected) {
                 if entry.workspace_rules_trust.is_some() || entry.workspace_agents_trust.is_some() {
                     return;
                 }
@@ -163,12 +166,25 @@ impl App {
                     if !is_guarded {
                         reason.extend(text.chars().filter(|c| !c.is_control()));
                     }
-                } else if entry.approval_queue.is_empty() {
-                    self.paste_into_composer(text);
+                    return;
                 }
+                if !entry.approval_queue.is_empty() {
+                    return;
+                }
+            }
+            if let Some(find) = &mut self.find
+                && find.editing
+            {
+                find.query.extend(text.chars().filter(|c| !c.is_control()));
+                self.recompute_find_matches(true);
+                return;
+            }
+            if self.entries.get(self.selected).is_some() {
+                self.paste_into_composer(text);
             } else {
                 input::paste(&mut self.scratch_editor, text, true);
             }
+            self.sync_at_popup();
             return;
         }
         let Event::Key(key) = event else {
@@ -398,6 +414,102 @@ impl App {
             }
             return;
         }
+        if input::control(key, 'f') {
+            self.open_find(None);
+            return;
+        }
+        if self.find.as_ref().is_some_and(|f| f.editing) {
+            let no_ctrl_alt = !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+            match key.code {
+                KeyCode::Esc if key.kind == KeyEventKind::Press => {
+                    self.close_find();
+                    return;
+                }
+                KeyCode::Enter
+                    if key.kind == KeyEventKind::Press
+                        && !key.modifiers.intersects(
+                            KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL,
+                        ) =>
+                {
+                    if let Some(find) = &mut self.find
+                        && !find.matches.is_empty()
+                    {
+                        find.editing = false;
+                    }
+                    return;
+                }
+                KeyCode::Backspace => {
+                    if let Some(find) = &mut self.find {
+                        find.query.pop();
+                    }
+                    self.recompute_find_matches(true);
+                    return;
+                }
+                KeyCode::Up if key.modifiers.is_empty() => {
+                    self.step_find_match(false);
+                    return;
+                }
+                KeyCode::Down if key.modifiers.is_empty() => {
+                    self.step_find_match(true);
+                    return;
+                }
+                KeyCode::Tab if key.modifiers.is_empty() => {
+                    return;
+                }
+                KeyCode::Char(c) if no_ctrl_alt && !c.is_control() => {
+                    if let Some(find) = &mut self.find {
+                        find.query.push(c);
+                    }
+                    self.recompute_find_matches(true);
+                    return;
+                }
+                _ => {}
+            }
+        } else if self.find.as_ref().is_some_and(|f| !f.editing) {
+            let no_ctrl_alt = !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+            match key.code {
+                KeyCode::Esc if key.kind == KeyEventKind::Press => {
+                    self.close_find();
+                    return;
+                }
+                KeyCode::Char('n') if key.kind == KeyEventKind::Press && no_ctrl_alt => {
+                    self.step_find_match(true);
+                    return;
+                }
+                KeyCode::Char('N') if key.kind == KeyEventKind::Press && no_ctrl_alt => {
+                    self.step_find_match(false);
+                    return;
+                }
+                KeyCode::Enter
+                    if key.kind == KeyEventKind::Press
+                        && !key.modifiers.intersects(
+                            KeyModifiers::SHIFT | KeyModifiers::ALT | KeyModifiers::CONTROL,
+                        ) =>
+                {
+                    self.step_find_match(true);
+                    return;
+                }
+                KeyCode::Down if key.modifiers.is_empty() => {
+                    self.step_find_match(true);
+                    return;
+                }
+                KeyCode::Up if key.modifiers.is_empty() => {
+                    self.step_find_match(false);
+                    return;
+                }
+                KeyCode::Char('/') if key.kind == KeyEventKind::Press && no_ctrl_alt => {
+                    if let Some(find) = &mut self.find {
+                        find.editing = true;
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         let is_backtab = key.code == KeyCode::BackTab
             || (key.code == KeyCode::Tab && key.modifiers.contains(KeyModifiers::SHIFT));
         if is_backtab {
@@ -405,7 +517,15 @@ impl App {
             return;
         }
         if key.kind == KeyEventKind::Press && key.code == KeyCode::Tab && key.modifiers.is_empty() {
-            self.complete_input();
+            if self
+                .at_popup
+                .as_ref()
+                .is_some_and(|popup| !popup.candidates.is_empty())
+            {
+                self.accept_at_popup_candidate();
+            } else {
+                self.complete_input();
+            }
             return;
         }
         if key.kind == KeyEventKind::Press
@@ -426,8 +546,17 @@ impl App {
                 if let Some(entry) = self.entries.get_mut(self.selected) {
                     entry.reset_history_cursor();
                 }
+                self.sync_at_popup();
             } else if key.kind == KeyEventKind::Press {
-                self.submit();
+                if self
+                    .at_popup
+                    .as_ref()
+                    .is_some_and(|popup| !popup.candidates.is_empty())
+                {
+                    self.accept_at_popup_candidate();
+                } else {
+                    self.submit();
+                }
             }
             return;
         }
@@ -436,6 +565,7 @@ impl App {
             if let Some(entry) = self.entries.get_mut(self.selected) {
                 entry.reset_history_cursor();
             }
+            self.sync_at_popup();
             return;
         }
         if input::control(key, 's') {
@@ -457,7 +587,7 @@ impl App {
         } else if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(
                 key.code,
-                KeyCode::Char('q' | 's' | 'c' | 'r' | 'e' | 'g' | 'o' | 'd' | 'w')
+                KeyCode::Char('q' | 's' | 'c' | 'r' | 'e' | 'g' | 'o' | 'd' | 'w' | 'f')
             )
         {
             // Repeated command keys never fall through into text editing.
@@ -470,6 +600,7 @@ impl App {
                 KeyCode::F(4) if key.kind == KeyEventKind::Press => {
                     if !self.entries.is_empty() {
                         self.selected = (self.selected + 1) % self.entries.len();
+                        self.clear_session_overlays();
                         self.refresh_size_flags();
                         self.update_approval_guard();
                         self.update_workspace_trust_guard();
@@ -478,7 +609,11 @@ impl App {
                 KeyCode::F(5) if key.kind == KeyEventKind::Press => self.list(),
                 KeyCode::F(6) if key.kind == KeyEventKind::Press => self.show_tools(),
                 KeyCode::F(7) if key.kind == KeyEventKind::Press => self.show_repair(),
-                KeyCode::Esc if key.kind == KeyEventKind::Press => self.cancel(),
+                KeyCode::Esc if key.kind == KeyEventKind::Press => {
+                    if self.at_popup.take().is_none() {
+                        self.cancel();
+                    }
+                }
                 KeyCode::PageUp | KeyCode::PageDown => {
                     if let Some(entry) = self.entries.get_mut(self.selected) {
                         let page = entry.viewport(self.viewport_height).page;
@@ -537,25 +672,35 @@ impl App {
                     if let Some(entry) = self.entries.get_mut(self.selected) {
                         if entry.has_text_draft() {
                             input::edit(&mut entry.editor, key);
+                            self.sync_at_popup();
                         } else {
                             scroll_to_top(entry);
                         }
                     } else if self.scratch_has_text_draft() {
                         input::edit(&mut self.scratch_editor, key);
+                        self.sync_at_popup();
                     }
                 }
                 KeyCode::End if key.modifiers.is_empty() => {
                     if let Some(entry) = self.entries.get_mut(self.selected) {
                         if entry.has_text_draft() {
                             input::edit(&mut entry.editor, key);
+                            self.sync_at_popup();
                         } else {
                             scroll_to_bottom(entry);
                         }
                     } else if self.scratch_has_text_draft() {
                         input::edit(&mut self.scratch_editor, key);
+                        self.sync_at_popup();
                     }
                 }
                 KeyCode::Up if key.modifiers.is_empty() => {
+                    if let Some(popup) = &mut self.at_popup
+                        && !popup.candidates.is_empty()
+                    {
+                        popup.selected = popup.selected.saturating_sub(1);
+                        return;
+                    }
                     if let Some(entry) = self.entries.get_mut(self.selected) {
                         if !entry.step_history_up() {
                             input::edit(&mut entry.editor, key);
@@ -563,8 +708,15 @@ impl App {
                     } else {
                         input::edit(&mut self.scratch_editor, key);
                     }
+                    self.sync_at_popup();
                 }
                 KeyCode::Down if key.modifiers.is_empty() => {
+                    if let Some(popup) = &mut self.at_popup
+                        && !popup.candidates.is_empty()
+                    {
+                        popup.selected = (popup.selected + 1).min(popup.candidates.len() - 1);
+                        return;
+                    }
                     if let Some(entry) = self.entries.get_mut(self.selected) {
                         if !entry.step_history_down() {
                             input::edit(&mut entry.editor, key);
@@ -572,6 +724,7 @@ impl App {
                     } else {
                         input::edit(&mut self.scratch_editor, key);
                     }
+                    self.sync_at_popup();
                 }
                 _ => {
                     if let Some(entry) = self.entries.get_mut(self.selected) {
@@ -590,6 +743,7 @@ impl App {
                     } else {
                         input::edit(&mut self.scratch_editor, key);
                     }
+                    self.sync_at_popup();
                 }
             }
         }
@@ -651,6 +805,7 @@ impl App {
             wizard.clear_secret();
         }
         self.panel = None;
+        self.at_popup = None;
         self.last_ctrl_c_cancel_at = None;
         self.ctrl_c_exit_armed = false;
         self.request_quit();

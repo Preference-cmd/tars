@@ -28,6 +28,7 @@ pub(crate) enum Panel {
     Sessions {
         query: String,
         selected: usize,
+        current_workspace_only: bool,
     },
     Models {
         query: String,
@@ -77,6 +78,7 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "Add or update a model provider preset and API key",
     ),
     ("sessions", "Find and open a saved or active session"),
+    ("find", "Search text in the current conversation (Ctrl-F)"),
     ("agents", "List session agents and switch transcript view"),
     ("queue", "Inspect, pop, or clear queued prompts"),
     ("image", "Attach, list, remove, or clear pending images"),
@@ -155,19 +157,49 @@ pub(crate) fn matching_commands(query: &str) -> Vec<usize> {
 
 impl App {
     pub(crate) fn matching_sessions(&self, query: &str) -> Vec<usize> {
+        self.matching_sessions_filtered(query, false)
+    }
+
+    pub(crate) fn matching_sessions_filtered(
+        &self,
+        query: &str,
+        current_workspace_only: bool,
+    ) -> Vec<usize> {
         let query = query.to_lowercase();
+        let ref_workspace = if current_workspace_only {
+            self.active_or_cli_workspace()
+        } else {
+            None
+        };
         let mut matches: Vec<usize> = self
             .entries
             .iter()
             .enumerate()
             .filter_map(|(i, entry)| {
+                let entry_ws = entry.effective_workspace_root();
+                if let Some(ref target_ws) = ref_workspace
+                    && !entry_ws
+                        .as_deref()
+                        .is_some_and(|ws| super::actions::workspaces_match(ws, target_ws))
+                {
+                    return None;
+                }
+                if query.is_empty() {
+                    return Some(i);
+                }
                 let matches_id = entry.id().to_lowercase().contains(&query);
                 let matches_title = entry
                     .title()
                     .map(|t| t.to_lowercase().contains(&query))
                     .unwrap_or(false);
                 let matches_model = entry.model().to_lowercase().contains(&query);
-                (matches_id || matches_title || matches_model).then_some(i)
+                let matches_ws = entry_ws.is_some_and(|ws| {
+                    ws.display().to_string().to_lowercase().contains(&query)
+                        || crate::render::format_workspace_label(&ws, usize::MAX)
+                            .to_lowercase()
+                            .contains(&query)
+                });
+                (matches_id || matches_title || matches_model || matches_ws).then_some(i)
             })
             .collect();
         matches.sort_by(|&a, &b| {
@@ -227,6 +259,7 @@ impl App {
     }
 
     pub(super) fn show_commands(&mut self) {
+        self.at_popup = None;
         self.panel = Some(Panel::Commands {
             query: String::new(),
             selected: 0,
@@ -276,6 +309,7 @@ impl App {
                 self.model_command(arg);
             }
             "sessions" => {
+                self.clear_session_overlays();
                 self.pending_resume_selector = None;
                 self.list();
                 // The picker is ordered, so start on the current session's row.
@@ -287,7 +321,13 @@ impl App {
                 self.panel = Some(Panel::Sessions {
                     query: String::new(),
                     selected,
+                    current_workspace_only: false,
                 });
+            }
+            "find" => {
+                let clean = query.trim_start_matches('/').trim();
+                let arg = clean.strip_prefix("find").unwrap_or("").trim();
+                self.open_find((!arg.is_empty()).then_some(arg));
             }
             "agents" => {
                 let clean = query.trim_start_matches('/').trim();
@@ -385,46 +425,44 @@ impl App {
             "init" => self.run_init(),
             "help" => self.panel = Some(Panel::Info {
                 title: "Keyboard shortcuts".into(),
-                kind: InfoKind::Plain,
+                kind: InfoKind::Markdown,
                 scroll: 0,
-                lines: ["Enter / Ctrl-S   Send input (or queue while a turn is running)", "Ctrl-J / Alt-Enter   New line",
-                    "Ctrl-G / /edit   Edit draft in external $VISUAL or $EDITOR",
-                    "↑ / ↓   Prompt history (at top/bottom line)",
-                    "Tab   Complete /command, /image <path>, or @workspace/path",
-                    "Shift-Tab   Cycle mode (ask -> accept-edits -> read-only)",
-                    "/image [<path> | remove <n> | clear]   Attach, list, or remove pending images",
-                    "/queue [list | pop | clear]   Inspect, pop to editor, or clear queued prompts",
-                    "/rename <title> | --clear   Set or clear the current session title",
-                    "/fork [title]   Fork current idle session into a new independent session",
-                    "Ctrl-D / Delete (in /sessions)   Delete a closed session with confirmation",
-                    "/doctor   Check configuration, credentials, storage, sandbox and tools",
-                    "/trust   Show folder trust and workspace .tars trust status",
-                    "/init   Analyze the workspace and create or update AGENTS.md",
-                    "/clear   Start a fresh session with current model preset and workspace",
-                    "/resume [selector]   Open session picker or jump to a saved session",
-                    "/model [profile]   Switch model profile in a new session",
-                    "/provider   Add or update a model provider preset and API key",
-                    "/agents [name|id|main]   List session agents (x cancels running, Enter switches)",
-                    "/mode [name]   Show or change the permission mode",
-                    "/rules [list | remove <N> | clear]   Show active rules or manage session rules",
-                    "/auto_compact [on|off|PERCENT]   Compaction switch and threshold",
-                    "/compact   Summarize and replace the current context now",
-                    "/summary   Show the current context summary in full",
-                    "Enter / y allow · n deny (optional reason)   Confirmation panel",
-                    "Esc   Interrupt work",
-                    "Ctrl-C   Interrupt work / decline prompt, or save and exit when idle (1.5s grace after cancel)",
-                    "/ or F1   Commands; Esc returns",
-                    "F2 new · F3 open · F4 next · F5 refresh", "Ctrl-O / F6 / /tools   Expand complete recorded tool results", "F7 / /repair   Preview and apply material repair",
-                    "PageUp / PageDown · Alt-U/D   Page or half-page scroll conversation",
-                    "Alt-↑/↓ · Shift-↑/↓   Scroll conversation by 3 lines",
-                    "Ctrl-Home / Ctrl-End (or Home/End when empty)   Jump to top / bottom",
-                    "Ctrl-Z undo · Ctrl-Y redo", "Ctrl-W close · Ctrl-Q save and quit",
-                    "Ctrl-R retry save · Ctrl-E export", "Ctrl-D discard with confirmation",
-                    "/export-md [path]   Export current conversation to a Markdown file",
-                    "/copy [code [N] | id]   Copy last reply, fenced code block, or session ID", "",
-                    "Switching views keeps work and drafts. Saved sessions restore materials, not old work records.",
-                    "Compaction replaces the context with a model-written summary; older conversation loads as you scroll up.",
-                    "Use /status for full configuration, save state and error details."].into_iter().map(str::to_owned).collect(),
+                lines: [
+                    "## Session & Models",
+                    "- `/new` / `F2`, `/clear` — start a fresh session keeping current model and settings",
+                    "- `/resume [selector]` · `/sessions` — open session picker (`Tab` workspace filter, `Ctrl-D`/`Del` delete)",
+                    "- `/model [profile | profile:model]` · `/provider` — switch models in a new session or run the 3-step provider wizard",
+                    "- `/rename <title> | --clear` · `/fork [title]` — rename or fork the current idle session",
+                    "- `F3` open · `F4` next session · `F5` refresh · `/` or `F1` commands",
+                    "",
+                    "## Editing & Input",
+                    "- `Enter` / `Ctrl-S` send (or queue while running) · `Ctrl-J` / `Alt-Enter` newline · `Ctrl-G` / `/edit` external editor",
+                    "- `↑` / `↓` prompt history · `Ctrl-Z` undo · `Ctrl-Y` redo",
+                    "- `Tab` complete `/command`, `/image`, `/model`, `/copy`, or `@workspace/path` · `@` floating workspace file popup (`↑↓` select, `Tab`/`Enter` insert, `Esc` close)",
+                    "- `/image [<path> | remove <n> | clear]` · `/queue [list | pop | clear]` — manage pending images and queued prompts",
+                    "",
+                    "## Navigation & Search",
+                    "- `Ctrl-F` / `/find [query]` — search current conversation (`Enter`/`n` next, `N` prev, `/` edit, `Esc` close)",
+                    "- `PageUp` / `PageDown` · `Alt-U`/`D` · `Alt-↑/↓` · `Shift-↑/↓` — scroll conversation",
+                    "- `Ctrl-Home` / `Ctrl-End` (or `Home`/`End` when empty) — jump to top / bottom",
+                    "- `/export-md [path]` · `/copy [code [N] | id]` — export Markdown or copy reply, code block, or session ID",
+                    "",
+                    "## Tools, Permissions & Agents",
+                    "- Inline approval & `.tars/` trust cards: `1`/`y`/`Enter` allow, `2`/`s` session, `3`/`w` workspace, `n` deny, `Shift-Tab` mode, `↑↓`/`PgUp`/`PgDn` scroll",
+                    "- `/mode [name]` · `Shift-Tab` · `/rules [list | remove <N> | clear]` — inspect or change permission mode and command rules",
+                    "- Ctrl-O / F6 / /tools — expand recorded tool calls and complete results",
+                    "- `/agents [name|id|main]` — list session agents (`x` cancels running, `Enter` switches view)",
+                    "- `/compact` · `/auto_compact [on|off|PERCENT]` · `/summary` — summarize and manage context compaction",
+                    "- `/trust` · `/doctor` · `/init` · `F7` / `/repair` · `/status` — trust, diagnostics, and material repair",
+                    "",
+                    "## Exit & Recovery",
+                    "- `Esc` interrupt work · `Ctrl-C` interrupt/decline, or save and exit when idle (1.5s grace after cancel)",
+                    "- `Ctrl-Q` / `/quit` save and quit · `Ctrl-W` / `/close` save and close · `Ctrl-D` / `/discard` discard local unsaved materials",
+                    "- `Ctrl-R` / `/retry` · `Ctrl-E` / `/export` — retry blocked save or export recovery materials",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
             }),
             "tools" => self.show_tools(),
             "repair" => self.show_repair(),
@@ -1317,7 +1355,7 @@ impl App {
         if key.code == KeyCode::Esc {
             return;
         }
-        let (query, selected, commands) = match &mut panel {
+        let (query, selected, current_workspace_only, commands) = match &mut panel {
             Panel::Repair(_) | Panel::Provider(_) => {
                 unreachable!("repair and provider keys handled separately")
             }
@@ -1410,8 +1448,12 @@ impl App {
                 self.panel = Some(panel);
                 return;
             }
-            Panel::Commands { query, selected } => (query, selected, true),
-            Panel::Sessions { query, selected } => (query, selected, false),
+            Panel::Commands { query, selected } => (query, selected, None, true),
+            Panel::Sessions {
+                query,
+                selected,
+                current_workspace_only,
+            } => (query, selected, Some(current_workspace_only), false),
             Panel::Models { query, selected } => {
                 let choices = self.matching_model_choices(query);
                 let total = choices.len() + 1;
@@ -1469,13 +1511,27 @@ impl App {
                 return;
             }
         };
+        let filter_ws = current_workspace_only.as_deref().copied().unwrap_or(false);
         let matches = if commands {
             matching_commands(query)
         } else {
-            self.matching_sessions(query)
+            self.matching_sessions_filtered(query, filter_ws)
         };
         *selected = (*selected).min(matches.len().saturating_sub(1));
         match key.code {
+            KeyCode::Tab
+                if !commands && key.kind == KeyEventKind::Press && key.modifiers.is_empty() =>
+            {
+                if let Some(flag) = current_workspace_only {
+                    if self.active_or_cli_workspace().is_some() {
+                        *flag = !*flag;
+                        *selected = 0;
+                    } else {
+                        *flag = false;
+                        self.notice = "No active workspace to filter by".into();
+                    }
+                }
+            }
             KeyCode::Tab
                 if commands && key.kind == KeyEventKind::Press && key.modifiers.is_empty() =>
             {
@@ -1594,6 +1650,7 @@ impl App {
                     } else {
                         self.panel = None;
                         self.selected = index;
+                        self.clear_session_overlays();
                         self.refresh_size_flags();
                         self.open();
                         self.update_approval_guard();

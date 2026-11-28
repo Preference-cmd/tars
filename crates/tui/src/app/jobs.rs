@@ -416,6 +416,7 @@ impl App {
                                     self.panel = Some(super::commands::Panel::Sessions {
                                         query: selector,
                                         selected: 0,
+                                        current_workspace_only: false,
                                     });
                                 }
                             }
@@ -472,6 +473,7 @@ impl App {
                                             self.panel = Some(super::commands::Panel::Sessions {
                                                 query: selector.trim().to_owned(),
                                                 selected: 0,
+                                                current_workspace_only: false,
                                             });
                                         }
                                     }
@@ -485,6 +487,7 @@ impl App {
                                     self.panel = Some(super::commands::Panel::Sessions {
                                         query: String::new(),
                                         selected,
+                                        current_workspace_only: false,
                                     });
                                 }
                                 crate::options::StartupAction::Default => {
@@ -897,6 +900,14 @@ impl App {
                     if accepted {
                         entry.restore_scroll_anchor();
                     }
+                    if self.find.is_some()
+                        && self
+                            .entries
+                            .get(self.selected)
+                            .is_some_and(|e| e.key == key)
+                    {
+                        self.recompute_find_matches(false);
+                    }
                 }
             }
             Message::Retried(key, result) => {
@@ -1126,6 +1137,7 @@ impl App {
                         }
                         if let Some(pos) = self.entries.iter().position(|e| e.id() == new_id_str) {
                             self.selected = pos;
+                            self.clear_session_overlays();
                             self.refresh_size_flags();
                             self.open();
                             self.update_approval_guard();
@@ -1154,6 +1166,7 @@ impl App {
                         self.list_generation = self.list_generation.saturating_add(1);
                         self.recently_deleted.insert(id.clone());
                         if let Some(pos) = self.entries.iter().position(|e| e.id() == id) {
+                            let deleted_selected = pos == self.selected;
                             self.entries.remove(pos);
                             if self.entries.is_empty() {
                                 self.selected = 0;
@@ -1161,6 +1174,9 @@ impl App {
                                 self.selected -= 1;
                             } else if self.selected >= self.entries.len() {
                                 self.selected = self.entries.len() - 1;
+                            }
+                            if deleted_selected || self.entries.is_empty() {
+                                self.clear_session_overlays();
                             }
                             self.refresh_size_flags();
                             self.update_approval_guard();
@@ -1461,6 +1477,7 @@ impl App {
         let busy = entry.busy.is_some();
         self.panel = None;
         self.selected = pos;
+        self.clear_session_overlays();
         self.refresh_size_flags();
         self.update_approval_guard();
         self.update_workspace_trust_guard();

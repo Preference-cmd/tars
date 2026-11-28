@@ -139,16 +139,30 @@ async fn tab_completion_completes_slash_commands_and_at_paths_without_stealing_s
         &["inspect @src/lib.rs "]
     );
 
-    // Multi-match @src/ lists candidates and excludes .git.
+    // Multi-match @src/ populates the @ popup with src/lib.rs & src/main.rs (excluding .git),
+    // and Tab inserts the selected file with a trailing space.
     app.entries[app.selected].editor = crate::input::editor();
     app.event(Event::Paste("@src/".into()));
-    app.event(key(KeyCode::Tab));
+    let popup = app.at_popup.as_ref().expect("@src/ opens @ popup");
     assert!(
-        app.entries[app.selected].notice.contains("src/lib.rs")
-            && app.entries[app.selected].notice.contains("src/main.rs"),
-        "notice: {}",
-        app.entries[app.selected].notice
+        popup
+            .candidates
+            .iter()
+            .any(|c| c.relative_path == "src/lib.rs")
+            && popup
+                .candidates
+                .iter()
+                .any(|c| c.relative_path == "src/main.rs")
+            && !popup
+                .candidates
+                .iter()
+                .any(|c| c.relative_path.contains(".git")),
+        "candidates: {:?}",
+        popup.candidates
     );
+    app.event(key(KeyCode::Tab));
+    assert_eq!(app.entries[app.selected].editor.lines(), &["@src/lib.rs "]);
+    assert!(app.at_popup.is_none());
 
     // Unsafe @../ and @.git/ are rejected without leaking entries.
     app.entries[app.selected].editor = crate::input::editor();

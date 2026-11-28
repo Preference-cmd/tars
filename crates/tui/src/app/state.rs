@@ -515,6 +515,12 @@ impl Entry {
             .and_then(|s| s.definition().code_execution)
             .or(self.code_execution)
     }
+    pub(crate) fn effective_workspace_root(&self) -> Option<PathBuf> {
+        self.session
+            .as_ref()
+            .and_then(|s| s.definition().workspace_root)
+            .or_else(|| self.workspace_root.clone())
+    }
     pub(crate) fn has_text_draft(&self) -> bool {
         self.editor.lines().iter().any(|line| !line.is_empty())
     }
@@ -622,6 +628,26 @@ pub(crate) enum Confirmation {
     DeleteSession { id: String, label: String },
 }
 
+/// Floating `@` workspace path completion popup state anchored above the composer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AtPopupState {
+    pub(crate) query: String,
+    pub(crate) candidates: Vec<tars_core::workspace::WorkspacePathCandidate>,
+    pub(crate) selected: usize,
+    pub(crate) line_idx: usize,
+    pub(crate) token_start: usize,
+    pub(crate) cursor_byte: usize,
+}
+
+/// In-conversation search bar state over wrapped transcript lines (`history_rows` + `rows`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FindState {
+    pub(crate) query: String,
+    pub(crate) editing: bool,
+    pub(crate) matches: Vec<usize>,
+    pub(crate) current: usize,
+}
+
 pub(super) struct PendingExternalEdit {
     pub(super) key: Key,
     pub(super) initial: String,
@@ -702,6 +728,10 @@ pub(crate) struct App {
     pub(crate) last_ctrl_c_cancel_at: Option<Instant>,
     /// Whether an idle `Ctrl+C` inside the post-cancel grace window has armed exit.
     pub(crate) ctrl_c_exit_armed: bool,
+    /// Floating `@` workspace file completion popup state.
+    pub(crate) at_popup: Option<AtPopupState>,
+    /// In-conversation search bar state (`/find` / `Ctrl+F`).
+    pub(crate) find: Option<FindState>,
 }
 impl App {
     pub fn new(options: Options) -> Self {
@@ -780,6 +810,17 @@ impl App {
             scratch_editor: input::editor(),
             last_ctrl_c_cancel_at: None,
             ctrl_c_exit_armed: false,
+            at_popup: None,
+            find: None,
+        }
+    }
+
+    /// Clear transient session-scoped UI overlays (`at_popup` and `find`) on view/session switch.
+    pub(crate) fn clear_session_overlays(&mut self) {
+        self.at_popup = None;
+        let had_find = self.find.take().is_some();
+        if had_find {
+            self.refresh_viewport_height();
         }
     }
 

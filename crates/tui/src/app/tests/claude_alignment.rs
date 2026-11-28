@@ -484,7 +484,7 @@ async fn cc02_continue_resume_and_picker_startup_actions_and_counterexamples() {
     );
     assert!(matches!(
         &app_r_miss.panel,
-        Some(Panel::Sessions { query, selected: 0 }) if query == "zzzz-no-match"
+        Some(Panel::Sessions { query, selected: 0, .. }) if query == "zzzz-no-match"
     ));
 
     // 5. `-r <ambiguous>` (if common prefix exists, or shared prefix) -> notice + pre-filtered `Panel::Sessions`.
@@ -511,7 +511,7 @@ async fn cc02_continue_resume_and_picker_startup_actions_and_counterexamples() {
         );
         assert!(matches!(
             &app_r_ambig.panel,
-            Some(Panel::Sessions { query, selected: 0 }) if query == ambig_prefix
+            Some(Panel::Sessions { query, selected: 0, .. }) if query == ambig_prefix
         ));
     }
 
@@ -2650,4 +2650,592 @@ api_key_env = "PATH"
         no_cfg.notice,
         "No active session or model preset under --no-config; omit --no-config or pass --config FILE"
     );
+}
+
+#[tokio::test]
+async fn d4_inline_approval_and_tars_trust_cards_layout_guards_and_colors() {
+    use super::support::{Server, create};
+    use crate::app::state::{
+        PendingApproval, WorkspaceAgentsTrustPrompt, WorkspaceRulesTrustPrompt,
+    };
+    use ratatui::style::{Color, Modifier};
+    use std::sync::Arc;
+    use tars_core::permission::{
+        ApprovalDecision, ApprovalSubject, CommandTarget, PermissionMode, WriteAction,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::new().await;
+    let mut app = app(dir.path());
+    app.clock = Clock::manual(std::time::Instant::now());
+    create(&mut app, &server.endpoint).await;
+    app.view_width = render::transcript_width(80);
+    app.viewport_height = render::conversation_height(28, 80, &app);
+
+    // Seed visible transcript context above the inline card.
+    let transcript = Arc::new(crate::transcript::Transcript {
+        text: "You\nUSER-VISIBLE-CONTEXT-LINE\n\nAssistant\nInspecting workspace files.".into(),
+        ..Default::default()
+    });
+    app.entries[0].rows = Some(crate::transcript::Rows::wrap(
+        transcript.clone(),
+        app.view_width,
+    ));
+    app.entries[0].transcript = transcript;
+    app.entries[0].editor.insert_str("draft-still-kept");
+    app.find = Some(crate::app::FindState {
+        query: "CONTEXT".into(),
+        editing: true,
+        matches: vec![1],
+        current: 0,
+    });
+
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    app.entries[0]
+        .approval_queue
+        .push_back(PendingApproval::mock(
+            "write_file".into(),
+            PermissionMode::Ask,
+            ApprovalSubject::FileWrite {
+                path: "src/app.rs".into(),
+                action: WriteAction::Updated,
+                diff: "+line 1\n+line 2\n".into(),
+            },
+            move |decision| {
+                let _ = tx.send(decision);
+            },
+        ));
+    app.update_approval_guard();
+
+    let buf = render_buffer(&app, 80, 28);
+    let rendered: String = (0..buf.area.height).map(|y| row_text(&buf, y)).collect();
+    assert!(
+        rendered.contains("USER-VISIBLE-CONTEXT-LINE"),
+        "conversation must remain visible above inline card: {rendered}"
+    );
+    assert!(
+        rendered.contains("write_file wants to update src/app.rs"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("Enter send"),
+        "footer must omit Enter send while inline card is active: {rendered}"
+    );
+    assert!(
+        !rendered.contains("Find:"),
+        "find bar must be suppressed while inline card is active: {rendered}"
+    );
+
+    // Single outer border in Cyan, no redundant inner Borders::ALL box inside card.
+    let top_border_row = (0..buf.area.height)
+        .find(|&y| row_text(&buf, y).contains('┌') && row_text(&buf, y).contains("Approval"))
+        .expect("outer top border");
+    let top_x = row_text(&buf, top_border_row)
+        .chars()
+        .position(|c| c == '┌')
+        .unwrap() as u16;
+    assert_eq!(buf[(top_x, top_border_row)].fg, Color::Cyan);
+    let border_corner_count: usize = (0..buf.area.height)
+        .map(|y| row_text(&buf, y).chars().filter(|&c| c == '┌').count())
+        .sum();
+    assert_eq!(
+        border_corner_count, 1,
+        "must only draw one outer border (no inner Borders::ALL)"
+    );
+
+    // 500 ms CONFIRM_GUARD_WINDOW blocks early decision keys, then allows deny reason + paste.
+    app.event(key(KeyCode::Char('y')));
+    assert!(!app.entries[0].approval_queue.is_empty());
+    app.advance_clock(crate::app::CONFIRM_GUARD_WINDOW + std::time::Duration::from_millis(10));
+    app.event(key(KeyCode::Char('n')));
+    assert!(app.entries[0].approval_reason.is_some());
+    app.event(Event::Paste("too risky\x1b[31m".into()));
+    app.event(key(KeyCode::Enter));
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        ApprovalDecision::Deny {
+            reason: Some("too risky[31m".into())
+        }
+    );
+
+    // Outside-sandbox command uses Red border + bold warning, and remains readable at 30x19 with queue_bar = 1.
+    app.entries[0]
+        .queued_prompts
+        .push_back("queued follow up".into());
+    app.entries[0]
+        .approval_queue
+        .push_back(PendingApproval::mock(
+            "run_command".into(),
+            PermissionMode::Ask,
+            ApprovalSubject::Command {
+                command: "rm -rf ./tmp".into(),
+                workdir: ".".into(),
+                timeout_secs: 30,
+                target: CommandTarget::Outside {
+                    justification: "needs host access".into(),
+                },
+                suggested_prefixes: vec![vec!["rm".into()]],
+                can_save_workspace_rule: true,
+            },
+            |_| {},
+        ));
+    app.update_approval_guard();
+
+    let buf_red = render_buffer(&app, 80, 28);
+    let red_top_y = (0..buf_red.area.height)
+        .find(|&y| {
+            row_text(&buf_red, y).contains('┌') && row_text(&buf_red, y).contains("OUTSIDE SANDBOX")
+        })
+        .expect("red outside-sandbox outer border");
+    let red_top_x = row_text(&buf_red, red_top_y)
+        .chars()
+        .position(|c| c == '┌')
+        .unwrap() as u16;
+    assert_eq!(buf_red[(red_top_x, red_top_y)].fg, Color::Red);
+
+    app.event(Event::Resize(30, 19));
+    let compact_buf = render_buffer(&app, 30, 19);
+    let compact_text: String = (0..compact_buf.area.height)
+        .map(|y| row_text(&compact_buf, y))
+        .collect();
+    assert!(
+        !compact_text.contains("Resize to at least 30 x 19"),
+        "{compact_text}"
+    );
+    assert!(compact_text.contains("Queued (1)"), "{compact_text}");
+    assert!(
+        compact_text.contains("1/y") || compact_text.contains("Esc"),
+        "hint must stay visible at 30x19 with queue_bar=1: {compact_text}"
+    );
+    assert!(
+        compact_text.contains("NOT in the sandbox") || compact_text.contains("needs host"),
+        "body must stay visible at 30x19 with queue_bar=1: {compact_text}"
+    );
+
+    // Below 30x19 triggers resize guard.
+    app.event(Event::Resize(29, 18));
+    let too_small = render_buffer(&app, 29, 18);
+    let too_small_text: String = (0..too_small.area.height)
+        .map(|y| row_text(&too_small, y))
+        .collect();
+    assert!(too_small_text.contains("Resize to at least 30 x 19"));
+
+    // Clear command approval and verify inline workspace_rules_trust & workspace_agents_trust cards.
+    app.entries[0].approval_queue.clear();
+    app.event(Event::Resize(80, 28));
+    app.entries[0].workspace_rules_trust = Some(WorkspaceRulesTrustPrompt {
+        file_path: PathBuf::from(".tars/permissions.toml"),
+        has_outside_sandbox: true,
+        body_lines: vec![crate::app::WorkspaceTrustLine {
+            kind: crate::app::WorkspaceTrustLineKind::RuleOutsideSandbox,
+            text: "  allow: cargo test  [OUTSIDE SANDBOX]".into(),
+        }],
+        scroll: 0,
+    });
+    app.update_workspace_trust_guard();
+    let rules_buf = render_buffer(&app, 80, 28);
+    let rules_text: String = (0..rules_buf.area.height)
+        .map(|y| row_text(&rules_buf, y))
+        .collect();
+    assert!(
+        rules_text.contains("USER-VISIBLE-CONTEXT-LINE"),
+        "{rules_text}"
+    );
+    assert!(
+        rules_text.contains("WARNING: [OUTSIDE SANDBOX]"),
+        "{rules_text}"
+    );
+    let rules_top_y = (0..rules_buf.area.height)
+        .find(|&y| {
+            row_text(&rules_buf, y).contains('┌')
+                && row_text(&rules_buf, y).contains("Workspace Rules")
+        })
+        .unwrap();
+    let rules_top_x = row_text(&rules_buf, rules_top_y)
+        .chars()
+        .position(|c| c == '┌')
+        .unwrap() as u16;
+    assert_eq!(rules_buf[(rules_top_x, rules_top_y)].fg, Color::Red);
+    assert!(
+        rules_buf[(rules_top_x + 2, rules_top_y)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+
+    // Esc declines rules trust, then verify agents trust card uses Cyan and preserves context.
+    app.advance_clock(crate::app::CONFIRM_GUARD_WINDOW + std::time::Duration::from_millis(10));
+    app.event(key(KeyCode::Esc));
+    assert!(app.entries[0].workspace_rules_trust.is_none());
+
+    app.entries[0].workspace_agents_trust = Some(WorkspaceAgentsTrustPrompt {
+        agents_dir: PathBuf::from(".tars/agents"),
+        body_lines: vec![crate::app::WorkspaceTrustLine {
+            kind: crate::app::WorkspaceTrustLineKind::Rule,
+            text: "  agent: reviewer".into(),
+        }],
+        scroll: 0,
+    });
+    app.update_workspace_trust_guard();
+    let agents_buf = render_buffer(&app, 80, 28);
+    let agents_text: String = (0..agents_buf.area.height)
+        .map(|y| row_text(&agents_buf, y))
+        .collect();
+    assert!(
+        agents_text.contains("USER-VISIBLE-CONTEXT-LINE"),
+        "{agents_text}"
+    );
+    assert!(agents_text.contains("agent: reviewer"), "{agents_text}");
+    app.advance_clock(crate::app::CONFIRM_GUARD_WINDOW + std::time::Duration::from_millis(10));
+    app.event(key(KeyCode::Esc));
+    assert!(app.entries[0].workspace_agents_trust.is_none());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn d5_at_workspace_file_floating_popup_interaction_and_fallbacks() {
+    use super::support::{Server, create_with_definition, fixture_definition};
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    std::fs::write(ws.join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+    std::fs::write(ws.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(ws.join("README.md"), "# readme\n").unwrap();
+    std::fs::write(ws.join(".git/config"), "[core]\n").unwrap();
+    std::os::unix::fs::symlink(dir.path(), ws.join("escape_link")).unwrap();
+    let ws_canon = ws.canonicalize().unwrap();
+
+    // 1. No workspace configured -> `@` never opens popup.
+    let mut no_ws_app = app(dir.path());
+    no_ws_app.event(Event::Paste("@src".into()));
+    assert!(no_ws_app.at_popup.is_none());
+
+    // 2. Open session with workspace.
+    let server = Server::new().await;
+    let mut app = app(dir.path());
+    let mut def = fixture_definition("openai-chat", &server.endpoint);
+    def.workspace_root = Some(ws_canon.clone());
+    create_with_definition(&mut app, def.clone()).await;
+
+    // Email-like token (`@` not after whitespace) does not trigger popup.
+    app.event(Event::Paste("user@example.com".into()));
+    assert!(app.at_popup.is_none());
+    app.entries[0].editor = crate::input::editor();
+
+    // 3. Typing `@sr` opens floating popup; composer stays typable and rendered popup shows `Files`.
+    app.event(Event::Paste("check @sr".into()));
+    let popup = app.at_popup.as_ref().expect("@sr opens popup");
+    assert_eq!(popup.query, "sr");
+    assert!(!popup.candidates.is_empty());
+    assert!(
+        !popup
+            .candidates
+            .iter()
+            .any(|c| c.relative_path.contains(".git"))
+    );
+    assert!(
+        !popup
+            .candidates
+            .iter()
+            .any(|c| c.relative_path.contains("escape_link"))
+    );
+
+    let popup_buf = render_buffer(&app, 90, 28);
+    let popup_screen: String = (0..popup_buf.area.height)
+        .map(|y| row_text(&popup_buf, y))
+        .collect();
+    assert!(popup_screen.contains("Files"), "{popup_screen}");
+    assert!(popup_screen.contains("src/"), "{popup_screen}");
+    assert!(popup_screen.contains("check @sr"), "{popup_screen}");
+
+    // 4. Tab on directory candidate `src/` inserts `@src/` and keeps popup open inside `src/`.
+    app.event(key(KeyCode::Tab));
+    assert_eq!(app.entries[0].editor.lines(), &["check @src/"]);
+    let inside_popup = app
+        .at_popup
+        .as_ref()
+        .expect("directory selection keeps @ popup open");
+    assert_eq!(inside_popup.query, "src/");
+    assert!(
+        inside_popup
+            .candidates
+            .iter()
+            .any(|c| c.relative_path == "src/lib.rs")
+    );
+    assert!(
+        inside_popup
+            .candidates
+            .iter()
+            .any(|c| c.relative_path == "src/main.rs")
+    );
+
+    // Down selects `src/main.rs` (overrides history) and Enter inserts `@src/main.rs ` and closes popup.
+    let main_idx = inside_popup
+        .candidates
+        .iter()
+        .position(|c| c.relative_path == "src/main.rs")
+        .unwrap();
+    for _ in 0..main_idx {
+        app.event(key(KeyCode::Down));
+    }
+    app.event(key(KeyCode::Enter));
+    assert_eq!(app.entries[0].editor.lines(), &["check @src/main.rs "]);
+    assert!(app.at_popup.is_none());
+
+    // 5. Esc closes popup while preserving draft.
+    app.event(Event::Paste("@RE".into()));
+    assert!(app.at_popup.is_some());
+    app.event(key(KeyCode::Esc));
+    assert!(app.at_popup.is_none());
+    assert_eq!(app.entries[0].editor.lines(), &["check @src/main.rs @RE"]);
+
+    // 6. Tab fallback on `@../` and `@.git/` preserves ergonomics notices.
+    app.entries[0].editor = crate::input::editor();
+    app.event(Event::Paste("@../".into()));
+    assert!(
+        app.at_popup
+            .as_ref()
+            .is_some_and(|p| p.candidates.is_empty())
+    );
+    app.event(key(KeyCode::Tab));
+    assert!(app.entries[0].notice.contains("Invalid workspace path"));
+
+    app.entries[0].editor = crate::input::editor();
+    app.event(Event::Paste("@.git/".into()));
+    assert!(
+        app.at_popup
+            .as_ref()
+            .is_some_and(|p| p.candidates.is_empty())
+    );
+    app.event(key(KeyCode::Tab));
+    assert!(app.entries[0].notice.contains("No workspace path matches"));
+
+    // 7. F4 / session switch clears `at_popup`.
+    create_with_definition(&mut app, def).await;
+    app.event(Event::Paste("@RE".into()));
+    assert!(app.at_popup.is_some());
+    app.event(key(KeyCode::F(4)));
+    assert!(app.at_popup.is_none());
+}
+
+#[tokio::test]
+async fn d6_find_in_conversation_sessions_workspace_filter_and_grouped_help() {
+    use super::support::{Server, create_with_definition, ctrl, fixture_definition};
+    use crate::app::{InfoKind, state::Entry};
+    use ratatui::style::{Color, Modifier};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let ws_a = dir.path().join("workspace-alpha");
+    let ws_b = dir.path().join("workspace-beta");
+    std::fs::create_dir_all(&ws_a).unwrap();
+    std::fs::create_dir_all(&ws_b).unwrap();
+
+    let server = Server::new().await;
+    let mut app = app(dir.path());
+    app.view_width = render::transcript_width(100);
+    app.viewport_height = render::conversation_height(26, 100, &app);
+
+    let mut def_a = fixture_definition("openai-chat", &server.endpoint);
+    def_a.workspace_root = Some(ws_a.clone());
+    create_with_definition(&mut app, def_a.clone()).await;
+
+    // Build wrapped transcript including spilled tool preview and UTF-8 case-folding chars ('İ', 'ẞ', 'K').
+    let mut body_lines = vec![
+        "You".to_owned(),
+        "Alpha first line".to_owned(),
+        "İstanbul ẞeta Kelvin".to_owned(),
+    ];
+    for i in 0..30 {
+        body_lines.push(format!("filler conversation line {i}"));
+    }
+    body_lines.push("Assistant".to_owned());
+    body_lines.push("Second ALPHA target line".to_owned());
+    let transcript = Arc::new(crate::transcript::Transcript {
+        text: body_lines.join("\n"),
+        tool_artifacts: vec![Some(crate::transcript::SpilledToolDetail {
+            call_block_id: causa::runtime::new_block_id(),
+            status: causa::kernel::ToolResultStatus::Succeeded,
+            artifact_id: "artifact:spilled-test".into(),
+            size_bytes: 4096,
+            preview: crate::transcript::format_tool_output_json(&serde_json::json!({
+                "preview": "spilled preview text"
+            })),
+        })],
+        ..Default::default()
+    });
+    app.entries[0].rows = Some(crate::transcript::Rows::wrap(
+        transcript.clone(),
+        app.view_width,
+    ));
+    app.entries[0].transcript = transcript;
+    app.entries[0].record_reads = 0;
+    app.entries[0].artifact_reads = 0;
+
+    // 1. Ctrl+F opens Find bar, typing updates matches, zero SQLite reads.
+    app.event(ctrl('f'));
+    assert!(app.find.as_ref().is_some_and(|f| f.editing));
+    for c in "alpha".chars() {
+        app.event(key(KeyCode::Char(c)));
+    }
+    let find = app.find.as_ref().unwrap();
+    assert_eq!(find.matches.len(), 2);
+    assert_eq!(find.current, 0);
+    assert_eq!(app.entries[0].record_reads, 0);
+    assert_eq!(app.entries[0].artifact_reads, 0);
+
+    // Find bar and active/secondary highlights render safely.
+    let buf_find = render_buffer(&app, 100, 26);
+    let find_screen: String = (0..buf_find.area.height)
+        .map(|y| row_text(&buf_find, y))
+        .collect();
+    assert!(find_screen.contains("Find: alpha"), "{find_screen}");
+    assert!(find_screen.contains("1/2"), "{find_screen}");
+
+    // Enter exits editing, `n` wraps to second match and scrolls viewport, `N` wraps back.
+    app.event(key(KeyCode::Enter));
+    assert!(!app.find.as_ref().unwrap().editing);
+    app.event(key(KeyCode::Char('n')));
+    assert_eq!(app.find.as_ref().unwrap().current, 1);
+    app.event(key(KeyCode::Char('N')));
+    assert_eq!(app.find.as_ref().unwrap().current, 0);
+
+    // `/` re-enters editing, Backspace clears, Event::Paste routes to find.query (not composer)
+    // and UTF-8 case-folding ('İ' 2->3 bytes, 'ẞ' 3->2 bytes, 'K' 3->1 byte) never panics!
+    app.event(key(KeyCode::Char('/')));
+    assert!(app.find.as_ref().unwrap().editing);
+    for _ in 0..5 {
+        app.event(key(KeyCode::Backspace));
+    }
+    app.event(Event::Paste("ß\x1b".into()));
+    assert_eq!(app.find.as_ref().unwrap().query, "ß");
+    assert!(
+        !app.entries[0].has_text_draft(),
+        "paste must not leak into composer"
+    );
+    assert_eq!(app.find.as_ref().unwrap().matches.len(), 1);
+    let _ = render_buffer(&app, 100, 26);
+
+    // Direct UTF-8 safety test on highlight_line_matches for 'İ', 'ẞ', 'K'.
+    for (needle, input) in [("i", "İ"), ("ß", "ẞ"), ("k", "K")] {
+        let highlighted = render::highlight_line_matches(
+            ratatui::text::Line::from(format!("prefix {input} suffix")),
+            needle,
+            true,
+        );
+        let has_active_style = highlighted.spans.iter().any(|s| {
+            s.style.fg == Some(Color::Cyan) && s.style.add_modifier.contains(Modifier::REVERSED)
+        });
+        assert!(
+            has_active_style,
+            "expected active highlight for {input} / {needle}"
+        );
+    }
+
+    // Esc closes find bar and clears highlights.
+    app.event(key(KeyCode::Esc));
+    assert!(app.find.is_none());
+
+    // `/find <query>` opens directly and F4 clears find state.
+    run_command(&mut app, "find alpha");
+    assert!(
+        app.find
+            .as_ref()
+            .is_some_and(|f| !f.editing && f.matches.len() == 2)
+    );
+    create_with_definition(&mut app, def_a.clone()).await;
+    assert!(app.find.is_none(), "session switch must clear find state");
+
+    // 2. `/sessions` workspace column, query matching, and Tab workspace filter (with symlink match).
+    #[cfg(unix)]
+    let ws_a_alias = {
+        let alias = dir.path().join("ws-alpha-link");
+        std::os::unix::fs::symlink(&ws_a, &alias).unwrap();
+        alias
+    };
+    #[cfg(not(unix))]
+    let ws_a_alias = ws_a.clone();
+
+    let mut entry_b = Entry::new("session-beta-12345678".into(), "gpt-beta".into());
+    entry_b.workspace_root = Some(ws_b.clone());
+    let mut entry_none = Entry::new("session-none-99999999".into(), "gpt-none".into());
+    entry_none.workspace_root = None;
+    let mut entry_alias = Entry::new("session-alias-abcdef12".into(), "gpt-alias".into());
+    entry_alias.workspace_root = Some(ws_a_alias);
+    app.entries.push(entry_b);
+    app.entries.push(entry_none);
+    app.entries.push(entry_alias);
+
+    // Query matches workspace path keyword.
+    assert!(app.matching_sessions("workspace-beta").len() == 1);
+
+    run_command(&mut app, "sessions");
+    let sess_all = screen(&app);
+    assert!(sess_all.contains("[all workspaces]"), "{sess_all}");
+    assert!(sess_all.contains("(no workspace)"), "{sess_all}");
+    assert!(
+        sess_all.contains("Tab toggle workspace filter"),
+        "{sess_all}"
+    );
+
+    // Tab filters to current workspace (including symlinked ws_a_alias).
+    app.event(key(KeyCode::Tab));
+    assert!(matches!(
+        app.panel,
+        Some(Panel::Sessions {
+            current_workspace_only: true,
+            ..
+        })
+    ));
+    let sess_ws = screen(&app);
+    assert!(sess_ws.contains("[this workspace]"), "{sess_ws}");
+    assert!(!sess_ws.contains("gpt-beta"), "{sess_ws}");
+    assert!(!sess_ws.contains("gpt-none"), "{sess_ws}");
+    assert!(sess_ws.contains("gpt-alias"), "{sess_ws}");
+    app.event(key(KeyCode::Esc));
+
+    // Counterexample: Tab with no active workspace keeps filter off and sets clear notice.
+    let mut no_ws = app_from_args(&[
+        "--no-config",
+        "--store",
+        dir.path().join("no-ws-store").to_str().unwrap(),
+    ]);
+    no_ws.entries.push(Entry::new("s-1".into(), "m".into()));
+    no_ws.panel = Some(Panel::Sessions {
+        query: String::new(),
+        selected: 0,
+        current_workspace_only: false,
+    });
+    no_ws.event(key(KeyCode::Tab));
+    assert!(matches!(
+        no_ws.panel,
+        Some(Panel::Sessions {
+            current_workspace_only: false,
+            ..
+        })
+    ));
+    assert_eq!(no_ws.notice, "No active workspace to filter by");
+
+    // 3. Grouped `/help` uses Markdown with 5 sections and no 11-field Form references.
+    run_command(&mut app, "help");
+    match &app.panel {
+        Some(Panel::Info { kind, lines, .. }) => {
+            assert_eq!(*kind, InfoKind::Markdown);
+            let joined = lines.join("\n");
+            for heading in [
+                "## Session & Models",
+                "## Editing & Input",
+                "## Navigation & Search",
+                "## Tools, Permissions & Agents",
+                "## Exit & Recovery",
+            ] {
+                assert!(joined.contains(heading), "missing {heading} in {joined}");
+            }
+            assert!(joined.contains("Ctrl-F"), "{joined}");
+            assert!(joined.contains("/find"), "{joined}");
+            assert!(!joined.contains("Custom settings (/new)"), "{joined}");
+        }
+        _ => panic!("expected grouped Info panel for /help"),
+    }
 }

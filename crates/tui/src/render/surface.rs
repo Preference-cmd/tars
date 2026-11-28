@@ -23,17 +23,24 @@ pub(crate) const fn footer_base_height() -> u16 {
     4
 }
 
+fn has_inline_confirm(app: &App) -> bool {
+    app.panel.is_none()
+        && app.folder_trust.is_none()
+        && app.confirmation.is_none()
+        && app.entries.get(app.selected).is_some_and(|e| {
+            e.workspace_rules_trust.is_some()
+                || e.workspace_agents_trust.is_some()
+                || !e.approval_queue.is_empty()
+        })
+}
+
 fn is_obscured(app: &App) -> bool {
     app.panel
         .as_ref()
         .is_some_and(|p| !matches!(p, crate::app::Panel::Commands { .. }))
         || app.folder_trust.is_some()
         || app.confirmation.is_some()
-        || app.entries.get(app.selected).is_some_and(|e| {
-            e.workspace_rules_trust.is_some()
-                || e.workspace_agents_trust.is_some()
-                || !e.approval_queue.is_empty()
-        })
+        || has_inline_confirm(app)
 }
 
 pub(crate) fn activity_bar_height(app: &App) -> u16 {
@@ -56,11 +63,18 @@ pub(crate) fn scroll_bar_height(app: &App) -> u16 {
     )
 }
 
+fn find_bar_height(app: &App) -> u16 {
+    u16::from(!is_obscured(app) && !has_inline_confirm(app) && app.find.is_some())
+}
+
 fn attachment_bar_height(app: &App) -> u16 {
     u16::from(
-        app.entries
-            .get(app.selected)
-            .is_some_and(|e| !e.pending_images.is_empty()),
+        !is_obscured(app)
+            && !has_inline_confirm(app)
+            && app
+                .entries
+                .get(app.selected)
+                .is_some_and(|e| !e.pending_images.is_empty()),
     )
 }
 
@@ -72,12 +86,100 @@ fn queue_bar_height(app: &App) -> u16 {
     )
 }
 
+fn inline_confirm_card_height(app: &App, height: u16, avail: u16, width: u16) -> u16 {
+    if !has_inline_confirm(app) || avail == 0 {
+        return 0;
+    }
+    let Some(entry) = app.entries.get(app.selected) else {
+        return 0;
+    };
+    let body_width = width.saturating_sub(4).max(1);
+    let inner_width = usize::from(body_width.saturating_sub(2).max(1));
+    let (header_rows, body_rows, reason_rows, hint_rows) =
+        if let Some(prompt) = &entry.workspace_rules_trust {
+            let mut h = 2u16;
+            if prompt.has_outside_sandbox {
+                h += 1;
+            }
+            if inner_width >= 48 {
+                h += 1;
+            }
+            let b = prompt.body_lines.len().max(1) as u16;
+            (h, b, 0u16, 1u16)
+        } else if let Some(prompt) = &entry.workspace_agents_trust {
+            let h = if inner_width >= 48 { 3u16 } else { 2u16 };
+            let b = prompt.body_lines.len().max(1) as u16;
+            (h, b, 0u16, 1u16)
+        } else if let Some(req) = entry.approval_queue.front() {
+            let mut h = 1u16;
+            let current_mode = entry
+                .session
+                .as_ref()
+                .and_then(|s| s.permission_mode())
+                .map(|(m, _)| m);
+            if current_mode.is_some_and(|m| m != req.mode) {
+                h += 1;
+            }
+            if entry.approval_queue.len() > 1 {
+                h += 1;
+            }
+            let b = match &req.subject {
+                tars_core::permission::ApprovalSubject::FileWrite { diff, .. } => {
+                    tars_core::permission::escape_untrusted_text(diff)
+                        .lines()
+                        .count()
+                        .max(1) as u16
+                }
+                tars_core::permission::ApprovalSubject::Command { .. } => {
+                    tars_core::permission::command_body(&req.subject)
+                        .map_or(1, |lines| lines.len().max(1)) as u16
+                }
+                tars_core::permission::ApprovalSubject::McpCall { arguments, .. } => {
+                    tars_core::permission::escape_untrusted_text(arguments)
+                        .lines()
+                        .count()
+                        .max(1) as u16
+                }
+            };
+            let r = u16::from(entry.approval_reason.is_some());
+            let hint = if entry.approval_reason.is_some() || inner_width < 48 {
+                1u16
+            } else {
+                2u16
+            };
+            (h, b, r, hint)
+        } else {
+            return 0;
+        };
+
+    // Outer border uses 2 rows (top + bottom); no inner body border.
+    let desired = 2u16
+        .saturating_add(header_rows)
+        .saturating_add(body_rows)
+        .saturating_add(reason_rows)
+        .saturating_add(hint_rows);
+
+    if height >= 22 && avail >= 12 {
+        let max_cap = ((u32::from(avail) * 55 / 100) as u16).max(9).min(avail);
+        let min_with_body = 2u16
+            .saturating_add(header_rows)
+            .saturating_add(body_rows.min(5))
+            .saturating_add(reason_rows)
+            .saturating_add(hint_rows);
+        desired.max(min_with_body).min(max_cap)
+    } else {
+        desired.min(avail)
+    }
+}
+
 struct LayoutHeights {
     header: u16,
     scroll_bar: u16,
     activity_bar: u16,
+    find_bar: u16,
     attachment_bar: u16,
     input: u16,
+    inline_card: u16,
     queue_bar: u16,
     footer_base: u16,
 }
@@ -85,16 +187,35 @@ struct LayoutHeights {
 fn layout_heights(app: &App, width: u16, height: u16) -> LayoutHeights {
     let header = header_height(height);
     let footer_base = footer_base_height();
+    if has_inline_confirm(app) {
+        let queue_bar = queue_bar_height(app).min(height.saturating_sub(header + footer_base));
+        let avail = height.saturating_sub(header + footer_base + queue_bar);
+        let inline_card = inline_confirm_card_height(app, height, avail, width);
+        return LayoutHeights {
+            header,
+            scroll_bar: 0,
+            activity_bar: 0,
+            find_bar: 0,
+            attachment_bar: 0,
+            input: 0,
+            inline_card,
+            queue_bar,
+            footer_base,
+        };
+    }
+
     // Reserve at least 1 row for conversation and 3 rows for the input box.
     let slack = height.saturating_sub(header + footer_base + 1 + 3);
     let attachment_bar = attachment_bar_height(app).min(slack);
     let rem = slack - attachment_bar;
     let queue_bar = queue_bar_height(app).min(rem);
     let rem = rem - queue_bar;
+    let find_bar = find_bar_height(app).min(rem);
+    let rem = rem - find_bar;
     let activity_bar = activity_bar_height(app).min(rem);
     let rem = rem - activity_bar;
     let scroll_bar = scroll_bar_height(app).min(rem);
-    let extra_bars = attachment_bar + queue_bar + activity_bar + scroll_bar;
+    let extra_bars = attachment_bar + queue_bar + find_bar + activity_bar + scroll_bar;
 
     let cells = usize::from(width.saturating_sub(6).max(1));
     let rows = app
@@ -112,8 +233,10 @@ fn layout_heights(app: &App, width: u16, height: u16) -> LayoutHeights {
         header,
         scroll_bar,
         activity_bar,
+        find_bar,
         attachment_bar,
         input,
+        inline_card: 0,
         queue_bar,
         footer_base,
     }
@@ -380,11 +503,107 @@ pub(crate) fn conversation_height(height: u16, width: u16, app: &App) -> usize {
     let non_conv = h.header
         + h.scroll_bar
         + h.activity_bar
+        + h.find_bar
         + h.attachment_bar
         + h.input
+        + h.inline_card
         + h.queue_bar
         + h.footer_base;
-    usize::from(height.saturating_sub(non_conv).max(1))
+    if has_inline_confirm(app) {
+        usize::from(height.saturating_sub(non_conv))
+    } else {
+        usize::from(height.saturating_sub(non_conv).max(1))
+    }
+}
+
+/// Highlight all case-insensitive occurrences of `needle_lower` in `line` using
+/// a per-character folded offset map so multi-byte case expansions (e.g. `'İ'`,
+/// `'ẞ'`, `'K'`) never slice mid-character.
+pub(crate) fn highlight_line_matches(
+    line: Line<'static>,
+    needle_lower: &str,
+    is_active: bool,
+) -> Line<'static> {
+    if needle_lower.is_empty() || line.spans.is_empty() {
+        return line;
+    }
+    let mut folded = String::new();
+    let mut char_map: Vec<(usize, usize, usize, usize, usize)> = Vec::new();
+    for (span_idx, span) in line.spans.iter().enumerate() {
+        for (byte_idx, ch) in span.content.char_indices() {
+            let orig_start = byte_idx;
+            let orig_end = byte_idx + ch.len_utf8();
+            let f_start = folded.len();
+            for lc in ch.to_lowercase() {
+                folded.push(lc);
+            }
+            let f_end = folded.len();
+            char_map.push((f_start, f_end, span_idx, orig_start, orig_end));
+        }
+    }
+    let mut folded_hits: Vec<(usize, usize)> = Vec::new();
+    let mut search_from = 0usize;
+    while search_from <= folded.len() {
+        let Some(rel) = folded[search_from..].find(needle_lower) else {
+            break;
+        };
+        let hit_start = search_from + rel;
+        let hit_end = hit_start + needle_lower.len();
+        folded_hits.push((hit_start, hit_end));
+        search_from = hit_end.max(search_from + 1);
+    }
+    if folded_hits.is_empty() {
+        return line;
+    }
+
+    let mut per_span_flags: Vec<Vec<(usize, usize, bool)>> = vec![Vec::new(); line.spans.len()];
+    let mut hit_idx = 0usize;
+    for &(f_start, f_end, span_idx, orig_start, orig_end) in &char_map {
+        while hit_idx < folded_hits.len() && folded_hits[hit_idx].1 <= f_start {
+            hit_idx += 1;
+        }
+        let matched = hit_idx < folded_hits.len()
+            && folded_hits[hit_idx].0 < f_end
+            && folded_hits[hit_idx].1 > f_start;
+        let span_runs = &mut per_span_flags[span_idx];
+        if let Some(last) = span_runs.last_mut()
+            && last.2 == matched
+            && last.1 == orig_start
+        {
+            last.1 = orig_end;
+        } else {
+            span_runs.push((orig_start, orig_end, matched));
+        }
+    }
+
+    let mut new_spans = Vec::with_capacity(line.spans.len());
+    for (span_idx, span) in line.spans.into_iter().enumerate() {
+        let runs = &per_span_flags[span_idx];
+        if runs.is_empty() || runs.iter().all(|&(_, _, matched)| !matched) {
+            new_spans.push(span);
+            continue;
+        }
+        let highlight_style = if is_active {
+            span.style
+                .fg(ACCENT)
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+        } else {
+            span.style
+                .fg(Color::Yellow)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::UNDERLINED)
+        };
+        for &(start, end, matched) in runs {
+            let slice = &span.content[start..end];
+            let style = if matched { highlight_style } else { span.style };
+            new_spans.push(Span::styled(slice.to_owned(), style));
+        }
+    }
+    Line {
+        style: line.style,
+        alignment: line.alignment,
+        spans: new_spans,
+    }
 }
 
 pub(super) fn inset(area: Rect) -> Rect {
@@ -650,14 +869,20 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         return;
     }
     let body = inset(area);
+    let inline_confirm = has_inline_confirm(app);
     let heights = layout_heights(app, area.width, area.height);
     let regions = Layout::vertical([
         Constraint::Length(heights.header),
-        Constraint::Min(1),
+        if inline_confirm {
+            Constraint::Min(0)
+        } else {
+            Constraint::Min(1)
+        },
         Constraint::Length(heights.scroll_bar),
         Constraint::Length(heights.activity_bar),
+        Constraint::Length(heights.find_bar),
         Constraint::Length(heights.attachment_bar),
-        Constraint::Length(heights.input),
+        Constraint::Length(heights.input + heights.inline_card),
         Constraint::Length(heights.footer_base + heights.queue_bar),
     ])
     .split(body);
@@ -696,49 +921,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         );
         return;
     }
-    let between_header_and_footer = regions[6].y.saturating_sub(regions[1].y);
-    if app.panel.is_none() && entry.is_some_and(|e| e.workspace_rules_trust.is_some()) {
-        super::panels::workspace_rules_trust(
-            frame,
-            app,
-            entry.unwrap(),
-            Rect {
-                y: regions[1].y,
-                height: between_header_and_footer,
-                ..body
-            },
-        );
-        footer(frame, app, regions[6], heights.queue_bar > 0);
-        return;
-    }
-    if app.panel.is_none() && entry.is_some_and(|e| e.workspace_agents_trust.is_some()) {
-        super::panels::workspace_agents_trust(
-            frame,
-            app,
-            entry.unwrap(),
-            Rect {
-                y: regions[1].y,
-                height: between_header_and_footer,
-                ..body
-            },
-        );
-        footer(frame, app, regions[6], heights.queue_bar > 0);
-        return;
-    }
-    if app.panel.is_none() && entry.is_some_and(|e| !e.approval_queue.is_empty()) {
-        super::panels::approval(
-            frame,
-            app,
-            entry.unwrap(),
-            Rect {
-                y: regions[1].y,
-                height: between_header_and_footer,
-                ..body
-            },
-        );
-        footer(frame, app, regions[6], heights.queue_bar > 0);
-        return;
-    }
+    let between_header_and_footer = regions[7].y.saturating_sub(regions[1].y);
     let mut active_viewport_stats: Option<(usize, usize)> = None;
     if let Some(entry) = entry {
         let history = entry
@@ -750,134 +933,163 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
         let height = usize::from(regions[1].height);
         let viewport = entry.viewport(height);
         active_viewport_stats = Some((viewport.start, viewport.end));
-        let start = viewport.start;
-        let sticky = viewport.sticky;
-        let mut lines = Vec::with_capacity(height);
-        if sticky && height == 1 {
-            // At minimum terminal height, retain both the temporary label and
-            // the latest text instead of spending the sole row on a heading.
-            let label = entry.preview.compact_label();
-            let text = entry.preview.line(start.saturating_sub(committed));
-            let space = usize::from(regions[1].width).saturating_sub(label.width());
-            let mut tail = text.len();
-            let mut cells = 0;
-            for (offset, grapheme) in text.grapheme_indices(true).rev() {
-                cells += grapheme.width();
-                if cells > space {
+        if regions[1].height > 0 {
+            let start = viewport.start;
+            let sticky = viewport.sticky;
+            let mut lines = Vec::with_capacity(height);
+            if sticky && height == 1 {
+                // At minimum terminal height, retain both the temporary label and
+                // the latest text instead of spending the sole row on a heading.
+                let label = entry.preview.compact_label();
+                let text = entry.preview.line(start.saturating_sub(committed));
+                let space = usize::from(regions[1].width).saturating_sub(label.width());
+                let mut tail = text.len();
+                let mut cells = 0;
+                for (offset, grapheme) in text.grapheme_indices(true).rev() {
+                    cells += grapheme.width();
+                    if cells > space {
+                        break;
+                    }
+                    tail = offset;
+                }
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        label,
+                        Style::default().fg(if entry.preview.warning().is_some() {
+                            Color::Yellow
+                        } else {
+                            MUTED
+                        }),
+                    ),
+                    Span::raw(&text[tail..]),
+                ]));
+            } else if sticky {
+                lines.push(Line::styled(
+                    if viewport.reserved == 1 && entry.preview.warning().is_some() {
+                        entry.preview.compact_label()
+                    } else {
+                        entry.preview.label()
+                    },
+                    Style::default().fg(
+                        if entry.preview.warning().is_some() && viewport.reserved == 1 {
+                            Color::Yellow
+                        } else {
+                            MUTED
+                        },
+                    ),
+                ));
+                if let Some(warning) = entry.preview.warning()
+                    && lines.len() < viewport.reserved
+                {
+                    lines.push(Line::styled(warning, Style::default().fg(Color::Yellow)));
+                }
+            }
+            let show_live_root = entry.viewed_agent_id.is_none();
+            let tool_lines = entry
+                .tools
+                .styled_lines(app.clock.now(), app.spinner_tick as usize);
+            let active_find = app.find.as_ref().filter(|f| !f.query.is_empty()).map(|f| {
+                (
+                    f.query.to_lowercase(),
+                    f.matches.get(f.current).copied(),
+                    &f.matches,
+                )
+            });
+            for index in start..entry.conversation_len() {
+                if lines.len() >= height {
                     break;
                 }
-                tail = offset;
-            }
-            lines.push(Line::from(vec![
-                Span::styled(
-                    label,
-                    Style::default().fg(if entry.preview.warning().is_some() {
-                        Color::Yellow
-                    } else {
-                        MUTED
-                    }),
-                ),
-                Span::raw(&text[tail..]),
-            ]));
-        } else if sticky {
-            lines.push(Line::styled(
-                if viewport.reserved == 1 && entry.preview.warning().is_some() {
-                    entry.preview.compact_label()
-                } else {
-                    entry.preview.label()
-                },
-                Style::default().fg(
-                    if entry.preview.warning().is_some() && viewport.reserved == 1 {
-                        Color::Yellow
-                    } else {
-                        MUTED
-                    },
-                ),
-            ));
-            if let Some(warning) = entry.preview.warning()
-                && lines.len() < viewport.reserved
-            {
-                lines.push(Line::styled(warning, Style::default().fg(Color::Yellow)));
-            }
-        }
-        let show_live_root = entry.viewed_agent_id.is_none();
-        let tool_lines = entry
-            .tools
-            .styled_lines(app.clock.now(), app.spinner_tick as usize);
-        for index in start..entry.conversation_len() {
-            if lines.len() >= height {
-                break;
-            }
-            if index < history {
-                if let Some(line) = entry
-                    .history_rows
-                    .as_ref()
-                    .and_then(|rows| rows.line(index))
-                {
-                    lines.push(line.clone());
+                if index < history {
+                    if let Some(line) = entry
+                        .history_rows
+                        .as_ref()
+                        .and_then(|rows| rows.line(index))
+                    {
+                        let rendered = if let Some((needle, active_idx, matches)) = &active_find
+                            && matches.binary_search(&index).is_ok()
+                        {
+                            highlight_line_matches(line.clone(), needle, *active_idx == Some(index))
+                        } else {
+                            line.clone()
+                        };
+                        lines.push(rendered);
+                    }
+                } else if index < committed {
+                    if let Some(line) = entry
+                        .rows
+                        .as_ref()
+                        .and_then(|rows| rows.line(index - history))
+                    {
+                        let rendered = if let Some((needle, active_idx, matches)) = &active_find
+                            && matches.binary_search(&index).is_ok()
+                        {
+                            highlight_line_matches(line.clone(), needle, *active_idx == Some(index))
+                        } else {
+                            line.clone()
+                        };
+                        lines.push(rendered);
+                    }
+                } else if show_live_root && index >= committed + entry.preview.line_count() {
+                    if let Some(line) =
+                        tool_lines.get(index - committed - entry.preview.line_count())
+                    {
+                        lines.push(line.clone());
+                    }
+                } else if show_live_root {
+                    let offset = index - committed;
+                    let text = entry.preview.line(offset);
+                    let style = match entry.preview.line_kind(offset) {
+                        crate::preview::PreviewLineKind::Label
+                        | crate::preview::PreviewLineKind::Reasoning => Style::default().fg(MUTED),
+                        crate::preview::PreviewLineKind::Warning => {
+                            Style::default().fg(Color::Yellow)
+                        }
+                        crate::preview::PreviewLineKind::ToolDraft => {
+                            Style::default().fg(Color::Cyan)
+                        }
+                        crate::preview::PreviewLineKind::Body => Style::default(),
+                    };
+                    lines.push(Line::styled(text, style));
                 }
-            } else if index < committed {
-                if let Some(line) = entry
-                    .rows
-                    .as_ref()
-                    .and_then(|rows| rows.line(index - history))
-                {
-                    lines.push(line.clone());
-                }
-            } else if show_live_root && index >= committed + entry.preview.line_count() {
-                if let Some(line) = tool_lines.get(index - committed - entry.preview.line_count()) {
-                    lines.push(line.clone());
-                }
-            } else if show_live_root {
-                let offset = index - committed;
-                let text = entry.preview.line(offset);
-                let style = match entry.preview.line_kind(offset) {
-                    crate::preview::PreviewLineKind::Label
-                    | crate::preview::PreviewLineKind::Reasoning => Style::default().fg(MUTED),
-                    crate::preview::PreviewLineKind::Warning => Style::default().fg(Color::Yellow),
-                    crate::preview::PreviewLineKind::ToolDraft => Style::default().fg(Color::Cyan),
-                    crate::preview::PreviewLineKind::Body => Style::default(),
-                };
-                lines.push(Line::styled(text, style));
             }
-        }
-        if entry.viewed_agent_id.is_some() && entry.transcript.text.is_empty() {
-            let label = entry
-                .viewed_agent_label
-                .as_deref()
-                .or(entry.viewed_agent_id.as_deref())
-                .unwrap_or("child");
-            frame.render_widget(
-                Paragraph::new(vec![
-                    Line::default(),
-                    Line::styled(
-                        format!(
-                            "Child agent {} (read-only)",
-                            tars_core::permission::escape_untrusted_text(label)
+            if entry.viewed_agent_id.is_some() && entry.transcript.text.is_empty() {
+                let label = entry
+                    .viewed_agent_label
+                    .as_deref()
+                    .or(entry.viewed_agent_id.as_deref())
+                    .unwrap_or("child");
+                frame.render_widget(
+                    Paragraph::new(vec![
+                        Line::default(),
+                        Line::styled(
+                            format!(
+                                "Child agent {} (read-only)",
+                                tars_core::permission::escape_untrusted_text(label)
+                            ),
+                            Style::default().add_modifier(Modifier::BOLD),
                         ),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Line::default(),
-                    Line::from("Waiting for idle materials, or no conversation recorded yet."),
-                    Line::styled(
-                        "Run /agents main to return to the entry agent.",
-                        Style::default().fg(MUTED),
-                    ),
-                ])
-                .wrap(Wrap { trim: false }),
-                regions[1],
-            );
-        } else if entry.viewed_agent_id.is_none()
-            && entry.transcript.is_conversation_empty()
-            && entry.history.is_empty()
-            && !entry.preview.is_active()
-            && entry.tools.calls.is_empty()
-        {
-            welcome(frame, app, regions[1], Some(entry));
-        } else {
-            frame.render_widget(Paragraph::new(lines), regions[1]);
+                        Line::default(),
+                        Line::from("Waiting for idle materials, or no conversation recorded yet."),
+                        Line::styled(
+                            "Run /agents main to return to the entry agent.",
+                            Style::default().fg(MUTED),
+                        ),
+                    ])
+                    .wrap(Wrap { trim: false }),
+                    regions[1],
+                );
+            } else if entry.viewed_agent_id.is_none()
+                && entry.transcript.is_conversation_empty()
+                && entry.history.is_empty()
+                && !entry.preview.is_active()
+                && entry.tools.calls.is_empty()
+            {
+                welcome(frame, app, regions[1], Some(entry));
+            } else {
+                frame.render_widget(Paragraph::new(lines), regions[1]);
+            }
         }
-    } else {
+    } else if regions[1].height > 0 {
         welcome(frame, app, regions[1], None);
     }
     if heights.scroll_bar > 0
@@ -912,90 +1124,144 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
             regions[3],
         );
     }
+    if heights.find_bar > 0
+        && let Some(find) = &app.find
+    {
+        let width = usize::from(regions[4].width);
+        let escaped_query = crate::transcript::display_single_line(&find.query);
+        let suffix = if find.query.is_empty() {
+            "type to search · Esc close".to_owned()
+        } else if find.matches.is_empty() {
+            "No matches · Esc close".to_owned()
+        } else {
+            let pos = find.current + 1;
+            let total = find.matches.len();
+            if find.editing {
+                format!("{pos}/{total} · Enter/n next · N prev · Esc close")
+            } else {
+                format!("{pos}/{total} · n next · N prev · / edit · Esc close")
+            }
+        };
+        let prefix_w = "Find: ".width();
+        let cursor_w = usize::from(find.editing);
+        let sep_w = 2usize;
+        let max_q_w = width
+            .saturating_sub(prefix_w + cursor_w + sep_w + suffix.width().min(width / 2))
+            .max(4);
+        let shown_query = tail_slice_display_width(&escaped_query, max_q_w);
+        let mut spans = vec![
+            Span::styled(
+                "Find: ",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(shown_query.to_owned()),
+        ];
+        if find.editing {
+            spans.push(Span::styled("▏", Style::default().fg(ACCENT)));
+        }
+        spans.push(Span::styled(
+            format!("  {suffix}"),
+            Style::default().fg(MUTED),
+        ));
+        frame.render_widget(
+            Paragraph::new(Line::from(truncate_spans_display_width(spans, width))),
+            regions[4],
+        );
+    }
     if heights.attachment_bar > 0
         && let Some(entry) = entry
     {
         const PREFIX: &str = "Images: ";
-        let avail = usize::from(regions[4].width).saturating_sub(PREFIX.len());
+        let avail = usize::from(regions[5].width).saturating_sub(PREFIX.len());
         let bar = format_attachment_bar(&entry.pending_images, avail);
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(PREFIX, Style::default().fg(ACCENT)),
                 Span::styled(bar, Style::default().fg(MUTED)),
             ])),
-            regions[4],
+            regions[5],
         );
     }
-    let commands_query = match &app.panel {
-        Some(crate::app::Panel::Commands { query, .. }) => Some(query.as_str()),
-        _ => None,
-    };
-    let block = Block::default()
-        .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(if commands_query.is_some() {
-            ACCENT
-        } else {
-            MUTED
-        }));
-    let inner = block.inner(regions[5]);
-    frame.render_widget(block, regions[5]);
-    frame.render_widget(
-        Paragraph::new("❯").style(Style::default().fg(ACCENT)),
-        inner,
-    );
-    let editor_area = Rect {
-        x: inner.x + 2,
-        width: inner.width.saturating_sub(2),
-        ..inner
-    };
-    if let Some(query) = commands_query {
-        let escaped = crate::transcript::display_single_line(query);
-        let full = format!("/{escaped}");
-        let max_text_width = usize::from(editor_area.width.saturating_sub(1));
-        let shown = tail_slice_display_width(&full, max_text_width);
-        let mut spans = vec![
-            Span::raw(shown.to_owned()),
-            Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)),
-        ];
-        if query.is_empty() {
-            let used = shown.width() + 1;
-            let rem = usize::from(editor_area.width).saturating_sub(used);
-            if rem > 0 {
-                spans.push(Span::styled(
-                    truncate_display_width(" type a command…", rem),
-                    Style::default().fg(MUTED),
-                ));
-            }
+    if inline_confirm && let Some(entry) = entry {
+        if entry.workspace_rules_trust.is_some() {
+            super::panels::workspace_rules_trust(frame, app, entry, regions[6]);
+        } else if entry.workspace_agents_trust.is_some() {
+            super::panels::workspace_agents_trust(frame, app, entry, regions[6]);
+        } else if !entry.approval_queue.is_empty() {
+            super::panels::approval(frame, app, entry, regions[6]);
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), editor_area);
     } else {
-        frame.render_widget(app.active_editor(), editor_area);
-        if !app.has_active_text_draft() && app.panel.is_none() {
-            let placeholder = if let Some(entry) = entry {
-                if entry.viewed_agent_id.is_some() {
-                    "Read-only child agent view · /agents to return to main"
-                } else if entry.session.is_some() {
-                    if entry.pending_images.is_empty() {
-                        "Ask something… · Ctrl-C exit"
+        let commands_query = match &app.panel {
+            Some(crate::app::Panel::Commands { query, .. }) => Some(query.as_str()),
+            _ => None,
+        };
+        let block = Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM)
+            .border_style(Style::default().fg(if commands_query.is_some() {
+                ACCENT
+            } else {
+                MUTED
+            }));
+        let inner = block.inner(regions[6]);
+        frame.render_widget(block, regions[6]);
+        frame.render_widget(
+            Paragraph::new("❯").style(Style::default().fg(ACCENT)),
+            inner,
+        );
+        let editor_area = Rect {
+            x: inner.x + 2,
+            width: inner.width.saturating_sub(2),
+            ..inner
+        };
+        if let Some(query) = commands_query {
+            let escaped = crate::transcript::display_single_line(query);
+            let full = format!("/{escaped}");
+            let max_text_width = usize::from(editor_area.width.saturating_sub(1));
+            let shown = tail_slice_display_width(&full, max_text_width);
+            let mut spans = vec![
+                Span::raw(shown.to_owned()),
+                Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)),
+            ];
+            if query.is_empty() {
+                let used = shown.width() + 1;
+                let rem = usize::from(editor_area.width).saturating_sub(used);
+                if rem > 0 {
+                    spans.push(Span::styled(
+                        truncate_display_width(" type a command…", rem),
+                        Style::default().fg(MUTED),
+                    ));
+                }
+            }
+            frame.render_widget(Paragraph::new(Line::from(spans)), editor_area);
+        } else {
+            frame.render_widget(app.active_editor(), editor_area);
+            if !app.has_active_text_draft() && app.panel.is_none() {
+                let placeholder = if let Some(entry) = entry {
+                    if entry.viewed_agent_id.is_some() {
+                        "Read-only child agent view · /agents to return to main"
+                    } else if entry.session.is_some() {
+                        if entry.pending_images.is_empty() {
+                            "Ask something… · Ctrl-C exit"
+                        } else {
+                            "Add a message or press Enter to send image(s)…"
+                        }
                     } else {
-                        "Add a message or press Enter to send image(s)…"
+                        "/open this session, or /new · Ctrl-C exit"
                     }
                 } else {
-                    "/open this session, or /new · Ctrl-C exit"
-                }
-            } else {
-                "/new to start · /provider · /sessions · Ctrl-C exit"
-            };
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)),
-                    Span::styled(placeholder, Style::default().fg(MUTED)),
-                ])),
-                editor_area,
-            );
+                    "/new to start · /provider · /sessions · Ctrl-C exit"
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled(" ", Style::default().add_modifier(Modifier::REVERSED)),
+                        Span::styled(placeholder, Style::default().fg(MUTED)),
+                    ])),
+                    editor_area,
+                );
+            }
         }
     }
-    footer(frame, app, regions[6], heights.queue_bar > 0);
+    footer(frame, app, regions[7], heights.queue_bar > 0);
     if let Some(crate::app::Panel::Commands { query, selected }) = &app.panel {
         let matches = crate::app::matching_commands(query);
         let desired_rows = if matches.is_empty() {
@@ -1027,6 +1293,28 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App) {
                 ..body
             },
         );
+    } else if !inline_confirm
+        && let Some(at_popup) = &app.at_popup
+        && regions[1].height > 0
+    {
+        let desired_rows = if at_popup.candidates.is_empty() {
+            if body.width < 29 { 2 } else { 1 }
+        } else {
+            at_popup.candidates.len().min(8) as u16
+        };
+        let show_header = regions[1].height >= 2;
+        let popup_height = (desired_rows + u16::from(show_header))
+            .min(regions[1].height)
+            .max(1);
+        let show_header = show_header && popup_height >= 2;
+        let popup_y = regions[1].y + regions[1].height.saturating_sub(popup_height);
+        let popup_area = Rect {
+            x: body.x,
+            y: popup_y,
+            width: body.width,
+            height: popup_height,
+        };
+        super::panels::at_popup(frame, at_popup, show_header, popup_area);
     }
 }
 
@@ -1280,6 +1568,12 @@ fn footer(frame: &mut Frame<'_>, app: &App, area: Rect, show_queue: bool) {
         "↑↓ / Tab navigate · Enter confirm · Esc back"
     } else if app.panel.is_some() {
         "Type to filter · ↑↓ select · Enter choose · Esc back"
+    } else if has_inline_confirm(app) {
+        if app.has_active_text_draft() {
+            "F1 commands · Esc interrupt · Ctrl-C exit"
+        } else {
+            "/ commands · Esc interrupt · Ctrl-C exit"
+        }
     } else if app.has_active_text_draft() {
         "Enter send · Ctrl-J newline · F1 commands · Esc interrupt · Ctrl-C exit"
     } else {
