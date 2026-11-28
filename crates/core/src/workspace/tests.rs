@@ -229,3 +229,104 @@ fn complete_workspace_paths_is_sorted_bounded_and_enforces_safety_boundaries() {
         );
     }
 }
+
+#[test]
+fn search_workspace_paths_ranks_matches_skips_symlinks_vcs_and_enforces_budgets() {
+    let (_root, path) = root();
+    std::fs::create_dir_all(path.join("src/nested")).unwrap();
+    std::fs::create_dir_all(path.join("alpha_src")).unwrap();
+    std::fs::create_dir_all(path.join(".git/objects")).unwrap();
+    std::fs::create_dir_all(path.join(".JJ")).unwrap();
+    std::fs::write(path.join(".git/config"), "[core]\n").unwrap();
+    std::fs::write(path.join(".JJ/store"), "jj").unwrap();
+    std::fs::write(path.join("src/lib.rs"), "").unwrap();
+    std::fs::write(path.join("src/my_lib.rs"), "").unwrap();
+    std::fs::write(path.join("src/nested/lib_helper.rs"), "").unwrap();
+    std::fs::write(path.join("alpha_src/lib_x.rs"), "").unwrap();
+    std::fs::write(path.join("Cargo.toml"), "").unwrap();
+
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("lib_secret.rs"), "secret").unwrap();
+    symlink(outside.path(), path.join("escape_dir")).unwrap();
+    symlink(
+        outside.path().join("lib_secret.rs"),
+        path.join("src/link_lib.rs"),
+    )
+    .unwrap();
+
+    // Empty query returns shallowest entries first, sorted and bounded, without VCS or symlinks.
+    let empty_limited = super::search_workspace_paths(&path, "", 3);
+    assert_eq!(empty_limited.len(), 3);
+    for item in &empty_limited {
+        assert!(!item.relative_path.contains(".git"));
+        assert!(!item.relative_path.contains(".JJ"));
+        assert!(!item.relative_path.contains("escape_dir"));
+        assert!(!item.relative_path.contains("link_lib"));
+    }
+
+    // Ranking: basename prefix ("lib.rs", "lib_helper.rs", "lib_x.rs") before basename substring ("my_lib.rs").
+    let ranked = super::search_workspace_paths(&path, "lib", 20);
+    let rels: Vec<&str> = ranked.iter().map(|c| c.relative_path.as_str()).collect();
+    assert_eq!(
+        rels,
+        vec![
+            "alpha_src/lib_x.rs",
+            "src/lib.rs",
+            "src/nested/lib_helper.rs",
+            "src/my_lib.rs",
+        ]
+    );
+
+    // Strip leading `./`, case-insensitive matching, and full-path prefix (tier 1) > full-path substring (tier 3).
+    let stripped = super::search_workspace_paths(&path, "./SRC/LIB", 10);
+    assert_eq!(
+        stripped,
+        vec![
+            super::WorkspacePathCandidate {
+                relative_path: "src/lib.rs".into(),
+                is_dir: false,
+            },
+            super::WorkspacePathCandidate {
+                relative_path: "alpha_src/lib_x.rs".into(),
+                is_dir: false,
+            },
+        ]
+    );
+
+    // Unsafe queries and zero limit always return empty.
+    assert!(super::search_workspace_paths(&path, "", 0).is_empty());
+    for bad in [
+        "/etc/passwd",
+        "./../etc",
+        "../outside",
+        "src/../lib",
+        "..",
+        "src\\lib",
+        "a\0b",
+        ".git",
+        "escape_dir",
+        "lib_secret",
+    ] {
+        assert!(
+            super::search_workspace_paths(&path, bad, 32).is_empty(),
+            "query {bad:?} must return empty"
+        );
+    }
+
+    // Depth budget (> 8 components deep excluded).
+    let mut deep = path.join("d1");
+    for idx in 2..=10 {
+        deep = deep.join(format!("d{idx}"));
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::write(deep.join("too_deep_marker.rs"), "").unwrap();
+    assert!(super::search_workspace_paths(&path, "too_deep_marker", 10).is_empty());
+
+    // Visited budget (2,000 entries max): create > 2,100 files and ensure bounded termination.
+    let (_bulk_root, bulk) = root();
+    for i in 0..2_100 {
+        std::fs::write(bulk.join(format!("f_{i:04}.txt")), "").unwrap();
+    }
+    let bulk_res = super::search_workspace_paths(&bulk, "", 5_000);
+    assert_eq!(bulk_res.len(), 2_000);
+}

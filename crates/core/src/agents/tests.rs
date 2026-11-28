@@ -392,6 +392,7 @@ fn resolve_model_override_handles_profiles_protocols_and_rejections() {
             name: "claude".into(),
             provider: Provider::Anthropic,
             model: "claude-sonnet-4".into(),
+            models: Vec::new(),
             endpoint: Some("https://anthropic.example.com/v1/messages".into()),
             credential: CredentialRef::Environment("TARS_ANTHROPIC_KEY".into()),
             max_tokens: Some(4096),
@@ -409,6 +410,7 @@ fn resolve_model_override_handles_profiles_protocols_and_rejections() {
             name: "claude-no-max".into(),
             provider: Provider::Anthropic,
             model: "claude-sonnet-4".into(),
+            models: Vec::new(),
             endpoint: None,
             credential: CredentialRef::Environment("TARS_ANTHROPIC_KEY".into()),
             max_tokens: None,
@@ -508,6 +510,7 @@ fn resolve_model_override_handles_profiles_protocols_and_rejections() {
             name: "fast-openai".into(),
             provider: Provider::OpenAiChat,
             model: "gpt-4o-mini".into(),
+            models: Vec::new(),
             endpoint: Some("https://openai.example.com/v1/chat/completions".into()),
             credential: CredentialRef::Environment("OPENAI_KEY".into()),
             max_tokens: Some(512),
@@ -549,4 +552,39 @@ fn resolve_model_override_handles_profiles_protocols_and_rejections() {
     );
     assert_eq!(switched.max_tokens, Some(Some(4096)));
     assert_eq!(switched.reasoning_effort, Some(Some("medium".to_owned())));
+}
+
+#[test]
+fn model_profile_available_models_places_primary_first_preserves_order_and_deduplicates() {
+    let single = ModelProfile {
+        name: "openai".into(),
+        provider: Provider::OpenAiResponses,
+        model: "gpt-5.4".into(),
+        models: Vec::new(),
+        endpoint: None,
+        credential: CredentialRef::Store("openai".into()),
+        max_tokens: None,
+        reasoning_effort: None,
+        temperature: None,
+        extra_body: Default::default(),
+        context_window: None,
+        max_model_attempts: None,
+        render_options: Default::default(),
+    };
+    assert_eq!(single.available_models(), vec!["gpt-5.4"]);
+
+    let multi = ModelProfile {
+        models: vec![
+            "gpt-5.4-mini".into(),
+            "   ".into(),
+            "gpt-5.4".into(),
+            "gpt-4.1".into(),
+            " gpt-5.4-mini ".into(),
+        ],
+        ..single
+    };
+    assert_eq!(
+        multi.available_models(),
+        vec!["gpt-5.4", "gpt-5.4-mini", "gpt-4.1"]
+    );
 }

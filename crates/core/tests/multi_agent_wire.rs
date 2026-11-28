@@ -351,6 +351,7 @@ fn make_child_profile(name: &str, provider: Provider, endpoint: &str) -> ModelPr
         name: name.to_owned(),
         provider,
         model: "child-wire-model".into(),
+        models: Vec::new(),
         endpoint: Some(endpoint.to_owned()),
         credential: CredentialRef::Environment("PATH".into()),
         max_tokens: (provider == Provider::Anthropic).then_some(512),

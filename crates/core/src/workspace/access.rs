@@ -168,7 +168,7 @@ impl Workspace {
     #[cfg(unix)]
     pub(crate) fn child_directory(
         &self,
-        parent: &rustix::fd::OwnedFd,
+        parent: impl rustix::fd::AsFd,
         name: &str,
     ) -> Result<rustix::fd::OwnedFd, WorkspaceError> {
         use rustix::fs::{Mode, OFlags, openat};
@@ -276,8 +276,6 @@ fn complete_workspace_paths_unix(
     prefix: &str,
     limit: usize,
 ) -> Vec<WorkspacePathCandidate> {
-    use rustix::fs::{AtFlags, FileType, statat};
-
     let (dir_parts, name_prefix) = match prefix.rfind('/') {
         Some(slash) => {
             let dir_part = &prefix[..slash];
@@ -332,26 +330,8 @@ fn complete_workspace_paths_unix(
         let Ok(fd) = dir.fd() else {
             break;
         };
-        let hint = entry.file_type();
-        let Ok(kind) = ws.entry_kind_nofollow(fd, name_cstr, hint) else {
+        let Some(is_dir) = classify_entry_nofollow(&ws, fd, name_cstr, entry.file_type()) else {
             continue;
-        };
-        let is_dir = match kind {
-            EntryKind::RegularFile => false,
-            EntryKind::Directory => {
-                if hint == FileType::Directory {
-                    let Ok(stat) = statat(fd, name_cstr, AtFlags::SYMLINK_NOFOLLOW) else {
-                        continue;
-                    };
-                    if stat.st_dev != ws.device
-                        || FileType::from_raw_mode(stat.st_mode) != FileType::Directory
-                    {
-                        continue;
-                    }
-                }
-                true
-            }
-            EntryKind::Other => continue,
         };
         results.push(WorkspacePathCandidate {
             relative_path: format!("{dir_prefix}{name}"),
@@ -361,4 +341,216 @@ fn complete_workspace_paths_unix(
     results.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     results.truncate(limit);
     results
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const MAX_SEARCH_DEPTH: usize = 8;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const MAX_SEARCH_VISITED: usize = 2_000;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn classify_entry_nofollow(
+    ws: &Workspace,
+    dir_fd: impl rustix::fd::AsFd + Copy,
+    name: &std::ffi::CStr,
+    hint: rustix::fs::FileType,
+) -> Option<bool> {
+    use rustix::fs::{AtFlags, FileType, statat};
+
+    let kind = ws.entry_kind_nofollow(dir_fd, name, hint).ok()?;
+    match kind {
+        EntryKind::RegularFile => Some(false),
+        EntryKind::Directory => {
+            if hint == FileType::Directory {
+                let stat = statat(dir_fd, name, AtFlags::SYMLINK_NOFOLLOW).ok()?;
+                if stat.st_dev != ws.device
+                    || FileType::from_raw_mode(stat.st_mode) != FileType::Directory
+                {
+                    return None;
+                }
+            }
+            Some(true)
+        }
+        EntryKind::Other => None,
+    }
+}
+
+/// Recursively search bounded workspace-relative paths under `root` matching `query`.
+///
+/// Uses handle-relative traversal without following symbolic links, excludes VCS
+/// metadata directories (`.git`, `.hg`, `.svn`, `.jj`, ASCII case-insensitive),
+/// rejects absolute paths, parent traversal (`..`), NUL bytes, and backslashes,
+/// enforces a bounded traversal budget (maximum depth 8 and 2,000 visited entries),
+/// ranks basename/path prefix matches ahead of substring matches, and caps the
+/// result count at `limit`. Returns an empty list on non-Unix platforms or invalid inputs.
+pub fn search_workspace_paths(
+    root: &Path,
+    query: &str,
+    limit: usize,
+) -> Vec<WorkspacePathCandidate> {
+    if limit == 0 || query.len() > 4096 || query.contains('\0') || query.contains('\\') {
+        return Vec::new();
+    }
+    let mut normalized = query;
+    while let Some(rest) = normalized.strip_prefix("./") {
+        normalized = rest;
+    }
+    if normalized.starts_with('/')
+        || normalized.split('/').any(|seg| seg == "..")
+        || Path::new(normalized).components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Vec::new();
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        search_workspace_paths_unix(root, normalized, limit)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (root, normalized, limit);
+        Vec::new()
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn search_workspace_paths_unix(
+    root: &Path,
+    query: &str,
+    limit: usize,
+) -> Vec<WorkspacePathCandidate> {
+    let Ok(ws) = Workspace::open(root) else {
+        return Vec::new();
+    };
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back((Vec::<String>::new(), 0usize));
+
+    let mut visited = 0usize;
+    let mut collected: Vec<(WorkspacePathCandidate, usize)> = Vec::new();
+
+    while let Some((dir_parts, depth)) = queue.pop_front() {
+        if visited >= MAX_SEARCH_VISITED {
+            break;
+        }
+        let Ok(mut dir_fd) = ws.child_directory(&ws.root, ".") else {
+            continue;
+        };
+        let mut open_ok = true;
+        for part in &dir_parts {
+            match ws.child_directory(&dir_fd, part) {
+                Ok(next_fd) => dir_fd = next_fd,
+                Err(_) => {
+                    open_ok = false;
+                    break;
+                }
+            }
+        }
+        if !open_ok {
+            continue;
+        }
+        let Ok(mut dir) = rustix::fs::Dir::new(dir_fd) else {
+            continue;
+        };
+        let dir_prefix = if dir_parts.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", dir_parts.join("/"))
+        };
+        let mut local_entries: Vec<(String, bool)> = Vec::new();
+        while visited < MAX_SEARCH_VISITED {
+            let Some(Ok(entry)) = dir.read() else {
+                break;
+            };
+            let name_cstr = entry.file_name();
+            if name_cstr.to_bytes() == b"." || name_cstr.to_bytes() == b".." {
+                continue;
+            }
+            visited += 1;
+            let Ok(name) = name_cstr.to_str() else {
+                continue;
+            };
+            if Workspace::is_vcs_metadata_name(name) {
+                continue;
+            }
+            let Ok(fd) = dir.fd() else {
+                break;
+            };
+            let Some(is_dir) = classify_entry_nofollow(&ws, fd, name_cstr, entry.file_type())
+            else {
+                continue;
+            };
+            local_entries.push((name.to_owned(), is_dir));
+        }
+        local_entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let child_depth = depth + 1;
+        for (name, is_dir) in local_entries {
+            let relative_path = format!("{dir_prefix}{name}");
+            collected.push((
+                WorkspacePathCandidate {
+                    relative_path,
+                    is_dir,
+                },
+                child_depth,
+            ));
+            if is_dir && child_depth < MAX_SEARCH_DEPTH {
+                let mut next_parts = dir_parts.clone();
+                next_parts.push(name);
+                queue.push_back((next_parts, child_depth));
+            }
+        }
+    }
+
+    if query.is_empty() {
+        collected.sort_by(|(a, a_depth), (b, b_depth)| {
+            a_depth
+                .cmp(b_depth)
+                .then_with(|| a.relative_path.cmp(&b.relative_path))
+        });
+        return collected
+            .into_iter()
+            .take(limit)
+            .map(|(candidate, _)| candidate)
+            .collect();
+    }
+
+    let query_lower = query.to_lowercase();
+    let mut ranked: Vec<(u8, usize, WorkspacePathCandidate)> = collected
+        .into_iter()
+        .filter_map(|(candidate, depth)| {
+            let rel_lower = candidate.relative_path.to_lowercase();
+            if !rel_lower.contains(&query_lower) {
+                return None;
+            }
+            let basename_lower = candidate
+                .relative_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&candidate.relative_path)
+                .to_lowercase();
+            let tier = if basename_lower.starts_with(&query_lower) {
+                0
+            } else if rel_lower.starts_with(&query_lower) {
+                1
+            } else if basename_lower.contains(&query_lower) {
+                2
+            } else {
+                3
+            };
+            Some((tier, depth, candidate))
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.relative_path.cmp(&b.2.relative_path))
+    });
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, candidate)| candidate)
+        .collect()
 }

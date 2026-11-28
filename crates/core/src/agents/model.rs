@@ -3,7 +3,7 @@ use crate::definition::{
     ChildModelOverride, CredentialRef, Provider, SessionDefinition, Temperature,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 /// Credential-free authorized model profile exposed to agent preset and call resolution.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -15,6 +15,9 @@ pub struct ModelProfile {
     pub provider: Provider,
     /// Provider model identifier.
     pub model: String,
+    /// Optional list of selectable model identifiers configured on this profile.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<String>,
     /// Optional explicit HTTP(S) endpoint URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
@@ -41,6 +44,27 @@ pub struct ModelProfile {
     /// Optional protocol render options.
     #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
     pub render_options: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ModelProfile {
+    /// Returns all selectable model identifiers for this profile, starting with
+    /// [`Self::model`] followed by any additional non-blank entries in
+    /// [`Self::models`] in their configured order without duplicates.
+    pub fn available_models(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(1 + self.models.len());
+        let mut seen = HashSet::with_capacity(1 + self.models.len());
+        let primary = self.model.trim();
+        if !primary.is_empty() && seen.insert(primary.to_owned()) {
+            out.push(primary.to_owned());
+        }
+        for entry in &self.models {
+            let trimmed = entry.trim();
+            if !trimmed.is_empty() && seen.insert(trimmed.to_owned()) {
+                out.push(trimmed.to_owned());
+            }
+        }
+        out
+    }
 }
 
 /// Optional per-call `model` overrides accepted by `spawn_agent`.

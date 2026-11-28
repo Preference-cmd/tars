@@ -10,6 +10,7 @@ mod credentials;
 mod file;
 mod mcp;
 mod model;
+mod model_discovery;
 mod onboarding;
 mod providers;
 
@@ -23,6 +24,9 @@ pub(crate) use file::{process_home_dir, resolve_user_tars_dir};
 pub use model::{
     DefinitionOverrides, DynamicCustomOverride, PreludeOverrides, StaticCustomOverride, parse_mcp,
     parse_tools,
+};
+pub use model_discovery::{
+    DiscoveredModel, ModelDiscoveryError, derive_models_url, fetch_available_models,
 };
 pub use onboarding::{
     OnboardingError, OnboardingInput, default_config_path, default_store_dir,

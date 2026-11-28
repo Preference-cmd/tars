@@ -1978,3 +1978,68 @@ api_key_env = "CI_KEY"
         CredentialRef::Store("personal".into())
     );
 }
+
+#[test]
+fn profile_models_validation_trims_and_rejects_blank_control_and_duplicate_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+
+    // Valid multi-model config trims entries and exposes primary first in available_models().
+    std::fs::write(
+        &path,
+        r#"
+version = 1
+default_profile = "work"
+
+[profiles.work]
+provider = "openai-responses"
+model = "gpt-5.4"
+models = [" gpt-5.4-mini ", "gpt-5.4", "gpt-4.1"]
+credential = "work"
+"#,
+    )
+    .unwrap();
+    let cfg = Config::load(ConfigSource::File(path.clone())).unwrap();
+    let profiles = cfg.model_profiles();
+    assert_eq!(
+        profiles["work"].models,
+        vec!["gpt-5.4-mini", "gpt-5.4", "gpt-4.1"]
+    );
+    assert_eq!(
+        profiles["work"].available_models(),
+        vec!["gpt-5.4", "gpt-5.4-mini", "gpt-4.1"]
+    );
+    // Default preset still uses profile.model.
+    assert_eq!(cfg.preset(None).unwrap().unwrap().model, "gpt-5.4");
+
+    // Reject blank, control char, and duplicate (including after-trim duplicate) entries.
+    for bad_models in [
+        r#"["gpt-5.4", ""]"#,
+        r#"["gpt-5.4", "   "]"#,
+        "[\"gpt-5.4\", \"bad\\u0007\"]",
+        r#"["gpt-5.4", "gpt-5.4"]"#,
+        r#"["gpt-5.4-mini", " gpt-5.4-mini "]"#,
+    ] {
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+version = 1
+default_profile = "work"
+
+[profiles.work]
+provider = "openai-responses"
+model = "gpt-5.4"
+models = {bad_models}
+credential = "work"
+"#
+            ),
+        )
+        .unwrap();
+        let err = Config::load(ConfigSource::File(path.clone())).unwrap_err();
+        assert!(
+            matches!(err, super::ConfigError::InvalidProfileModels(ref p) if p == "work"),
+            "expected InvalidProfileModels for {bad_models}, got {err:?}"
+        );
+    }
+}

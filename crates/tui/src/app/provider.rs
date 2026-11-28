@@ -554,6 +554,7 @@ impl App {
             profile_name: profile_name.clone(),
             provider: wizard.provider,
             model,
+            models: Vec::new(),
             credential: profile_name.clone(),
             endpoint,
             max_tokens,

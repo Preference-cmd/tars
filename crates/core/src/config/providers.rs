@@ -7,7 +7,7 @@
 use super::{Config, ConfigError, ConfigSource, toml_string};
 use crate::definition::{Provider, valid_credential_name, valid_http_endpoint};
 use crate::fs_atomic::{ReplaceMode, atomic_write_bytes};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{self, Read};
 use std::path::Path;
@@ -117,6 +117,8 @@ pub struct ProfileUpsertInput {
     pub provider: Provider,
     /// Non-empty model identifier without control characters.
     pub model: String,
+    /// Optional list of selectable model identifiers for this profile.
+    pub models: Vec<String>,
     /// Credential store entry name (`credential = "<name>"`).
     pub credential: String,
     /// Optional custom HTTP(S) endpoint URL; empty/whitespace-only is treated as `None`.
@@ -129,6 +131,7 @@ struct NormalizedUpsert<'a> {
     profile_name: &'a str,
     provider: Provider,
     model: &'a str,
+    models: Vec<&'a str>,
     credential: &'a str,
     endpoint: Option<&'a str>,
     max_tokens: Option<u32>,
@@ -236,6 +239,20 @@ fn validate_upsert_input(input: &ProfileUpsertInput) -> Result<NormalizedUpsert<
         ));
     }
 
+    let mut unique_models = Vec::with_capacity(1 + input.models.len());
+    let mut seen_models = HashSet::with_capacity(1 + input.models.len());
+    unique_models.push(model);
+    seen_models.insert(model);
+    for entry in &input.models {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() || trimmed.chars().any(char::is_control) {
+            return Err(ConfigError::InvalidProfileModels(profile_name.to_owned()));
+        }
+        if seen_models.insert(trimmed) {
+            unique_models.push(trimmed);
+        }
+    }
+
     let endpoint = input
         .endpoint
         .as_deref()
@@ -262,6 +279,7 @@ fn validate_upsert_input(input: &ProfileUpsertInput) -> Result<NormalizedUpsert<
         profile_name,
         provider: input.provider,
         model,
+        models: unique_models,
         credential,
         endpoint,
         max_tokens: input.max_tokens,
@@ -283,12 +301,23 @@ fn render_new_config(input: &NormalizedUpsert<'_>) -> String {
     out
 }
 
+fn format_models_line(models: &[&str]) -> Option<String> {
+    if models.len() < 2 {
+        return None;
+    }
+    let items: Vec<String> = models.iter().map(|model| toml_string(model)).collect();
+    Some(format!("models = [{}]", items.join(", ")))
+}
+
 fn rendered_profile_fields(input: &NormalizedUpsert<'_>) -> Vec<String> {
     let mut lines = vec![
         format!("provider = {}", toml_string(input.provider.as_str())),
         format!("model = {}", toml_string(input.model)),
-        format!("credential = {}", toml_string(input.credential)),
     ];
+    if let Some(models_line) = format_models_line(&input.models) {
+        lines.push(models_line);
+    }
+    lines.push(format!("credential = {}", toml_string(input.credential)));
     if let Some(ep) = input.endpoint {
         lines.push(format!("endpoint = {}", toml_string(ep)));
     }
@@ -850,6 +879,7 @@ fn desired_key_lines(input: &NormalizedUpsert<'_>) -> Vec<(&'static str, Option<
             "model",
             Some(format!("model = {}", toml_string(input.model))),
         ),
+        ("models", format_models_line(&input.models)),
         (
             "credential",
             Some(format!("credential = {}", toml_string(input.credential))),
@@ -871,6 +901,7 @@ fn managed_key_name(key: &str) -> Option<&'static str> {
     match key {
         "provider" => Some("provider"),
         "model" => Some("model"),
+        "models" => Some("models"),
         "credential" => Some("credential"),
         "api_key_env" => Some("api_key_env"),
         "endpoint" => Some("endpoint"),
@@ -1042,6 +1073,7 @@ mod tests {
                 profile_name: "openai".into(),
                 provider: Provider::OpenAiResponses,
                 model: "gpt-5.4".into(),
+                models: Vec::new(),
                 credential: "openai".into(),
                 endpoint: Some("   ".into()),
                 max_tokens: None,
@@ -1107,6 +1139,7 @@ max_tokens = 8192
                 profile_name: "openai".into(),
                 provider: Provider::OpenAiResponses,
                 model: "gpt-5.4".into(),
+                models: Vec::new(),
                 credential: "openai".into(),
                 endpoint: None,
                 max_tokens: None,
@@ -1176,6 +1209,7 @@ mcp = ["echo"]
                 profile_name: "deepseek".into(),
                 provider: Provider::OpenAiChat,
                 model: "deepseek-chat".into(),
+                models: Vec::new(),
                 credential: "deepseek".into(),
                 endpoint: Some("https://api.deepseek.com/v1/chat/completions".into()),
                 max_tokens: None,
@@ -1212,6 +1246,7 @@ mcp = ["missing_server"]
                 profile_name: "deepseek".into(),
                 provider: Provider::OpenAiChat,
                 model: "deepseek-chat".into(),
+                models: Vec::new(),
                 credential: "deepseek".into(),
                 endpoint: None,
                 max_tokens: None,
@@ -1231,6 +1266,7 @@ mcp = ["missing_server"]
             profile_name: "openai".into(),
             provider: Provider::OpenAiResponses,
             model: "gpt-5.4".into(),
+            models: Vec::new(),
             credential: "openai".into(),
             endpoint: None,
             max_tokens: None,
@@ -1306,6 +1342,146 @@ mcp = ["missing_server"]
                 ConfigError::SymlinkNotAllowed(_)
             ));
             assert!(!dir.path().join("absent.toml").exists());
+        }
+    }
+
+    #[test]
+    fn upsert_profile_in_config_writes_multi_model_and_cleans_stale_multiline_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"# Keep top comment
+version = 1
+default_profile = "openrouter"
+
+[profiles.openrouter]
+# Keep profile comment
+provider = "openai-chat"
+model = "old-model"
+models = [
+  "old-model",
+  "legacy-a",
+]
+credential = "openrouter"
+temperature = 0.2
+"#,
+        )
+        .unwrap();
+
+        // Update with >= 2 unique models: replaces multiline models, puts primary first, deduplicates.
+        let cfg_multi = upsert_profile_in_config(
+            &config_path,
+            &ProfileUpsertInput {
+                profile_name: "openrouter".into(),
+                provider: Provider::OpenAiChat,
+                model: "anthropic/claude-sonnet-4.6".into(),
+                models: vec![
+                    "openai/gpt-5.4".into(),
+                    "anthropic/claude-sonnet-4.6".into(),
+                    " openai/gpt-5.4 ".into(),
+                    "google/gemini-2.5-pro".into(),
+                ],
+                credential: "openrouter".into(),
+                endpoint: Some("https://openrouter.ai/api/v1/chat/completions".into()),
+                max_tokens: None,
+            },
+        )
+        .unwrap();
+        let text_multi = std::fs::read_to_string(&config_path).unwrap();
+        assert!(text_multi.contains("# Keep top comment"));
+        assert!(text_multi.contains("# Keep profile comment"));
+        assert!(text_multi.contains("temperature = 0.2"));
+        assert!(text_multi.contains(
+            r#"models = ["anthropic/claude-sonnet-4.6", "openai/gpt-5.4", "google/gemini-2.5-pro"]"#
+        ));
+        assert!(!text_multi.contains("legacy-a"));
+        assert_eq!(
+            cfg_multi.model_profiles()["openrouter"].available_models(),
+            vec![
+                "anthropic/claude-sonnet-4.6",
+                "openai/gpt-5.4",
+                "google/gemini-2.5-pro",
+            ]
+        );
+
+        // Update back to single model (only primary in models): omits models and strips old line.
+        let cfg_single = upsert_profile_in_config(
+            &config_path,
+            &ProfileUpsertInput {
+                profile_name: "openrouter".into(),
+                provider: Provider::OpenAiChat,
+                model: "openai/gpt-5.4".into(),
+                models: vec!["openai/gpt-5.4".into()],
+                credential: "openrouter".into(),
+                endpoint: Some("https://openrouter.ai/api/v1/chat/completions".into()),
+                max_tokens: None,
+            },
+        )
+        .unwrap();
+        let text_single = std::fs::read_to_string(&config_path).unwrap();
+        assert!(text_single.contains("# Keep profile comment"));
+        assert!(text_single.contains("temperature = 0.2"));
+        assert!(!text_single.contains("models ="));
+        assert_eq!(
+            cfg_single.model_profiles()["openrouter"].available_models(),
+            vec!["openai/gpt-5.4"]
+        );
+
+        // Multiline models removal on update to empty models list.
+        std::fs::write(
+            &config_path,
+            r#"version = 1
+default_profile = "openrouter"
+
+[profiles.openrouter]
+provider = "openai-chat"
+model = "m1"
+credential = "openrouter"
+models = [
+  "m1",
+  "m2",
+]
+"#,
+        )
+        .unwrap();
+        let cfg_cleaned = upsert_profile_in_config(
+            &config_path,
+            &ProfileUpsertInput {
+                profile_name: "openrouter".into(),
+                provider: Provider::OpenAiChat,
+                model: "m1".into(),
+                models: Vec::new(),
+                credential: "openrouter".into(),
+                endpoint: None,
+                max_tokens: None,
+            },
+        )
+        .unwrap();
+        let cleaned_text = std::fs::read_to_string(&config_path).unwrap();
+        assert!(!cleaned_text.contains("models"));
+        assert!(!cleaned_text.contains("m2"));
+        assert_eq!(
+            cfg_cleaned.model_profiles()["openrouter"].available_models(),
+            vec!["m1"]
+        );
+
+        // Validation rejects blank or control characters in input.models before touching disk.
+        for bad in ["", "   ", "bad\nmodel"] {
+            let err = upsert_profile_in_config(
+                &config_path,
+                &ProfileUpsertInput {
+                    profile_name: "openrouter".into(),
+                    provider: Provider::OpenAiChat,
+                    model: "m1".into(),
+                    models: vec![bad.into()],
+                    credential: "openrouter".into(),
+                    endpoint: None,
+                    max_tokens: None,
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(err, ConfigError::InvalidProfileModels(ref p) if p == "openrouter"));
         }
     }
 }

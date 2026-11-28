@@ -236,6 +236,7 @@ impl Config {
             if name.trim().is_empty() {
                 return Err(ConfigError::EmptyProfile);
             }
+            profile.validate_models(name)?;
             model::resolve(
                 Some((name.as_str(), profile)),
                 DefinitionOverrides::default(),
@@ -603,6 +604,9 @@ pub enum ConfigError {
         "profile name must be 1..=64 ASCII alphanumeric, '_' or '-' characters starting with alphanumeric"
     )]
     InvalidProfileName,
+    /// Profile `models` entries must be non-empty, free of control characters, and unique.
+    #[error("profile {0:?} has invalid or duplicate entries in models")]
+    InvalidProfileModels(String),
     /// Both `credential` and `api_key_env` were set on the same profile.
     #[error("credential and api_key_env cannot both be set")]
     ConflictingCredential,

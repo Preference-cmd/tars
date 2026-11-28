@@ -137,6 +137,8 @@ pub(super) struct ResolvedPreludeDefaults {
 pub(super) struct Profile {
     provider: Provider,
     model: String,
+    #[serde(default)]
+    models: Vec<String>,
     endpoint: Option<String>,
     credential: Option<String>,
     api_key_env: Option<String>,
@@ -181,6 +183,18 @@ pub(super) struct Profile {
 }
 
 impl Profile {
+    pub(super) fn validate_models(&self, name: &str) -> Result<(), ConfigError> {
+        let mut seen = std::collections::HashSet::with_capacity(self.models.len());
+        for entry in &self.models {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() || trimmed.chars().any(char::is_control) || !seen.insert(trimmed)
+            {
+                return Err(ConfigError::InvalidProfileModels(name.to_owned()));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn to_model_profile(&self, name: &str) -> crate::agents::ModelProfile {
         let credential = if let Some(store_name) = &self.credential {
             CredentialRef::Store(store_name.clone())
@@ -193,6 +207,7 @@ impl Profile {
             name: name.to_owned(),
             provider: self.provider,
             model: self.model.clone(),
+            models: self.models.iter().map(|m| m.trim().to_owned()).collect(),
             endpoint: self.endpoint.clone(),
             credential,
             max_tokens: self.max_tokens,
